@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dohc_engine_domain::{
-    CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
+    CreateNamedVersion, DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
@@ -371,4 +371,481 @@ fn binary_merges_compare_against_the_last_merged_bytes() {
 
     put_binary(&mut store, "feat", "conflict.png", b"\x89PNG-feat-2");
     assert_eq!(outcome(&merge(&mut store, "conflict.png")), "conflict");
+}
+
+fn update(store: &mut EngineStore, path: &str) -> MergeTextFileResult {
+    let mut input = merge_request(path);
+    input.source_version_id = "main".to_owned();
+    input.target_version_id = "feat".to_owned();
+    merge_with(store, &input)
+}
+
+fn feat_text(store: &mut EngineStore, path: &str) -> Option<String> {
+    VersionedTextStore::new(store)
+        .read_text(WS, "feat", path)
+        .expect("read feat")
+        .map(|snapshot| snapshot.text)
+}
+
+#[test]
+fn a_version_updated_from_main_merges_back_without_a_conflict() {
+    let (_scratch, mut store) = open();
+    for path in ["edit.md", "revert.md"] {
+        put(&mut store, "main", path, "A");
+    }
+    fork(&mut store);
+    for path in ["edit.md", "revert.md"] {
+        put(&mut store, "main", path, "B");
+        assert_eq!(outcome(&update(&mut store, path)), "write", "{path}");
+        assert_eq!(feat_text(&mut store, path).as_deref(), Some("B"), "{path}");
+    }
+
+    put(&mut store, "feat", "edit.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "edit.md")), "write");
+    assert_eq!(main_text(&mut store, "edit.md").as_deref(), Some("C"));
+
+    put(&mut store, "feat", "revert.md", "A");
+    assert_eq!(
+        outcome(&merge(&mut store, "revert.md")),
+        "source unchanged",
+        "taking back an update is an undo of it, not a change for Main"
+    );
+    assert_eq!(main_text(&mut store, "revert.md").as_deref(), Some("B"));
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn a_resolved_update_conflict_is_not_asked_again_by_a_merge() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "r.md", LINES);
+    fork(&mut store);
+    put(&mut store, "main", "r.md", "main\n2\n3\n4\n5");
+    put(&mut store, "feat", "r.md", "feat\n2\n3\n4\n5");
+    let conflict = conflict_id(&update(&mut store, "r.md"));
+    resolve(&mut store, &conflict, ResolveConflictKind::KeepCurrent);
+
+    assert_eq!(outcome(&update(&mut store, "r.md")), "source unchanged");
+    assert_eq!(outcome(&merge(&mut store, "r.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "r.md").as_deref(),
+        Some("feat\n2\n3\n4\n5")
+    );
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn updating_after_main_undid_a_merge_keeps_the_version() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "u.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "u.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "u.md")), "write");
+    put(&mut store, "main", "u.md", "A");
+
+    assert_eq!(outcome(&update(&mut store, "u.md")), "source unchanged");
+    assert_eq!(feat_text(&mut store, "u.md").as_deref(), Some("C"));
+    assert_eq!(outcome(&merge(&mut store, "u.md")), "write");
+    assert_eq!(main_text(&mut store, "u.md").as_deref(), Some("C"));
+}
+
+#[test]
+fn a_merge_recorded_before_updates_existed_lets_main_reach_the_version() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "p.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "p.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "p.md")), "write");
+
+    put(&mut store, "main", "p.md", "D");
+    assert_eq!(outcome(&update(&mut store, "p.md")), "write");
+    assert_eq!(feat_text(&mut store, "p.md").as_deref(), Some("D"));
+    assert_eq!(outcome(&merge(&mut store, "p.md")), "already same");
+}
+
+#[test]
+fn undoing_first_direction_after_second_direction_keeps_both_sides_work() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "a.md", LINES);
+    put(&mut store, "main", "b.md", LINES);
+    fork(&mut store);
+
+    // Direction 1: edit separate lines in Main & Draft, merge Draft->Main, update Draft->Main, undo Main.
+    put(&mut store, "main", "a.md", "MAIN\n2\n3\n4\n5");
+    put(&mut store, "feat", "a.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&merge(&mut store, "a.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    // Restore Main to before its merge: updating Draft is a no-op that keeps Draft's undo record.
+    put(&mut store, "main", "a.md", "MAIN\n2\n3\n4\n5");
+    assert_eq!(outcome(&update(&mut store, "a.md")), "already same");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "updating Draft after undoing Main's merge must keep Draft's original edit"
+    );
+    // Restore Draft to before its update: Main's edit must still reach Draft.
+    put(&mut store, "feat", "a.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "restoring Draft after a no-op update must still receive Main's edit"
+    );
+
+    // Direction 2: edit separate lines in Main & Draft, update Draft from Main, merge Draft->Main, undo Draft.
+    put(&mut store, "main", "b.md", "MAIN\n2\n3\n4\n5");
+    put(&mut store, "feat", "b.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&update(&mut store, "b.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    // Restore Draft to before its update: merging Draft is a no-op that keeps Main's undo record.
+    put(&mut store, "feat", "b.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "already same");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "merging Draft after undoing Draft's update must keep Main's original edit"
+    );
+    // Restore Main to before its merge: Draft's edit must still reach Main.
+    put(&mut store, "main", "b.md", "MAIN\n2\n3\n4\n5");
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "restoring Main after a no-op merge must still receive Draft's edit"
+    );
+}
+
+#[test]
+fn agreed_deletion_advances_merge_base_when_base_drift_is_included() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "gone.md", "A");
+    fork(&mut store);
+    for version in ["main", "feat"] {
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: version.to_owned(),
+                    path: "gone.md".to_owned(),
+                    moment_id: id("del"),
+                    request_id: None,
+                    metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 200,
+                },
+                &NO_FAULTS,
+            )
+            .expect("delete");
+    }
+    let plain = VersionedTextStore::new(&mut store)
+        .compare_version_files_page_with_drift(WS, "feat", "main", None, 50, false)
+        .expect("plain compare");
+    assert!(plain.entries.is_empty());
+    let drifted = VersionedTextStore::new(&mut store)
+        .compare_version_files_page_with_drift(WS, "feat", "main", None, 50, true)
+        .expect("drift compare");
+    assert_eq!(
+        drifted
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gone.md"]
+    );
+    assert_eq!(outcome(&merge(&mut store, "gone.md")), "already same");
+    put(&mut store, "main", "gone.md", "recreated");
+    assert_eq!(outcome(&update(&mut store, "gone.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "gone.md").as_deref(),
+        Some("recreated")
+    );
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn stale_same_direction_merge_conflict_is_superseded_on_rerun() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "c.md", "base");
+    fork(&mut store);
+    put(&mut store, "main", "c.md", "main-1");
+    put(&mut store, "feat", "c.md", "feat-1");
+    let first_id = conflict_id(&merge(&mut store, "c.md"));
+    // Rerunning while live heads still match dedupes the existing open conflict.
+    let dedup = merge(&mut store, "c.md");
+    assert_eq!(conflict_id(&dedup), first_id);
+    assert!(matches!(
+        dedup,
+        MergeTextFileResult::Conflict { deduped: true, .. }
+    ));
+    assert_eq!(open_conflicts(&mut store), 1);
+
+    // Editing Main makes the conflict stale; rerunning supersedes it cleanly.
+    put(&mut store, "main", "c.md", "main-2");
+    let second = merge(&mut store, "c.md");
+    let second_id = conflict_id(&second);
+    assert_ne!(second_id, first_id);
+    assert!(matches!(
+        second,
+        MergeTextFileResult::Conflict { deduped: false, .. }
+    ));
+    assert_eq!(open_conflicts(&mut store), 1);
+
+    // Matching the other side supersedes the conflict and converges cleanly.
+    put(&mut store, "main", "c.md", "feat-1");
+    assert_eq!(outcome(&merge(&mut store, "c.md")), "already same");
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn archiving_a_version_with_open_conflicts_is_refused_and_archived_cannot_write() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "base");
+    fork(&mut store);
+    put(&mut store, "main", "x.md", "main-1");
+    put(&mut store, "feat", "x.md", "feat-1");
+    let cid = conflict_id(&update(&mut store, "x.md"));
+
+    let err = VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect_err("version with open conflicts cannot be archived");
+    assert!(matches!(
+        err,
+        DomainError::InvalidInput {
+            reason: "version-has-open-conflicts"
+        }
+    ));
+
+    resolve(&mut store, &cid, ResolveConflictKind::KeepCurrent);
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive after resolve");
+
+    let write_err = VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "feat".to_owned(),
+                object_id: id("obj"),
+                path: "x.md".to_owned(),
+                text: "blocked".to_owned(),
+                moment_id: id("m"),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1000,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("write into archived version must fail");
+    assert!(matches!(
+        write_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+    let active_err = VersionedTextStore::new(&mut store)
+        .set_active_version(WS, "feat", &NO_FAULTS)
+        .expect_err("activating archived version must fail");
+    assert!(matches!(
+        active_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+    let fork_err = VersionedTextStore::new(&mut store)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "child".to_owned(),
+                name: "child".to_owned(),
+                from_version_id: "feat".to_owned(),
+                now_ms: 1001,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("forking archived version must fail");
+    assert!(matches!(
+        fork_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+}
+
+#[test]
+fn merging_from_or_into_an_archived_version_is_refused() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "arch.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "arch.md", "B");
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive feat");
+
+    let merge_err = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&merge_request("arch.md"), &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("merge from archived version must fail");
+    assert!(matches!(
+        merge_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+
+    let mut update_req = merge_request("arch.md");
+    update_req.source_version_id = "main".to_owned();
+    update_req.target_version_id = "feat".to_owned();
+    let update_err = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&update_req, &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("update into archived version must fail");
+    assert!(matches!(
+        update_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+}
+
+#[test]
+fn a_merge_between_unrelated_versions_has_no_base() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "A");
+    fork(&mut store);
+    let mut input = merge_request("x.md");
+    input.source_version_id = "main".to_owned();
+    input.target_version_id = "main".to_owned();
+    let error = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&input, &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("a version does not merge into itself");
+    assert!(matches!(error, DomainError::ForkBaseNotFound));
+}
+
+#[test]
+fn archiving_refuses_open_sync_conflicts_and_replicated_ydoc_projection_still_writes() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "base");
+    fork(&mut store);
+    put(&mut store, "feat", "x.md", "feat-1");
+    let snap = VersionedTextStore::new(&mut store)
+        .read_text(WS, "feat", "x.md")
+        .unwrap()
+        .unwrap();
+    let sync_conflict = dohc_engine_domain::TextConflict {
+        conflict_id: id("sync-c"),
+        workspace_id: WS.to_owned(),
+        path: "x.md".to_owned(),
+        target_version_id: "feat".to_owned(),
+        source_version_id: "feat".to_owned(),
+        created_at_ms: 100,
+        updated_at_ms: 100,
+        status: dohc_engine_domain::ConflictStatus::Open,
+        chosen_from: dohc_engine_domain::ConflictChoice::Current,
+        resolution: None,
+        metadata: dohc_engine_domain::ConflictMetadata::origin("sync"),
+        base: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+        current: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+        incoming: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+    };
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::insert_text_conflict_if_absent(tx, &sync_conflict)
+        })
+        .unwrap();
+
+    let err = VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect_err("open sync conflict must block archiving");
+    assert!(matches!(
+        err,
+        DomainError::InvalidInput {
+            reason: "version-has-open-conflicts"
+        }
+    ));
+
+    resolve(
+        &mut store,
+        &sync_conflict.conflict_id,
+        ResolveConflictKind::KeepCurrent,
+    );
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive after sync conflict resolved");
+
+    let local_err = store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "feat".to_owned(),
+                    object_id: snap.object_id.clone(),
+                    path: "x.md".to_owned(),
+                    text: "local-ydoc".to_owned(),
+                    moment_id: id("m-local"),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1001,
+                    request_id: None,
+                },
+            )
+        })
+        .expect_err("local ydoc projection on archived version must fail");
+    assert!(matches!(
+        local_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_replicated_projected_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "feat".to_owned(),
+                    object_id: snap.object_id.clone(),
+                    path: "x.md".to_owned(),
+                    text: "peer-ydoc".to_owned(),
+                    moment_id: id("m-peer"),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1002,
+                    request_id: None,
+                },
+            )
+        })
+        .expect("replicated ydoc projection must update locally archived version");
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "feat", "x.md")
+            .unwrap()
+            .map(|s| s.text)
+            .as_deref(),
+        Some("peer-ydoc")
+    );
 }

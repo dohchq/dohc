@@ -115,8 +115,18 @@ export function isVersionMergeIdentity(identity: string | undefined): boolean {
 type MergeAnswer =
   // A null count: the merge left files to decide, and they were all decided
   // before the answer came.
-  | { kind: "merged"; mergedFileCount: number | null; replacedProtectedPaths: string[] }
-  | { kind: "decide"; conflictCount: number; replacedProtectedPaths: string[] }
+  | {
+      kind: "merged";
+      mergedFileCount: number | null;
+      replacedProtectedPaths: string[];
+      skippedProtectedPaths: string[];
+    }
+  | {
+      kind: "decide";
+      conflictCount: number;
+      replacedProtectedPaths: string[];
+      skippedProtectedPaths: string[];
+    }
   | { kind: "failed"; error: unknown };
 
 // A merge that answered after its dialog closed, as a toast and a Notices
@@ -137,12 +147,9 @@ export interface VersionMergeNotice {
   offersHistory?: true;
 }
 
-// Whether a merge from this version still has files to decide. It reads the
-// open conflicts page by page and stops at the first one.
-export async function mergeFilesWait(
-  workspaceId: string,
-  sourceVersionId: string,
-): Promise<boolean> {
+// Whether a merge into or out of this version still has files to decide. It
+// reads the open conflicts page by page and stops at the first one.
+export async function mergeFilesWait(workspaceId: string, versionId: string): Promise<boolean> {
   let afterConflictId: string | undefined;
   do {
     const page = await bridge().listWorkspaceVersionConflicts({
@@ -151,7 +158,9 @@ export async function mergeFilesWait(
     });
     if (
       page.conflicts.some(
-        (conflict) => conflict.origin === "merge" && conflict.sourceVersionId === sourceVersionId,
+        (conflict) =>
+          conflict.origin === "merge" &&
+          (conflict.sourceVersionId === versionId || conflict.targetVersionId === versionId),
       )
     )
       return true;
@@ -160,8 +169,12 @@ export async function mergeFilesWait(
   return false;
 }
 
+function protectedCount(count: number): string {
+  return count === 1 ? "One protected file" : `${count} protected files`;
+}
+
 function protectedCopyWords(paths: readonly string[], sourceName: string): string {
-  return `${paths.length === 1 ? "One protected file" : `${paths.length} protected files`} took ${sourceName}'s copy.`;
+  return `${protectedCount(paths.length)} took ${sourceName}'s copy.`;
 }
 
 const AFTER_STORE_FIX = "Fix the data store problem in Notices, then merge again.";
@@ -172,29 +185,31 @@ const AFTER_STORE_FIX = "Fix the data store problem in Notices, then merge again
 function mergeNotice(
   identity: string,
   source: WorkspaceVersionRecord,
+  update: boolean,
   answer: MergeAnswer,
   retry: (() => void | false) | null,
 ): VersionMergeNotice {
+  const [from, into] = update ? ["Main", source.name] : [source.name, "Main"];
   if (answer.kind === "failed") {
     if (isMergeStoppedPartway(answer.error)) {
-      const title = `dohc could not finish merging ${source.name} into Main`;
+      const title = `dohc could not finish merging ${from} into ${into}`;
       return retry === null
         ? {
             identity,
             title,
-            message: `Some changes from ${source.name} are in Main. ${AFTER_STORE_FIX}`,
+            message: `Some changes from ${from} are in ${into}. ${AFTER_STORE_FIX}`,
             cause: answer.error,
           }
         : {
             identity,
             title,
-            message: `Some changes from ${source.name} are in Main, and History shows which.`,
+            message: `Some changes from ${from} are in ${into}, and History shows which.`,
             cause: answer.error,
             retry,
             offersHistory: true,
           };
     }
-    const title = `dohc could not merge ${source.name} into Main`;
+    const title = `dohc could not merge ${from} into ${into}`;
     if (retry === null) return { identity, title, message: AFTER_STORE_FIX, cause: answer.error };
     const { words } = readError(answer.error);
     return {
@@ -205,14 +220,20 @@ function mergeNotice(
     };
   }
   const protectedPaths = answer.replacedProtectedPaths;
-  const protectedLine =
-    protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, source.name) : null;
+  const skippedPaths = answer.skippedProtectedPaths;
+  const protectedParts = [
+    protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, from) : null,
+    skippedPaths.length > 0
+      ? `${protectedCount(skippedPaths.length)} changed in both kept ${into}'s copy.`
+      : null,
+  ].filter(Boolean);
+  const protectedLine = protectedParts.length > 0 ? protectedParts.join(" ") : null;
   const paths = protectedPaths.length > 0 ? { paths: protectedPaths } : {};
   if (answer.kind === "decide") {
     return {
       identity,
       tone: "warning",
-      title: `Merging ${source.name} into Main needs a decision`,
+      title: `Merging ${from} into ${into} needs a decision`,
       message: [conflictCountCopy(answer.conflictCount, false), protectedLine]
         .filter(Boolean)
         .join(" "),
@@ -223,10 +244,10 @@ function mergeNotice(
   const { mergedFileCount } = answer;
   const said =
     mergedFileCount === null
-      ? `Merged ${source.name} into Main`
+      ? `Merged ${from} into ${into}`
       : mergedFileCount === 0
-        ? `No files from ${source.name} merged into Main`
-        : `Merged ${mergedFileCount} file${mergedFileCount === 1 ? "" : "s"} from ${source.name} into Main`;
+        ? `No files from ${from} merged into ${into}`
+        : `Merged ${mergedFileCount} file${mergedFileCount === 1 ? "" : "s"} from ${from} into ${into}`;
   return {
     identity,
     tone: "success",
@@ -285,6 +306,9 @@ export interface WorkspaceVersions {
   requestSwitch(versionId: string): void;
   openCreate(): void;
   openMerge(version: WorkspaceVersionRecord): void;
+  // Brings Main's changes into a version made from Main.
+  openUpdate(version: WorkspaceVersionRecord): void;
+  setArchived(version: WorkspaceVersionRecord, archived: boolean): void;
   // The save-first prompt, the New version dialog and the merge dialog. The
   // shell renders them once.
   dialogs: ReactNode;
@@ -300,9 +324,11 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   const [draft, setDraft] = useState<{ name: string; error: ReactNode } | null>(null);
   // The version the merge dialog is open for, and whether it merges as it
   // opens, for a notice's Try again.
-  const [merge, setMerge] = useState<{ source: WorkspaceVersionRecord; runOnOpen: boolean } | null>(
-    null,
-  );
+  const [merge, setMerge] = useState<{
+    source: WorkspaceVersionRecord;
+    runOnOpen: boolean;
+    update: boolean;
+  } | null>(null);
   const mergeOpen = useRef(false);
   mergeOpen.current = merge !== null;
   const { onMergeOpenChange } = props;
@@ -599,15 +625,16 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   // so a failure's Try again opens the dialog and merges again whenever
   // capture is on to do it.
   const answerMergeAway = useCallback(
-    (version: WorkspaceVersionRecord, answer: MergeAnswer) => {
+    (version: WorkspaceVersionRecord, update: boolean, answer: MergeAnswer) => {
       const retry = () => {
         if (!captureLive.current || mergeOpen.current) return false;
-        setMerge({ source: version, runOnOpen: true });
+        setMerge({ source: version, runOnOpen: true, update });
       };
       props.onMergeNotice(
         mergeNotice(
           mergeIdentity(workspaceId, version.id),
           version,
+          update,
           answer,
           captureLive.current ? retry : null,
         ),
@@ -616,8 +643,34 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     [props.onMergeNotice, workspaceId],
   );
   const openMerge = useCallback(
-    (version: WorkspaceVersionRecord) => setMerge({ source: version, runOnOpen: false }),
+    (version: WorkspaceVersionRecord) =>
+      setMerge({ source: version, runOnOpen: false, update: false }),
     [],
+  );
+  const openUpdate = useCallback(
+    (version: WorkspaceVersionRecord) =>
+      setMerge({ source: version, runOnOpen: false, update: true }),
+    [],
+  );
+  const setArchived = useCallback(
+    async (version: WorkspaceVersionRecord, archived: boolean) => {
+      const identity = `version-archive:${workspaceId}:${version.id}`;
+      try {
+        await bridge().archiveWorkspaceVersion({ workspaceId, versionId: version.id, archived });
+      } catch (error) {
+        const verb = archived ? "archive" : "restore";
+        props.onError(
+          ipcErrorMessage(error, `dohc could not ${verb} ${version.name}.`),
+          error,
+          () => void setArchived(version, archived),
+          identity,
+        );
+        return;
+      }
+      props.clearError(identity);
+      await refresh().catch(() => undefined);
+    },
+    [workspaceId, refresh, props.onError, props.clearError],
   );
 
   const activeName = active?.name ?? "Main";
@@ -668,12 +721,14 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
           <VersionMergeDialog
             workspaceId={workspaceId}
             source={merge.source}
+            versions={snapshot?.versions}
+            update={merge.update}
             runOnOpen={merge.runOnOpen}
             {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
             beginLineageOperation={props.beginLineageOperation}
             onWorkspaceStateChanged={props.onWorkspaceStateChanged}
             onMerged={() => props.clearError(mergeIdentity(workspaceId, merge.source.id))}
-            onAnsweredAway={(answer) => answerMergeAway(merge.source, answer)}
+            onAnsweredAway={(answer) => answerMergeAway(merge.source, merge.update, answer)}
             onConflictError={props.onConflictError}
             onClose={() => {
               setMerge(null);
@@ -694,6 +749,8 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     requestSwitch,
     openCreate,
     openMerge,
+    openUpdate,
+    setArchived: (version, archived) => void setArchived(version, archived),
     dialogs,
   };
 }
@@ -714,8 +771,9 @@ export function VersionMenu(props: {
   if (!snapshot) return null;
 
   const activeName = active?.name ?? "Main";
+  const listed = snapshot.versions.filter((version) => version.archivedAtMs === undefined);
   const items: MenuEntry[] = [
-    ...snapshot.versions.map((version) => ({
+    ...listed.map((version) => ({
       id: `version:${version.id}`,
       // The chip's dot, so a person matches the chip to its row. Main keeps
       // the dot's space, so every name starts at the same place.
@@ -730,9 +788,7 @@ export function VersionMenu(props: {
         </>
       ),
       checked: version.id === snapshot.activeVersionId,
-      ...(snapshot.versions.length === 1
-        ? { description: "Try changes without touching Main." }
-        : {}),
+      ...(listed.length === 1 ? { description: "Try changes without touching Main." } : {}),
       testId: "version-item",
       data: { "data-version-id": version.id, "data-version-name": version.name },
       onSelect: () => {
@@ -775,6 +831,16 @@ export function VersionMenu(props: {
         },
       },
     );
+    if (active.canMergeIntoMain)
+      actions.push({
+        id: "update",
+        label: "Update from Main…",
+        icon: <RefreshCw size={14} aria-hidden />,
+        testId: "version-update",
+        onSelect: () => {
+          props.versions.openUpdate(active);
+        },
+      });
   }
   if (props.onShareVersion) {
     const share = props.onShareVersion;
@@ -863,6 +929,9 @@ type MergeStage =
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
+  versions?: readonly WorkspaceVersionRecord[];
+  // Merges Main into the version instead.
+  update?: boolean;
   // VersionMenu's contract: drain writes, hold the release across the IPC.
   beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
@@ -884,6 +953,11 @@ export function VersionMergeDialog(props: {
   onClose: () => void;
 }) {
   const { workspaceId, source } = props;
+  const [from, into] = props.update ? ["Main", source.name] : [source.name, "Main"];
+  const versionNames = useMemo(
+    () => new Map((props.versions ?? []).map((version) => [version.id, version.name])),
+    [props.versions],
+  );
   const [stage, setStage] = useState<MergeStage>({
     stage: props.runOnOpen ? "running" : "confirm",
   });
@@ -892,6 +966,8 @@ export function VersionMergeDialog(props: {
   // Protected files this merge gave the version's copy. They never become
   // conflicts, so whichever stage the merge ends in lists them once.
   const [replacedProtectedPaths, setReplacedProtectedPaths] = useState<string[]>([]);
+  // Protected files both sides changed, which an update left as they were.
+  const [skippedProtectedPaths, setSkippedProtectedPaths] = useState<string[]>([]);
   const liveToken = useRequestSequence();
   // Whether the dialog is still open when a merge answers.
   const mounted = useRef(false);
@@ -917,30 +993,37 @@ export function VersionMergeDialog(props: {
       // Closed by its owner before the merge started, nothing ran. Closed by
       // the person, the merge they asked for still runs.
       if (mounted.current ? !liveToken.isCurrent(token) : !closedWhileMerging.current) return;
-      const result = await bridge().mergeWorkspaceVersion({
-        workspaceId,
-        versionId: source.id,
-      });
+      const pair = { workspaceId, versionId: source.id };
+      const result = await (props.update
+        ? bridge().updateWorkspaceVersion(pair)
+        : bridge().mergeWorkspaceVersion(pair));
       props.onWorkspaceStateChanged();
       props.onMerged();
       const decide =
         result.conflictCount > 0 &&
         (result.conflicts.length > 0 || result.nextAfterConflictId !== null);
       if (!mounted.current) {
-        const { replacedProtectedPaths } = result;
+        const { replacedProtectedPaths, skippedProtectedPaths } = result;
         props.onAnsweredAway(
           decide
-            ? { kind: "decide", conflictCount: result.conflictCount, replacedProtectedPaths }
+            ? {
+                kind: "decide",
+                conflictCount: result.conflictCount,
+                replacedProtectedPaths,
+                skippedProtectedPaths,
+              }
             : {
                 kind: "merged",
                 mergedFileCount: result.conflictCount > 0 ? null : result.mergedFileCount,
                 replacedProtectedPaths,
+                skippedProtectedPaths,
               },
         );
         return;
       }
       if (!liveToken.isCurrent(token)) return;
       setReplacedProtectedPaths(result.replacedProtectedPaths);
+      setSkippedProtectedPaths(result.skippedProtectedPaths);
       if (decide) {
         windowGeneration.current += 1;
         setStage({
@@ -966,6 +1049,7 @@ export function VersionMergeDialog(props: {
     props.onAnsweredAway,
     props.onMerged,
     props.onWorkspaceStateChanged,
+    props.update,
     source.id,
     workspaceId,
   ]);
@@ -987,18 +1071,39 @@ export function VersionMergeDialog(props: {
     if (failure !== undefined) confirmButton.current?.focus();
   }, [failure]);
 
-  const onResolved = useCallback((remaining: ResolveWorkspaceVersionConflictResult) => {
-    windowGeneration.current += 1;
-    setStage(
-      remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
-        ? {
-            stage: "conflicts",
-            conflicts: remaining.conflicts,
-            nextAfterConflictId: remaining.nextAfterConflictId,
-          }
-        : { stage: "resolved-all" },
-    );
-  }, []);
+  const fromId = props.update ? "main" : source.id;
+  const intoId = props.update ? source.id : "main";
+  const pair = useMemo(
+    () => ({ sourceVersionId: fromId, targetVersionId: intoId }),
+    [fromId, intoId],
+  );
+  const forPair = useCallback(
+    (conflicts: readonly WorkspaceVersionConflict[]) =>
+      conflicts.filter(
+        (conflict) =>
+          conflict.origin === "merge" &&
+          conflict.sourceVersionId === fromId &&
+          conflict.targetVersionId === intoId,
+      ),
+    [fromId, intoId],
+  );
+
+  const onResolved = useCallback(
+    (remaining: ResolveWorkspaceVersionConflictResult) => {
+      windowGeneration.current += 1;
+      const scoped = forPair(remaining.conflicts);
+      setStage(
+        scoped.length > 0 || remaining.nextAfterConflictId !== null
+          ? {
+              stage: "conflicts",
+              conflicts: scoped,
+              nextAfterConflictId: remaining.nextAfterConflictId,
+            }
+          : { stage: "resolved-all" },
+      );
+    },
+    [forPair],
+  );
 
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
@@ -1007,21 +1112,25 @@ export function VersionMergeDialog(props: {
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: stage.nextAfterConflictId,
+      pair,
     });
     if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
-    setStage((current) =>
-      current.stage === "conflicts"
-        ? {
+    const scoped = forPair(page.conflicts);
+    setStage((current) => {
+      if (current.stage !== "conflicts") return current;
+      const conflicts = [...current.conflicts, ...scoped];
+      return conflicts.length === 0 && page.nextAfterConflictId === null
+        ? { stage: "resolved-all" }
+        : {
             stage: "conflicts",
-            conflicts: [...current.conflicts, ...page.conflicts],
+            conflicts,
             nextAfterConflictId: page.nextAfterConflictId,
-          }
-        : current,
-    );
-  }, [stage, workspaceId]);
+          };
+    });
+  }, [forPair, pair, stage, workspaceId]);
 
   // Closing while merging leaves the merge running, and its answer comes as a
   // notice. While conflicts are open, closing is explicit only ("Finish
@@ -1054,7 +1163,7 @@ export function VersionMergeDialog(props: {
         >
           <header className="border-b border-line px-6 py-4">
             <h3 id="version-merge-title" className="m-0 text-base font-semibold text-ink">
-              Decide what Main should keep
+              Decide what {into} should keep
             </h3>
             <p
               className="m-0 mt-1 text-[13px] leading-5 text-muted"
@@ -1068,9 +1177,18 @@ export function VersionMergeDialog(props: {
             {hasProtected ? (
               <ReplacedProtectedFiles
                 paths={replacedProtectedPaths}
-                sourceName={source.name}
+                sourceName={from}
                 collapsible
               />
+            ) : null}
+            {skippedProtectedPaths.length > 0 ? (
+              <p
+                data-testid="version-merge-skipped"
+                className="m-0 text-[13px] leading-5 text-muted"
+              >
+                {protectedCount(skippedProtectedPaths.length)} changed in both kept{" "}
+                <span className="font-medium text-ink">{into}</span>'s copy.
+              </p>
             ) : null}
             <ConflictList
               workspaceId={workspaceId}
@@ -1079,7 +1197,11 @@ export function VersionMergeDialog(props: {
               conflicts={stage.conflicts}
               hasMore={stage.nextAfterConflictId !== null}
               onLoadMore={loadMoreConflicts}
-              sourceNameFor={() => source.name}
+              namesFor={(conflict) => [
+                versionNames.get(conflict.sourceVersionId) ?? from,
+                versionNames.get(conflict.targetVersionId) ?? into,
+              ]}
+              pair={pair}
               onResolved={onResolved}
               onError={props.onConflictError}
             />
@@ -1101,11 +1223,13 @@ export function VersionMergeDialog(props: {
   const title =
     stage.stage === "clean"
       ? stage.mergedFileCount === 0
-        ? "No files merged into Main"
-        : `Merged ${stage.mergedFileCount} file${stage.mergedFileCount === 1 ? "" : "s"} into Main`
+        ? `No files merged into ${into}`
+        : `Merged ${stage.mergedFileCount} file${stage.mergedFileCount === 1 ? "" : "s"} into ${into}`
       : stage.stage === "resolved-all"
-        ? `Merged ${source.name} into Main`
-        : `Merge ${source.name} into Main`;
+        ? `Merged ${from} into ${into}`
+        : props.update
+          ? `Update ${source.name} from Main`
+          : `Merge ${source.name} into Main`;
   return (
     <Overlay onClose={() => (canCloseByEscape ? finish() : undefined)}>
       <div
@@ -1125,19 +1249,32 @@ export function VersionMergeDialog(props: {
             </h3>
           </div>
           {result ? (
-            hasProtected ? (
-              <div className="mt-1">
-                <ReplacedProtectedFiles paths={replacedProtectedPaths} sourceName={source.name} />
-              </div>
-            ) : null
+            <>
+              {hasProtected ? (
+                <div className="mt-1">
+                  <ReplacedProtectedFiles paths={replacedProtectedPaths} sourceName={from} />
+                </div>
+              ) : null}
+              {skippedProtectedPaths.length > 0 ? (
+                <p
+                  data-testid="version-merge-skipped"
+                  className="m-0 mt-1 text-[13px] leading-5 text-muted"
+                >
+                  {protectedCount(skippedProtectedPaths.length)} changed in both kept{" "}
+                  <span className="font-medium text-ink">{into}</span>'s copy.
+                </p>
+              ) : null}
+            </>
           ) : (
             <p className="m-0 mt-1 text-[13px] leading-5 text-muted">
-              You can keep working in <span className="font-medium text-ink">{source.name}</span>.
+              {props.update ? "Main's changes come into" : "You can keep working in"}{" "}
+              <span className="font-medium text-ink">{source.name}</span>. Only this computer
+              remembers what merged.
             </p>
           )}
         </div>
         {failure !== undefined ? (
-          <MergeFailure wordsId={failureId} error={failure.error} sourceName={source.name} />
+          <MergeFailure wordsId={failureId} error={failure.error} from={from} into={into} />
         ) : null}
         <div className="flex justify-end gap-2">
           {partway && props.onOpenHistory ? (
@@ -1179,7 +1316,9 @@ export function VersionMergeDialog(props: {
                   ? "Merging…"
                   : partway
                     ? "Merge again"
-                    : "Merge into Main"}
+                    : props.update
+                      ? "Update from Main"
+                      : "Merge into Main"}
               </PrimaryButton>
             </>
           )}
@@ -1191,12 +1330,12 @@ export function VersionMergeDialog(props: {
 
 // A merge's failure, in the dialog that ran it: what failed, then Details
 // when the copy text holds more than the words show.
-function MergeFailure(props: { wordsId: string; error: unknown; sourceName: string }) {
+function MergeFailure(props: { wordsId: string; error: unknown; from: string; into: string }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const words = isMergeStoppedPartway(props.error)
-    ? `dohc could not finish the merge. Some changes from ${props.sourceName} are in Main, and History shows which.`
-    : ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
+    ? `dohc could not finish the merge. Some changes from ${props.from} are in ${props.into}, and History shows which.`
+    : ipcErrorMessage(props.error, `dohc could not merge ${props.from} into ${props.into}.`);
   const { cause } = readError(props.error);
   const details = errorDetails([
     ["Error", words],
@@ -1374,7 +1513,7 @@ function sideNote(binary: { byteLength: number } | null | undefined, missingNote
 
 function conflictSideLabels(
   origin: WorkspaceVersionConflict["origin"],
-  sourceName: string,
+  [sourceName, targetName]: readonly [string, string],
 ): {
   currentHeading: string;
   incomingHeading: string;
@@ -1401,13 +1540,13 @@ function conflictSideLabels(
     };
   }
   return {
-    currentHeading: "On Main",
-    incomingHeading: `In ${sourceName}`,
-    currentName: "Main",
+    currentHeading: targetName === "Main" ? "On Main" : `In ${targetName}`,
+    incomingHeading: sourceName === "Main" ? "On Main" : `In ${sourceName}`,
+    currentName: targetName,
     incomingName: sourceName,
-    keepCurrent: "Keep Main's copy",
+    keepCurrent: `Keep ${targetName}'s copy`,
     keepIncoming: `Keep ${sourceName}'s copy`,
-    currentMissing: "Main does not have this file.",
+    currentMissing: `${targetName} does not have this file.`,
     incomingMissing: `Removed in ${sourceName}.`,
   };
 }
@@ -1462,12 +1601,13 @@ function ConflictResolver(props: {
   beginLineageOperation: () => Promise<() => void>;
   onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
-  sourceName: string;
+  names: readonly [source: string, target: string];
+  pair?: { sourceVersionId: string; targetVersionId: string };
   expanded: boolean;
   onToggle: () => void;
   onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
 }) {
-  const { conflict, expanded, sourceName, workspaceId } = props;
+  const { conflict, expanded, workspaceId } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
@@ -1476,7 +1616,7 @@ function ConflictResolver(props: {
   // is how the attempt is reported.
   const [refusedBytes, setRefusedBytes] = useState<number | null>(null);
   const isBinary = conflict.contentKind === "binary";
-  const labels = conflictSideLabels(conflict.origin, sourceName);
+  const labels = conflictSideLabels(conflict.origin, props.names);
   const { currentName, incomingName, currentMissing, incomingMissing } = labels;
   const combineSeed = useMemo<CombineSeed | null>(
     () =>
@@ -1547,6 +1687,7 @@ function ConflictResolver(props: {
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
+          ...(props.pair ? { pair: props.pair } : {}),
         });
         props.onWorkspaceStateChanged();
         if (!liveToken.isCurrent(token)) return;
@@ -1584,6 +1725,7 @@ function ConflictResolver(props: {
       props.onError,
       props.onResolved,
       props.onWorkspaceStateChanged,
+      props.pair,
       workspaceId,
     ],
   );
@@ -1787,7 +1929,8 @@ function ConflictList(props: {
   conflicts: WorkspaceVersionConflict[];
   hasMore: boolean;
   onLoadMore: () => Promise<void>;
-  sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
+  namesFor: (conflict: WorkspaceVersionConflict) => readonly [source: string, target: string];
+  pair?: { sourceVersionId: string; targetVersionId: string };
   onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
 }) {
   // `undefined` means the user has not chosen yet. `null` means the user
@@ -1833,7 +1976,8 @@ function ConflictList(props: {
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
-          sourceName={props.sourceNameFor(conflict)}
+          names={props.namesFor(conflict)}
+          pair={props.pair}
           expanded={conflict.conflictId === openId}
           onToggle={() => setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)}
           onResolved={props.onResolved}
@@ -2432,9 +2576,10 @@ export function ConflictReviewDialog(props: {
               conflicts={conflicts}
               hasMore={hasMoreConflicts}
               onLoadMore={loadMoreConflicts}
-              sourceNameFor={(conflict) =>
-                versionNames.get(conflict.sourceVersionId) ?? "the other version"
-              }
+              namesFor={(conflict) => [
+                versionNames.get(conflict.sourceVersionId) ?? "the other version",
+                versionNames.get(conflict.targetVersionId) ?? "Main",
+              ]}
               onResolved={onResolved}
             />
           ) : null}

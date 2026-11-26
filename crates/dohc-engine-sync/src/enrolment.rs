@@ -866,6 +866,7 @@ fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Syn
                     created_at_ms,
                     fork_version_id,
                     fork_moment_id,
+                    archived_at_ms: None,
                 })
             },
         )

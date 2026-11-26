@@ -346,6 +346,7 @@ async fn comparing_versions_skips_an_older_builds_env_template_row_across_pages(
                 after_path,
                 1,
                 None,
+                false,
             )
             .await
             .expect("compare page");

@@ -1,9 +1,9 @@
 use super::{
     MomentBeforeState, VersionedTextStore, alias_object_id, blob_text, committed, get_moment,
     get_version, hash_author_fields, hash_fields, hydrate_moments, lookup_request, map_moment_row,
-    map_version_row, next_moment_order, record_request, upsert_snapshot,
+    map_version_row, next_moment_order, record_request, require_writable_version, upsert_snapshot,
     validate_addressable_plaintext_path, validate_identifier, validate_moment_metadata,
-    version_exists, version_is_active,
+    version_is_active,
 };
 use crate::conflicts::{
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
@@ -99,9 +99,7 @@ impl<'a> VersionedTextStore<'a> {
             return Ok(true);
         }
         let prep = self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
+            require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
             let moment = get_moment(conn, ws, &input.mutation_moment_id)?
                 .filter(|m| m.version_id == input.version_id && m.path == input.path)
                 .ok_or(DomainError::FileNotFound)?;
@@ -1170,7 +1168,7 @@ fn rollback_moment_has_dependents(
     let mut version_stmt = conn
         .prepare_cached(
             "SELECT workspace_id, version_id, kind, name, created_at_ms, fork_version_id, \
-             fork_moment_id FROM versions WHERE workspace_id = ?1",
+             fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1",
         )
         .map_err(DomainError::sql_corrupt)?;
     let version_rows = version_stmt

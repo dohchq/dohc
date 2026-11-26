@@ -703,6 +703,18 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Shared profiles omit this owner write. Owning-workspace admission and the History path policy remain the gates.",
   }),
+  "version.update": capability("Update a workspace version from Main.", {
+    ipc: ["updateWorkspaceVersion"],
+    mcp: { owner: ["dohc_update_version"] },
+    mcpReason:
+      "Shared profiles omit this owner write. Owning-workspace admission and the History path policy remain the gates.",
+  }),
+  "version.archive": capability("Archive or restore a workspace version.", {
+    ipc: ["archiveWorkspaceVersion"],
+    mcp: { owner: ["dohc_archive_version"] },
+    mcpReason:
+      "Shared profiles omit this owner write. Owning-workspace admission and the History path policy remain the gates.",
+  }),
   "version.conflicts.list": capability("List version conflicts.", {
     ipc: ["listWorkspaceVersionConflicts", "countWorkspaceVersionConflicts"],
     mcp: { owner: ["dohc_list_version_conflicts"] },

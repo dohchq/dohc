@@ -7,7 +7,10 @@ import {
 } from "./engineHistoryIpc";
 import type { WriteAuthor } from "@dohc/workspace-engine-client";
 import type { OperationHandlers } from "./operationTable";
-import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
+import type {
+  WorkspaceEngineCapture,
+  WorkspaceVersionMergeResult,
+} from "../workspaces/workspaceEngineCapture";
 
 // Each engine page can carry up to about 8 MiB, so the Versions page's count
 // stops here and shows "N+" past it.
@@ -21,6 +24,8 @@ type VersionOperations = Pick<
   | "compareVersions"
   | "compareVersionsChangedCount"
   | "mergeVersionIntoMain"
+  | "updateVersionFromMain"
+  | "setVersionArchived"
   | "listOpenConflictsPage"
   | "countOpenMergeConflicts"
   | "resolveConflict"
@@ -40,6 +45,7 @@ export function workspaceVersionForIpc(version: {
   name: string;
   kind: "main" | "named";
   createdAtMs: number;
+  archivedAtMs?: number;
   forkPoint?: { versionId: string };
 }): WorkspaceVersionRecord {
   return {
@@ -49,6 +55,7 @@ export function workspaceVersionForIpc(version: {
     createdAtMs: version.createdAtMs,
     canMergeIntoMain: version.kind === "named" && version.forkPoint?.versionId === "main",
     ...(version.forkPoint ? { madeFromVersionId: version.forkPoint.versionId } : {}),
+    ...(version.archivedAtMs !== undefined ? { archivedAtMs: version.archivedAtMs } : {}),
   };
 }
 
@@ -70,6 +77,30 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
   async function requireVersionOperations(workspaceId: string) {
     const { capture } = await requireEngineCapture(workspaceId, "Versions");
     return capture;
+  }
+
+  async function mergeResultForIpc(
+    capture: VersionOperations,
+    workspaceId: string,
+    pair: { sourceVersionId: string; targetVersionId: string },
+    result: WorkspaceVersionMergeResult,
+  ) {
+    notifyRenderer({ workspaceId });
+    // The merge reports a count; the rows are open conflicts in the engine,
+    // read back one page at a time like every other conflict reader.
+    const page =
+      result.conflictCount > 0
+        ? await capture.listOpenConflictsPage(undefined, pair)
+        : { conflicts: [], nextAfterConflictId: null };
+    return {
+      mergedFileCount: result.mergedFileCount,
+      unchangedFileCount: result.unchangedFileCount,
+      conflictCount: result.conflictCount,
+      replacedProtectedPaths: result.replacedProtectedPaths,
+      skippedProtectedPaths: result.skippedProtectedPaths,
+      conflicts: page.conflicts.map(versionConflictForIpc),
+      nextAfterConflictId: page.nextAfterConflictId,
+    };
   }
 
   return {
@@ -96,7 +127,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
     },
     async listWorkspaceVersions(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const snapshot = await capture.listVersions();
+      const snapshot = await capture.listVersions({ includeArchived: true });
       return {
         versions: snapshot.versions.map(workspaceVersionForIpc),
         activeVersionId: snapshot.activeVersionId,
@@ -142,21 +173,29 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
     async mergeWorkspaceVersion(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const result = await capture.mergeVersionIntoMain(input.versionId);
+      return await mergeResultForIpc(
+        capture,
+        input.workspaceId,
+        { sourceVersionId: input.versionId, targetVersionId: "main" },
+        result,
+      );
+    },
+
+    async updateWorkspaceVersion(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const result = await capture.updateVersionFromMain(input.versionId);
+      return await mergeResultForIpc(
+        capture,
+        input.workspaceId,
+        { sourceVersionId: "main", targetVersionId: input.versionId },
+        result,
+      );
+    },
+
+    async archiveWorkspaceVersion(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      await capture.setVersionArchived(input.versionId, input.archived);
       notifyRenderer({ workspaceId: input.workspaceId });
-      // The merge reports a count; the rows are open conflicts in the engine,
-      // read back one page at a time like every other conflict reader.
-      const page =
-        result.conflictCount > 0
-          ? await capture.listOpenConflictsPage()
-          : { conflicts: [], nextAfterConflictId: null };
-      return {
-        mergedFileCount: result.mergedFileCount,
-        unchangedFileCount: result.unchangedFileCount,
-        conflictCount: result.conflictCount,
-        replacedProtectedPaths: result.replacedProtectedPaths,
-        conflicts: page.conflicts.map(versionConflictForIpc),
-        nextAfterConflictId: page.nextAfterConflictId,
-      };
     },
 
     async listKeptCopies(input) {
@@ -188,7 +227,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
 
     async listWorkspaceVersionConflicts(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const page = await capture.listOpenConflictsPage(input.afterConflictId);
+      const page = await capture.listOpenConflictsPage(input.afterConflictId, input.pair);
       return {
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
@@ -208,7 +247,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
           : input.resolution.kind === "keep-incoming"
             ? ({ kind: "apply-incoming" } as const)
             : ({ kind: "apply-merged", text: input.resolution.text } as const);
-      const outcome = await capture.resolveConflict(input.conflictId, resolution);
+      const outcome = await capture.resolveConflict(input.conflictId, resolution, input.pair);
       // Push the resolution promptly: "keep mine" changes nothing on disk, so
       // without this nudge the other machine's mirrored conflict would stay
       // open until an unrelated edit happened to trigger a sync.

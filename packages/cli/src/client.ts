@@ -188,6 +188,8 @@ export const VERSION_CHANGE_VERBS: ReadonlySet<CliVerb> = new Set([
   "versionCreate",
   "versionSwitch",
   "versionMerge",
+  "versionUpdate",
+  "versionArchive",
   "versionResolve",
 ]);
 

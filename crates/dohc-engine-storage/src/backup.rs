@@ -163,6 +163,7 @@ const COMPARED_TABLES: &[&str] = &[
     // verified).
     "secret_files",
     "secret_fork_bases",
+    "secret_merge_bases",
     "secret_moments",
 ];
 

@@ -60,15 +60,17 @@ impl ActorHandle {
         target_version_id: String,
         after_path: Option<String>,
         limit: usize,
+        include_base_drift: bool,
     ) -> Result<VersionFileChangePage, RuntimeError> {
         self.run(move |store, _| {
             VersionedTextStore::new(store)
-                .compare_version_files_page(
+                .compare_version_files_page_with_drift(
                     &workspace_id,
                     &source_version_id,
                     &target_version_id,
                     after_path.as_deref(),
                     limit,
+                    include_base_drift,
                 )
                 .map_err(RuntimeError::from)
         })
@@ -84,6 +86,21 @@ impl ActorHandle {
         self.run(move |store, _| {
             VersionedTextStore::new(store)
                 .list_versions(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn set_version_archived(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        archived_at_ms: Option<i64>,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<VersionRecord, RuntimeError> {
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .set_version_archived(&workspace_id, &version_id, archived_at_ms, faults.as_ref())
                 .map_err(RuntimeError::from)
         })
         .await
@@ -1262,6 +1279,12 @@ pub(super) fn switch_active_version_on_store(
         .ok_or(DomainError::VersionNotFound)?;
     if previous.version_id == version_id {
         return Ok(target);
+    }
+    if target.archived_at_ms.is_some() {
+        return Err(DomainError::InvalidInput {
+            reason: "version-archived",
+        }
+        .into());
     }
     let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;

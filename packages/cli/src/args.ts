@@ -193,11 +193,12 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
-  | { verb: "versionList" }
+  | { verb: "versionList"; includeArchived?: boolean }
   | { verb: "versionCompare"; version: string; afterPath?: string }
   | { verb: "versionConflicts"; afterConflictId?: string }
   | { verb: "versionCreate"; name: string }
-  | { verb: "versionSwitch" | "versionMerge"; version: string }
+  | { verb: "versionSwitch" | "versionMerge" | "versionUpdate"; version: string }
+  | { verb: "versionArchive"; version: string; restore: boolean }
   | {
       verb: "versionResolve";
       conflictId: string;
@@ -2804,10 +2805,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         capabilityId: "version.list",
         summary: "List the versions and which one is active.",
         operands: "",
-        notes: ["A version's madeFromVersionId is the id of the version it was made from."],
+        flags: [{ name: "--archived", text: "Include archived versions." }],
+        notes: [
+          "A version's madeFromVersionId is the id of the version it was made from. Archived versions are hidden unless --archived is set.",
+        ],
         parse: (input) => {
           noExtraArgs(input.operands, "version list");
-          return { verb: "versionList" };
+          const includeArchived = input.flags.has("--archived");
+          return { verb: "versionList", ...(includeArchived ? { includeArchived: true } : {}) };
         },
       },
       compare: {
@@ -2883,6 +2888,42 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           version: versionOperand(input, "version merge"),
         }),
       },
+      update: {
+        capabilityId: "version.update",
+        summary: "Bring Main's changes into a version made from Main.",
+        operands: "<version>",
+        notes: [
+          "Prints the open conflicts the update leaves. A protected file both sides changed stays as the version has it.",
+        ],
+        parse: (input) => ({
+          verb: "versionUpdate",
+          version: versionOperand(input, "version update"),
+        }),
+      },
+      archive: {
+        capabilityId: "version.archive",
+        summary: "Archive a version.",
+        operands: "<version>",
+        notes: [
+          "An archived version keeps its files and leaves the version menu. Main, the active version, and versions with open conflicts can't be archived.",
+        ],
+        parse: (input) => ({
+          verb: "versionArchive",
+          version: versionOperand(input, "version archive"),
+          restore: false,
+        }),
+      },
+      restore: {
+        capabilityId: "version.archive",
+        summary: "Restore an archived version.",
+        operands: "<version>",
+        notes: ["Returns an archived version to the version menu."],
+        parse: (input) => ({
+          verb: "versionArchive",
+          version: versionOperand(input, "version restore"),
+          restore: true,
+        }),
+      },
       resolve: {
         capabilityId: "version.conflict.resolve",
         summary: "Resolve an open conflict.",
@@ -2897,7 +2938,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         ],
         notes: [
           "Use - to read the combined text from stdin. Give exactly one of --keep, --text or -.",
-          "In a merge, current is Main and incoming is the version. In sync, current is this computer.",
+          "In a merge, current is Main and incoming is the version. In an update, current is the version and incoming is Main. In sync, current is this computer.",
         ],
         parse: (input) => {
           const [conflictId, body, ...extra] = input.operands;

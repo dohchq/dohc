@@ -792,7 +792,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
           const parent = version.madeFromVersionId;
           const madeFrom =
             parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
-          return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+          const archived = version.archivedAtMs !== undefined ? " · archived" : "";
+          return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}${archived}`;
         })
         .join("\n");
     }
@@ -824,13 +825,30 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed`
         : switched.reason;
     }
-    case "versionMerge": {
-      const merge = result as CliResultByVerb["versionMerge"];
-      if (!merge.ok) return merge.reason;
+    case "versionMerge":
+    case "versionUpdate": {
+      const outcome = result as CliResultByVerb["versionMerge"] | CliResultByVerb["versionUpdate"];
+      if (!outcome.ok) return outcome.reason;
+      const head =
+        verb === "versionUpdate"
+          ? `Updated ${lineSafe(outcome.version.name)} from Main`
+          : `Merged ${lineSafe(outcome.version.name)} into Main`;
+      const skipped =
+        "skippedProtectedFileCount" in outcome && outcome.skippedProtectedFileCount > 0
+          ? [
+              `${counted(outcome.skippedProtectedFileCount, "protected file", "protected files")} changed on both sides kept the version's copy`,
+            ]
+          : [];
       return [
-        `Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
-        ...conflictLines(merge),
+        `${head} · ${counted(outcome.mergedFileCount, "file", "files")} merged · ${counted(outcome.conflictCount, "conflict", "conflicts")}`,
+        ...skipped,
+        ...conflictLines(outcome),
       ].join("\n");
+    }
+    case "versionArchive": {
+      const archive = result as CliResultByVerb["versionArchive"];
+      if (!archive.ok) return archive.reason;
+      return `${archive.archived ? "Archived" : "Restored"} ${lineSafe(archive.version.name)} · ${archive.version.id}`;
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);

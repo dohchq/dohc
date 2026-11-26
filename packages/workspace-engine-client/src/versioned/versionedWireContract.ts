@@ -22,6 +22,7 @@ export const VERSIONED_METHOD = {
   versionsCreateNamed: "versions.createNamed",
   versionsList: "versions.list",
   versionsSetActive: "versions.setActive",
+  versionsSetArchived: "versions.setArchived",
   versionsEnsureMain: "versions.ensureMain",
   versionsActive: "versions.active",
   versionsMerge: "versionedText.merge",
@@ -198,11 +199,18 @@ type VersionsCreateNamedParams = JsonObject & {
 
 type VersionsListParams = JsonObject & {
   afterVersionId?: string;
+  includeArchived?: boolean;
 };
 
 type VersionsSetActiveParams = JsonObject & {
   workspaceId?: string;
   versionId: string;
+};
+
+type VersionsSetArchivedParams = JsonObject & {
+  workspaceId?: string;
+  versionId: string;
+  archived: boolean;
 };
 
 type WorkspaceOnlyParams = JsonObject & { workspaceId?: string };
@@ -226,6 +234,7 @@ type VersionsCompareFilesParams = JsonObject & {
   targetVersionId: string;
   afterPath?: string;
   byteBudget?: number;
+  includeBaseDrift?: boolean;
 };
 
 type SecretsWriteParams = JsonObject & {
@@ -278,6 +287,7 @@ type SecretsCompareParams = JsonObject & {
   targetVersionId: string;
   afterPath?: string;
   limit?: number;
+  includeBaseDrift?: boolean;
 };
 
 type SecretsApplyParams = JsonObject & {
@@ -447,7 +457,7 @@ export type SecretCompareEntry = JsonObject & {
   status: VersionChangeStatus;
 };
 type SecretCompareResult = typeof SecretCompareResultSchema.Type;
-type SecretApplyResult = SecretWriteResult;
+type SecretApplyResult = typeof SecretApplyResultSchema.Type;
 type SecretRestoreResult = typeof SecretRestoreResultSchema.Type;
 type SecretsMomentsListResult = typeof SecretsMomentsListResultSchema.Type;
 type SecretsMomentsGetResult = SecretMomentRecord | null;
@@ -485,6 +495,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedParams;
   [VERSIONED_METHOD.versionsList]: VersionsListParams;
   [VERSIONED_METHOD.versionsSetActive]: VersionsSetActiveParams;
+  [VERSIONED_METHOD.versionsSetArchived]: VersionsSetArchivedParams;
   [VERSIONED_METHOD.versionsEnsureMain]: WorkspaceOnlyParams;
   [VERSIONED_METHOD.versionsActive]: WorkspaceOnlyParams;
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeParams;
@@ -534,6 +545,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedResult;
   [VERSIONED_METHOD.versionsList]: VersionsListResult;
   [VERSIONED_METHOD.versionsSetActive]: VersionsSetActiveResult;
+  [VERSIONED_METHOD.versionsSetArchived]: VersionRecord;
   [VERSIONED_METHOD.versionsEnsureMain]: VersionsEnsureMainResult;
   [VERSIONED_METHOD.versionsActive]: VersionsActiveResult;
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeResult;
@@ -829,12 +841,14 @@ const VersionRecordSchema = mutableStruct({
     }),
   ),
   createdAtMs: Schema.Int,
+  archivedAtMs: Schema.optionalKey(Schema.Int),
 });
 const VersionsListEntrySchema = mutableStruct({
   versionId: Schema.String,
   kind: VersionKindSchema,
   name: Schema.String,
   createdAtMs: Schema.Int,
+  archivedAtMs: Schema.NullOr(Schema.Int),
   forkVersionId: NullableString,
   forkMomentId: NullableString,
 });
@@ -953,6 +967,11 @@ const SecretMomentRecordSchema = mutableStruct({
 const SecretWriteResultSchema = mutableStruct({
   changed: Schema.Boolean,
   moment: Schema.NullOr(SecretMomentRecordSchema),
+});
+const SecretApplyResultSchema = mutableStruct({
+  changed: Schema.Boolean,
+  moment: Schema.NullOr(SecretMomentRecordSchema),
+  diverged: Schema.Boolean,
 });
 const SecretsListResultSchema = mutableStruct({
   secrets: Schema.mutable(
@@ -1138,6 +1157,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.binaryReadBlob]: BlobReadResultSchema,
   [VERSIONED_METHOD.versionsCreateNamed]: VersionRecordSchema,
   [VERSIONED_METHOD.versionsSetActive]: VersionRecordSchema,
+  [VERSIONED_METHOD.versionsSetArchived]: VersionRecordSchema,
   [VERSIONED_METHOD.versionsEnsureMain]: VersionRecordSchema,
   [VERSIONED_METHOD.versionsList]: VersionsListResultSchema,
   [VERSIONED_METHOD.versionsActive]: Schema.NullOr(VersionRecordSchema),
@@ -1153,7 +1173,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.secretsDelete]: SecretDeleteResultSchema,
   [VERSIONED_METHOD.secretsFork]: EmptyObjectSchema,
   [VERSIONED_METHOD.secretsCompare]: SecretCompareResultSchema,
-  [VERSIONED_METHOD.secretsApply]: SecretWriteResultSchema,
+  [VERSIONED_METHOD.secretsApply]: SecretApplyResultSchema,
   [VERSIONED_METHOD.secretsRestore]: SecretRestoreResultSchema,
   [VERSIONED_METHOD.secretsMomentsList]: SecretsMomentsListResultSchema,
   [VERSIONED_METHOD.secretsMomentsGet]: Schema.NullOr(SecretMomentRecordSchema),

@@ -22,6 +22,8 @@ export const RENDERER_USAGE_ACTIONS = {
   version: {
     createWorkspaceVersion: workspaceVersionOperations.createWorkspaceVersion.capabilityId,
     mergeWorkspaceVersion: workspaceVersionOperations.mergeWorkspaceVersion.capabilityId,
+    updateWorkspaceVersion: workspaceVersionOperations.updateWorkspaceVersion.capabilityId,
+    archiveWorkspaceVersion: workspaceVersionOperations.archiveWorkspaceVersion.capabilityId,
     resolveWorkspaceVersionConflict:
       workspaceVersionOperations.resolveWorkspaceVersionConflict.capabilityId,
     saveKeptCopy: workspaceVersionOperations.saveKeptCopy.capabilityId,
@@ -57,6 +59,8 @@ export function createRendererUsage<Event>(recordSuccess: (input: Invocation) =>
   const version: OperationCompletions<typeof workspaceVersionOperations, Event> = {
     createWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.createWorkspaceVersion),
     mergeWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.mergeWorkspaceVersion),
+    updateWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.updateWorkspaceVersion),
+    archiveWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.archiveWorkspaceVersion),
     resolveWorkspaceVersionConflict: () =>
       count(RENDERER_USAGE_ACTIONS.version.resolveWorkspaceVersionConflict),
     saveKeptCopy: (_input, result) => {

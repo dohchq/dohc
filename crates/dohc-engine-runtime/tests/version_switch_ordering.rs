@@ -1328,3 +1328,93 @@ async fn secret_capture_waits_for_a_switch_to_replace_the_previous_versions_secr
     );
     supervisor.close(&database).expect("close");
 }
+
+fn reason(error: RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput { reason }) => reason,
+        other => panic!("expected an invalid-input refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archived_version_cannot_become_active_and_the_active_one_cannot_be_archived() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    let archive = |version_id: &str, archived_at_ms: Option<i64>| {
+        actor.set_version_archived(
+            WORKSPACE.to_owned(),
+            version_id.to_owned(),
+            archived_at_ms,
+            Arc::new(NoFaults),
+        )
+    };
+    let switch = |version_id: &str| {
+        actor.set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: version_id.to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 5,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+    };
+
+    assert_eq!(
+        reason(archive("main", Some(10)).await.expect_err("main")),
+        "version-is-main"
+    );
+    let archived = archive("feature", Some(10)).await.expect("archive");
+    assert_eq!(archived.archived_at_ms, Some(10));
+    assert_eq!(
+        reason(switch("feature").await.expect_err("archived")),
+        "version-archived"
+    );
+    assert_eq!(
+        actor
+            .active_version(WORKSPACE.to_owned())
+            .await
+            .expect("active version")
+            .version_id,
+        "main"
+    );
+
+    let restored = archive("feature", None).await.expect("restore");
+    assert_eq!(restored.archived_at_ms, None);
+    switch("feature")
+        .await
+        .expect("switch to the restored version");
+    assert_eq!(
+        reason(archive("feature", Some(20)).await.expect_err("active")),
+        "version-is-active"
+    );
+    supervisor.close(&database).expect("close");
+}

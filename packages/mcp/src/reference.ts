@@ -142,6 +142,9 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
   create: "versionCreate",
   switch: "versionSwitch",
   merge: "versionMerge",
+  update: "versionUpdate",
+  archive: "versionArchive",
+  restore: "versionArchive",
   resolve: "versionResolve",
 };
 
@@ -397,6 +400,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_create_version: { cli: "versionCreate" },
     dohc_switch_version: { cli: "versionSwitch" },
     dohc_merge_version: { cli: "versionMerge" },
+    dohc_update_version: { cli: "versionUpdate" },
+    dohc_archive_version: { cli: "versionArchive" },
     dohc_resolve_version_conflict: { cli: "versionResolve" },
     dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
     dohc_read_file:
@@ -787,6 +792,8 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_switch_version",
       "dohc_compare_version",
       "dohc_merge_version",
+      "dohc_update_version",
+      "dohc_archive_version",
       "dohc_list_version_conflicts",
       "dohc_resolve_version_conflict",
       "dohc_list_changes",

@@ -744,7 +744,7 @@ export function createWorkspaceEngineIpc<
             const admitted = historyPathAdmission(policy);
             const { capture } = await requireEngineCapture(input.workspaceId, "History");
             assertCurrent();
-            const { versions } = await capture.listVersions();
+            const { versions } = await capture.listVersions({ includeArchived: true });
             assertCurrent();
             // A page also holds version markers and hidden paths, so reading goes on
             // until an own shown moment, the end, or a page older than the version:

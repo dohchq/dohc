@@ -303,6 +303,8 @@ interface DesktopCliServerDependencies<State> {
       | "createVersion"
       | "switchVersion"
       | "mergeVersionIntoMain"
+      | "updateVersionFromMain"
+      | "setVersionArchived"
       | "resolveConflict"
       | "changePathsAs"
     > | null;
@@ -1157,8 +1159,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
         ? {}
         : {
             versions: {
-              list: async () => {
-                const snapshot = await capture.listVersions();
+              list: async (includeArchived) => {
+                const snapshot = await capture.listVersions(
+                  includeArchived ? { includeArchived: true } : undefined,
+                );
                 return {
                   versions: snapshot.versions.map((version) => workspaceVersionForIpc(version)),
                   activeVersionId: snapshot.activeVersionId,
@@ -1188,11 +1192,11 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                   after = page.nextAfterPath;
                 }
               },
-              conflicts: async (afterConflictId) => {
+              conflicts: async (afterConflictId, pair) => {
                 const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
                 if (policy.errors.length)
                   return { status: "policy-unreadable", unreadable: policy.unreadable };
-                const page = await capture.listOpenConflictsPage(afterConflictId);
+                const page = await capture.listOpenConflictsPage(afterConflictId, pair);
                 const admitted = historyPathAdmission(policy);
                 // After a rename, a side can sit at another path than its conflict.
                 const shown = (conflict: (typeof page.conflicts)[number]) =>
@@ -1249,17 +1253,37 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 dependencies.versionRound(
                   workspace.workspaceId,
                   async () => {
-                    const merged = await capture.mergeVersionIntoMain(versionId);
+                    const { mergedFileCount, unchangedFileCount, conflictCount } =
+                      await capture.mergeVersionIntoMain(versionId);
                     notifyRenderer({ workspaceId: workspace.workspaceId });
-                    // The CLI reply carries the counts only.
+                    return { mergedFileCount, unchangedFileCount, conflictCount };
+                  },
+                  { done: () => ({}), failed: {} },
+                ),
+              update: (versionId) =>
+                dependencies.versionRound(
+                  workspace.workspaceId,
+                  async () => {
+                    const {
+                      mergedFileCount,
+                      unchangedFileCount,
+                      conflictCount,
+                      skippedProtectedPaths,
+                    } = await capture.updateVersionFromMain(versionId);
+                    notifyRenderer({ workspaceId: workspace.workspaceId });
                     return {
-                      mergedFileCount: merged.mergedFileCount,
-                      unchangedFileCount: merged.unchangedFileCount,
-                      conflictCount: merged.conflictCount,
+                      mergedFileCount,
+                      unchangedFileCount,
+                      conflictCount,
+                      skippedProtectedFileCount: skippedProtectedPaths.length,
                     };
                   },
                   { done: () => ({}), failed: {} },
                 ),
+              archive: async (versionId, archived) => {
+                await capture.setVersionArchived(versionId, archived);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+              },
               resolve: (conflictId, resolution) =>
                 dependencies.versionRound(
                   workspace.workspaceId,

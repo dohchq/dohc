@@ -4,6 +4,10 @@ import { parseCliArguments } from "./args";
 
 it("parses each version verb and refuses a missing or extra operand before transport", async () => {
   expect(parseCliArguments(["version", "list"], {})).toMatchObject({ verb: "versionList" });
+  expect(parseCliArguments(["version", "list", "--archived"], {})).toMatchObject({
+    verb: "versionList",
+    includeArchived: true,
+  });
   expect(parseCliArguments(["version", "compare", "Draft", "--after", "a.md"], {})).toMatchObject({
     verb: "versionCompare",
     version: "Draft",
@@ -68,13 +72,14 @@ it("marks binary files and conflicts, and exits 1 with a refusal's reason", asyn
 });
 
 it("says what each version was made from, by its id when the list doesn't have it", async () => {
-  const row = (id: string, name: string, madeFromVersionId?: string) => ({
+  const row = (id: string, name: string, madeFromVersionId?: string, archivedAtMs?: number) => ({
     id,
     name,
     kind: madeFromVersionId ? "named" : "main",
     createdAtMs: 10,
     canMergeIntoMain: madeFromVersionId === "main",
     ...(madeFromVersionId ? { madeFromVersionId } : {}),
+    ...(archivedAtMs !== undefined ? { archivedAtMs } : {}),
   });
   const listed = {
     ok: true,
@@ -84,6 +89,7 @@ it("says what each version was made from, by its id when the list doesn't have i
       row("draft", "Draft", "main"),
       row("nested", "Nested", "draft"),
       row("orphan", "Orphan", "gone"),
+      row("old", "Old", "main", 42),
     ],
   };
   const request = vi.fn(async () => listed as never);
@@ -95,6 +101,7 @@ it("says what each version was made from, by its id when the list doesn't have i
       "* Draft · draft · made from Main",
       "  Nested · nested · made from Draft",
       "  Orphan · orphan · made from gone",
+      "  Old · old · made from Main · archived",
       "",
     ].join("\n"),
   });
@@ -187,6 +194,59 @@ it("says what a version change did", async () => {
   expect((await executeCli({ argv: ["version", "merge", "Draft"], request })).stdout).toBe(
     "Merged Draft into Main · 2 files merged · 1 conflict\nc1 · merge · notes.md\n",
   );
+});
+
+it("updates a version from Main, and archives or restores one", async () => {
+  expect(parseCliArguments(["version", "update", "Draft"], {})).toMatchObject({
+    verb: "versionUpdate",
+    version: "Draft",
+  });
+  expect(parseCliArguments(["version", "archive", "Draft"], {})).toMatchObject({
+    verb: "versionArchive",
+    version: "Draft",
+    restore: false,
+  });
+  expect(parseCliArguments(["version", "restore", "Draft"], {})).toMatchObject({
+    verb: "versionArchive",
+    version: "Draft",
+    restore: true,
+  });
+  const request = vi.fn(async (_sent: unknown) => ({
+    ok: true,
+    version: { id: "draft", name: "Draft" },
+    mergedFileCount: 2,
+    unchangedFileCount: 0,
+    conflictCount: 0,
+    skippedProtectedFileCount: 1,
+    conflicts: [],
+    nextAfterConflictId: null,
+  }));
+  expect((await executeCli({ argv: ["version", "update", "Draft"], request })).stdout).toBe(
+    "Updated Draft from Main · 2 files merged · 0 conflicts\n1 protected file changed on both sides kept the version's copy\n",
+  );
+  request.mockResolvedValueOnce({
+    ok: true,
+    version: { id: "draft", name: "Draft" },
+    archived: false,
+  } as never);
+  expect((await executeCli({ argv: ["version", "restore", "Draft"], request })).stdout).toBe(
+    "Restored Draft · draft\n",
+  );
+  expect(
+    request.mock.calls.map(([sent]) => (sent as { verb: string; args: unknown }).verb),
+  ).toEqual(["versionUpdate", "versionArchive"]);
+  expect((request.mock.calls[1]![0] as { args: { restore: boolean } }).args.restore).toBe(true);
+  request.mockClear();
+  for (const argv of [
+    ["version", "update"],
+    ["version", "archive"],
+    ["version", "restore"],
+    ["version", "archive", "Draft", "Later"],
+    ["version", "restore", "Draft", "Later"],
+  ]) {
+    expect((await executeCli({ argv, request })).exitCode, argv.join(" ")).toBe(1);
+  }
+  expect(request).not.toHaveBeenCalled();
 });
 
 it("says under a conflict that a newer version waits behind it, and only there", async () => {

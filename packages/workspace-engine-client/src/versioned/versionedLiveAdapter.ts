@@ -409,6 +409,15 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.request(VERSIONED_METHOD.versionsSetActive, input);
   }
 
+  async setVersionArchived(input: {
+    workspaceId: string;
+    versionId: string;
+    archived: boolean;
+  }): Promise<VersionRecord> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.versionsSetArchived, input);
+  }
+
   async createNamedVersion(input: {
     workspaceId: string;
     name: string;
@@ -420,13 +429,17 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async listVersions(input: { workspaceId: string }): Promise<VersionRecord[]> {
+  async listVersions(input: {
+    workspaceId: string;
+    includeArchived?: boolean;
+  }): Promise<VersionRecord[]> {
     this.assertWorkspace(input.workspaceId);
     const records: VersionRecord[] = [];
     let afterVersionId: string | undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.versionsList, {
         ...(afterVersionId !== undefined ? { afterVersionId } : {}),
+        ...(input.includeArchived ? { includeArchived: true } : {}),
       });
       records.push(
         ...page.versions.map((row) => ({
@@ -435,6 +448,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
           kind: row.kind,
           name: row.name,
           createdAtMs: row.createdAtMs,
+          ...(row.archivedAtMs !== null ? { archivedAtMs: row.archivedAtMs } : {}),
           ...(row.forkVersionId !== null
             ? {
                 forkPoint: {
@@ -779,6 +793,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     sourceVersionId: string;
     targetVersionId: string;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<{
     entries: VersionedMethodResultMap["versions.compareFiles"]["entries"];
     nextAfterPath: string | null;
@@ -789,6 +804,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       sourceVersionId: input.sourceVersionId,
       targetVersionId: input.targetVersionId,
       ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+      ...(input.includeBaseDrift ? { includeBaseDrift: true } : {}),
     });
     return { entries: page.entries, nextAfterPath: page.nextCursor };
   }
@@ -1738,6 +1754,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     targetVersionId: string;
     sourceVersionId: string;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<{
     entries: SecretCompareEntry[];
     nextAfterPath: string | null;
@@ -1749,6 +1766,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       sourceVersionId: input.sourceVersionId,
       limit: 500,
       ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+      ...(input.includeBaseDrift ? { includeBaseDrift: true } : {}),
     });
     return { entries: page.entries, nextAfterPath: page.nextAfterPath };
   }
@@ -1759,7 +1777,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     sourceVersionId: string;
     path: string;
     metadata: AdapterWriteMetadata;
-  }): Promise<{ changed: boolean; moment?: SecretMomentRecord }> {
+  }): Promise<{ changed: boolean; diverged: boolean; moment?: SecretMomentRecord }> {
     this.assertWorkspace(input.workspaceId);
     const result = await this.request(VERSIONED_METHOD.secretsApply, {
       workspaceId: input.workspaceId,
@@ -1775,6 +1793,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
     return {
       changed: result.changed,
+      diverged: result.diverged,
       ...(result.moment !== null ? { moment: result.moment } : {}),
     };
   }

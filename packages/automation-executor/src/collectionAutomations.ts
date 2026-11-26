@@ -294,7 +294,10 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
   readonly workspaceId: string;
   /** The workspace's versions and their files, to list every automation a take over cannot vouch for. */
-  listVersions(input: { workspaceId: string }): Promise<ReadonlyArray<{ id: string }>>;
+  listVersions(input: {
+    workspaceId: string;
+    includeArchived?: boolean;
+  }): Promise<ReadonlyArray<{ id: string }>>;
   listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
@@ -6058,7 +6061,7 @@ export class CollectionAutomations {
     return this.withLiveEngine(async (engine) => {
       const { workspaceId } = engine;
       const files: Array<{ folder: string; collectionId: string | null; text: string | null }> = [];
-      for (const version of await engine.listVersions({ workspaceId })) {
+      for (const version of await engine.listVersions({ workspaceId, includeArchived: true })) {
         const datasetId = async (path: string): Promise<string | null> => {
           const descriptor = await engine.readTextFile({
             workspaceId,

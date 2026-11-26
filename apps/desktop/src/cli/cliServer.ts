@@ -319,13 +319,14 @@ type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConf
 // pages leave out secret-backed files and paths the workspace's rules don't
 // track, as History does.
 export interface CliVersionsPort {
-  list(): Promise<CliVersionPage<"versionList">>;
+  list(includeArchived?: boolean): Promise<CliVersionPage<"versionList">>;
   compare(
     versionId: string,
     afterPath?: string,
   ): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
   conflicts(
     afterConflictId?: string,
+    pair?: { sourceVersionId: string; targetVersionId: string },
   ): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
   // The versions menu's changes. Each first has the windows showing the
   // workspace save their open edits, and throws their reason when one can't.
@@ -334,6 +335,13 @@ export interface CliVersionsPort {
   merge(
     versionId: string,
   ): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
+  update(versionId: string): Promise<{
+    mergedFileCount: number;
+    unchangedFileCount: number;
+    conflictCount: number;
+    skippedProtectedFileCount: number;
+  }>;
+  archive(versionId: string, archived: boolean): Promise<void>;
   resolve(conflictId: string, resolution: VersionResolution): Promise<void>;
 }
 
@@ -2631,6 +2639,8 @@ const HAND_WRITTEN_SHARE_RULES: {
   versionCreate: versionsInOwner,
   versionSwitch: versionsInOwner,
   versionMerge: versionsInOwner,
+  versionUpdate: versionsInOwner,
+  versionArchive: versionsInOwner,
   versionResolve: versionsInOwner,
 };
 const RECEIVED_SHARE_RULES: {
@@ -4167,12 +4177,14 @@ async function dispatchWorkspace(
     case "versionCreate":
     case "versionSwitch":
     case "versionMerge":
+    case "versionUpdate":
+    case "versionArchive":
     case "versionResolve": {
       const versions = context.versions;
       if (!versions) return versionsInOwner.answer;
       // A version as version list names it: by its name, then by its ID.
       const named = async (name: string) => {
-        const { versions: all, activeVersionId } = await versions.list();
+        const { versions: all, activeVersionId } = await versions.list(true);
         const version =
           all.find((candidate) => candidate.name === name) ??
           all.find((candidate) => candidate.id === name);
@@ -4185,7 +4197,7 @@ async function dispatchWorkspace(
       try {
         switch (request.verb) {
           case "versionList":
-            return { ok: true as const, ...(await versions.list()) };
+            return { ok: true as const, ...(await versions.list(request.args.includeArchived)) };
           case "versionConflicts": {
             const page = await versions.conflicts(request.args.afterConflictId);
             return "status" in page
@@ -4237,10 +4249,12 @@ async function dispatchWorkspace(
               changedFileCount: changed.changedFileCount,
             };
           }
-          case "versionMerge": {
+          case "versionMerge":
+          case "versionUpdate": {
+            const update = request.verb === "versionUpdate";
             const { version } = await named(request.args.version);
             if (!version) return unknown(request.args.version);
-            if (version.kind === "main")
+            if (!update && version.kind === "main")
               return {
                 ok: false as const,
                 reason: "Versions merge into Main. Name another version.",
@@ -4248,17 +4262,39 @@ async function dispatchWorkspace(
             if (!version.canMergeIntoMain)
               return {
                 ok: false as const,
-                reason: "Only versions made from Main can merge into Main.",
+                reason: update
+                  ? "Only versions made from Main can update from Main."
+                  : "Only versions made from Main can merge into Main.",
               };
-            const merged = await versions.merge(version.id);
-            const page = await versions.conflicts();
+            const summary = update
+              ? await versions.update(version.id)
+              : await versions.merge(version.id);
+            const page = await versions.conflicts(
+              undefined,
+              update
+                ? { sourceVersionId: "main", targetVersionId: version.id }
+                : { sourceVersionId: version.id, targetVersionId: "main" },
+            );
             if ("status" in page)
-              return historyPolicyUnreadable(page, "The merge ran, and its conflicts are hidden");
+              return historyPolicyUnreadable(
+                page,
+                `The ${update ? "update" : "merge"} ran, and its conflicts are hidden`,
+              );
             return {
               ok: true as const,
               version: { id: version.id, name: version.name },
-              ...merged,
+              ...summary,
               ...page,
+            };
+          }
+          case "versionArchive": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            await versions.archive(version.id, !request.args.restore);
+            return {
+              ok: true as const,
+              version: { id: version.id, name: version.name },
+              archived: !request.args.restore,
             };
           }
           case "versionResolve": {

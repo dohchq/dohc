@@ -811,6 +811,10 @@ impl EngineService {
                 self.versions_set_active(&ctx, request.workspace, request.params)
                     .await?
             }
+            "versions.setArchived" => {
+                self.versions_set_archived(request.workspace, request.params)
+                    .await?
+            }
             "versions.list" => {
                 self.versions_list(&ctx, request.workspace, request.params)
                     .await?
@@ -1946,6 +1950,7 @@ mod tests {
             "versions.ensureMain",
             "versions.list",
             "versions.setActive",
+            "versions.setArchived",
             "watcher.status",
             "workReferences.make",
             "workReferences.resolve",

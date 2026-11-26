@@ -36,9 +36,11 @@
 //! Plaintext never does.
 
 use crate::error::DomainError;
-use crate::merge::VersionFileChangeStatus;
+use crate::merge::{MERGED_INTO_NAMED, MERGED_INTO_PARENT, VersionFileChangeStatus, merge_pair};
 use crate::records::{ApplySecretFileFromVersion, InbandSecret};
-use crate::store::{validate_identifier, validate_path};
+use crate::store::{
+    require_unarchived_version, require_writable_version, validate_identifier, validate_path,
+};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
@@ -292,6 +294,9 @@ pub struct SecretMomentPage {
 pub struct SecretWriteResult {
     pub changed: bool,
     pub moment: Option<SecretMomentRecord>,
+    /// Both sides changed the secret since their last merge, so it stayed
+    /// as it was.
+    pub diverged: bool,
 }
 
 /// Outcome of restoring a secret to the state before a protected moment.
@@ -380,7 +385,7 @@ impl<'a> SecretFileStore<'a> {
         // reaches the duplicate-moment-id guard, so a committed retry is never
         // misreported as `DuplicateMomentId`.
         let no_op = self.store.read_with(|conn| {
-            require_version(conn, ws, &input.version_id)?;
+            require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
             if let Some(tip) = select_tip(conn, ws, &input.version_id, &path)? {
                 let current = aead::open(self.key, ws, &path, &tip)?;
                 if current.as_bytes() == input.text.as_bytes() {
@@ -396,6 +401,7 @@ impl<'a> SecretFileStore<'a> {
             return Ok(SecretWriteResult {
                 changed: false,
                 moment: None,
+                diverged: false,
             });
         }
 
@@ -455,6 +461,7 @@ impl<'a> SecretFileStore<'a> {
             let result = SecretWriteResult {
                 changed: true,
                 moment: Some(moment),
+                diverged: false,
             };
             after(tx, &result)?;
             Ok::<SecretWriteResult, DomainError>(result)
@@ -1026,7 +1033,22 @@ const COMPARE_SECRET_FILES_PAGE_SQL: &str = "WITH page(path) AS ( \
         SELECT path FROM secret_files \
         WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4 \
         ORDER BY 1 LIMIT ?5) \
-     SELECT t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+     SELECT page.path, t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+            s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
+     FROM page \
+     LEFT JOIN secret_files AS t \
+       ON t.workspace_id = ?1 AND t.version_id = ?2 AND t.path = page.path \
+     LEFT JOIN secret_files AS s \
+       ON s.workspace_id = ?1 AND s.version_id = ?3 AND s.path = page.path \
+     ORDER BY page.path";
+
+const COMPARE_SECRET_FILES_WITH_DRIFT_SQL: &str = "WITH page(path) AS ( \
+        SELECT path FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?4 \
+        UNION SELECT path FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4 \
+        UNION SELECT path FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?6 AND path > ?4 \
+        UNION SELECT path FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?6 AND path > ?4 \
+        ORDER BY 1 LIMIT ?5) \
+     SELECT page.path, t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
             s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
      FROM page \
      LEFT JOIN secret_files AS t \
@@ -1046,6 +1068,29 @@ pub fn compare_secret_files_page_keyless(
     after_path: Option<&str>,
     limit: usize,
 ) -> Result<SecretComparePage, DomainError> {
+    compare_secret_files_page_with_drift(
+        store,
+        key,
+        workspace_id,
+        source_version_id,
+        target_version_id,
+        after_path,
+        limit,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compare_secret_files_page_with_drift(
+    store: &EngineStore,
+    key: Option<&SecretDataKey>,
+    workspace_id: &str,
+    source_version_id: &str,
+    target_version_id: &str,
+    after_path: Option<&str>,
+    limit: usize,
+    include_base_drift: bool,
+) -> Result<SecretComparePage, DomainError> {
     if limit == 0 {
         return Err(DomainError::InvalidInput {
             reason: "limit must be positive",
@@ -1054,108 +1099,167 @@ pub fn compare_secret_files_page_keyless(
     store.read_with(|conn| {
         require_version(conn, workspace_id, source_version_id)?;
         require_version(conn, workspace_id, target_version_id)?;
-        let mut stmt = conn
-            .prepare_cached(COMPARE_SECRET_FILES_PAGE_SQL)
-            .map_err(DomainError::sql_corrupt)?;
-        let rows = stmt
-            .query_map(
-                params![
-                    workspace_id,
-                    target_version_id,
-                    source_version_id,
-                    after_path.unwrap_or(""),
-                    limit as i64
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                    ))
-                },
-            )
-            .map_err(DomainError::sql_corrupt)?;
-        let mut entries = Vec::new();
-        let mut rows_fetched = 0usize;
-        let mut last_scanned_path = None;
-        for row in rows {
-            let (t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) =
-                row.map_err(DomainError::sql_corrupt)?;
-            let path = t_path
-                .as_ref()
-                .or(s_path.as_ref())
-                .ok_or(DomainError::StateCorrupt {
-                    reason: "secret comparison row has no path",
-                })?;
-            rows_fetched += 1;
-            last_scanned_path = Some(path.clone());
-            match (&t_path, &s_path) {
-                (None, Some(_)) => entries.push(SecretCompareEntry {
-                    path: path.clone(),
-                    status: VersionFileChangeStatus::Added,
-                }),
-                (Some(_), None) => entries.push(SecretCompareEntry {
-                    path: path.clone(),
-                    status: VersionFileChangeStatus::Deleted,
-                }),
-                (Some(_), Some(_)) => {
-                    if t_iv == s_iv && t_tag == s_tag && t_ct == s_ct {
-                        continue;
+        let pair = if include_base_drift {
+            merge_pair(conn, workspace_id, source_version_id, target_version_id)?
+        } else {
+            None
+        };
+        let after = after_path.unwrap_or("");
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+            ))
+        };
+        let mapped = if let Some((named, _)) = &pair {
+            let mut stmt = conn
+                .prepare_cached(COMPARE_SECRET_FILES_WITH_DRIFT_SQL)
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after,
+                        limit as i64,
+                        named
+                    ],
+                    map_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?
+        } else {
+            let mut stmt = conn
+                .prepare_cached(COMPARE_SECRET_FILES_PAGE_SQL)
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after,
+                        limit as i64
+                    ],
+                    map_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?
+        };
+        let sealed_from = |iv: &Option<String>,
+                           tag: &Option<String>,
+                           ct: &Option<String>,
+                           len: Option<i64>|
+         -> Result<SealedSecret, DomainError> {
+            let incomplete = || DomainError::StateCorrupt {
+                reason: "secret tip is incomplete",
+            };
+            SealedSecret::from_base64(
+                iv.as_deref().ok_or_else(incomplete)?,
+                tag.as_deref().ok_or_else(incomplete)?,
+                ct.as_deref().ok_or_else(incomplete)?,
+                usize::try_from(len.ok_or_else(incomplete)?).map_err(|_| {
+                    DomainError::StateCorrupt {
+                        reason: "secret tip has a negative byte length",
                     }
-                    let key = key.ok_or(DomainError::StateCorrupt {
-                        reason: "secret comparison needs a missing data key",
-                    })?;
-                    let target = SealedSecret::from_base64(
-                        t_iv.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        t_tag.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        t_ct.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        usize::try_from(t_len.ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?)
-                        .map_err(|_| DomainError::StateCorrupt {
-                            reason: "secret tip has a negative byte length",
-                        })?,
-                    )?;
-                    let source = SealedSecret::from_base64(
-                        s_iv.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        s_tag.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        s_ct.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        usize::try_from(s_len.ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?)
-                        .map_err(|_| DomainError::StateCorrupt {
-                            reason: "secret tip has a negative byte length",
-                        })?,
-                    )?;
-                    if aead::open(key, workspace_id, path, &target)?.as_bytes()
-                        != aead::open(key, workspace_id, path, &source)?.as_bytes()
-                    {
-                        entries.push(SecretCompareEntry {
-                            path: path.clone(),
-                            status: VersionFileChangeStatus::Modified,
-                        });
+                })?,
+            )
+            .map_err(DomainError::from)
+        };
+        let open_diff =
+            |path: &str, left: &SealedSecret, right: &SealedSecret| -> Result<bool, DomainError> {
+                if left == right {
+                    return Ok(false);
+                }
+                let key = key.ok_or(DomainError::StateCorrupt {
+                    reason: "secret comparison needs a missing data key",
+                })?;
+                Ok(aead::open(key, workspace_id, path, left)?.as_bytes()
+                    != aead::open(key, workspace_id, path, right)?.as_bytes())
+            };
+        let mut entries = Vec::new();
+        let rows_fetched = mapped.len();
+        let last_scanned_path = mapped.last().map(|row| row.0.clone());
+        for (path, t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) in mapped {
+            if path.is_empty() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "secret comparison row has no path",
+                });
+            }
+            let status = match (&t_path, &s_path) {
+                (None, Some(_)) => Some(VersionFileChangeStatus::Added),
+                (Some(_), None) => Some(VersionFileChangeStatus::Deleted),
+                (Some(_), Some(_)) => {
+                    let same_sealed =
+                        t_iv == s_iv && t_tag == s_tag && t_ct == s_ct && t_len == s_len;
+                    if same_sealed && pair.is_none() {
+                        None
+                    } else {
+                        let t_sealed = sealed_from(&t_iv, &t_tag, &t_ct, t_len)?;
+                        let s_sealed = if same_sealed {
+                            None
+                        } else {
+                            Some(sealed_from(&s_iv, &s_tag, &s_ct, s_len)?)
+                        };
+                        if let Some(ref s) = s_sealed
+                            && open_diff(&path, &t_sealed, s)?
+                        {
+                            Some(VersionFileChangeStatus::Modified)
+                        } else if let Some((named, merged_into)) = &pair {
+                            let t_opt = Some(t_sealed);
+                            let s_ref = if s_sealed.is_some() {
+                                &s_sealed
+                            } else {
+                                &t_opt
+                            };
+                            let tips = if *merged_into == MERGED_INTO_NAMED {
+                                [s_ref, &t_opt]
+                            } else {
+                                [&t_opt, s_ref]
+                            };
+                            let base =
+                                select_secret_merge_base(conn, workspace_id, named, &path, tips)?;
+                            let drifted = match (&base, s_ref) {
+                                (Some(b), Some(s)) => open_diff(&path, b, s)?,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            drifted.then_some(VersionFileChangeStatus::Modified)
+                        } else {
+                            None
+                        }
                     }
                 }
-                (None, None) => unreachable!(),
+                (None, None) => match &pair {
+                    Some((named, _))
+                        if select_secret_merge_base(
+                            conn,
+                            workspace_id,
+                            named,
+                            &path,
+                            [&None, &None],
+                        )?
+                        .is_some() =>
+                    {
+                        Some(VersionFileChangeStatus::Modified)
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(status) = status {
+                entries.push(SecretCompareEntry { path, status });
             }
         }
         Ok(SecretComparePage {
@@ -1167,10 +1271,13 @@ pub fn compare_secret_files_page_keyless(
     })
 }
 
-/// Three-way-apply one source-version secret state to the destination. The key
-/// is used only for equality/base comparisons; writes copy sealed fields. The
-/// queued write or delete changes the workspace file only while it still
-/// holds what `check` gives. `after` runs inside the apply transaction.
+/// Three-way-apply one secret state between a named version and its fork
+/// parent. The key is used only for equality/base comparisons; writes copy
+/// sealed fields. Into the parent the source wins any change of its own; into
+/// the named version a secret both sides changed stays as it was and reports
+/// `diverged`. The queued write or delete changes the workspace file only
+/// while it still holds what `check` gives. `after` runs inside the apply
+/// transaction.
 pub fn apply_secret_file_from_version_with<F>(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -1201,39 +1308,59 @@ where
     validate_origin(metadata_origin)?;
     let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
-        require_version(tx, workspace_id, from_version_id)?;
-        require_version(tx, workspace_id, to_version_id)?;
+        require_unarchived_version(tx, workspace_id, from_version_id)?;
+        require_unarchived_version(tx, workspace_id, to_version_id)?;
+        let (named_version_id, merged_into) =
+            merge_pair(tx, workspace_id, from_version_id, to_version_id)?
+                .ok_or(DomainError::ForkBaseNotFound)?;
+        let into_named = merged_into == MERGED_INTO_NAMED;
         let source = select_tip(tx, workspace_id, from_version_id, &path)?;
         let target = select_tip(tx, workspace_id, to_version_id, &path)?;
-        let base = select_fork_base(tx, workspace_id, from_version_id, &path)?;
-        let result = if (source.is_none() && target.is_none())
-            || source.as_ref() == target.as_ref()
-        {
-            SecretWriteResult {
+        let (parent_tip, named_tip) = if into_named {
+            (&source, &target)
+        } else {
+            (&target, &source)
+        };
+        let base = select_secret_merge_base(
+            tx,
+            workspace_id,
+            &named_version_id,
+            &path,
+            [parent_tip, named_tip],
+        )?;
+        let open = |sealed: &Option<SealedSecret>| {
+            sealed
+                .as_ref()
+                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
+                .transpose()
+        };
+        let source_text = open(&source)?;
+        let target_text = open(&target)?;
+        let base_text = open(&base)?;
+        let source_moved = !secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref());
+        let agreed = secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref());
+        let target_moved = !secret_plaintexts_equal(target_text.as_ref(), base_text.as_ref());
+        let diverged = into_named && source_moved && !agreed && target_moved;
+        let apply = source_moved && !agreed && !diverged;
+        if source_moved && !diverged {
+            record_secret_merge_base(
+                tx,
+                workspace_id,
+                &named_version_id,
+                &path,
+                merged_into,
+                [&source, &base, &target, if apply { &source } else { &target }],
+            )?;
+        }
+        if !apply {
+            let result = SecretWriteResult {
                 changed: false,
                 moment: None,
-            }
-        } else {
-            let source_text = source
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            let target_text = target
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            let base_text = base
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
-                || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
-            {
-                SecretWriteResult {
-                    changed: false,
-                    moment: None,
-                }
-            } else {
+                diverged,
+            };
+            after(tx, &result)?;
+            return Ok(result);
+        }
         if secret_moment_exists(tx, workspace_id, moment_id)? {
             return Err(DomainError::DuplicateMomentId);
         }
@@ -1306,11 +1433,10 @@ where
             )
             .map_err(DomainError::sql_persist)?;
         }
-                SecretWriteResult {
-                    changed: true,
-                    moment: Some(moment),
-                }
-            }
+        let result = SecretWriteResult {
+            changed: true,
+            moment: Some(moment),
+            diverged: false,
         };
         after(tx, &result)?;
         Ok::<_, DomainError>(result)
@@ -1373,6 +1499,7 @@ where
                 reason: "path does not match the protected history moment",
             });
         }
+        require_unarchived_version(tx, workspace_id, &before.version_id)?;
         // The state to go back to is the tip that change replaced, so skip a
         // synced change that lost and never became the tip.
         let previous = tx
@@ -1539,7 +1666,7 @@ fn delete_secret_file_inner(
     // `DuplicateMomentId`. Only a delete that will actually change state
     // reaches the duplicate-moment-id guard.
     let has_tip = store.read_with(|conn| {
-        require_version(conn, ws, &input.version_id)?;
+        require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
         if select_tip(conn, ws, &input.version_id, &path)?.is_none() {
             return Ok(false);
         }
@@ -1838,6 +1965,154 @@ fn select_fork_base(
         SealedSecret::from_base64(&iv, &tag, &ciphertext, byte_length).map_err(DomainError::from)
     })
     .transpose()
+}
+
+/// The secret base a merge between a named version and its fork parent
+/// compares against, chosen as `select_merge_base` chooses a file's: the last
+/// merge's base, the base that merge used when the side it wrote is back to
+/// what it held before, or the fork point.
+fn select_secret_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
+    path: &str,
+    [parent_tip, named_tip]: [&Option<SealedSecret>; 2],
+) -> Result<Option<SealedSecret>, DomainError> {
+    type Row = (Option<String>, Option<String>, String);
+    let mut stmt = conn
+        .prepare(
+            "SELECT target_before_sha256, target_after_sha256, merged_into \
+             FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
+             ORDER BY merge_seq ASC",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows: Vec<Row> = stmt
+        .query_map(params![workspace_id, named_version_id, path], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    if rows.is_empty() {
+        return select_fork_base(conn, workspace_id, named_version_id, path);
+    }
+    let (chosen_dir, use_prior) = rows
+        .iter()
+        .find_map(|(before, after, merged_into)| {
+            let held = secret_identity(if merged_into == MERGED_INTO_PARENT {
+                parent_tip
+            } else {
+                named_tip
+            });
+            (held == *before && held != *after).then_some((merged_into.as_str(), true))
+        })
+        .unwrap_or_else(|| {
+            let latest = rows.last().expect("rows is non-empty");
+            (latest.2.as_str(), false)
+        });
+    let columns = if use_prior {
+        "prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, prior_byte_length \
+         FROM secret_merge_bases WHERE prior_exists = 1"
+    } else {
+        "iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+         FROM secret_merge_bases WHERE base_exists = 1"
+    };
+    let row: Option<(String, String, String, i64)> = conn
+        .query_row(
+            &format!(
+                "SELECT {columns} AND workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4"
+            ),
+            params![workspace_id, named_version_id, path, chosen_dir],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((iv, tag, ciphertext, byte_length)) = row else {
+        return Ok(None);
+    };
+    let byte_length = usize::try_from(byte_length).map_err(|_| DomainError::StateCorrupt {
+        reason: "secret merge base has a negative byte length",
+    })?;
+    Ok(Some(SealedSecret::from_base64(
+        &iv,
+        &tag,
+        &ciphertext,
+        byte_length,
+    )?))
+}
+
+fn secret_identity(sealed: &Option<SealedSecret>) -> Option<String> {
+    sealed
+        .as_ref()
+        .map(|sealed| dohc_engine_storage::hex_sha256(sealed.ciphertext()))
+}
+
+fn record_secret_merge_base(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    named_version_id: &str,
+    path: &str,
+    merged_into: &str,
+    [incoming, prior, before, after]: [&Option<SealedSecret>; 4],
+) -> Result<(), DomainError> {
+    use rusqlite::types::Value;
+    let sealed = |side: &Option<SealedSecret>| -> [Value; 5] {
+        side.as_ref().map_or(
+            [
+                Value::Integer(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+            |sealed| {
+                [
+                    Value::Integer(1),
+                    Value::Text(sealed.iv_base64()),
+                    Value::Text(sealed.auth_tag_base64()),
+                    Value::Text(sealed.ciphertext_base64()),
+                    Value::Integer(sealed.byte_length() as i64),
+                ]
+            },
+        )
+    };
+    let identity =
+        |side: &Option<SealedSecret>| secret_identity(side).map_or(Value::Null, Value::Text);
+    let other_dir = if merged_into == MERGED_INTO_PARENT {
+        MERGED_INTO_NAMED
+    } else {
+        MERGED_INTO_PARENT
+    };
+    let incoming_id = secret_identity(incoming);
+    tx.execute(
+        "DELETE FROM secret_merge_bases \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4 \
+           AND target_after_sha256 IS NOT ?5",
+        params![workspace_id, named_version_id, path, other_dir, incoming_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let mut values = vec![
+        Value::Text(workspace_id.to_owned()),
+        Value::Text(named_version_id.to_owned()),
+        Value::Text(path.to_owned()),
+    ];
+    values.extend(sealed(incoming));
+    values.extend(sealed(prior));
+    values.push(identity(before));
+    values.push(identity(after));
+    values.push(Value::Text(merged_into.to_owned()));
+    tx.execute(
+        "INSERT OR REPLACE INTO secret_merge_bases (workspace_id, version_id, path, \
+         base_exists, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
+         prior_exists, prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, \
+         prior_byte_length, target_before_sha256, target_after_sha256, merged_into, merge_seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         COALESCE((SELECT MAX(merge_seq) FROM secret_merge_bases \
+                   WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3), 0) + 1)",
+        rusqlite::params_from_iter(values),
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
 }
 
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {

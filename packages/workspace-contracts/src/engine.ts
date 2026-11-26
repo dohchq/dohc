@@ -91,6 +91,7 @@ export interface VersionRecord {
   kind: VersionKind;
   name: string;
   createdAtMs: number;
+  archivedAtMs?: number;
   forkPoint?: {
     versionId: VersionId;
     momentId?: VersionedTextMomentId;
@@ -605,12 +606,20 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
   }): Promise<VersionRecord>;
+  setVersionArchived(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    archived: boolean;
+  }): Promise<VersionRecord>;
   createNamedVersion(input: {
     workspaceId: WorkspaceId;
     name: string;
     fromVersionId: VersionId;
   }): Promise<VersionRecord>;
-  listVersions(input: { workspaceId: WorkspaceId }): Promise<VersionRecord[]>;
+  listVersions(input: {
+    workspaceId: WorkspaceId;
+    includeArchived?: boolean;
+  }): Promise<VersionRecord[]>;
   writeTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -678,6 +687,7 @@ export interface VersionedTextStore {
     sourceVersionId: VersionId;
     targetVersionId: VersionId;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<VersionFileChangeEntryPage>;
   // Page-shaped on purpose: the engine pages `conflicts.list` under a
   // byte budget, and a drain here is what let one caller undo that. A caller
@@ -1897,19 +1907,22 @@ export interface SecretFileStore {
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<SecretFileComparePage>;
-  // Whole-file merge of one secret path from source into target. Secrets
-  // never produce conflict records (conflict records carry side texts, which
-  // protected contents must never ride): when the source changed relative to
-  // its fork base, the source side wins and the target's previous state stays
-  // one moment back in the target's protected history.
+  // Whole-file merge of one secret path between a named version and its fork
+  // parent. Secrets never produce conflict records (conflict records carry
+  // side texts, which protected contents must never ride). Into the parent,
+  // a source changed since the last merge wins and the target's previous
+  // state stays one moment back in its protected history. Into the named
+  // version, a secret both sides changed stays as it was and reports
+  // `diverged`.
   applySecretFileFromVersion(input: {
     workspaceId: WorkspaceId;
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
     path: string;
     metadata: ActorNeutralWriteMetadata;
-  }): Promise<SecretFileWriteOutcome>;
+  }): Promise<SecretFileWriteOutcome & { diverged: boolean }>;
   // Returns the file to its state before the given moment by copying the
   // prior ciphertext forward as a new moment (history is never rewritten,
   // plaintext is never produced).

@@ -59,7 +59,7 @@ pub use capture_write::{
     derive_capture_object_id, derive_capture_retire_moment_id, ensure_capture_object_in_tx,
     switch_projection_job_id, validate_write_input, write_history_text_in_tx,
     write_projected_text_in_tx, write_published_history_text_in_tx, write_published_text_in_tx,
-    write_text_in_tx,
+    write_replicated_projected_text_in_tx, write_text_in_tx,
 };
 
 pub(crate) use capture_write::write_revived_text_in_tx;
@@ -203,7 +203,7 @@ impl<'a> VersionedTextStore<'a> {
             let row = conn
                 .query_row(
                     "SELECT v.workspace_id, v.version_id, v.kind, v.name, v.created_at_ms, \
-                     v.fork_version_id, v.fork_moment_id FROM versioned_workspaces w \
+                     v.fork_version_id, v.fork_moment_id, v.archived_at_ms FROM versioned_workspaces w \
                      JOIN versions v ON v.workspace_id = w.workspace_id \
                        AND v.version_id = w.main_version_id WHERE w.workspace_id = ?1",
                     params![workspace_id],
@@ -677,7 +677,7 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, version_id, kind, name, created_at_ms, \
-                     fork_version_id, fork_moment_id FROM versions WHERE workspace_id = ?1 \
+                     fork_version_id, fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1 \
                      ORDER BY created_at_ms, name, version_id",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -1016,9 +1016,7 @@ impl<'a> VersionedTextStore<'a> {
         ]);
         let ws = &input.workspace_id;
         self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.from_version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
+            require_unarchived_version(conn, ws, &input.from_version_id)?;
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(conn, request_id)?
             {
@@ -1079,9 +1077,7 @@ impl<'a> VersionedTextStore<'a> {
 
         let ws = &input.workspace_id;
         let prep = self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.from_version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
+            require_unarchived_version(conn, ws, &input.from_version_id)?;
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(conn, request_id)?
             {
@@ -1115,6 +1111,7 @@ impl<'a> VersionedTextStore<'a> {
             created_at_ms: input.now_ms,
             fork_version_id: Some(input.from_version_id.clone()),
             fork_moment_id: fork_moment_id.clone(),
+            archived_at_ms: None,
         };
 
         let outcome = self.store.write_with(faults, |tx| {
@@ -1191,10 +1188,15 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<VersionRecord, DomainError> {
-        let record = self.require_version(workspace_id, version_id)?;
         let ws = workspace_id.to_owned();
         let ver = version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
+            let record = get_version(tx, &ws, &ver)?.ok_or(DomainError::VersionNotFound)?;
+            if record.archived_at_ms.is_some() {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-archived",
+                });
+            }
             ensure_no_pending_undo_in(tx, &ws)?;
             tx.execute(
                 "INSERT INTO active_versions (workspace_id, version_id) VALUES (?1, ?2) \
@@ -1202,10 +1204,58 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, ver],
             )
             .map_err(DomainError::sql_persist)?;
-            Ok::<_, DomainError>(())
+            Ok::<_, DomainError>(record)
         })?;
-        committed(outcome)?;
-        Ok(record)
+        committed(outcome)
+    }
+
+    pub fn set_version_archived(
+        &mut self,
+        workspace_id: &str,
+        version_id: &str,
+        archived_at_ms: Option<i64>,
+        faults: &dyn FaultInjector,
+    ) -> Result<VersionRecord, DomainError> {
+        let outcome = self.store.write_with(faults, |tx| {
+            let record =
+                get_version(tx, workspace_id, version_id)?.ok_or(DomainError::VersionNotFound)?;
+            if record.kind == VersionKind::Main {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-is-main",
+                });
+            }
+            if archived_at_ms.is_some() {
+                if get_active_version_in(tx, workspace_id)?.version_id == version_id {
+                    return Err(DomainError::InvalidInput {
+                        reason: "version-is-active",
+                    });
+                }
+                let has_open_conflicts: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id = ?1 \
+                         AND status = 'open' \
+                         AND (source_version_id = ?2 OR target_version_id = ?2))",
+                        params![workspace_id, version_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                if has_open_conflicts {
+                    return Err(DomainError::InvalidInput {
+                        reason: "version-has-open-conflicts",
+                    });
+                }
+            }
+            tx.execute(
+                "UPDATE versions SET archived_at_ms = ?3 WHERE workspace_id = ?1 AND version_id = ?2",
+                params![workspace_id, version_id, archived_at_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok::<_, DomainError>(VersionRecord {
+                archived_at_ms,
+                ..record
+            })
+        })?;
+        committed(outcome)
     }
 
     fn require_version(
@@ -1217,6 +1267,42 @@ impl<'a> VersionedTextStore<'a> {
             .read_with(|conn| get_version(conn, workspace_id, version_id))?
             .ok_or(DomainError::VersionNotFound)
     }
+}
+
+pub(crate) fn require_unarchived_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), DomainError> {
+    let archived: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match archived {
+        None => Err(DomainError::VersionNotFound),
+        Some(Some(_)) => Err(DomainError::InvalidInput {
+            reason: "version-archived",
+        }),
+        Some(None) => Ok(()),
+    }
+}
+
+pub(crate) fn require_writable_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    metadata_origin: &str,
+) -> Result<(), DomainError> {
+    if metadata_origin == "sync" {
+        return version_exists(conn, workspace_id, version_id)?
+            .then_some(())
+            .ok_or(DomainError::VersionNotFound);
+    }
+    require_unarchived_version(conn, workspace_id, version_id)
 }
 
 /// Ensure the workspace's main version inside the caller's transaction.
@@ -1256,6 +1342,7 @@ pub fn ensure_main_version_in_tx(
         created_at_ms: now_ms,
         fork_version_id: None,
         fork_moment_id: None,
+        archived_at_ms: None,
     })
 }
 
@@ -1993,7 +2080,7 @@ fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
     }
 }
 
-fn get_version(
+pub(crate) fn get_version(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
@@ -2001,7 +2088,7 @@ fn get_version(
     let row = conn
         .query_row(
             "SELECT workspace_id, version_id, kind, name, created_at_ms, fork_version_id, \
-             fork_moment_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+             fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
             params![workspace_id, version_id],
             map_version_row,
         )
@@ -2076,6 +2163,7 @@ fn map_version_row(
     let created_at_ms: i64 = row.get(4)?;
     let fork_version_id: Option<String> = row.get(5)?;
     let fork_moment_id: Option<String> = row.get(6)?;
+    let archived_at_ms: Option<i64> = row.get(7)?;
     Ok(VersionKind::from_db(&kind_str).map(|kind| VersionRecord {
         workspace_id,
         version_id,
@@ -2084,6 +2172,7 @@ fn map_version_row(
         created_at_ms,
         fork_version_id,
         fork_moment_id,
+        archived_at_ms,
     }))
 }
 

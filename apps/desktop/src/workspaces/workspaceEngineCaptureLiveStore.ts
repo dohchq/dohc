@@ -973,9 +973,11 @@ export function createCaptureLiveStores(
       runRead(async (adapter) => await adapter.getActiveVersion(input)),
     setActiveVersion: (input: { workspaceId: string; versionId: string }) =>
       runMutation(async (adapter) => await adapter.setActiveVersion(input)),
+    setVersionArchived: (input: { workspaceId: string; versionId: string; archived: boolean }) =>
+      runMutation(async (adapter) => await adapter.setVersionArchived(input)),
     createNamedVersion: (input: { workspaceId: string; name: string; fromVersionId: string }) =>
       runMutation(async (adapter) => await adapter.createNamedVersion(input)),
-    listVersions: (input: { workspaceId: string }) =>
+    listVersions: (input: { workspaceId: string; includeArchived?: boolean }) =>
       runRead(async (adapter) => await adapter.listVersions(input)),
 
     async readTextFile(input: { workspaceId: string; versionId: string; path: string }) {
@@ -1315,6 +1317,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       targetVersionId: string;
       afterPath?: string;
+      includeBaseDrift?: boolean;
     }) {
       return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
     },
@@ -1681,6 +1684,7 @@ export function createCaptureLiveStores(
         const result = await adapter.applySecretFileFromVersion(input);
         return {
           changed: result.changed,
+          diverged: result.diverged,
           ...(result.moment ? { moment: secretMomentFromWire(result.moment) } : {}),
         };
       }),

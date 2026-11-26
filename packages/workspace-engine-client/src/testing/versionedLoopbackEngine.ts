@@ -236,10 +236,18 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.versionsCreateNamed]: {
     requiredStrings: ["workspaceId", "name", "fromVersionId"],
   },
-  [VERSIONED_METHOD.versionsList]: { optionalStrings: ["afterVersionId"] },
+  [VERSIONED_METHOD.versionsList]: {
+    optionalStrings: ["afterVersionId"],
+    optionalBools: ["includeArchived"],
+  },
   [VERSIONED_METHOD.versionsSetActive]: {
     requiredStrings: ["versionId"],
     optionalStrings: ["workspaceId"],
+  },
+  [VERSIONED_METHOD.versionsSetArchived]: {
+    requiredStrings: ["versionId"],
+    optionalStrings: ["workspaceId"],
+    optionalBools: ["archived"],
   },
   [VERSIONED_METHOD.versionsEnsureMain]: { optionalStrings: ["workspaceId"] },
   [VERSIONED_METHOD.versionsActive]: { optionalStrings: ["workspaceId"] },
@@ -258,6 +266,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId", "afterPath"],
     optionalUsize: ["byteBudget"],
+    optionalBools: ["includeBaseDrift"],
   },
   [VERSIONED_METHOD.secretsWrite]: {
     requiredStrings: [...REQUIRED_SECRET_METADATA, "versionId", "path", "text", "momentId"],
@@ -286,6 +295,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["workspaceId", "sourceVersionId", "targetVersionId"],
     optionalStrings: ["afterPath"],
     optionalUsize: ["limit"],
+    optionalBools: ["includeBaseDrift"],
   },
   [VERSIONED_METHOD.secretsApply]: {
     requiredStrings: [
@@ -360,12 +370,16 @@ interface LoopbackVersion {
   kind: "main" | "named";
   name: string;
   createdAtMs: number;
+  archivedAtMs?: number;
   forkVersionId?: string;
   forkMomentId?: string;
   files: Map<string, LoopbackFile>;
   textForkBase: Map<string, LoopbackFile>;
   secrets: Map<string, string>;
   secretForkBase: Map<string, string>;
+  // A named version's last merge with its fork parent, either way, per path.
+  mergeBase?: Map<string, LoopbackFile | undefined>;
+  secretMergeBase?: Map<string, string | undefined>;
 }
 
 interface InternalSecretMoment {
@@ -1328,6 +1342,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.versionsList(state, params);
       case VERSIONED_METHOD.versionsSetActive:
         return this.setActive(state, params);
+      case VERSIONED_METHOD.versionsSetArchived:
+        return this.setArchived(state, params);
       case VERSIONED_METHOD.versionsEnsureMain:
         return this.versionJson(this.ensureMain(state, workspace));
       case VERSIONED_METHOD.versionsActive:
@@ -2243,12 +2259,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private versionsList(state: WorkspaceState, params: JsonObject): JsonValue {
     const afterVersionId = optionalString(params, "afterVersionId");
-    const versions = [...state.versions.values()].sort(
-      (left, right) =>
-        left.createdAtMs - right.createdAtMs ||
-        left.name.localeCompare(right.name) ||
-        left.id.localeCompare(right.id),
-    );
+    const includeArchived = params.includeArchived === true;
+    const versions = [...state.versions.values()]
+      .filter((version) => includeArchived || version.archivedAtMs === undefined)
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs ||
+          left.name.localeCompare(right.name) ||
+          left.id.localeCompare(right.id),
+      );
     const afterIndex =
       afterVersionId === undefined
         ? -1
@@ -2260,6 +2279,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         kind: version.kind,
         name: version.name,
         createdAtMs: version.createdAtMs,
+        archivedAtMs: version.archivedAtMs ?? null,
         forkVersionId: version.forkVersionId ?? null,
         forkMomentId: version.forkMomentId ?? null,
       })),
@@ -2269,9 +2289,29 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private setActive(state: WorkspaceState, params: JsonObject): JsonValue {
     const version = this.version(state, requiredString(params, "versionId", "setActive"));
+    if (version.archivedAtMs !== undefined) throw new Error("version-archived");
     state.activeVersionId = version.id;
     state.versioned = true;
     return this.versionJson(version);
+  }
+
+  private setArchived(state: WorkspaceState, params: JsonObject): JsonValue {
+    const version = this.version(state, requiredString(params, "versionId", "setArchived"));
+    if (version.kind === "main") throw new Error("version-is-main");
+    if (params.archived !== true) delete version.archivedAtMs;
+    else if (version.id === state.activeVersionId) throw new Error("version-is-active");
+    else version.archivedAtMs ??= this.clock++;
+    return this.versionJson(version);
+  }
+
+  private mergeNamed(source: LoopbackVersion, target: LoopbackVersion) {
+    if (source.kind === "named" && source.forkVersionId === target.id) return source;
+    if (target.kind === "named" && target.forkVersionId === source.id) return target;
+    return undefined;
+  }
+
+  private mergeBaseOf(named: LoopbackVersion, path: string) {
+    return named.mergeBase?.has(path) ? named.mergeBase.get(path) : named.textForkBase.get(path);
   }
 
   private comparisonRecord(
@@ -2282,7 +2322,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonObject {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
-    const base = source.textForkBase.get(path);
+    const named = this.mergeNamed(source, target);
+    const base = named ? this.mergeBaseOf(named, path) : source.textForkBase.get(path);
     const status = this.filesEqual(current, incoming)
       ? "same"
       : this.filesEqual(current, base)
@@ -2358,12 +2399,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const source = this.version(state, sourceVersionId);
     const target = this.version(state, targetVersionId);
-    if (source.kind !== "named" || source.forkVersionId !== target.id) {
-      throw new Error("fork-base-not-found");
+    if (source.archivedAtMs !== undefined || target.archivedAtMs !== undefined) {
+      throw new Error("version-archived");
     }
+    const named = this.mergeNamed(source, target);
+    if (!named) throw new Error("fork-base-not-found");
     const incoming = source.files.get(path);
     const current = target.files.get(path);
-    const base = source.textForkBase.get(path);
+    const base = this.mergeBaseOf(named, path);
     const comparison = this.comparisonRecord(workspace, path, target, source);
     // The fast-forward writes a side through the text seam, so both live sides
     // must be text. The base does not gate it: a binary base can never
@@ -2371,6 +2414,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // its own kind check keeps a binary ancestor out.
     const liveSidesBinary = incoming?.contentKind === "binary" || current?.contentKind === "binary";
     if (this.filesEqual(incoming, current)) {
+      if (!this.filesEqual(incoming, base)) {
+        (named.mergeBase ??= new Map()).set(path, incoming && copyFile(incoming));
+      }
       const result: JsonObject = {
         status: "unchanged",
         reason: "already-same",
@@ -2410,6 +2456,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
           ? mergeMarkdown(base.text ?? "", current.text ?? "", incoming.text ?? "")
           : { status: "conflict" as const };
       if (cleanMerge.status === "merged") {
+        if (cleanMerge.text === current?.text) {
+          const result: JsonObject = {
+            status: "unchanged",
+            reason: "already-same",
+            comparison,
+            deduped: false,
+            materializeEnqueued: false,
+            materialized: false,
+            materializeOutcome: "skipped",
+          };
+          this.recordReplay(state, requestId, params, result, fingerprint);
+          return result;
+        }
         textToWrite = cleanMerge.text;
       } else {
         const result: JsonObject = {
@@ -2425,6 +2484,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return result;
       }
     }
+    (named.mergeBase ??= new Map()).set(path, incoming && copyFile(incoming));
     const materializeEnqueued = target.id === state.activeVersionId;
     if (!incoming) {
       const before = this.file(target, path);
@@ -2506,14 +2566,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const source = this.version(state, requiredString(params, "sourceVersionId", "compareFiles"));
     const target = this.version(state, requiredString(params, "targetVersionId", "compareFiles"));
     const afterPath = optionalString(params, "afterPath");
-    const paths = [...new Set([...source.files.keys(), ...target.files.keys()])]
+    const driftNamed =
+      params.includeBaseDrift === true ? this.mergeNamed(source, target) : undefined;
+    const paths = [
+      ...new Set([
+        ...source.files.keys(),
+        ...target.files.keys(),
+        ...(driftNamed ? driftNamed.textForkBase.keys() : []),
+        ...(driftNamed?.mergeBase ? driftNamed.mergeBase.keys() : []),
+      ]),
+    ]
       .filter((path) => afterPath === undefined || path > afterPath)
       .sort(comparePaths);
     const scannedPaths = paths.slice(0, COMPARE_PAGE_SIZE);
     const changes = scannedPaths.flatMap((path) => {
       const sourceFile = source.files.get(path);
       const targetFile = target.files.get(path);
-      if (this.filesEqual(sourceFile, targetFile)) return [];
+      if (this.filesEqual(sourceFile, targetFile)) {
+        if (!driftNamed || this.filesEqual(sourceFile, this.mergeBaseOf(driftNamed, path))) {
+          return [];
+        }
+        const entry: JsonObject = { path, status: "modified" };
+        if (sourceFile?.contentKind === "binary") entry.binary = true;
+        return [entry];
+      }
       const status: VersionChangeStatus = !targetFile
         ? "added"
         : !sourceFile
@@ -2671,19 +2747,37 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const target = this.version(state, requiredString(params, "targetVersionId", "secret compare"));
     const after = optionalString(params, "afterPath");
     const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
-    const paths = [...new Set([...source.secrets.keys(), ...target.secrets.keys()])]
+    const driftNamed =
+      params.includeBaseDrift === true ? this.mergeNamed(source, target) : undefined;
+    const baseOf = (path: string) =>
+      driftNamed?.secretMergeBase?.has(path)
+        ? driftNamed.secretMergeBase.get(path)
+        : driftNamed?.secretForkBase.get(path);
+    const paths = [
+      ...new Set([
+        ...source.secrets.keys(),
+        ...target.secrets.keys(),
+        ...(driftNamed ? driftNamed.secretForkBase.keys() : []),
+        ...(driftNamed?.secretMergeBase ? driftNamed.secretMergeBase.keys() : []),
+      ]),
+    ]
       .filter((path) => after === undefined || path > after)
-      .filter((path) => source.secrets.get(path) !== target.secrets.get(path))
+      .filter((path) => {
+        const s = source.secrets.get(path);
+        const t = target.secrets.get(path);
+        return s !== t || (driftNamed !== undefined && s !== baseOf(path));
+      })
       .sort();
     const page = paths.slice(0, limit);
     return {
       entries: page.map((path) => ({
         path,
-        status: !target.secrets.has(path)
-          ? "added"
-          : !source.secrets.has(path)
-            ? "deleted"
-            : "modified",
+        status:
+          !target.secrets.has(path) && source.secrets.has(path)
+            ? "added"
+            : target.secrets.has(path) && !source.secrets.has(path)
+              ? "deleted"
+              : "modified",
       })),
       nextAfterPath: paths.length > page.length ? (page.at(-1) ?? null) : null,
     };
@@ -2699,13 +2793,22 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
     if (!source || !target) throw new Error("invalid-version");
+    if (source.archivedAtMs !== undefined || target.archivedAtMs !== undefined) {
+      throw new Error("version-archived");
+    }
     validateSecretMomentId(momentId);
     const path = normalizedSecretPath(rawPath);
+    const named = this.mergeNamed(source, target);
+    if (!named) throw new Error("fork-base-not-found");
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
-    const base = source.secretForkBase.get(path);
-    if ((before === undefined && after === undefined) || before === after || after === base) {
-      return { changed: false, moment: null };
+    const base = named.secretMergeBase?.has(path)
+      ? named.secretMergeBase.get(path)
+      : named.secretForkBase.get(path);
+    const diverged = named === target && after !== base && before !== after && before !== base;
+    if (after !== base && !diverged) (named.secretMergeBase ??= new Map()).set(path, after);
+    if (before === after || after === base || diverged) {
+      return { changed: false, moment: null, diverged };
     }
     this.assertFreshSecretMoment(state, momentId);
     if (after === undefined) target.secrets.delete(path);
@@ -2722,7 +2825,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       correlationId,
     );
     state.secretMoments.set(momentId, { wire, before, after });
-    return { changed: true, moment: wire };
+    return { changed: true, moment: wire, diverged: false };
   }
 
   private secretRestore(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -3646,6 +3749,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       name: version.name,
       createdAtMs: version.createdAtMs,
     };
+    if (version.archivedAtMs !== undefined) value.archivedAtMs = version.archivedAtMs;
     if (version.forkVersionId) {
       const forkPoint: JsonObject = { versionId: version.forkVersionId };
       if (version.forkMomentId) forkPoint.momentId = version.forkMomentId;
