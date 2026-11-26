@@ -23,6 +23,7 @@ import {
   type RemovedText,
   type UnsentText,
 } from "@dohc/ydoc-projection/removed-text";
+import { declareBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -127,6 +128,7 @@ export function createNamedLiveProvider(
       throw new TypeError("Invalid named provider limits.");
   }
   const doc = new Y.Doc();
+  declareBodySequence(doc);
   const body = getDohcYDocBodyFragment(doc);
   const pending: PendingUpdate[] = [];
   const listeners = new Set<(state: NamedLiveProviderState) => void>();

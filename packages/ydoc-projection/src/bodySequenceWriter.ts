@@ -653,6 +653,41 @@ export function typeLetters(
   );
 }
 
+/**
+ * Replace `length` letters at an offset of a line with `letters`, which take `marks`, in one change.
+ * Refused where it would cut a surrogate pair or reach past the line.
+ */
+export function replaceLetters(
+  schema: Schema,
+  doc: Y.Doc,
+  at: number,
+  offset: number,
+  length: number,
+  letters: string,
+  marks: SequenceAttrs,
+): BodyChange | null {
+  keepMarkRules(schema, marks);
+  if (length < 1 || LONE_HALF.test(letters)) return null;
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => ({ edits: [lines[at]] }),
+    (lines) => {
+      const line = lines[at];
+      if (!line || offset < 0 || offset + length > line.text.length) return null;
+      if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length))
+        return null;
+      const index = line.start + offset;
+      return {
+        ...nothing(),
+        erased: [{ index, length }],
+        ...(letters ? { typed: { index, letters, marks } } : {}),
+      };
+    },
+  );
+}
+
 /** Insert an inline item into a line. Refused where typing is, and in a block that cannot hold it. */
 export function insertInline(
   schema: Schema,

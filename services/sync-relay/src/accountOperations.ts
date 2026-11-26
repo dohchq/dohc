@@ -33,7 +33,8 @@ import {
   type FilesHost,
   type TextReadResult,
 } from "@dohc/workspace-operations/documents";
-import { documentMarkdown, settledDocumentMarkdown } from "@dohc/ydoc-projection";
+import { documentMarkdownOf, settledDocumentMarkdown, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import * as Y from "yjs";
 import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
@@ -491,6 +492,17 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
   };
 }
 
+/** A hosted note's accepted state as Markdown. A format-2 note reads as the engine writes it. */
+function acceptedMarkdown(state: Uint8Array): string {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, state);
+    return readsBodySequence(doc) ? yDocToMarkdown(doc) : documentMarkdownOf(doc);
+  } finally {
+    doc.destroy();
+  }
+}
+
 /**
  * Pages as the copy holds them. While the copy's active version is main, a
  * page the relay hosts live reads as its accepted state, the journal's
@@ -536,7 +548,7 @@ function serverDocuments(
       if (live.kind === "cut" && live.cut.document.objectId === file.objectId) {
         return {
           path,
-          markdown: documentMarkdown(
+          markdown: acceptedMarkdown(
             Y.mergeUpdates([live.cut.checkpoint.bytes, ...live.cut.suffix.map((row) => row.bytes)]),
           ),
         };
