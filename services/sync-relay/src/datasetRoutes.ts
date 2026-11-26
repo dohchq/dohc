@@ -990,7 +990,7 @@ export function createDatasetAppRoutes(
       !published ||
       (!options.publications && !published.local) ||
       (publishedOnly && published.local) ||
-      // An app with no dataset serves only its files, and a Member app its consent.
+      // An app with no dataset serves only its files.
       (!published.capabilities.length && !get && route.action !== "consent")
     )
       throw notFound();

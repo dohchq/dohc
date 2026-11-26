@@ -81,7 +81,6 @@ const exact = (v: unknown, keys: string): v is Record<string, unknown> =>
 const label = (value: unknown) => typeof value === "string" && value.length <= 320;
 const list = (value: unknown, max: number, item: (value: unknown) => boolean) =>
   Array.isArray(value) && value.length <= max && value.every(item);
-/** A Member app's review as the relay sends it: what the viewer would allow, and its source files. */
 const memberReview = (value: unknown) =>
   exact(value, "authorityRevision,collections,consent,scopeDigest,source") &&
   Number.isSafeInteger(value.authorityRevision) &&
@@ -113,7 +112,6 @@ const memberReview = (value: unknown) =>
       Number.isSafeInteger(file.byteLength) &&
       PUBLICATION.test(String(file.sha256)),
   );
-/** The most source text the review shows at once. */
 const MAX_SOURCE_BYTES = 256 * 1024;
 interface Descriptor {
   publicationId: string;

@@ -68,7 +68,6 @@ const definition: DatasetDefinition = {
   ],
 };
 
-/** A workspace where Ana, a Member, shares an app over Registrations that Ben, another Member, opens. */
 async function memberWorkspace(root: string) {
   const storage = openSyncRelayStorage(join(root, "relay.sqlite")) as StorageContext;
   storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
@@ -163,7 +162,6 @@ async function memberWorkspace(root: string) {
   return { storage, host, revision };
 }
 
-/** Ana's app as her computer uploads it: the build, then every source and bundle byte it names. */
 function memberAppUpload(revision: ReturnType<typeof describeDatasetRevision>) {
   const source = Buffer.from("export const greeting = 'Registrations tracker';\n");
   const bundle = Buffer.from(

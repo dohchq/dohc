@@ -1689,7 +1689,6 @@ it("shares a Member app only while members may, never as the owner, and runs it 
     scope: [{ datasetId: id(1), operationIds: [id(6), id(7)].sort(), access: "edit" }],
   });
 
-  // The owner holds every action, but the app reaches only what its author holds.
   expect(f.review(owner, app).scope[0]!.operationIds).toEqual([id(6), id(7)].sort());
   f.allow(owner, app);
   await expect(f.invoke(owner, id(5), { name: "Owner" }, app, "escalate")).rejects.toMatchObject(
@@ -1697,7 +1696,6 @@ it("shares a Member app only while members may, never as the owner, and runs it 
   );
   expect((await f.invoke(owner, id(6), {}, app, "owner-read")).result).toBe("edit");
 
-  // And a viewer reaches only what they hold.
   f.grant("ben-grant", [id(6)]);
   f.allow(ben, app);
   expect((await f.invoke(ben, id(6), {}, app, "ben-read")).result).toBe("edit");
@@ -1734,7 +1732,6 @@ it("refuses a Member app's running write, and every later call, once its author 
   await expect(edit("edit-1")).rejects.toMatchObject(refused);
   expect(lower).toBeNull();
   await expect(edit("edit-2")).rejects.toMatchObject(refused);
-  // Narrowing asks nobody again, and widening does.
   expect((await f.invoke(ben, id(6), {}, app, "read")).result).toBe("edit");
   f.allow(ben, app);
   f.grant("ana-grant", [id(6), id(7)]);
@@ -1963,7 +1960,6 @@ it("takes a Member app only with every file and source byte it names, each match
     agent: null,
   });
   const badRequest = expect.objectContaining({ code: "bad_request" });
-  // Bytes the relay already stores still have to come with the upload.
   expect(() =>
     parseMemberAppUpload(
       memberAppUpload(

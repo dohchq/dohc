@@ -51,7 +51,6 @@ export function initializeMemberAppSchema(db: SqliteDb): void {
     ON ${CONSENTS}(publication_id)`);
 }
 
-/** Four apps at the largest bundle a publication carries. */
 export const MEMBER_APP_STORAGE_BYTES = 4 * APP_PUBLICATION_MAX_BUNDLE_BYTES;
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const mib = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
@@ -173,7 +172,6 @@ export function recordMemberAppConsent(
     );
 }
 
-/** Ends a revision: the unbind trigger removes its bindings, and only a taken-down one keeps its row. */
 function retire(storage: StorageContext, publicationId: string): void {
   storage.db
     .prepare(
@@ -290,7 +288,6 @@ export function withdrawMemberApp(
   });
 }
 
-/** Active Member apps in the workspace, a page at a time. */
 export function memberAppPage(storage: StorageContext, workspaceId: string, cursor: string) {
   const rows = storage.db
     .prepare(`SELECT m.publication_id,m.publisher_user_id,m.slug,m.created_at_ms FROM ${MEMBER_APPS} m

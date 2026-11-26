@@ -534,7 +534,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     resolve();
     return { candidate, authorityRevision, resolveAuthority: resolve };
   }
-  // What a person holds on a Collection, or with no Collection on the app's source, for a Member app. Null when out of reach.
   function memberReach(
     workspaceId: string,
     userId: string,
@@ -587,7 +586,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       token: [grantId, authority.authorityToken, row?.token ?? null],
     };
   }
-  // A Member app runs under declared ∩ author ∩ viewer, read-only below Edit. Null when either cannot reach every Collection.
   function memberScope(
     workspaceId: string,
     publicationId: string,
@@ -1061,7 +1059,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     };
   }
   // The app whose files a named caller may load: a dataset app, or a publication that requests nothing in the
-  // workspace and so has no dataset. Null for any other app. `reviewing` serves a Member app before its consent.
+  // workspace and so has no dataset. Null for any other app.
   function servedPublication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     const dataset = publication(auth, publicationId, reviewing);
     if (dataset || auth.kind !== "named") return dataset;

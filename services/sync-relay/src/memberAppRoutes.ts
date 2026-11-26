@@ -20,7 +20,6 @@ export type MemberAppRoute = { route: "member-apps"; workspaceId: string } & (
 );
 
 const HEADER_BYTES = 256 * 1024;
-/** A header, then each distinct file and input once. */
 export const MEMBER_APP_UPLOAD_BYTES = 4 + HEADER_BYTES + 64 * 1024 * 1024;
 
 const json = (value: unknown) =>
