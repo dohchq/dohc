@@ -690,6 +690,84 @@ fn a_line_added_or_deleted_takes_no_letters_from_the_line_above() {
             title.insert_attribute(txn, "level", Any::Number(2.0));
         });
         assert_eq!(merged(&ours, &theirs), ["## Title\n", "## Title\n"]);
+
+        let mut wrong = Vec::new();
+        let mut expect = |kept: [String; 2], after: &str| {
+            if kept != [after, after] {
+                wrong.push((kept, after.to_owned()));
+            }
+        };
+        let rule = ("A\n\n---\n\nB\n", "A\n\nB\n");
+        let kept = folded_while(rule.0, rule.1, |txn, sequence, _| {
+            sequence.remove_range(txn, 2, 1)
+        });
+        expect(kept, rule.1);
+        let heading = [("type", Any::from("heading")), ("level", Any::Number(1.0))];
+        let kept = folded_beside(rule.0, rule.1, |doc| last_line_given(doc, &heading));
+        expect(kept, "A\n\n# B\n");
+        let kept = folded_beside(rule.1, rule.0, |doc| last_line_given(doc, &heading));
+        expect(kept, "A\n\n---\n\n# B\n");
+        let level = [("level", Any::Number(2.0))];
+        let (title, ruled) = ("# Title\n", "---\n\n# Title\n");
+        let kept = folded_beside(title, ruled, |doc| last_line_given(doc, &level));
+        expect(kept, "---\n\n## Title\n");
+        let kept = folded_beside(ruled, title, |doc| last_line_given(doc, &level));
+        expect(kept, "## Title\n");
+        let kept = folded_beside("- [ ] a\n", "---\n\n- [ ] a\n", |doc| {
+            let item = path_of(doc, 0).swap_remove(1);
+            edited(doc, move |txn, _, containers| {
+                containers.insert(txn, format!("{item}.checked"), Any::Bool(true));
+            });
+        });
+        expect(kept, "---\n\n- [x] a\n");
+        let kept = folded_while("a\n\nab\n", "ab\n", |txn, sequence, _| {
+            sequence.remove_range(txn, 3, 1)
+        });
+        expect(kept, "b\n");
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    });
+}
+
+fn folded_beside(base: &str, file: &str, peer: impl FnOnce(&Ydoc)) -> [String; 2] {
+    let (ours, theirs) = peers(&seeded(2, base));
+    fold(&ours, file);
+    peer(&theirs);
+    merged(&ours, &theirs)
+}
+
+fn last_line_given(doc: &Ydoc, attributes: &[(&'static str, Any)]) {
+    let line = boundaries(doc).pop().unwrap();
+    let attributes = attributes.to_vec();
+    edited(doc, move |txn, _, _| {
+        for (name, value) in attributes {
+            line.insert_attribute(txn, name, value);
+        }
+    });
+}
+
+#[test]
+fn a_formatting_only_save_leaves_a_bare_line_between_restyled_lines_alone() {
+    reading_body_sequence_here(|| {
+        let doc = by_hand(|txn, sequence, _| {
+            line(txn, sequence, "paragraph", &[]);
+            typed(txn, sequence, "left");
+            line(txn, sequence, "horizontalRule", &[]);
+            let at = sequence.len(txn);
+            let image = sequence.insert_embed(txn, at, XmlElementPrelim::empty("image"));
+            image.insert_attribute(txn, "src", Any::from("b.png"));
+            image.insert_attribute(txn, "alt", Any::from("a"));
+            line(txn, sequence, "paragraph", &[]);
+            typed(txn, sequence, "right");
+        });
+        let body = markdown_of(&doc);
+        assert!(body.contains("![a](b.png)"), "{body}");
+        let file = body
+            .replace("left", "**left**")
+            .replace("right", "**right**");
+        let lines = boundaries(&doc).len();
+        fold(&doc, &file);
+        assert_eq!(markdown_of(&doc), file);
+        assert_eq!(boundaries(&doc).len(), lines);
     });
 }
 
