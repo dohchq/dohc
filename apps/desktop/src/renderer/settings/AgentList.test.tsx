@@ -1304,6 +1304,20 @@ it("defaults Add agent to Agent link when no local CLI is ready and the workspac
   expect(sheet().queryByTestId("agent-add-link-private-note")).toBeNull();
 });
 
+it("opens the Add agent sheet once for each request, not again when Settings comes back to Agents", async () => {
+  const request = { add: true } as const;
+  const first = renderList({ openAgent: request });
+  await userEvent.click(await sheet().findByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
+  first.unmount();
+
+  const again = renderList({ openAgent: request });
+  await screen.findByTestId("agent-add");
+  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
+  again.rerender({ openAgent: { add: true } });
+  await screen.findByTestId("agent-add-sheet");
+});
+
 it("keeps an early click or typed name on Add agent when account load finishes, and falls back to MCP when unsynced or when CLI resolves ready", async () => {
   const earlyClickPersonal = deferred<PersonalAgentsEvent>();
   bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });

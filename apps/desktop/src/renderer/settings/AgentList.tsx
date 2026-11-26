@@ -620,6 +620,9 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
 }
 
 export type AgentsOpen = { agentId: string } | { add: true };
+// Settings mounts the list again each time it comes back to Agents, with the
+// same request, so each request is acted on once.
+const openedRequests = new WeakSet<AgentsOpen>();
 
 /**
  * Settings › Agents: every agent in the order the file lists them, with the
@@ -837,8 +840,10 @@ export function AgentList(props: {
   // When the roster doesn't hold it, the list shows, as after Remove.
   const [wanted, setWanted] = useState<string | null>(null);
   useEffect(() => {
-    if (!props.openAgent) return;
-    if ("agentId" in props.openAgent) setWanted(props.openAgent.agentId);
+    const open = props.openAgent;
+    if (!open || openedRequests.has(open)) return;
+    openedRequests.add(open);
+    if ("agentId" in open) setWanted(open.agentId);
     else setSheetOpen(true);
   }, [props.openAgent]);
   useEffect(() => {
