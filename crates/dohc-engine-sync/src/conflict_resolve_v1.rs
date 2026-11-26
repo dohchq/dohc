@@ -3866,7 +3866,7 @@ fn prepare_local_lineage_in_tx(
                         content_kind: marker.content_kind,
                         result_sha256: &result.blob_sha256,
                     },
-                    doc.successor_schema_version(),
+                    doc.note_schema_version(),
                 );
                 let successor = fresh_successor_base(
                     &identity,
@@ -4304,6 +4304,12 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             constraint: "MAX_YDOC_UPDATE_BYTES (conflict successor)",
             limit_bytes: max,
             observed_bytes: actual,
+        },
+        CollabError::InvalidSuccessorBase {
+            constraint: "format-2 successor",
+            ..
+        } => SyncError::InvalidInput {
+            reason: "ydoc-note-uses-a-newer-body-format",
         },
         CollabError::MarkdownNotRepresentable
         | CollabError::MarkdownQuoteDepthExceeded

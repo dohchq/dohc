@@ -642,16 +642,6 @@ impl Ydoc {
         }
     }
 
-    /// The rich-document schema version a successor of this note is written
-    /// in: the note's own, or 1 on an engine that does not read format 2.
-    pub fn successor_schema_version(&self) -> u8 {
-        if self.reads_body_sequence {
-            self.note_schema_version()
-        } else {
-            1
-        }
-    }
-
     fn fits_a_live_note(&self, markdown: &str) -> bool {
         let weight = body_sequence_writer::Weight::of(&self.doc);
         match self.markdown_source_reference() {
