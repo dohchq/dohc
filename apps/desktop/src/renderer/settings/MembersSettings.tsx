@@ -149,6 +149,13 @@ const keyOf = (request: MembersRequest): string => {
   }
 };
 
+const addressesOf = (view: WorkspaceMembersView): Set<string> =>
+  new Set(
+    view.people.flatMap((person) =>
+      person.state !== "removed" && person.email ? [person.email.toLowerCase()] : [],
+    ),
+  );
+
 const FALLBACK: Record<MembersRequest["action"], string> = {
   list: "dohc could not load Members.",
   invite: "dohc could not send the invite.",
@@ -239,6 +246,7 @@ export function MembersSettings(props: {
   const [ended, setEnded] = useState<string | null>(null);
   // The last invite and what became of its email, for the scope it ran in.
   const [invited, setInvited] = useState<{ key: string; invited: Invited } | null>(null);
+  const lastView = useRef<WorkspaceMembersView | null>(null);
   const listIdentity = `settings-members:${workspaceId}`;
 
   useEffect(() => {
@@ -351,6 +359,7 @@ export function MembersSettings(props: {
               const listed = await bridge()
                 .workspaceMembers({ workspaceId, request: { action: "list" } })
                 .catch(() => null);
+              if (!scope.isCurrent(token) && !closed.current) return;
               if (listed === null) return reportEmail();
               if (
                 listed.status !== "ready" ||
@@ -376,18 +385,16 @@ export function MembersSettings(props: {
       report.current.onClearError?.(identity);
       if (result.status === "ready") {
         // An email notice goes once its address is no longer invited or in the workspace.
-        const here = new Set(
-          result.view.people.flatMap((person) =>
-            person.state !== "removed" && person.email ? [person.email.toLowerCase()] : [],
-          ),
-        );
+        // Settings may have reopened since it was filed, so the last view counts too.
+        const here = addressesOf(result.view);
+        const before = new Set(lastView.current === null ? [] : addressesOf(lastView.current));
         for (const filedIdentity of filed.current)
-          if (
-            filedIdentity.startsWith(emailPrefix) &&
-            !here.has(filedIdentity.slice(emailPrefix.length))
-          ) {
-            filed.current.delete(filedIdentity);
-            report.current.onClearError?.(filedIdentity);
+          if (filedIdentity.startsWith(emailPrefix))
+            before.add(filedIdentity.slice(emailPrefix.length));
+        for (const address of before)
+          if (!here.has(address)) {
+            filed.current.delete(`${emailPrefix}${address}`);
+            report.current.onClearError?.(`${emailPrefix}${address}`);
           }
       }
       if (request.action === "invite" && result.status === "ready")
@@ -417,6 +424,10 @@ export function MembersSettings(props: {
   );
 
   const shown = load?.key === scopeKey ? load.load : { status: "loading" as const };
+  const shownView = shown.status === "ready" ? shown.view : null;
+  useEffect(() => {
+    lastView.current = shownView;
+  }, [shownView]);
 
   return (
     <div data-testid="settings-members">

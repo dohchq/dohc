@@ -944,6 +944,58 @@ describe("Members page", () => {
     expect(screen.queryByTestId("settings-members-invite-email-failed")).toBeNull();
   });
 
+  it("takes back a failed email's notice when the invite is removed after Settings reopens", async () => {
+    const first = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await vi.waitFor(() => expect(first.props.onError).toHaveBeenCalledTimes(1));
+    first.view.unmount();
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await openMenu("m-eve");
+    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Remove invite" }));
+    await vi.waitFor(() =>
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      ),
+    );
+  });
+
+  it("drops a failed email's Try again when the workspace changes while it checks the invite", async () => {
+    const { props, rerender } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    const listed = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(listed.promise);
+    let retried: Promise<void> | undefined;
+    act(() => {
+      retried = onError.mock.calls[0]![2]!() as Promise<void>;
+    });
+    rerender({ workspaceId: "ws-2" });
+    await act(async () => {
+      listed.resolve({ status: "ready", view: withEve() });
+      await retried;
+    });
+    expect(requests().filter((request) => request.action === "invite")).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
   it("resends an invite from its row", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
