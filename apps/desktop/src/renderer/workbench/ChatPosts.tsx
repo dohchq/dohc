@@ -105,9 +105,8 @@ function RunLine(props: {
   );
 }
 
-// A poll's choices, stacked as radio rows. Picking one is the answer, by
-// click or by its number key while the poll has focus. An answered poll keeps
-// its choices and marks the one taken.
+// A poll's choices, stacked. Picking one is the answer. An answered poll
+// keeps its choices and marks the one taken.
 export function PollOptions(props: {
   decision: ChatDecisionRecord;
   onChoose?: (option: string) => void;
@@ -131,7 +130,6 @@ export function PollOptions(props: {
     >
       {options.map((option, index) => {
         const taken = chosen === option;
-        // The key hint is drawn from data-key so the row's text stays the choice.
         const key = choose && index < 9 ? String(index + 1) : undefined;
         return (
           <li key={option}>
