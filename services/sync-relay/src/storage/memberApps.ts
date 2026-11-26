@@ -103,12 +103,14 @@ export function memberAppSetting(storage: StorageContext, workspaceId: string) {
 
 function requireManager(storage: StorageContext, workspaceId: string, userId: string) {
   const role = workspaceRoleOf(storage, workspaceId, userId)?.role;
-  if (role !== "owner" && role !== "admin") throw relayError("members_forbidden");
+  if (!role) throw notFound();
+  if (role === "member") throw relayError("members_forbidden");
 }
 
+/** Every member reads the switch, so a Member's computer can tell them sharing is off before they upload. */
 export function readMemberAppSetting(storage: StorageContext, workspaceId: string, userId: string) {
   return storage.readTx(() => {
-    requireManager(storage, workspaceId, userId);
+    if (!workspaceRoleOf(storage, workspaceId, userId)) throw notFound();
     return { membersCanShare: memberAppSetting(storage, workspaceId).membersCanShare };
   });
 }
@@ -292,20 +294,34 @@ export function withdrawMemberApp(
   });
 }
 
-export function memberAppPage(storage: StorageContext, workspaceId: string, cursor: string) {
+/** `w` then `m` with the last id seen: official Workspace Publications first, then Member apps. */
+export const WORKSPACE_APP_CURSOR = /^(w[0-9a-f]{64}|m([0-9a-f]{64})?)$/;
+
+export function workspaceAppPage(storage: StorageContext, workspaceId: string, cursor: string) {
+  const kind = cursor.startsWith("m") ? ("member" as const) : ("workspace" as const);
   const rows = storage.db
-    .prepare(`SELECT m.publication_id,m.publisher_user_id,m.slug,m.created_at_ms FROM ${MEMBER_APPS} m
+    .prepare(
+      kind === "member"
+        ? `SELECT m.publication_id,m.publisher_user_id,m.slug,m.created_at_ms FROM ${MEMBER_APPS} m
     JOIN sync_relay_app_publications p USING(publication_id)
-    WHERE m.workspace_id=? AND p.active=1 AND m.publication_id>? ORDER BY m.publication_id LIMIT 26`)
-    .all(workspaceId, cursor);
+    WHERE m.workspace_id=? AND p.active=1 AND m.publication_id>? ORDER BY m.publication_id LIMIT 26`
+        : `SELECT p.publication_id,NULL AS publisher_user_id,NULL AS slug,p.created_at_ms FROM sync_relay_app_publications p
+    WHERE p.workspace_id=? AND p.active=1 AND p.audience='workspace' AND p.publication_id>?
+    AND NOT EXISTS (SELECT 1 FROM ${MEMBER_APPS} m WHERE m.publication_id=p.publication_id)
+    ORDER BY p.publication_id LIMIT 26`,
+    )
+    .all(workspaceId, cursor.slice(1));
+  const prefix = kind === "member" ? "m" : "w";
   return {
     rows: rows.slice(0, 25).map((row) => ({
+      kind,
       publicationId: String(row.publication_id),
-      publisherUserId: String(row.publisher_user_id),
-      slug: String(row.slug),
+      publisherUserId: row.publisher_user_id === null ? null : String(row.publisher_user_id),
+      slug: row.slug === null ? null : String(row.slug),
       createdAtMs: Number(row.created_at_ms),
     })),
-    nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null,
+    nextCursor:
+      rows.length > 25 ? prefix + String(rows[24]!.publication_id) : kind === "member" ? null : "m",
   };
 }
 
@@ -324,7 +340,7 @@ const REFUSALS = {
     "member_app_review_changed",
     "This app changed. Review it again before you open it.",
   ],
-  agent: [403, "member_app_person_only", "Only a person can allow a Member app, not an agent."],
+  browser: [403, "member_app_person_only", "Allow Member apps in your browser."],
 } as const;
 /** A Member app refusal the viewer acts on: review it, review it again, or allow it themselves. */
 export class MemberAppRefusal extends Error {

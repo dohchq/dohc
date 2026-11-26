@@ -1397,7 +1397,13 @@ export function createSyncRelayHandler({
     nowMs,
   });
   const respondToMemberApps = datasetHost
-    ? createMemberAppRoutes({ host: datasetHost, storage, limits: appPublicationLimits })
+    ? createMemberAppRoutes({
+        host: datasetHost,
+        storage,
+        limits: appPublicationLimits,
+        ...(shareWebOrigin ? { shareWebOrigin } : {}),
+        authorName: (userId) => shareSenderLabel(userId),
+      })
     : undefined;
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({
     storage,
@@ -1761,10 +1767,24 @@ export function createSyncRelayHandler({
         }
         const actor = await resolveNamedActor(actorRequest, route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
+        const person =
+          route.action === "consent" &&
+          actorRequest === request &&
+          resolveAccountSession !== undefined &&
+          (await resolveAccountSession(
+            new Request(request.url, {
+              headers: { cookie: request.headers.get("cookie")! },
+              signal: request.signal,
+            }),
+          ).then(
+            (session) => session.clientKind === "browser" && session.userId === actor.userId,
+            () => false,
+          ));
         const auth = {
           kind: "named" as const,
           workspaceId: route.workspaceId,
           userId: actor.userId,
+          ...(person ? { person: true as const } : {}),
         };
         return await respondToDatasetApp(request, route, auth);
       }

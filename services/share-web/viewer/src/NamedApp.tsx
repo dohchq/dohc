@@ -281,7 +281,11 @@ export default function NamedApp({ target }: { target: NamedAppTarget | null }) 
         <main className="download-card" aria-label="Shared app">
           <h2>Open this app</h2>
           <p>This app can use external services. Its author decides where it sends data.</p>
-          <p>It opens with the access the owner gave your account.</p>
+          <p>
+            {summary?.review
+              ? "It can only do what both you and its author can do."
+              : "It opens with the access the owner gave your account."}
+          </p>
           <button className="handoff-button primary" disabled={busy} onClick={open}>
             {pending === "open" ? "Opening app" : "Open app"}
           </button>
