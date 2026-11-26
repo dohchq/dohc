@@ -1,5 +1,5 @@
 import { ChevronDown, type LucideIcon } from "lucide-react";
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   MENU_ACTIVE_OPTION,
   MENU_DETAIL,
@@ -51,9 +51,11 @@ export function SuggestInput(props: {
   const field = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const [shown, setShown] = useState(false);
-  // -1 until the arrow keys or the pointer choose a row, so Enter after
-  // typing keeps what was typed.
-  const [active, setActive] = useState(-1);
+  // The value of the row the arrow keys or the pointer chose. None until
+  // then, so Enter after typing keeps what was typed. It follows the value
+  // rather than a position, so a list that changes never puts another row
+  // under Enter.
+  const [active, setActive] = useState<string | null>(null);
   const Icon = props.icon;
 
   const options = useMemo(() => {
@@ -68,33 +70,36 @@ export function SuggestInput(props: {
   // A value the list doesn't have is still a fine answer, so nothing to
   // offer shows no list at all.
   const open = shown && !props.disabled && options.length > 0;
-  const activeIndex = active < options.length ? active : -1;
+  const activeIndex = options.findIndex((option) => option.value === active);
   const optionId = (index: number) => `${id}-option-${index}`;
 
   const pick = (option: Suggestion) => {
     props.onChange(option.value);
     setShown(false);
   };
-  const move = (index: number) => {
-    setActive(index);
-    revealMenuRow(
-      list.current!,
-      list.current?.querySelector<HTMLElement>(`[data-index="${index}"]`),
-    );
-  };
+  // Only the list scrolls to show the active row.
+  useLayoutEffect(() => {
+    if (open && list.current && activeIndex >= 0)
+      revealMenuRow(
+        list.current,
+        list.current.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`),
+      );
+  }, [open, activeIndex]);
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (isComposingKey(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (!open) {
-        setShown(true);
-        setActive(0);
-        return;
-      }
+      // From no row, ArrowDown goes to the first and ArrowUp to the last.
       const down = event.key === "ArrowDown";
-      if (activeIndex < 0) move(down ? 0 : options.length - 1);
-      else move((activeIndex + (down ? 1 : -1) + options.length) % options.length);
+      const next =
+        open && activeIndex >= 0
+          ? (activeIndex + (down ? 1 : -1) + options.length) % options.length
+          : down
+            ? 0
+            : options.length - 1;
+      setShown(true);
+      setActive(options[next]?.value ?? null);
       return;
     }
     // The Overlay leaves this Escape to an open list, so it closes the list
@@ -143,7 +148,7 @@ export function SuggestInput(props: {
           onChange={(event) => {
             props.onChange(event.target.value);
             setShown(true);
-            setActive(-1);
+            setActive(null);
           }}
           onKeyDown={onKeyDown}
           onBlur={() => setShown(false)}
@@ -162,7 +167,7 @@ export function SuggestInput(props: {
           onClick={() => {
             field.current?.focus();
             setShown(!open);
-            setActive(-1);
+            setActive(null);
           }}
           className="grid h-full w-7 shrink-0 place-items-center rounded-r-md text-subtle transition-colors hover:text-ink"
         >
@@ -190,7 +195,7 @@ export function SuggestInput(props: {
               }}
               onClick={() => pick(option)}
               onMouseMove={(event) => {
-                if (movedPointer(event)) setActive(index);
+                if (movedPointer(event)) setActive(option.value);
               }}
               className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} h-8 cursor-pointer data-active:text-ink`}
             >

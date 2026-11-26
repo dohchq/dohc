@@ -281,6 +281,28 @@ describe("Folder access", () => {
     expect(requests().map(({ action }) => action)).toEqual(["list", "folder", "list"]);
   });
 
+  it("chooses no folder for Enter while the folders load, and ArrowUp starts at the last", async () => {
+    const listing = deferred<{ files: { path: string }[]; folders: string[] }>();
+    bridge.listWorkspaceFiles.mockReturnValueOnce(listing.promise);
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: adminView() });
+    renderMembers();
+    const user = userEvent.setup();
+    await user.click(within(await section()).getByRole("button", { name: "Add" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add folder access" }));
+    const field = dialog.getByLabelText("Folder path");
+    await user.type(field, "Research");
+    await user.keyboard("{ArrowDown}");
+    await act(async () =>
+      listing.resolve({ files: [], folders: ["Archive/Research", "Research/Old"] }),
+    );
+    expect(dialog.getByRole("listbox", { name: "Folders" })).toBeTruthy();
+    expect(field.getAttribute("aria-activedescendant")).toBeNull();
+    await user.keyboard("{Escape}{ArrowUp}");
+    const options = within(dialog.getByRole("listbox", { name: "Folders" })).getAllByRole("option");
+    expect(options.at(-1)!.textContent).toBe("Research/Old");
+    expect(field.getAttribute("aria-activedescendant")).toBe(options.at(-1)!.id);
+  });
+
   it("keeps folder rules and marker removal out of the member view", async () => {
     bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: memberView() });
     renderMembers();
