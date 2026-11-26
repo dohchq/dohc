@@ -144,7 +144,12 @@ export interface WorkspaceApps {
   check(): Promise<void>;
   /** Whether answers for this store still count: its sign-in is current and it hasn't stopped. */
   isLive(): boolean;
-  approve(app: Pick<PhoneApp, "publicationId" | "authorityRevision">): Promise<void>;
+  /** A Member app is allowed for exactly the reviewed `scopeDigest`. */
+  approve(
+    app: Pick<PhoneApp, "publicationId" | "authorityRevision"> & {
+      readonly scopeDigest?: string | null;
+    },
+  ): Promise<void>;
   revoke(publicationId: string): Promise<void>;
   /**
    * Opens the app in the runner, unless this build can't run apps. Resolves whether it showed. Once `leaving` aborts,

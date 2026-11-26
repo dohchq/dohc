@@ -1,0 +1,42 @@
+import { appWords } from "@dohc/interface-words/apps";
+import type { AppReview, PhoneApp } from "../server/phoneApps";
+
+/**
+ * Which of an app review's controls show in this build. Approve, Allow and Open write through the server, so they wait
+ * for phone writes (canOpenApps.ts). Revoke shows wherever an approval or an allowing stands, even when the app needs
+ * another review: an approval holds on every phone of the account, and an allowing on every device.
+ */
+export function reviewControls(
+  review: Pick<AppReview, "approved" | "revocable" | "member">,
+  build: { readonly phoneWrites: boolean; readonly canOpen: boolean },
+) {
+  return {
+    open: review.approved && build.canOpen,
+    approve:
+      review.approved || !build.phoneWrites
+        ? null
+        : review.member
+          ? appWords.allowAndOpen
+          : appWords.approve,
+    revoke: review.revocable,
+  };
+}
+
+/** The line a review leads with. */
+export function reviewStatus(
+  review: Pick<AppReview, "approved" | "member">,
+  phoneWrites: boolean,
+): string {
+  if (review.approved)
+    return review.member ? appWords.allowedEverywhere : appWords.approvedOnPhones;
+  if (review.member?.consent === "changed")
+    return phoneWrites ? appWords.changedToOpen : appWords.updated;
+  if (!phoneWrites) return appWords.notApproved;
+  return review.member ? appWords.reviewToOpen : appWords.approveToOpen;
+}
+
+/** A Member app's state in Home's list, beside its name. Null once allowed, when the list shows its check instead. */
+export function memberAppState(app: Pick<PhoneApp, "approved" | "member">): string | null {
+  if (!app.member || app.approved) return null;
+  return app.member.consent === "changed" ? appWords.updated : appWords.toReview;
+}

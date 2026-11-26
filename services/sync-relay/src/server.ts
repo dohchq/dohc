@@ -575,13 +575,15 @@ export function createSyncRelayHandler({
     launchable: !!shareWebOrigin && !!relayExchangeKeyHash && !!respondToDatasetApp,
     nowMs,
     endShareWebLaunches: endShareWebAppLaunches,
-    // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
-    servable(userId, workspaceId, publicationId) {
-      const published = datasetHost?.servedPublication(
-        { kind: "named", workspaceId, userId },
-        publicationId,
-      );
-      if (!published || published.local) throw notFound();
+    served(auth, publicationId, reviewing) {
+      if (!datasetHost) throw notFound();
+      return datasetHost.servedPublication(auth, publicationId, reviewing);
+    },
+    // A Member app's author by name or address, never "the owner" when the relay knows neither.
+    async authorName(userId) {
+      const name = await accountDisplayName(lookupUserDisplayName, userId);
+      const email = await lookupUserEmail?.(userId);
+      return name || email ? formatShareSender(name, email) : null;
     },
   });
   // Share-web, with the exchange key and no person's credential, redeeming a grant or acting under a launch ID.
@@ -1711,8 +1713,13 @@ export function createSyncRelayHandler({
             if (launchId !== null) throw notFound();
             return await phoneApps.redeem(request, scope);
           }
-          // A phone launch reaches its own app's bundle and backend, never activation or the share summary.
-          if (route.action === "activate" || route.action === "summary") throw notFound();
+          // A phone launch reaches its own app's bundle and backend, never activation, the share summary or consent.
+          if (
+            route.action === "activate" ||
+            route.action === "summary" ||
+            route.action === "consent"
+          )
+            throw notFound();
           const { userId, guard } = await phoneApps.authorizeLaunch(launchId!, scope);
           // The guard goes with the request: rechecked after its body, and inside each commit.
           const answer = await respondToDatasetApp(

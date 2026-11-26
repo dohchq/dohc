@@ -25,6 +25,25 @@ export const appWords = {
   publishedBy: (agent: string) => `Published by ${agent}`,
   publishedByAgent: "Published by an agent",
 
+  // A Member app: one a workspace member shared. Its review uses share-web's words (NamedApp.tsx).
+  sharedBy: (person: string) => `Made by ${person}`,
+  sharedByMember: "Made by a workspace member",
+  /** A Member app that now reaches more than the person allowed. */
+  updated: "Updated, review changes",
+  toReview: "Review",
+  memberNote:
+    "A workspace member made this app. It can only do what both of you can do, and only in these Collections.",
+  reviewToOpen: "Review what it can do before you open it.",
+  changedToOpen: "This app changed. Review it again before you open it.",
+  allowedEverywhere: "Allowed for your account",
+  allowAndOpen: "Allow and open",
+  allowFailed: "dohc could not allow this app.",
+  /** A Collection's level for this app, from sharingWords.level. */
+  access: (level: string) => `${level} access`,
+  // Revoking a Member app also withdraws the person's allowing, which holds on every device.
+  memberRevokeBody:
+    "It closes on your phones, computers and in the browser, and needs your review again to open.",
+
   reach: "What it can reach",
   /** An app that requests nothing in the workspace. It may still reach other websites. */
   reachesNothing: "Nothing in this workspace.",

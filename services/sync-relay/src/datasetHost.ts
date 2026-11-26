@@ -658,7 +658,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const slug = String(row.member_slug);
     const viewerGrantId = workspaceMemberGrantId(storage, workspaceId, auth.userId);
     if (
-      auth.launch ||
       (auth.grantId !== undefined && auth.grantId !== viewerGrantId) ||
       getWorkspaceMembership(storage, workspaceId)?.shareId !== row.share_id ||
       memberAppIdOf(workspaceId, authorUserId, slug, hash(JSON.stringify(candidate))) !==
@@ -712,6 +711,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           readOnlyOnly: entry?.access !== "edit",
           operationIds,
         },
+        ...(auth.launch
+          ? {
+              authorizeOperation: () => auth.launch!.authorizeOperation(),
+              beforeCommit: () => auth.launch!.recheck(),
+            }
+          : {}),
       };
     };
     return {
@@ -2256,7 +2261,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       /** Records that this person allowed the operations they reviewed. Only a person allows, never an agent. */
       consentMemberApp(auth: AppBackendAuth, publicationId: string, scopeDigest: string) {
         current();
-        if (auth.kind !== "named") throw notFound();
+        if (auth.kind !== "named" || auth.launch) throw notFound();
         if (auth.agent) throw new MemberAppRefusal("agent");
         return storage.tx(() => {
           const published = namedPublication(auth, publicationId, true);
