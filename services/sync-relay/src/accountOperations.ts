@@ -409,12 +409,10 @@ export function serverChats(
                 (thread) => thread.linkedFile?.pathHint,
               )
             : [last];
-        known.set(
-          objectId,
-          hints.every((hint) => pathShown(member, hint))
-            ? { kind: "unavailable" }
-            : { kind: "hidden" },
-        );
+        const shown =
+          hints.every((hint) => pathShown(member, hint)) &&
+          (member === null || member.selector.reach.objectVisible(objectId));
+        known.set(objectId, shown ? { kind: "unavailable" } : { kind: "hidden" });
       }
     }
     return known;
@@ -461,16 +459,18 @@ function withoutSecretFiles(
     hint: string | undefined,
   ) =>
     !pathShown(member, hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
-  let channels: Promise<ReadonlySet<string>> | undefined;
-  const shownChannels = (workspaceId: string) =>
+  let channels: Promise<Awaited<ReturnType<ChatReadStore["listChannels"]>>> | undefined;
+  const shownRows = (workspaceId: string) =>
     (channels ??= store.listChannels({ workspaceId }).then(async (rows) => {
-      const shown = new Set<string>();
+      const shown = [];
       for (const row of rows) {
         const wireId = await store.getChannelWireId({ workspaceId, channelId: row.id });
-        if (channelShown(member, wireId, row.kind)) shown.add(row.id);
+        if (channelShown(member, wireId, row.kind)) shown.push(row);
       }
       return shown;
     }));
+  const shownChannels = async (workspaceId: string) =>
+    new Set((await shownRows(workspaceId)).map((row) => row.id));
   const channelHidden = async (workspaceId: string, channelId: string | undefined) =>
     member !== null &&
     (channelId === undefined || !(await shownChannels(workspaceId)).has(channelId));
@@ -519,12 +519,8 @@ function withoutSecretFiles(
   };
   return {
     ...store,
-    listChannels: async (input) => {
-      const rows = await store.listChannels(input);
-      if (member === null) return rows;
-      const shown = await shownChannels(input.workspaceId);
-      return rows.filter((row) => shown.has(row.id));
-    },
+    listChannels: async (input) =>
+      member === null ? await store.listChannels(input) : await shownRows(input.workspaceId),
     getThreadProjection: async (input) => {
       if (member !== null) await admit(input.workspaceId, input.threadId);
       return await store.getThreadProjection(input);

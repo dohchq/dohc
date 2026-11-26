@@ -52,7 +52,6 @@ export interface PhoneAppBinding {
   approvalId: string;
 }
 
-/** Launches to end: every field given must match. */
 /** One person's launches, or with `joined`, those of everyone in the workspace but its owner. */
 export type PhoneAppLaunchScope =
   | { userId: string; sessionId?: string; workspaceId?: string; publicationId?: string }

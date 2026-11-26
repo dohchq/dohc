@@ -38,7 +38,8 @@ export function threadShownByLog(
   if (!paths.named.every((path) => pathShown(member, path))) return false;
   if (!pathShown(member, paths.lastKnownPath ?? undefined)) return false;
   if (member === null) return true;
-  if (paths.linkedObjectId !== null) return paths.lastKnownPath !== null;
+  if (paths.linkedObjectId !== null)
+    return member.selector.reach.objectVisible(paths.linkedObjectId);
   return (
     paths.channelWireId !== null &&
     channelShown(

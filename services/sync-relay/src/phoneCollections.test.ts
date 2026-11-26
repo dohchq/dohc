@@ -197,7 +197,7 @@ const definition: DatasetDefinition = {
       label: "Edit",
       tableId: PEOPLE,
       kind: "edit",
-      access: "owner",
+      access: "link",
       readOnly: false,
       fieldIds: [NAME, PAID],
       reversible: true,
@@ -1068,4 +1068,48 @@ it("reads a joined workspace's Collection through the Member's own grant, read-o
   });
   expect(await f.op("collections", {}, ana)).toEqual(notFound);
   expect((await f.op("collections", {})).status, "the owner's phone still shows it").toBe(200);
+});
+
+it("commits no Member's change once their phone stops reaching the workspace as it starts", async () => {
+  const f = await phone();
+  const storage = f.storage as SyncRelayStorage;
+  storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Fundraiser",
+    email: "ana@example.test",
+    recipientUserId: "ana",
+    newMemberId: () => "member-ana",
+    newGrantId: () => "grant-ana",
+    newShareId: () => "share-w",
+    nowMs: 1,
+  });
+  storage.setWorkspaceMemberLevel({
+    workspaceId: "w",
+    actorUserId: "owner",
+    level: "edit",
+    workspaceName: undefined,
+    newShareId: () => "share-w-edit",
+    nowMs: 2,
+  });
+  const offered = definition.operations
+    .filter((operation) => operation.access !== "owner")
+    .map((operation) => operation.operationId);
+  f.host.setWorkspaceDefaults(owner, {
+    ...scope,
+    defaults: {
+      view: [READ],
+      comment: [READ],
+      edit: offered,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
+  const ana = "ana:ana-phone:phone";
+  f.during(() => storage.setShowOnPhone({ userId: "ana", workspaceId: "w", showOnPhone: false }));
+  expect(await edit(f, {}, ana)).toEqual(notFound);
+  f.during(() => undefined);
+  expect((await r01(f)).version).toBe(1);
+  storage.setShowOnPhone({ userId: "ana", workspaceId: "w", showOnPhone: true });
+  expect(await edit(f, {}, ana)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
 });

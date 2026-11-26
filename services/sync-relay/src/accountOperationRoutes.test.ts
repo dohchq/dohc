@@ -4095,4 +4095,68 @@ describe("a Member's phone reads in a workspace they joined", () => {
       "the owner hears their own read place",
     ).toMatchObject({ changed: { chats: ["thread-stay"] } });
   });
+
+  it("keeps Comments on a file deleted while hidden out of a Member's reads after the folder opens", async () => {
+    const { storage, activity, engine, h } = await joined();
+    const write = logWriter(storage, activity);
+    write("moment.append", { objectId: "object-old", path: "private/old.md", versionId: "main" });
+    write("moment.append", { objectId: "object-old", path: null, versionId: "main" });
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const onOld = await chats.createThread({
+      workspaceId: "trip",
+      title: "Old",
+      linkedFile: { objectId: "object-old", pathHint: "private/old.md" },
+    });
+    const view = await json(
+      await h(
+        new Request("http://relay.test/sync/trip/members", {
+          headers: { authorization: "Bearer user:ana" },
+        }),
+      ),
+    );
+    const rule = (view.folderRules as Array<{ ruleId: string; revision: number }>)[0]!;
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: { kind: "clear", ruleId: rule.ruleId, revision: rule.revision },
+        nowMs: 5,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(files(await answer(await h(op("trip", "listFiles", {}, asBen))))).toContain(
+      "private/budget.md",
+    );
+    expect(await answer(await h(op("trip", "chat", { threadId: onOld.id }, asBen)))).toMatchObject({
+      ok: false,
+      refusal: "missing",
+    });
+    expect(await answer(await h(op("trip", "chat", { threadId: onOld.id })))).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("reaches a folder a rule shares with the Member's address on their first phone read", async () => {
+    const { storage, engine, h } = await joined();
+    engine.files.seedTextFile({
+      workspace: "trip",
+      path: "shared/notes.md",
+      text: "# Notes\n",
+      objectId: "object-notes",
+    });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: {
+          kind: "create",
+          folder: "shared",
+          rule: parseAccessRule("people:\n  ben@dohc.test: edit\n")!,
+        },
+        nowMs: 6,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(files(await answer(await h(op("trip", "listFiles", {}, asBen))))).toContain(
+      "shared/notes.md",
+    );
+  });
 });

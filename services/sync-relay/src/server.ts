@@ -934,6 +934,8 @@ export function createSyncRelayHandler({
         feedWaits: accountFeedWaits,
         wakeWaits: chatWakeWaits,
         lookupUserDisplayName,
+        refreshAccountEmail: (userId, signal) =>
+          claimPendingShares(userId, signal, MEMBER_IDENTITY_MAX_AGE_MS),
         serverUrl: relayPublicOrigin,
         phoneApps,
         phoneCollections: createPhoneCollections({ storage, host: datasetHost }),

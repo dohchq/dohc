@@ -327,6 +327,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     }
     throw notFound();
   }
+  /** The authority with a phone launch's checks, which the host runs at admission, before each commit and inside it. */
+  function launched(auth: AppBackendAuth, authority: DatasetAuthority): DatasetAuthority {
+    const launch = auth.kind === "named" ? auth.launch : undefined;
+    return launch
+      ? {
+          ...authority,
+          authorizeOperation: () => launch.authorizeOperation(),
+          beforeCommit: () => launch.recheck(),
+        }
+      : authority;
+  }
   function owner(auth: AppBackendAuth, workspaceId: string): DatasetAuthority {
     current();
     if (
@@ -533,7 +544,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const resolve = (datasetId?: string) => {
       const grantId = workspaceMemberGrantId(storage, auth.workspaceId, auth.userId);
       if (!grantId || (auth.grantId !== undefined && auth.grantId !== grantId)) throw notFound();
-      return named(auth.workspaceId, grantId, auth.userId, datasetId, { paths, authorityRevision });
+      return launched(
+        auth,
+        named(auth.workspaceId, grantId, auth.userId, datasetId, { paths, authorityRevision }),
+      );
     };
     resolve();
     return { candidate, authorityRevision, resolveAuthority: resolve };
@@ -1028,7 +1042,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         ? { ...owner(auth, auth.workspaceId), agent: auth.agent }
         : owner(auth, auth.workspaceId);
     if (!auth.grantId || auth.agent) throw notFound();
-    return named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId);
+    return launched(auth, named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId));
   }
   function publication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     current();

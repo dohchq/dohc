@@ -79,12 +79,12 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * A signed-in account's reads, chat writes, read marks, wake retries,
  * conversation contexts, and a phone's page opens for live editing in a
  * workspace it owns, through this server's copy of it, while it shows on the
- * phone. A Member or an Admin reaches only the reads, the change feed, the
- * apps and the Collections of a workspace they joined, while it shows on their
- * own phone, each narrowed by their reach; its published apps (phoneApps.ts); its transactional Collections
- * (phoneCollections.ts); its change feed, at
- * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
- * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
+ * phone; its published apps (phoneApps.ts); its transactional Collections
+ * (phoneCollections.ts); its change feed, at `GET .../ops/changes?since=&hold=`;
+ * and its wake changes there, at `GET .../ops/wakeChanges?since=&hold=`. A
+ * Member or an Admin reaches only the reads, the change feed, the apps and the
+ * Collections of a workspace they joined, while it shows on their own phone,
+ * each narrowed by their reach. Only a Bearer session
  * reaches them, except a page open share-web forwards for the owner's browser.
  * The route checks the operation and the owner before it
  * reads the arguments or the cursor. The sign-in, its fence, the owner and
@@ -107,6 +107,8 @@ export function createAccountOperationRoute(options: {
   feedWaits: AccountFeedWaits;
   /** The account's wake reads, which wake changes park in. */
   wakeWaits: Pick<ChatWakeWaits, "wait">;
+  /** Reads the account's verified email again when it is old, so a folder or Group rule that names it reaches them. */
+  refreshAccountEmail?(userId: string, signal: AbortSignal): Promise<void>;
   /** The account's name, which a write's author takes. */
   lookupUserDisplayName?: LookupUserDisplayName;
   /** This server's public origin, which issues its accounts' actor keys. Writes need it. */
@@ -208,6 +210,8 @@ export function createAccountOperationRoute(options: {
       owner === null
     )
       throw notFound();
+    if (caller.userId !== owner)
+      await options.refreshAccountEmail?.(caller.userId, readSignal ?? request.signal);
     const member = memberOf(caller.userId);
     const check = async (sameReach: boolean) => {
       const current = await checkSignIn();
