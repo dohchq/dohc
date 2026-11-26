@@ -3,6 +3,8 @@ import {
   MemberAppInspectResult,
   MemberAppsListInput,
   MemberAppsListResult,
+  MemberAppSourceInput,
+  MemberAppSourceResult,
 } from "./memberApps";
 import { CURSOR_FLAG, EVERY_MCP_LEVEL, type OperationFamily } from "./operationDeclaration";
 
@@ -55,7 +57,31 @@ export const MEMBER_APPS_DECLARATIONS = {
       tool: "dohc_inspect_member_app",
       levels: EVERY_MCP_LEVEL,
       description:
-        "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+        "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.",
+    },
+  },
+  memberAppSource: {
+    access: "read",
+    capabilityId: "app.member.source",
+    input: MemberAppSourceInput,
+    result: MemberAppSourceResult,
+    ipc: {
+      channel: "desktop:member-app-source",
+      inactiveMessage: "The file stopped loading because this window changed workspaces.",
+    },
+    cli: {
+      verb: "memberAppSource",
+      command: ["member-apps", "source"],
+      summary: "Print one source file of a Member app.",
+      operands: "<app-id> <path>",
+      unavailable,
+      example: ["0".repeat(64), "trip-board/index.html"],
+    },
+    mcp: {
+      tool: "dohc_read_member_app_source",
+      levels: EVERY_MCP_LEVEL,
+      description:
+        "Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.",
     },
   },
 } as const satisfies OperationFamily;

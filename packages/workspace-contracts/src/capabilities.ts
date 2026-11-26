@@ -457,10 +457,21 @@ const LISTED_CAPABILITIES = {
     ipc: [],
     mcp: {},
   }),
+  "app.member.source": capability("Read one source file of a Member app.", {
+    ipc: [],
+    mcp: {},
+  }),
   "app.member.fork": capability("Copy a Member app's source into a new Personal app.", {
     ipc: [],
     mcp: {},
   }),
+  "app.member.promote": capability(
+    "Copy a Member app's source into a new folder of an owned workspace, to publish it.",
+    {
+      ipc: [],
+      mcp: {},
+    },
+  ),
   "app.member.withdraw": capability("Stop sharing a Member app with a workspace.", {
     ipc: [],
     mcp: {},

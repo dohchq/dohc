@@ -8259,6 +8259,23 @@ const memberApps = createMemberAppsActions<
     if (!personalMemberApps) throw new Error("Personal apps are not ready. Try again.");
     return personalMemberApps.prepare(operation, appRoot);
   },
+  withVersionLock: async ({ workspace }, work) => {
+    assertWritableWorkspace(workspace);
+    const { capture } = await requireEngineCapture(workspace, "History");
+    await capture.withVersionLock(async () => {
+      const active = await withEngineAdapter(workspace, (adapter) =>
+        adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
+      );
+      await work(active?.id ?? "main");
+    });
+  },
+  capture: async ({ workspace, signal }, paths) => {
+    const captured = await withEngineAdapter(workspace, async (adapter) => {
+      await flushDatasetSourceCapture(adapter, signal, paths);
+      return true;
+    });
+    if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+  },
 });
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even
@@ -8528,6 +8545,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
     memberAppInspect: (workspace, input) =>
       workspaceAuthorities.withOperation(workspace.workspaceId, (operation) =>
         memberApps.inspect(operation, input),
+      ),
+    memberAppSource: (workspace, input) =>
+      workspaceAuthorities.withOperation(workspace.workspaceId, (operation) =>
+        memberApps.source(operation, input),
       ),
   },
   hasOpenWorkspaceWindow: (workspaceId) => hasAnyWorkspaceWindowFor(workspaceId),
@@ -10557,12 +10578,16 @@ function registerIpcHandlers(): void {
       memberApps.list(operation, input),
     memberAppInspect: ({ workspaceId: _, ...input }, { operation }) =>
       memberApps.inspect(operation, input),
+    memberAppSource: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.source(operation, input),
   });
   registerOperations(operationBoundary, memberAppsWriteOperations, {
     memberAppShare: ({ workspaceId: _, ...input }, { operation }) =>
       memberApps.share(operation, input),
     memberAppFork: ({ workspaceId: _, ...input }, { operation }) =>
       memberApps.fork(operation, input),
+    memberAppPromote: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.promote(operation, input),
     memberAppWithdraw: ({ workspaceId: _, ...input }, { operation }) =>
       memberApps.withdraw(operation, input),
     memberAppSharing: ({ workspaceId: _, ...input }, { operation }) =>

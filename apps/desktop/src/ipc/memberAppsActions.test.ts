@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -148,12 +148,17 @@ describe("createMemberAppsActions", () => {
     signal: new AbortController().signal,
     assertCurrent: () => undefined,
   };
-  const actionsAnswering = (answer: (path: string, init: RequestInit) => Response) => {
+  type Capture = (paths: readonly string[]) => Promise<void>;
+  const actionsAnswering = (
+    answer: (path: string, init: RequestInit) => Response,
+    failCapture?: Capture,
+  ) => {
     const sent: Array<{ path: string; body: unknown }> = [];
     const remote = async (_workspace: unknown, options?: { allowPaused: boolean }) => {
       if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
       return { credentials: "token", credentialGeneration: 1 };
     };
+    const captured: string[][] = [];
     const actions = createMemberAppsActions({
       remoteForWorkspace: remote,
       remoteForJoinedWorkspace: () => remote(null, { allowPaused: true }),
@@ -170,9 +175,226 @@ describe("createMemberAppsActions", () => {
       preparePersonalApp: async () => {
         throw new Error("unused");
       },
+      withVersionLock: (_operation, work) => work(versionId),
+      capture: async (_operation, paths) => {
+        if (failCapture) return failCapture(paths);
+        captured.push([...paths]);
+      },
     });
-    return { actions, sent };
+    return { actions, sent, captured };
   };
+  let versionId = "main";
+  afterEach(() => {
+    versionId = "main";
+  });
+
+  const shared = (files: ReturnType<typeof file>[], served = files, failCapture?: Capture) =>
+    actionsAnswering((path) => {
+      if (path.endsWith("/backend/summary"))
+        return Response.json({
+          subjectName: "trip",
+          sharerName: "Ana",
+          review: {
+            authorityRevision: 3,
+            consent: "none",
+            collections: [],
+            source: files.map(({ bytes: _, ...entry }) => entry),
+          },
+        });
+      const digest = /\/blobs\/([0-9a-f]{64})/.exec(path)?.[1];
+      const blob = served.find((entry) => entry.sha256 === digest);
+      return blob
+        ? new Response(blob.bytes, { headers: { "content-type": "application/octet-stream" } })
+        : Response.json({ error: "missing" }, { status: 404 });
+    }, failCapture);
+  const publicationId = "a".repeat(64);
+  const ownedAt = (rootPath: string) => ({
+    ...operation,
+    workspace: { workspaceId: "ws", rootPath },
+  });
+  const manifest = (extra: Record<string, unknown> = {}) =>
+    file(
+      "trip/app.publish.json",
+      JSON.stringify({ entryPath: "index.html", inputs: ["index.html"], ...extra }),
+    );
+
+  describe("promote", () => {
+    it("copies a Member app into a nested workspace folder and captures every file", async () => {
+      const root = await personalFolder();
+      const { actions, captured } = shared([manifest(), file("trip/index.html", "<p>hi</p>")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).resolves.toEqual({ folder: "apps/trip" });
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("<p>hi</p>");
+      expect(captured).toEqual([["apps/trip/app.publish.json", "apps/trip/index.html"]]);
+    });
+
+    it("refuses a workspace the person joined, before asking the server", async () => {
+      const { actions, sent } = shared([file("trip/index.html", "x")]);
+      const joined = { ...operation, workspace: { ...operation.workspace, shareView: null } };
+      await expect(actions.promote(joined, { publicationId, folder: "apps/trip" })).rejects.toThrow(
+        "Only the workspace's owner",
+      );
+      expect(sent).toEqual([]);
+    });
+
+    it("refuses another version than Main, and writes nothing", async () => {
+      const root = await personalFolder();
+      versionId = "v1";
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("Switch to Main");
+      expect(await readdir(root)).toEqual([]);
+      expect(captured).toEqual([]);
+    });
+
+    it("refuses a file that doesn't match the reviewed digest, and writes nothing", async () => {
+      const root = await personalFolder();
+      const index = file("trip/index.html", "x");
+      const { actions } = shared([index], [{ ...index, bytes: bytes("tampered") }]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("doesn't match the app the author shared");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses an app that calls outside services, and writes nothing", async () => {
+      const root = await personalFolder();
+      const external = {
+        usage: {
+          method: "GET",
+          url: "https://api.example.com/v1/usage",
+          secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+        },
+      };
+      const { actions } = shared([manifest({ external }), file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("calls outside services");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses inputs outside the new folder, and writes nothing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([
+        manifest({ inputs: ["index.html", "../notes.md"] }),
+        file("trip/index.html", "x"),
+      ]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("outside its own folder");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses a secret or reserved folder", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/index.html", "x")]);
+      for (const folder of [".env", "apps/.env", "../apps", ".dohc/apps"])
+        await expect(actions.promote(ownedAt(root), { publicationId, folder })).rejects.toThrow(
+          "not a folder dohc can promote an app into",
+        );
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("leaves a folder that exists untouched", async () => {
+      const root = await personalFolder();
+      await mkdir(join(root, "apps", "trip"), { recursive: true });
+      await writeFile(join(root, "apps", "trip", "index.html"), "kept");
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("already has apps/trip");
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("kept");
+      expect(captured).toEqual([]);
+    });
+
+    it("refuses a folder reached through a link, and writes nothing", async () => {
+      const root = await personalFolder();
+      await mkdir(join(root, "docs"));
+      await symlink(join(root, "docs"), join(root, "apps"), "junction");
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("goes through a link");
+      expect(await readdir(join(root, "docs"))).toEqual([]);
+      expect(captured).toEqual([]);
+    });
+
+    it("refuses files whose names differ only by case, before writing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/Logo.svg", "a"), file("trip/logo.svg", "b")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("differ only by case");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses a file and a folder whose names differ only by case, before writing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([
+        file("trip/assets.js", "a"),
+        file("trip/Assets.js/logo.svg", "b"),
+      ]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("differ only by case");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses a file larger than History keeps, naming its size", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/photo.txt", "x".repeat(6 * 1024 * 1024))]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("photo.txt is 6.0 MiB. dohc promotes files up to 5 MiB.");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it.runIf(process.platform === "win32")(
+      "refuses a name Windows can't save, before writing",
+      async () => {
+        for (const name of ["nul.md", "notes?.txt"]) {
+          const root = await personalFolder();
+          const { actions } = shared([file("trip/index.html", "x"), file(`trip/${name}`, "y")]);
+          await expect(
+            actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+          ).rejects.toThrow(name);
+          expect(await readdir(root)).toEqual([]);
+        }
+      },
+    );
+
+    it("names the copy when History can't record it", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/index.html", "x")], undefined, async () => {
+        throw new Error("dohc could not capture these files. Reopen the workspace.");
+      });
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("copied the app into apps/trip, but History hasn't recorded it yet.");
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("x");
+    });
+  });
+
+  describe("source", () => {
+    it("reads a text file, and gives no text for a binary file or one over 256 KiB", async () => {
+      const png = { ...file("trip/logo.png", ""), bytes: new Uint8Array([0x89, 0xff, 0xfe]) };
+      png.sha256 = sha256(png.bytes);
+      png.byteLength = 3;
+      const big = file("trip/big.js", "x".repeat(256 * 1024 + 1));
+      const { actions, sent } = shared([file("trip/index.html", "<p>hi</p>"), png, big]);
+      const read = (path: string) => actions.source(operation, { publicationId, path });
+      await expect(read("trip/index.html")).resolves.toEqual({
+        path: "trip/index.html",
+        byteLength: 9,
+        text: "<p>hi</p>",
+      });
+      await expect(read("trip/logo.png")).resolves.toMatchObject({ text: null });
+      await expect(read("trip/big.js")).resolves.toMatchObject({ text: null });
+      expect(sent.filter(({ path }) => path.includes(big.sha256))).toEqual([]);
+    });
+  });
 
   it("sends the relay only the sharing switch, whatever else the caller passed, even while sync is paused", async () => {
     const { actions, sent } = actionsAnswering(() => Response.json({ membersCanShare: true }));

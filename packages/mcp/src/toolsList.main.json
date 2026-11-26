@@ -2834,7 +2834,7 @@
     },
     {
       "name": "dohc_inspect_member_app",
-      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3932,6 +3932,33 @@
       }
     },
     {
+      "name": "dohc_promote_member_app",
+      "description": "Copy a Member app's source into a new folder of a synced workspace the person you work for owns, on Main, so its owner can review and publish it as an official app. Refuses a folder that exists and apps that call outside services. The copy runs for no one until the owner publishes it. Ask the person you work for first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "folder": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "publicationId",
+          "folder"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_publish_app",
       "description": "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
       "inputSchema": {
@@ -5005,6 +5032,33 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_read_member_app_source",
+      "description": "Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "publicationId",
+          "path"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -6430,7 +6484,7 @@
     },
     {
       "name": "dohc_inspect_member_app",
-      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -8241,6 +8295,33 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_read_member_app_source",
+      "description": "Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "publicationId",
+          "path"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -8849,7 +8930,7 @@
     },
     {
       "name": "dohc_inspect_member_app",
-      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -10660,6 +10741,33 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_read_member_app_source",
+      "description": "Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "publicationId",
+          "path"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -11648,7 +11756,7 @@
     },
     {
       "name": "dohc_inspect_member_app",
-      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -13459,6 +13567,33 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_read_member_app_source",
+      "description": "Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "publicationId",
+          "path"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"

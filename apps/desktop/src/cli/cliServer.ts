@@ -528,7 +528,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     request: import("@dohc/cli/members").AgentMembersRequest,
   ): Promise<import("@dohc/cli/members").MembersResult>;
   memberApps?: {
-    [Verb in "share" | "fork" | "withdraw" | "sharing"]: (
+    [Verb in "share" | "fork" | "promote" | "withdraw" | "sharing"]: (
       input: never,
     ) => Promise<Record<string, unknown>>;
   };
@@ -2543,6 +2543,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   memberAppsList: "anywhere",
   memberAppInspect: "anywhere",
   linksConnections: { answer: SHARE_OMITTED_CONNECTIONS },
+  memberAppSource: "anywhere",
   linksEdges: "anywhere",
   linksIn: "anywhere",
   linksResolve: "anywhere",
@@ -3345,6 +3346,7 @@ const DECLARED_WRITERS: {
   },
   memberAppShare: (request, context) => memberAppWrite(context, "share", request.args),
   memberAppFork: (request, context) => memberAppWrite(context, "fork", request.args),
+  memberAppPromote: (request, context) => memberAppWrite(context, "promote", request.args),
   memberAppWithdraw: (request, context) => memberAppWrite(context, "withdraw", request.args),
   memberAppSharing: (request, context) => memberAppWrite(context, "sharing", request.args),
   liveResume: async (request, context, options) => {

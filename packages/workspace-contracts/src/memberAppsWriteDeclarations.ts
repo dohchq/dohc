@@ -2,6 +2,9 @@ import {
   MemberAppForkInput,
   MemberAppForkResult,
   MemberAppForkSocketResult,
+  MemberAppPromoteInput,
+  MemberAppPromoteResult,
+  MemberAppPromoteSocketResult,
   MemberAppShareInput,
   MemberAppShareResult,
   MemberAppShareSocketResult,
@@ -89,6 +92,39 @@ export const MEMBER_APPS_WRITE_DECLARATIONS = {
         "Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.",
       levels: EVERY_MCP_LEVEL,
       reason,
+    },
+  },
+  memberAppPromote: {
+    access: "write",
+    capabilityId: "app.member.promote",
+    ipc: {
+      channel: "desktop:member-app-promote",
+      input: MemberAppPromoteInput,
+      result: MemberAppPromoteResult,
+      inactiveMessage: "Promoting stopped because this window changed workspaces.",
+    },
+    socket: {
+      verb: "memberAppPromote",
+      input: MemberAppPromoteInput,
+      result: MemberAppPromoteSocketResult,
+      admission,
+    },
+    cli: {
+      command: ["member-apps", "promote"],
+      summary: "Copy a Member app's source into a new folder of the workspace you own.",
+      operands: "<app-id> <new-folder>",
+      notes: [
+        "Only the owner can promote, on Main of a synced workspace. Publish the copy with Review app, which shows what it can reach.",
+      ],
+      example: ["0".repeat(64), "apps/trip-board"],
+    },
+    mcp: {
+      tool: "dohc_promote_member_app",
+      description:
+        "Copy a Member app's source into a new folder of a synced workspace the person you work for owns, on Main, so its owner can review and publish it as an official app. Refuses a folder that exists and apps that call outside services. The copy runs for no one until the owner publishes it. Ask the person you work for first.",
+      levels: ["owner"],
+      reason:
+        "Writes workspace files the owner later publishes, so shared profiles omit it. The handler refuses a workspace the caller doesn't own.",
     },
   },
   memberAppWithdraw: {

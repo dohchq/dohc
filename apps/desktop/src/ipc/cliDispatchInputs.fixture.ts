@@ -188,6 +188,14 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
     "0000000000000000000000000000000000000000000000000000000000000000",
     "my-trip-board",
   ],
+  "member-apps source": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "trip-board/index.html",
+  ],
+  "member-apps promote": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "apps/trip-board",
+  ],
   "member-apps withdraw": ["0000000000000000000000000000000000000000000000000000000000000000"],
   "member-apps sharing": ["on"],
   "links connections": [],

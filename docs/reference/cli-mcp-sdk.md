@@ -37,7 +37,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_update_version`](#dohc_update_version), [`dohc_archive_version`](#dohc_archive_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
-| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access), [`dohc_list_member_apps`](#dohc_list_member_apps), [`dohc_inspect_member_app`](#dohc_inspect_member_app), [`dohc_share_member_app`](#dohc_share_member_app), [`dohc_fork_member_app`](#dohc_fork_member_app), [`dohc_withdraw_member_app`](#dohc_withdraw_member_app), [`dohc_set_member_app_sharing`](#dohc_set_member_app_sharing) |
+| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access), [`dohc_list_member_apps`](#dohc_list_member_apps), [`dohc_inspect_member_app`](#dohc_inspect_member_app), [`dohc_read_member_app_source`](#dohc_read_member_app_source), [`dohc_share_member_app`](#dohc_share_member_app), [`dohc_fork_member_app`](#dohc_fork_member_app), [`dohc_promote_member_app`](#dohc_promote_member_app), [`dohc_withdraw_member_app`](#dohc_withdraw_member_app), [`dohc_set_member_app_sharing`](#dohc_set_member_app_sharing) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
 ---
@@ -867,11 +867,20 @@ Returns `{ apps: { kind, publicationId, name, authorName, createdAtMs, reachable
 
 ### `dohc_inspect_member_app`
 
-Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.
+Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_read_member_app_source reads one file. dohc_fork_member_app copies the source into a Personal app.
 
 - `publicationId`: `string`. Required.
 
 Returns `{ name, authorName, consent, collections: { name, access, operations }[], source: { path, sha256, byteLength }[] }`.
+
+### `dohc_read_member_app_source`
+
+Read one source file of a Member app, by a path dohc_inspect_member_app lists. text is null when the file is not UTF-8 text or is larger than 256 KiB; byteLength is its size.
+
+- `publicationId`: `string`. Required.
+- `path`: `string`. Required.
+
+Returns `{ path, byteLength, text }`.
 
 ### `dohc_share_member_app`
 
@@ -890,6 +899,17 @@ Copy a Member app's source into a new folder in the Personal app folder, to read
 - `personalApp`: `string`. Required.
 
 Returns `{ ok: true, personalApp } | { ok: false, reason }`.
+
+### `dohc_promote_member_app`
+
+Copy a Member app's source into a new folder of a synced workspace the person you work for owns, on Main, so its owner can review and publish it as an official app. Refuses a folder that exists and apps that call outside services. The copy runs for no one until the owner publishes it. Ask the person you work for first.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `publicationId`: `string`. Required.
+- `folder`: `string`. Required.
+
+Returns `{ ok: true, folder } | { ok: false, reason }`.
 
 ### `dohc_withdraw_member_app`
 
@@ -1264,6 +1284,18 @@ Copy a Member app's source into a new Personal app folder.
 
 With `--json`, prints `{ schemaVersion, ok: true, personalApp }` or `{ schemaVersion, ok: false, reason }`.
 
+#### `dohc member-apps promote`
+
+```sh
+dohc member-apps promote <app-id> <new-folder> [options]
+```
+
+Copy a Member app's source into a new folder of the workspace you own.
+
+Only the owner can promote, on Main of a synced workspace. Publish the copy with Review app, which shows what it can reach.
+
+With `--json`, prints `{ schemaVersion, ok: true, folder }` or `{ schemaVersion, ok: false, reason }`.
+
 #### `dohc member-apps withdraw`
 
 ```sh
@@ -1309,6 +1341,16 @@ dohc member-apps inspect <app-id> [options]
 Show a Member app's author, Collection access, and source files.
 
 With `--json`, prints `{ schemaVersion, name, authorName, consent, collections: { name, access, operations }[], source: { path, sha256, byteLength }[] }`.
+
+#### `dohc member-apps source`
+
+```sh
+dohc member-apps source <app-id> <path> [options]
+```
+
+Print one source file of a Member app.
+
+With `--json`, prints `{ schemaVersion, path, byteLength, text }`.
 
 ### `dohc sync`
 

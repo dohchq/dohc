@@ -1,17 +1,24 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import {
+  MEMBER_APP_SOURCE_MAX_BYTES,
   MemberAppInspectResult,
   MemberAppSlug,
   MemberAppsListResult,
 } from "@dohc/workspace-contracts/member-apps";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { membersPlace, MEMBERS_UNREACHABLE } from "./workspaceMembersActions";
+import { parseAppPublicationDeclaration } from "../workspaces/ownerAppPublication";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { createFile, createFolder } from "../workspaces/workspaceFiles";
 
 type AppsWorkspace = { workspaceId: string; rootPath: string; shareView?: unknown };
 type AppsOperation<Workspace> = {
@@ -21,6 +28,7 @@ type AppsOperation<Workspace> = {
 };
 type Remote<Credentials> = Promise<{ credentials: Credentials; credentialGeneration: number }>;
 
+const mebibytes = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const PERSONAL_ONLY = "Open a workspace you joined to share or copy Member apps.";
 const RATE_LIMITED_TRIES = 8;
@@ -54,16 +62,10 @@ export function memberAppUpload(
   return body;
 }
 
-/** Writes a Member app's source into a new folder, refusing a folder that exists or a file that doesn't match its digest. */
-export async function writeForkedApp(
-  folder: string,
-  appRoot: string,
-  files: ReadonlyArray<{ path: string; bytes: Uint8Array; sha256: string }>,
-): Promise<void> {
-  if (!MemberAppSlug.safeParse(appRoot).success)
-    throw new Error(
-      `Name the copy with lowercase letters, digits, or hyphens. ${appRoot} is not a folder name you can use.`,
-    );
+type SourceFile = { path: string; bytes: Uint8Array; sha256: string };
+
+/** A Member app's files moved under `appRoot` from the folder that holds its manifest, each checked against its digest. */
+function placeAppSource(appRoot: string, files: ReadonlyArray<SourceFile>) {
   const root =
     files
       .filter((file) => `/${file.path}`.endsWith(`/${MANIFEST}`))
@@ -71,14 +73,105 @@ export async function writeForkedApp(
       .sort((a, b) => a.length - b.length)[0] ?? `${files[0]?.path.split("/", 1)[0]}/`;
   if (!files.length || files.some((file) => !file.path.startsWith(root)))
     throw new Error("This app's source spans more than one folder, so dohc cannot copy it.");
-  const placed = files.map((file) => {
+  return files.map((file) => {
     const rest = file.path.slice(root.length);
     if (!rest || !isShareablePath(`${appRoot}/${rest}`))
       throw new Error(`${file.path} is not a file dohc can copy.`);
     if (sha256(file.bytes) !== file.sha256)
       throw new Error(`${file.path} doesn't match the app the author shared. Try again.`);
-    return { target: join(folder, appRoot, ...rest.split("/")), bytes: file.bytes };
+    return { path: `${appRoot}/${rest}`, rest, bytes: file.bytes };
   });
+}
+
+/**
+ * Places a Member app's verified source at a new workspace folder, and refuses before anything is written when the
+ * folder can't hold it or its app.publish.json can't be published there.
+ */
+export function promotedAppFiles(folder: string, files: ReadonlyArray<SourceFile>) {
+  if (!isShareablePath(folder))
+    throw new Error(`${folder} is not a folder dohc can promote an app into. Choose another.`);
+  const placed = placeAppSource(folder, files);
+  const seen = new Map<string, boolean>();
+  for (const file of placed) {
+    if (file.bytes.byteLength > MAX_VERSIONED_BINARY_FILE_BYTES)
+      throw new Error(
+        `${file.rest} is ${mebibytes(file.bytes.byteLength)} MiB. dohc promotes files up to 5 MiB.`,
+      );
+    if (
+      !validateUserMaterializePath(file.path, { platform: process.platform }).ok ||
+      workspaceDestinationError(file.path, process.platform)
+    )
+      throw new Error(
+        `${file.rest} has a name this computer can't save, so dohc can't promote this app.`,
+      );
+    const parts = pathCollisionKey(file.path).split("/");
+    parts.forEach((_, index) => {
+      const key = parts.slice(0, index + 1).join("/");
+      const isFile = index === parts.length - 1;
+      if (seen.has(key) && (isFile || seen.get(key)))
+        throw new Error(
+          "This app has names that differ only by case, which this computer can't keep apart.",
+        );
+      seen.set(key, isFile);
+    });
+  }
+  const manifest = placed.find((file) => file.rest === MANIFEST);
+  if (manifest) {
+    const declared = parseAppPublicationDeclaration(manifest.bytes, folder, {
+      folder: placed.map((file) => file.path),
+    });
+    if (declared.external?.length)
+      throw new Error(
+        "This app calls outside services, which official apps can't do yet. Ask its author for a version without them.",
+      );
+    const outside = declared.inputs.find((path) => !path.startsWith(`${folder}/`));
+    if (outside) throw new Error(`This app reads ${outside}, outside its own folder.`);
+  }
+  return placed.map(({ path, bytes }) => ({ path, bytes }));
+}
+
+/** Writes a promoted app into a new workspace folder. It refuses a folder that exists, and never removes what it wrote. */
+export async function writePromotedApp(
+  rootPath: string,
+  folder: string,
+  files: ReadonlyArray<{ path: string; bytes: Uint8Array }>,
+): Promise<void> {
+  let at = rootPath;
+  for (const segment of folder.split("/")) {
+    at = join(at, segment);
+    const entry = await lstat(at).catch(() => null);
+    if (!entry) break;
+    if (entry.isSymbolicLink() || !entry.isDirectory())
+      throw new Error(
+        `${folder} goes through a link or a file, so dohc can't promote an app there. Choose another folder.`,
+      );
+  }
+  const parent = posix.dirname(folder);
+  if (parent !== ".") await createFolder(rootPath, parent);
+  try {
+    await createFolder(rootPath, folder, { exclusive: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST")
+      throw new Error(`The workspace already has ${folder}. Choose another folder.`);
+    throw error;
+  }
+  for (const file of files) await createFile(rootPath, file.path, file.bytes, { exclusive: true });
+}
+
+/** Writes a Member app's source into a new folder, refusing a folder that exists or a file that doesn't match its digest. */
+export async function writeForkedApp(
+  folder: string,
+  appRoot: string,
+  files: ReadonlyArray<SourceFile>,
+): Promise<void> {
+  if (!MemberAppSlug.safeParse(appRoot).success)
+    throw new Error(
+      `Name the copy with lowercase letters, digits, or hyphens. ${appRoot} is not a folder name you can use.`,
+    );
+  const placed = placeAppSource(appRoot, files).map((file) => ({
+    target: join(folder, appRoot, ...file.rest.split("/")),
+    bytes: file.bytes,
+  }));
   await mkdir(folder, { recursive: true });
   try {
     await mkdir(join(folder, appRoot));
@@ -133,6 +226,10 @@ export function createMemberAppsActions<
     candidate: AppPublicationCandidate;
     files: ReadonlyArray<{ sha256: string; bytes: Uint8Array }>;
   }>;
+  /** Runs `work` under the version lock of a workspace this computer may write, with its active version's id. */
+  withVersionLock(operation: Operation, work: (versionId: string) => Promise<void>): Promise<void>;
+  /** Captures new files into the workspace's History. */
+  capture(operation: Operation, paths: readonly string[]): Promise<void>;
 }) {
   const relayOperation = createOwnerRelayShareOperation<Workspace, Operation, Credentials>({
     remoteForWorkspace: (workspace, options) =>
@@ -264,6 +361,28 @@ export function createMemberAppsActions<
     }
     return { review: parsed.data, revision };
   };
+  const blob = async (
+    request: Parameters<Parameters<typeof run>[2]>[0],
+    publicationId: string,
+    file: { sha256: string },
+    revision: number,
+  ) =>
+    (
+      await request(
+        `/app-publications/${publicationId}/backend/blobs/${file.sha256}?authorityRevision=${revision}`,
+      )
+    ).bytes();
+  const download = async (
+    request: Parameters<Parameters<typeof run>[2]>[0],
+    publicationId: string,
+    phrase: string,
+  ) => {
+    const { review, revision } = await summary(request, publicationId, phrase);
+    const files = [];
+    for (const file of review.source)
+      files.push({ ...file, bytes: await blob(request, publicationId, file, revision) });
+    return files;
+  };
 
   return {
     list: (operation: Operation, input: { cursor?: string }) =>
@@ -330,17 +449,54 @@ export function createMemberAppsActions<
       const folder = dependencies.personalFolder(operation.workspace);
       if (folder === null) throw new Error(PERSONAL_ONLY);
       return run(operation, "copy this app", async (request) => {
-        const { review, revision } = await summary(request, input.publicationId, "copy this app");
-        const files = [];
-        for (const file of review.source) {
-          const blob = await request(
-            `/app-publications/${input.publicationId}/backend/blobs/${file.sha256}?authorityRevision=${revision}`,
-          );
-          files.push({ ...file, bytes: await blob.bytes() });
-        }
+        const files = await download(request, input.publicationId, "copy this app");
         operation.assertCurrent();
         await writeForkedApp(folder, input.personalApp, files);
         return { personalApp: input.personalApp };
+      });
+    },
+
+    source: (operation: Operation, input: { publicationId: string; path: string }) =>
+      run(operation, "load this file", async (request) => {
+        const { review, revision } = await summary(request, input.publicationId, "load this file");
+        const file = review.source.find((entry) => entry.path === input.path);
+        if (!file) throw new Error(`dohc could not load ${input.path}. This app has no such file.`);
+        const result = { path: file.path, byteLength: file.byteLength, text: null };
+        if (file.byteLength > MEMBER_APP_SOURCE_MAX_BYTES) return result;
+        const bytes = await blob(request, input.publicationId, file, revision);
+        if (sha256(bytes) !== file.sha256)
+          throw new Error(`${file.path} doesn't match the app the author shared. Try again.`);
+        try {
+          return { ...result, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+        } catch {
+          return result;
+        }
+      }),
+
+    promote: async (operation: Operation, input: { publicationId: string; folder: string }) => {
+      if (shareViewIsPresent(operation.workspace.shareView))
+        throw new Error("Only the workspace's owner can promote a Member app.");
+      return run(operation, "promote this app", async (request) => {
+        const files = promotedAppFiles(
+          input.folder,
+          await download(request, input.publicationId, "promote this app"),
+        );
+        await dependencies.withVersionLock(operation, async (versionId) => {
+          if (versionId !== "main") throw new Error("Switch to Main to promote an app.");
+          operation.assertCurrent();
+          await writePromotedApp(operation.workspace.rootPath, input.folder, files);
+          await dependencies
+            .capture(
+              operation,
+              files.map((file) => file.path),
+            )
+            .catch((error: unknown) => {
+              throw new Error(
+                `dohc copied the app into ${input.folder}, but History hasn't recorded it yet. ${error instanceof Error ? error.message : ""}`.trim(),
+              );
+            });
+        });
+        return { folder: input.folder };
       });
     },
 
