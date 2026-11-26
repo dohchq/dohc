@@ -339,3 +339,24 @@ fn a_collection_relation_seed_is_written_in_the_new_note_format() {
         });
     });
 }
+
+#[test]
+fn a_collection_relation_seed_format_two_cannot_hold_is_written_in_format_one() {
+    let linked_code = "Run [`npm install`](https://example.com) first\n";
+    reading_body_sequence_here(|| {
+        writing_new_notes_in_format_two_here(|| {
+            let doc = Ydoc::wire();
+            doc.seed_collection_relation_markdown(linked_code)
+                .expect("seed");
+            let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+            let sequence_length = sequence.len(&doc.doc.transact());
+            assert_eq!((doc.note_schema_version(), sequence_length), (1, 0));
+            let projection = doc.project_richdoc().expect("projection");
+            assert_eq!(
+                doc.preserved_markdown_source(&projection)
+                    .unwrap_or(projection),
+                linked_code
+            );
+        });
+    });
+}

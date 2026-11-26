@@ -2297,15 +2297,9 @@ impl Ydoc {
             .encode_full_state_bounded(max_bytes)
             .ok_or(CollabError::ConfiguredByteBudgetExceeded)?;
         staged.apply(&full)?;
-        let frag = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let format_two = staged.body_roots(&frag);
-        restore_copy::copy(
-            point,
-            &staged,
-            format_two.is_some(),
-            crate::limits::MAX_YDOC_UPDATE_BYTES,
-        )?;
-        if let Some((sequence, containers)) = format_two {
+        restore_copy::copy(point, &staged, crate::limits::MAX_YDOC_UPDATE_BYTES)?;
+        if let Some((sequence, containers)) = staged.body_sequence_roots() {
+            let frag = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
             let read = point.body_blocks()?;
             let written = staged.sequence_written(&frag, &sequence, &containers, &read)?;
             written.write(&mut staged.doc.transact_mut(), &sequence, &containers);

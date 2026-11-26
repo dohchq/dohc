@@ -902,6 +902,15 @@ pub(super) fn workspace_unavailable() -> WireError {
 mod tests {
 
     #[test]
+    fn a_note_in_a_newer_body_format_keeps_its_reason() {
+        let wire = super::map_domain(&DomainError::InvalidInput {
+            reason: "ydoc-note-uses-a-newer-body-format",
+        });
+        assert!(matches!(wire.code, ErrorCode::InvalidParams));
+        assert_eq!(wire.message, "ydoc-note-uses-a-newer-body-format");
+    }
+
+    #[test]
     fn internal_refusal_logs_only_its_code_words() {
         use dohc_engine_files::MaterializeError;
         use dohc_engine_storage::StorageError;

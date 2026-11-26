@@ -48,14 +48,10 @@ impl Budget {
     }
 }
 
-pub(super) fn copy(
-    point: &Ydoc,
-    staged: &Ydoc,
-    format_two: bool,
-    max_bytes: usize,
-) -> Result<(), CollabError> {
+pub(super) fn copy(point: &Ydoc, staged: &Ydoc, max_bytes: usize) -> Result<(), CollabError> {
     let reader = point.has_reader_source();
     let clear_reader = !reader && staged.has_reader_source();
+    let format_two = staged.body_sequence_roots().is_some();
     let source_body = point.doc.get_or_insert_xml_fragment(ROOT_BODY);
     let source_frontmatter = point.doc.get_or_insert_map(ROOT_FRONTMATTER);
     let source_meta = point.doc.get_or_insert_map(ROOT_META);
@@ -227,10 +223,7 @@ mod tests {
             Some(2_000_000),
             true,
             true,
-            |staged| {
-                let body = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
-                copy(point, staged, staged.body_roots(&body).is_some(), 2_000_000)
-            },
+            |staged| copy(point, staged, 2_000_000),
         )
     }
 
