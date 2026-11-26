@@ -79,6 +79,22 @@ export const MemberAppInspectResult = z
   .strict();
 export type MemberAppInspectResult = z.infer<typeof MemberAppInspectResult>;
 
+/** The largest source file dohc shows as text. */
+export const MEMBER_APP_SOURCE_MAX_BYTES = 256 * 1024;
+const SourcePath = z.string().min(1).max(1024);
+export const MemberAppSourceInput = z
+  .object({ publicationId: PublicationId, path: SourcePath })
+  .strict();
+export const MemberAppSourceResult = z
+  .object({
+    path: SourcePath,
+    byteLength: z.number().int().nonnegative(),
+    /** Null when the file is not UTF-8 text or is larger than MEMBER_APP_SOURCE_MAX_BYTES. */
+    text: z.string().nullable(),
+  })
+  .strict();
+export type MemberAppSourceResult = z.infer<typeof MemberAppSourceResult>;
+
 export const MemberAppShareInput = z
   .object({ personalApp: AppFolder, slug: MemberAppSlug.optional() })
   .strict();
@@ -91,6 +107,11 @@ export const MemberAppForkInput = z
   .object({ publicationId: PublicationId, personalApp: AppFolder })
   .strict();
 export const MemberAppForkResult = z.object({ personalApp: AppFolder }).strict();
+
+export const MemberAppPromoteInput = z
+  .object({ publicationId: PublicationId, folder: AppFolder })
+  .strict();
+export const MemberAppPromoteResult = z.object({ folder: AppFolder }).strict();
 
 export const MemberAppWithdrawInput = z.object({ publicationId: PublicationId }).strict();
 export const MemberAppWithdrawResult = z.object({ publicationId: PublicationId }).strict();
@@ -106,6 +127,10 @@ export const MemberAppShareSocketResult = z.union([
 ]);
 export const MemberAppForkSocketResult = z.union([
   MemberAppForkResult.extend(done).strict(),
+  failed,
+]);
+export const MemberAppPromoteSocketResult = z.union([
+  MemberAppPromoteResult.extend(done).strict(),
   failed,
 ]);
 export const MemberAppWithdrawSocketResult = z.union([

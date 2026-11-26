@@ -874,6 +874,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
                     command.verb === "ownerAppResponses" ||
                     command.verb === "memberAppShare" ||
                     command.verb === "memberAppFork" ||
+                    command.verb === "memberAppPromote" ||
                     VERSION_CHANGE_VERBS.has(command.verb)
                   ? 90_000
                   : DEFAULT_RESPONSE_TIMEOUT_MS),

@@ -11,9 +11,11 @@ import {
 import {
   MemberAppForkInput,
   MemberAppInspectInput,
+  MemberAppPromoteInput,
   MemberAppShareInput,
   MemberAppSharingInput,
   MemberAppsListInput,
+  MemberAppSourceInput,
   MemberAppWithdrawInput,
 } from "@dohc/workspace-contracts/member-apps";
 import {
@@ -2248,6 +2250,11 @@ const DECLARED_PARSERS: {
     noExtraArgs(extra, command);
     return MemberAppInspectInput.parse({ publicationId });
   },
+  memberAppSource: (input, command) => {
+    const [publicationId, path, ...extra] = input.operands;
+    noExtraArgs(extra, command);
+    return MemberAppSourceInput.parse({ publicationId, path });
+  },
   workspaceSearch: (input, command) => {
     const [query, ...extra] = input.operands;
     if (!query || !query.trim()) fail(`${command} requires a query`);
@@ -2404,6 +2411,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         const [publicationId, personalApp, ...extra] = operands;
         noExtraArgs(extra, "member-apps fork");
         return MemberAppForkInput.parse({ publicationId, personalApp });
+      }),
+      promote: declaredWrite("memberAppPromote", ({ operands }) => {
+        const [publicationId, folder, ...extra] = operands;
+        noExtraArgs(extra, "member-apps promote");
+        return MemberAppPromoteInput.parse({ publicationId, folder });
       }),
       withdraw: declaredWrite("memberAppWithdraw", ({ operands }) => {
         const [publicationId, ...extra] = operands;

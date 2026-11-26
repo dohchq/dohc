@@ -376,6 +376,12 @@
     ],
     "linksConnections": [
       "links.connections"
+    ],
+    "memberAppSource": [
+      "app.member.source"
+    ],
+    "memberAppPromote": [
+      "app.member.promote"
     ]
   },
   "public": {
@@ -532,6 +538,8 @@
     "member-apps fork": "app.member.fork",
     "member-apps withdraw": "app.member.withdraw",
     "member-apps sharing": "app.member.sharing",
-    "links connections": "links.connections"
+    "links connections": "links.connections",
+    "member-apps source": "app.member.source",
+    "member-apps promote": "app.member.promote"
   }
 }

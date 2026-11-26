@@ -316,6 +316,7 @@ function fixture(
         collections: [],
         source: [],
       })),
+      memberAppSource: vi.fn(async () => ({ path: "app/index.html", byteLength: 0, text: "" })),
       linksEdges: vi.fn(async () => ({
         versionId: "main",
         files: [],

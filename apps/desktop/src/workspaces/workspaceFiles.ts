@@ -358,7 +358,7 @@ function assertWorkspaceDestination(path: string): void {
 export async function createFile(
   rootPath: string,
   relativePath: string,
-  initialText: string,
+  initialText: string | Uint8Array,
   options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
@@ -367,7 +367,7 @@ export async function createFile(
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
-  const observedBytes = utf8ByteLength(initialText);
+  const observedBytes = typeof initialText === "string" ? utf8ByteLength(initialText) : 0;
   if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
     throw new Error(workspaceTextLimitReason(observedBytes));
   }

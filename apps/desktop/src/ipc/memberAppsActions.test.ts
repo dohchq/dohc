@@ -154,6 +154,7 @@ describe("createMemberAppsActions", () => {
       if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
       return { credentials: "token", credentialGeneration: 1 };
     };
+    const captured: string[][] = [];
     const actions = createMemberAppsActions({
       remoteForWorkspace: remote,
       remoteForJoinedWorkspace: () => remote(null, { allowPaused: true }),
@@ -170,9 +171,158 @@ describe("createMemberAppsActions", () => {
       preparePersonalApp: async () => {
         throw new Error("unused");
       },
+      withVersionLock: (_operation, work) => work(versionId),
+      capture: async (_operation, paths) => {
+        captured.push([...paths]);
+      },
     });
-    return { actions, sent };
+    return { actions, sent, captured };
   };
+  let versionId = "main";
+  afterEach(() => {
+    versionId = "main";
+  });
+
+  const shared = (files: ReturnType<typeof file>[], served = files) =>
+    actionsAnswering((path) => {
+      if (path.endsWith("/backend/summary"))
+        return Response.json({
+          subjectName: "trip",
+          sharerName: "Ana",
+          review: {
+            authorityRevision: 3,
+            consent: "none",
+            collections: [],
+            source: files.map(({ bytes: _, ...entry }) => entry),
+          },
+        });
+      const digest = /\/blobs\/([0-9a-f]{64})/.exec(path)?.[1];
+      const blob = served.find((entry) => entry.sha256 === digest);
+      return blob
+        ? new Response(blob.bytes, { headers: { "content-type": "application/octet-stream" } })
+        : Response.json({ error: "missing" }, { status: 404 });
+    });
+  const publicationId = "a".repeat(64);
+  const ownedAt = (rootPath: string) => ({
+    ...operation,
+    workspace: { workspaceId: "ws", rootPath },
+  });
+  const manifest = (extra: Record<string, unknown> = {}) =>
+    file(
+      "trip/app.publish.json",
+      JSON.stringify({ entryPath: "index.html", inputs: ["index.html"], ...extra }),
+    );
+
+  describe("promote", () => {
+    it("copies a Member app into a nested workspace folder and captures every file", async () => {
+      const root = await personalFolder();
+      const { actions, captured } = shared([manifest(), file("trip/index.html", "<p>hi</p>")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).resolves.toEqual({ folder: "apps/trip" });
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("<p>hi</p>");
+      expect(captured).toEqual([["apps/trip/app.publish.json", "apps/trip/index.html"]]);
+    });
+
+    it("refuses a workspace the person joined, before asking the server", async () => {
+      const { actions, sent } = shared([file("trip/index.html", "x")]);
+      const joined = { ...operation, workspace: { ...operation.workspace, shareView: null } };
+      await expect(actions.promote(joined, { publicationId, folder: "apps/trip" })).rejects.toThrow(
+        "Only the workspace's owner",
+      );
+      expect(sent).toEqual([]);
+    });
+
+    it("refuses another version than Main, and writes nothing", async () => {
+      const root = await personalFolder();
+      versionId = "v1";
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("Switch to Main");
+      expect(await readdir(root)).toEqual([]);
+      expect(captured).toEqual([]);
+    });
+
+    it("refuses a file that doesn't match the reviewed digest, and writes nothing", async () => {
+      const root = await personalFolder();
+      const index = file("trip/index.html", "x");
+      const { actions } = shared([index], [{ ...index, bytes: bytes("tampered") }]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("doesn't match the app the author shared");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses an app that calls outside services, and writes nothing", async () => {
+      const root = await personalFolder();
+      const external = {
+        usage: {
+          method: "GET",
+          url: "https://api.example.com/v1/usage",
+          secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+        },
+      };
+      const { actions } = shared([manifest({ external }), file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("calls outside services");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses inputs outside the new folder, and writes nothing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([
+        manifest({ inputs: ["index.html", "../notes.md"] }),
+        file("trip/index.html", "x"),
+      ]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("outside its own folder");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses a secret or reserved folder", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/index.html", "x")]);
+      for (const folder of [".env", "apps/.env", "../apps", ".dohc/apps"])
+        await expect(actions.promote(ownedAt(root), { publicationId, folder })).rejects.toThrow(
+          "not a folder dohc can promote an app into",
+        );
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("leaves a folder that exists untouched", async () => {
+      const root = await personalFolder();
+      await mkdir(join(root, "apps", "trip"), { recursive: true });
+      await writeFile(join(root, "apps", "trip", "index.html"), "kept");
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("already has apps/trip");
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("kept");
+      expect(captured).toEqual([]);
+    });
+  });
+
+  describe("source", () => {
+    it("reads a text file, and gives no text for a binary file or one over 256 KiB", async () => {
+      const png = { ...file("trip/logo.png", ""), bytes: new Uint8Array([0x89, 0xff, 0xfe]) };
+      png.sha256 = sha256(png.bytes);
+      png.byteLength = 3;
+      const big = file("trip/big.js", "x".repeat(256 * 1024 + 1));
+      const { actions, sent } = shared([file("trip/index.html", "<p>hi</p>"), png, big]);
+      const read = (path: string) => actions.source(operation, { publicationId, path });
+      await expect(read("trip/index.html")).resolves.toEqual({
+        path: "trip/index.html",
+        byteLength: 9,
+        text: "<p>hi</p>",
+      });
+      await expect(read("trip/logo.png")).resolves.toMatchObject({ text: null });
+      await expect(read("trip/big.js")).resolves.toMatchObject({ text: null });
+      expect(sent.filter(({ path }) => path.includes(big.sha256))).toEqual([]);
+    });
+  });
 
   it("sends the relay only the sharing switch, whatever else the caller passed, even while sync is paused", async () => {
     const { actions, sent } = actionsAnswering(() => Response.json({ membersCanShare: true }));

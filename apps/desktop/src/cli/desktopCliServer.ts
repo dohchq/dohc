@@ -203,7 +203,7 @@ interface DesktopCliServerDependencies<State> {
         unknown
       >
     >,
-    "share" | "fork" | "withdraw" | "sharing"
+    "share" | "fork" | "promote" | "withdraw" | "sharing"
   >;
   /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
   beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
@@ -729,6 +729,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             memberApps: {
               share: attached(dependencies.memberApps.share),
               fork: attached(dependencies.memberApps.fork),
+              promote: attached(dependencies.memberApps.promote),
               withdraw: attached(dependencies.memberApps.withdraw),
               sharing: attached(dependencies.memberApps.sharing),
             },

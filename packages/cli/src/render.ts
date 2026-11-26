@@ -951,12 +951,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ...app.source.map((file) => `${lineSafe(file.path)} · ${file.byteLength} bytes`),
       ].join("\n");
     }
+    case "memberAppSource": {
+      const file = result as CliResultByVerb["memberAppSource"];
+      return file.text ?? `${lineSafe(file.path)} · ${file.byteLength} bytes, not shown as text`;
+    }
     case "memberAppShare": {
       const shared = result as Extract<CliResultByVerb["memberAppShare"], { ok: true }>;
       return `Shared ${shared.slug} with the workspace's members · ${shared.publicationId}`;
     }
     case "memberAppFork":
       return `Copied into ${lineSafe((result as Extract<CliResultByVerb["memberAppFork"], { ok: true }>).personalApp)} in your Personal app folder`;
+    case "memberAppPromote":
+      return `Copied into ${lineSafe((result as Extract<CliResultByVerb["memberAppPromote"], { ok: true }>).folder)}. Publish it with Review app.`;
     case "memberAppWithdraw":
       return `Withdrew ${(result as Extract<CliResultByVerb["memberAppWithdraw"], { ok: true }>).publicationId}`;
     case "memberAppSharing":
