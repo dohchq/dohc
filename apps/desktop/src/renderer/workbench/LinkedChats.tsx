@@ -445,20 +445,21 @@ export function LinkedChatsPanel(props: {
       const quote = commentQuote;
       const body = quote === null ? trimmed : quotedCommentBody(quote, trimmed);
       const token = ++liveToken.current;
+      const key = threadsKey;
       setSending(true);
       try {
         const created = await bridge().createFileChat({ workspaceId, path: filePath });
         const thread = quote === null ? created.thread : { ...created.thread, quote };
-        // The chat exists, so its comment posts even if this person has moved
-        // on; only what the panel shows waits for them.
+        // The chat exists, so its comment posts even if this person has opened
+        // another comment meanwhile. The file's list holds it either way.
+        setThreadsState((current) =>
+          current.status === "ready" && current.key === key
+            ? { ...current, threads: [...current.threads, thread] }
+            : current,
+        );
         if (token === liveToken.current) {
           setCommenting(null);
           setCommentQuote(null);
-          setThreadsState((current) =>
-            current.status === "ready"
-              ? { ...current, threads: [...current.threads, thread] }
-              : current,
-          );
         }
         try {
           const result = await bridge().sendChatMessage({
@@ -466,6 +467,9 @@ export function LinkedChatsPanel(props: {
             threadId: thread.id,
             body,
           });
+          // Posted, so the draft is spent unless this person wrote another.
+          setCommenting((current) => (current === words ? null : current));
+          setCommentQuote((current) => (current === quote ? null : current));
           if (token !== liveToken.current) return;
           // The comment saved, so its words stay out of the composer. Opening the chat shows it.
           if ("failure" in result)
@@ -496,6 +500,7 @@ export function LinkedChatsPanel(props: {
       props.onError,
       reportUnshown,
       sending,
+      threadsKey,
       workspaceId,
     ],
   );

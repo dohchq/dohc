@@ -1295,6 +1295,11 @@ describe("LinkedChatsPanel comment on a passage", () => {
       }),
     );
     expect(screen.getByTestId("linked-chat-title").textContent).toBe("Why Monday?");
+
+    // Back in the list, the posted comment is there and its draft is gone.
+    fireEvent.click(screen.getByTestId("linked-chat-back"));
+    expect(await screen.findAllByTestId("linked-chat-open")).toHaveLength(2);
+    expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
   });
 
   it("tells the editor a passage takes no comment where this person cannot comment", async () => {

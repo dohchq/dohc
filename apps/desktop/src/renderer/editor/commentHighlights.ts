@@ -41,7 +41,7 @@ export function setCommentAnchors(state: EditorState, anchors: readonly CommentA
 
 export function makeCommentHighlightPlugin(options: {
   anchors: () => readonly CommentAnchor[];
-  // Every comment whose passage holds the click, oldest first.
+  // Every comment whose passage holds the click.
   onOpen: (threadIds: string[]) => void;
 }) {
   return new Plugin<DecorationSet>({
@@ -57,12 +57,17 @@ export function makeCommentHighlightPlugin(options: {
     props: {
       decorations: (state) => commentHighlightKey.getState(state),
       handleClick(view, pos, event) {
-        if (!(event.target as HTMLElement | null)?.closest(`[${ATTRIBUTE}]`)) return false;
+        const clicked = (event.target as HTMLElement | null)
+          ?.closest(`[${ATTRIBUTE}]`)
+          ?.getAttribute(ATTRIBUTE);
+        if (!clicked) return false;
         // Passages can overlap, and the painted span names only one of them.
-        const threadIds = (commentHighlightKey.getState(view.state)?.find(pos, pos) ?? []).map(
-          (decoration) => (decoration.spec as { threadId: string }).threadId,
-        );
-        if (threadIds.length > 0) options.onOpen(threadIds);
+        // A passage that merely ends or starts where the click lands is a
+        // neighbour, not an overlap.
+        const around = (commentHighlightKey.getState(view.state)?.find(pos, pos) ?? [])
+          .filter((decoration) => decoration.from < pos && pos < decoration.to)
+          .map((decoration) => (decoration.spec as { threadId: string }).threadId);
+        options.onOpen([...new Set([...around, clicked])]);
         // The click still places the caret, so the passage stays editable.
         return false;
       },

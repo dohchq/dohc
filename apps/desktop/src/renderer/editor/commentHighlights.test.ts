@@ -41,7 +41,7 @@ describe("comment highlights", () => {
     expect(painted(state)).toEqual(["the plan"]);
   });
 
-  it("opens every comment whose passage holds the click", () => {
+  it("opens every comment whose passage holds the click, and not a neighbour's", () => {
     const opened: string[][] = [];
     const clicking = makeCommentHighlightPlugin({
       anchors: () => [],
@@ -54,14 +54,17 @@ describe("comment highlights", () => {
     state = state.apply(
       setCommentAnchors(state, [
         { threadId: "a", quote: "the plan" },
-        { threadId: "b", quote: "plan on Monday" },
+        { threadId: "b", quote: "plan on" },
       ]),
     );
-    const onHighlight = { target: { closest: () => ({}) } } as unknown as MouseEvent;
-    const click = (pos: number) =>
-      clicking.props.handleClick!.call(clicking, { state } as EditorView, pos, onHighlight);
-    click(11); // "pl|an", in both passages
-    click(6); // "t|he", in the first only
-    expect(opened).toEqual([["a", "b"], ["a"]]);
+    // The span the click lands in names one comment, as the painted DOM does.
+    const click = (pos: number, span: string) =>
+      clicking.props.handleClick!.call(clicking, { state } as EditorView, pos, {
+        target: { closest: () => ({ getAttribute: () => span }) },
+      } as unknown as MouseEvent);
+    click(12, "b"); // "pl|an", in both passages
+    click(7, "a"); // "t|he", in the first only
+    click(10, "a"); // "the |plan", where the second passage only starts
+    expect(opened).toEqual([["a", "b"], ["a"], ["a"]]);
   });
 });
