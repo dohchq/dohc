@@ -879,6 +879,7 @@ automations:
       let reads = 0;
       let approvals = 0;
       let allowNewCode: "approved" | "unapproved" = "unapproved";
+      const checked: string[][] = [];
       const codeDeps: CollectionAutomationRunDependencies = {
         ...deps,
         readCode: async () => ({
@@ -886,6 +887,10 @@ automations:
           truncated: false,
         }),
         isHttpStepApproved: async () => (approvals++ === 0 ? "approved" : allowNewCode),
+        checkReach: async (steps) => {
+          checked.push(steps.map((step) => step.kind));
+          return false;
+        },
       };
       const codeRun = (attempts: number) =>
         runCollectionAutomation(codeDeps, {
@@ -903,6 +908,7 @@ automations:
         });
       execute.mockClear();
       expect(await codeRun(1)).toEqual({ kind: "wait", reason: "held" });
+      expect(checked.filter((kinds) => kinds.join() === "http")).toHaveLength(2);
       allowNewCode = "approved";
       expect(await codeRun(2)).toEqual({ kind: "done" });
       expect(execute).toHaveBeenCalledTimes(1);

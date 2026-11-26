@@ -201,6 +201,14 @@ function everyStep(steps: readonly AutomationStep[]): AutomationStep[] {
   );
 }
 
+function textsIn(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, inner]) =>
+    key === "kind" || key === "as" ? [] : textsIn(inner),
+  );
+}
+
 /**
  * What the http step at `ordinal` does, for the person who allows it: the
  * website, the secrets it attaches, its body, and what later steps do with
@@ -240,8 +248,14 @@ export function httpAllowText(automation: Automation, ordinal: number): string |
     } else if (later.kind === "run-file") {
       code.add(later.file);
     } else if (later.kind === "if") {
-      if (name.test(later.if)) other.add("choose which steps run");
-    } else if (name.test(JSON.stringify(later))) {
+      const branch = everyStep([...later.do, ...later.otherwise]).filter(
+        (inner) => inner.kind !== "if",
+      );
+      if (name.test(later.if) && branch.length > 0)
+        other.add(
+          `decide whether to ${wordList(branch.map((inner) => sentenceText(stepParts(inner))))}`,
+        );
+    } else if (textsIn(later).some((text) => name.test(text))) {
       other.add(later.kind === "find" ? "find records" : sentenceText(stepParts(later)));
     }
   }

@@ -1418,7 +1418,7 @@ export async function prepareRecordBackend(
         if (name === file && hash !== sha256) return "unavailable";
         codeFileHashes.push({ file: name, sha256: hash });
       }
-      return deps.isHttpStepApproved(
+      const allowed = await deps.isHttpStepApproved(
         computeHttpStepApprovalDigest({
           collectionId,
           collectionPath: collection.path,
@@ -1429,6 +1429,12 @@ export async function prepareRecordBackend(
           codeFileHashes,
         }),
       );
+      if (allowed === "unapproved")
+        await deps.checkReach?.(
+          [{ kind: "http", target: httpStepTargetLabel(fetch), stepOrdinal: ordinal }],
+          roster,
+        );
+      return allowed;
     },
     async apply(run, effect, place, chat) {
       if (

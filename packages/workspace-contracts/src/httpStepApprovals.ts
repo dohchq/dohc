@@ -258,18 +258,19 @@ function decoded(part: string): string {
 }
 
 /**
- * What to scrub for a secret destination URL: the URL, its query values of 8
- * or more characters, and its path parts that look like tokens rather than
- * words, as sent and decoded.
+ * What to scrub for a secret destination URL: the URL, and its path parts
+ * and query values of 8 or more characters, as sent and decoded.
  */
 export function secretUrlScrubValues(rawUrl: string): string[] {
   const url = URL.parse(rawUrl);
   if (url === null) return [rawUrl];
-  const tokens = url.pathname
-    .split("/")
-    .filter((part) => part.length >= 24 || (part.length >= 8 && /[^a-z_-]/u.test(part)));
+  const parts = url.pathname.split("/").filter((part) => part.length >= 8);
   const values = [...url.searchParams.values()].filter((value) => value.length >= 8);
-  return [...new Set([rawUrl, url.href, ...tokens, ...tokens.map(decoded), ...values])];
+  return [...new Set([rawUrl, url.href, ...parts, ...parts.map(decoded), ...values])];
+}
+
+function isWord(secret: string): boolean {
+  return secret.length < 24 && /^[a-z]+(?:[-_][a-z]+)*$/u.test(secret);
 }
 
 export type HttpJsonValue =
@@ -295,7 +296,7 @@ function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonVa
   }
   const entries: Array<[string, HttpJsonValue]> = [];
   for (const [key, item] of Object.entries(value)) {
-    if (secrets.some((secret) => secret.length > 0 && key.includes(secret))) return null;
+    if (secrets.some((secret) => !isWord(secret) && key.includes(secret))) return null;
     const scrubbed = scrubJson(item, secrets);
     if (scrubbed === null && item !== null) return null;
     entries.push([key, scrubbed]);
@@ -305,8 +306,9 @@ function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonVa
 
 /**
  * Replaces every secret value in a fetched JSON answer. Refuses an answer
- * with a secret in a field name, or one over MAX_HTTP_RESPONSE_BYTES once
- * written back out as JSON.
+ * with a secret in a field name, unless that secret is a plain word such as
+ * a REST path part, or one over MAX_HTTP_RESPONSE_BYTES once written back out
+ * as JSON.
  */
 export function scrubSecretsFromJson(
   value: HttpJsonValue,

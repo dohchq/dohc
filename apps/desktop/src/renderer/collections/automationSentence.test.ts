@@ -100,7 +100,15 @@ describe("http step copy", () => {
       ],
     };
     expect(httpAllowText(spread, 0)).toBe(
-      "This step fetches data from us.posthog.com with secret POSTHOG_KEY in its Authorization header, and saves the answer as stats. Later steps use it to post in Everyone, run import, and choose which steps run. Allow it before dohc sends requests there.",
+      "This step fetches data from us.posthog.com with secret POSTHOG_KEY in its Authorization header, and saves the answer as stats. Later steps use it to post in Everyone, run import, and decide whether to set Status to On. Allow it before dohc sends requests there.",
     );
+    const named: Automation = {
+      ...fetchStats,
+      do: [
+        { ...fetch, as: "group" } as typeof fetch,
+        { kind: "post", text: "Done", group: "Everyone" },
+      ],
+    };
+    expect(httpAllowText(named, 0)).toContain("No later step uses it yet.");
   });
 });

@@ -489,22 +489,25 @@ automations:
       value: {
         auth: "Bearer [redacted]",
         pin: "[redacted]",
-        path: "/services/[redacted]",
+        path: "/[redacted]/[redacted]",
         count: 3,
       },
     });
   });
 
-  it("keeps REST words in a secret URL's path out of what it scrubs", () => {
+  it("scrubs every path part of a secret URL but refuses a field name only for a token", () => {
     const scrubValues = secretUrlScrubValues(
-      "https://api.example.com/v1/customers/invoices?api_key=sk_live_12345678",
+      "https://api.example.com/v1/customers/qdfrgkmwnpvbzstx?api_key=sk_live_12345678",
     );
-    expect(scrubValues).toEqual([
-      "https://api.example.com/v1/customers/invoices?api_key=sk_live_12345678",
-      "sk_live_12345678",
-    ]);
     expect(
-      scrubSecretsFromJson({ customers: [{ invoices: 2, key: "sk_live_12345678" }] }, scrubValues),
-    ).toEqual({ ok: true, value: { customers: [{ invoices: 2, key: "[redacted]" }] } });
+      scrubSecretsFromJson(
+        { customers: [{ path: "/v1/customers/qdfrgkmwnpvbzstx", key: "sk_live_12345678" }] },
+        scrubValues,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { customers: [{ path: "/v1/[redacted]/[redacted]", key: "[redacted]" }] },
+    });
+    expect(scrubSecretsFromJson({ sk_live_12345678: 1 }, scrubValues)).toMatchObject({ ok: false });
   });
 });
