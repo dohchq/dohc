@@ -71,7 +71,6 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const failed = workspaceWords.filesFailed(workspace);
   useFailureNotice(`read:${workspaceId}:files`, failed, state, retry);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  // Other files starts folded: the phone opens none of them, so they only take room.
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set(["other"]));
   const rows = useMemo(
     () => (state.value ? homeRows(state.value, expanded) : null),
