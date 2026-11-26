@@ -302,7 +302,7 @@ describe("the account's unread state", () => {
       groups: [
         agent("channel-agent-default", "My agent", "channel_wire_agent_v1", true),
         agent("channel-agent-old", "Old one", "channel_wire_agent_v1_old", true),
-        agent("channel-agent-t3", "vibe-guy", "channel_wire_agent_v1_t3"),
+        agent("channel-agent-t3", "Nova", "channel_wire_agent_v1_t3"),
       ],
     });
     expect(
@@ -313,7 +313,7 @@ describe("the account's unread state", () => {
     ).toEqual([
       { name: "Your agent", archived: true },
       { name: "Old one", archived: true },
-      { name: "vibe-guy", archived: undefined },
+      { name: "Nova", archived: undefined },
     ]);
   });
 

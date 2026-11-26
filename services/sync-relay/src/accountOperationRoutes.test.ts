@@ -391,13 +391,13 @@ describe("an account's reads through the server's copy", () => {
       installId: "pc",
       computerLabel: "PC",
       runners: [],
-      agents: [{ agentId: "t3-code", displayName: "vibe-guy" }],
+      agents: [{ agentId: "t3-code", displayName: "Nova" }],
       nowMs: Date.now(),
     });
     expect(await listed()).toEqual([
       { name: "My agent", kind: "agent", archived: true },
+      { name: "Nova", kind: "agent", archived: undefined },
       { name: "Planning", kind: "group", archived: undefined },
-      { name: "vibe-guy", kind: "agent", archived: undefined },
     ]);
   });
 
