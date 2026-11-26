@@ -354,12 +354,14 @@ describe("createMemberAppsActions", () => {
     it.runIf(process.platform === "win32")(
       "refuses a name Windows can't save, before writing",
       async () => {
-        const root = await personalFolder();
-        const { actions } = shared([file("trip/index.html", "x"), file("trip/nul.md", "y")]);
-        await expect(
-          actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
-        ).rejects.toThrow("nul.md");
-        expect(await readdir(root)).toEqual([]);
+        for (const name of ["nul.md", "notes?.txt"]) {
+          const root = await personalFolder();
+          const { actions } = shared([file("trip/index.html", "x"), file(`trip/${name}`, "y")]);
+          await expect(
+            actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+          ).rejects.toThrow(name);
+          expect(await readdir(root)).toEqual([]);
+        }
       },
     );
 

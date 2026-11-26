@@ -5,6 +5,8 @@ import { setTimeout as wait } from "node:timers/promises";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import {
   MEMBER_APP_SOURCE_MAX_BYTES,
@@ -95,11 +97,14 @@ export function promotedAppFiles(folder: string, files: ReadonlyArray<SourceFile
       throw new Error(
         `${file.rest} is ${mebibytes(file.bytes.byteLength)} MiB. dohc promotes files up to 5 MiB.`,
       );
-    if (!validateUserMaterializePath(file.path, { platform: process.platform }).ok)
+    if (
+      !validateUserMaterializePath(file.path, { platform: process.platform }).ok ||
+      workspaceDestinationError(file.path, process.platform)
+    )
       throw new Error(
         `${file.rest} has a name this computer can't save, so dohc can't promote this app.`,
       );
-    const parts = file.path.normalize("NFC").toLowerCase().split("/");
+    const parts = pathCollisionKey(file.path).split("/");
     parts.forEach((_, index) => {
       const key = parts.slice(0, index + 1).join("/");
       const isFile = index === parts.length - 1;
