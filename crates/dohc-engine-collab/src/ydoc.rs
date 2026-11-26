@@ -48,6 +48,7 @@ use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 mod body_sequence;
+pub(crate) use body_sequence::BOUNDARY;
 mod body_sequence_fold;
 mod body_sequence_writer;
 mod bounded_encoder;
@@ -695,6 +696,46 @@ impl Ydoc {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn reads_as_format_two(&self) -> bool {
+        if !self.reads_body_sequence {
+            return false;
+        }
+        let reading = self.doc.transact();
+        let marked = reading
+            .get_map(ROOT_META)
+            .and_then(|meta| body_sequence::stored_under(&meta, "schemaVersion"));
+        let holds = |root: Option<&yrs::branch::Branch>| {
+            root.is_some_and(yrs::branch::Branch::holds_unkeyed_item)
+        };
+        let sequence = reading.get_text(ROOT_SEQUENCE);
+        let body = reading.get_xml_fragment(ROOT_BODY);
+        matches!(marked, Some(Any::Number(2.0)))
+            && (holds(sequence.as_ref().map(AsRef::as_ref))
+                || !holds(body.as_ref().map(AsRef::as_ref)))
+    }
+
+    pub(crate) fn hides_kept_content(
+        head_state: &[u8],
+        candidate: &[u8],
+    ) -> Result<bool, CollabError> {
+        let copy = Ydoc::wire();
+        copy.apply(head_state)?;
+        let kept = copy.kept_content()?;
+        if kept.is_empty() {
+            return Ok(false);
+        }
+        copy.apply(candidate)?;
+        Ok(!kept.is_subset(&copy.kept_content()?))
+    }
+
+    fn kept_content(&self) -> Result<BTreeSet<(body_sequence::KeptAt, String)>, CollabError> {
+        let Some((sequence, containers)) = self.body_sequence_roots() else {
+            return Ok(BTreeSet::new());
+        };
+        let reading = self.doc.transact();
+        Ok(body_sequence::traced(&reading, &sequence, &containers)?.kept_content())
     }
 
     fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
@@ -12575,3 +12616,7 @@ mod successor_format_two_tests;
 #[cfg(test)]
 #[path = "ydoc/body_sequence_fold_tests.rs"]
 mod body_sequence_fold_tests;
+
+#[cfg(test)]
+#[path = "ydoc/released_format_two_tests.rs"]
+mod released_format_two_tests;

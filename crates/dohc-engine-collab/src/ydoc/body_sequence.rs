@@ -10,7 +10,7 @@ use yrs::branch::Branch;
 use yrs::types::text::TextItem;
 
 const TOP: &str = "doc";
-pub(super) const BOUNDARY: &str = "block";
+pub(crate) const BOUNDARY: &str = "block";
 const PARAGRAPH: &str = "paragraph";
 pub(super) const MAX_PATH_ENTRIES: usize = 64;
 const MAX_ID_BYTES: usize = 32;
@@ -620,7 +620,45 @@ pub(super) struct Trace {
     generation: Option<u64>,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum KeptAt {
+    Line(yrs::ClientID, u32, &'static str),
+    Callout(String),
+}
+
 impl Trace {
+    pub(super) fn kept_content(&self) -> BTreeSet<(KeptAt, String)> {
+        let mut kept = BTreeSet::new();
+        for line in &self.lines {
+            let boundary = line
+                .boundary
+                .as_ref()
+                .map(|boundary| AsRef::<Branch>::as_ref(boundary).id());
+            if let Some(yrs::branch::BranchID::Nested(id)) = boundary {
+                for name in ["tex", "source"] {
+                    match line.attributes.get(name) {
+                        Some(Any::String(value)) if !value.is_empty() => {
+                            kept.insert((
+                                KeptAt::Line(id.client, id.clock, name),
+                                value.to_string(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            for frame in line.frames.iter().map(|&frame| &self.frames[frame]) {
+                match frame.attributes.get("title") {
+                    Some(Any::String(title)) if frame.kind == "callout" && !title.is_empty() => {
+                        kept.insert((KeptAt::Callout(frame.id.clone()), title.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        kept
+    }
+
     fn line(
         &mut self,
         boundary: Option<yrs::XmlElementRef>,

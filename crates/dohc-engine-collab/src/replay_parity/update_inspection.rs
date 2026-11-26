@@ -23,13 +23,16 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yrs::block::{
-    BLOCK_ITEM_DELETED_REF_NUMBER, BLOCK_ITEM_FORMAT_REF_NUMBER, BLOCK_ITEM_TYPE_REF_NUMBER, ID,
+    BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER, BLOCK_ITEM_FORMAT_REF_NUMBER,
+    BLOCK_ITEM_TYPE_REF_NUMBER, ID,
 };
 use yrs::ClientID;
 
 use super::{
-    normalize_ranges, scan_v2, BlockDescriptor, BlockKind, ParentDescriptor, WireStructure,
+    normalize_ranges, scan_v2, xml_element_identity, BlockDescriptor, BlockKind,
+    ClockIdentityIndex, ClockIdentityRef, ParentDescriptor, WireStructure,
 };
+use crate::ydoc::{BOUNDARY, ROOT_CONTAINERS, ROOT_SEQUENCE};
 use crate::Ydoc;
 
 /// What [`inspect_update`] decided about one candidate update.
@@ -63,11 +66,17 @@ pub enum StructuralHold {
     /// scan rejects, such as a client's block section given twice, or a block
     /// whose origins sit in another parent or key.
     Unclassifiable,
+    /// In a format-2 note, a formula, raw source or callout title the head
+    /// shows is no longer shown as it was.
+    HiddenContent,
 }
 
 /// Decide whether applying `candidate` to `head` could delete, overwrite or
 /// reformat content `head` already holds. Base-state replacement, lineage and
-/// binding changes are decided by the caller.
+/// binding changes are decided by the caller. In a head that reads as format
+/// 2, marks, joins, boundary attributes and `containers` records may change,
+/// so long as every formula, raw source and callout title it shows still
+/// shows as it was.
 pub fn inspect_update(head: &Ydoc, candidate: &[u8]) -> UpdateInspection {
     match decide(head, candidate) {
         Ok(()) => UpdateInspection::Admissible,
@@ -79,7 +88,8 @@ fn decide(head: &Ydoc, candidate: &[u8]) -> Result<(), StructuralHold> {
     if head.has_pending_dependencies() {
         return Err(StructuralHold::PendingState);
     }
-    let known = scan_v2(&head.encode_full_state()).map_err(|_| StructuralHold::Unclassifiable)?;
+    let head_state = head.encode_full_state();
+    let known = scan_v2(&head_state).map_err(|_| StructuralHold::Unclassifiable)?;
     // yrs leaves a head Skip out of the clocks it knows, so a candidate block
     // filling one integrates even though the head's clock is past it.
     if known
@@ -91,7 +101,7 @@ fn decide(head: &Ydoc, candidate: &[u8]) -> Result<(), StructuralHold> {
         return Err(StructuralHold::PendingState);
     }
     let incoming = scan_v2(candidate).map_err(|_| StructuralHold::Unclassifiable)?;
-    let mut index = Index::new(&known);
+    let mut index = Index::new(&known, head.reads_as_format_two());
     let mut block_hold = None;
     let mut fresh = Vec::new();
     for (&client, blocks) in &incoming.blocks {
@@ -133,16 +143,30 @@ fn decide(head: &Ydoc, candidate: &[u8]) -> Result<(), StructuralHold> {
         for &(start, end) in ranges {
             for (start, end) in uncovered(historical, start, end) {
                 if start < live_end {
-                    return Err(StructuralHold::LiveDeletion);
+                    if !index.format_two {
+                        return Err(StructuralHold::LiveDeletion);
+                    }
+                    index.delete_live(*client, start, end.min(live_end))?;
                 }
-                unproven |= !uncovered(admitted, start, end).is_empty();
+                let start = start.max(live_end);
+                if start < end {
+                    unproven |= !uncovered(admitted, start, end).is_empty();
+                }
             }
         }
     }
     if unproven {
         return Err(StructuralHold::UnprovenDeletion);
     }
-    block_hold.map_or(Ok(()), Err)
+    block_hold.map_or(Ok(()), Err)?;
+    if index.reads_again {
+        return match Ydoc::hides_kept_content(&head_state, candidate) {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(StructuralHold::HiddenContent),
+            Err(_) => Err(StructuralHold::Unclassifiable),
+        };
+    }
+    Ok(())
 }
 
 /// The earlier-checked of two block holds.
@@ -195,12 +219,17 @@ struct Block<'a> {
 struct Index<'a> {
     clients: HashMap<ClientID, Vec<Block<'a>>>,
     known_clocks: &'a BTreeMap<ClientID, u32>,
+    identities: &'a ClockIdentityIndex,
+    format_two: bool,
+    boundary: String,
+    reads_again: bool,
+    records: HashSet<&'a str>,
     resolved: HashMap<At, Result<Effective<'a>, StructuralHold>>,
     admitted: HashMap<At, Result<(), StructuralHold>>,
 }
 
 impl<'a> Index<'a> {
-    fn new(known: &'a WireStructure) -> Self {
+    fn new(known: &'a WireStructure, format_two: bool) -> Self {
         let clients = known
             .blocks
             .iter()
@@ -215,6 +244,11 @@ impl<'a> Index<'a> {
         Index {
             clients,
             known_clocks: &known.claimed_clocks,
+            identities: &known.identities,
+            format_two,
+            boundary: xml_element_identity(BOUNDARY),
+            reads_again: false,
+            records: HashSet::new(),
             resolved: HashMap::new(),
             admitted: HashMap::new(),
         }
@@ -367,6 +401,7 @@ impl<'a> Index<'a> {
             return Ok(None);
         };
         let Effective { parent, key } = self.resolve(at)?;
+        let mut under_boundary = false;
         if let ParentDescriptor::Item(id) = parent {
             let parent_at = self.item_at(*id)?;
             let parent = self.block(parent_at);
@@ -380,15 +415,109 @@ impl<'a> Index<'a> {
                 }
                 _ => return Err(StructuralHold::Unclassifiable),
             }
+            under_boundary = self.format_two && self.is_boundary(parent_at)?;
         }
-        if key.is_some() {
+        if let Some(key) = key {
+            if self.format_two && content == BLOCK_ITEM_ANY_REF_NUMBER {
+                if under_boundary {
+                    self.reads_again = true;
+                    return Ok(None);
+                }
+                if is_root(parent, ROOT_CONTAINERS) {
+                    self.reads_again = true;
+                    self.records.insert(key);
+                    return Ok(None);
+                }
+            }
             return Err(StructuralHold::ExistingParentKey);
         }
         if content == BLOCK_ITEM_FORMAT_REF_NUMBER {
+            if self.format_two && is_root(parent, ROOT_SEQUENCE) {
+                return Ok(None);
+            }
             return Err(StructuralHold::ExistingTextFormat);
         }
         Ok(None)
     }
+
+    fn is_boundary(&mut self, at: At) -> Result<bool, StructuralHold> {
+        let block = self.block(at);
+        if block.fresh || block.kind != BlockKind::Item(BLOCK_ITEM_TYPE_REF_NUMBER) {
+            return Ok(false);
+        }
+        let named = matches!(
+            self.identities.identity_at(at.0, block.start),
+            Some(ClockIdentityRef::Typed { payload, .. }) if payload == self.boundary
+        );
+        if !named {
+            return Ok(false);
+        }
+        let Effective { parent, key } = self.resolve(at)?;
+        Ok(key.is_none() && is_root(parent, ROOT_SEQUENCE))
+    }
+
+    fn delete_live(
+        &mut self,
+        client: ClientID,
+        start: u32,
+        end: u32,
+    ) -> Result<(), StructuralHold> {
+        let blocks = self
+            .clients
+            .get(&client)
+            .ok_or(StructuralHold::LiveDeletion)?;
+        let mut index = blocks.partition_point(|block| block.end <= start);
+        let mut at = start;
+        while at < end {
+            let block = self
+                .clients
+                .get(&client)
+                .and_then(|blocks| blocks.get(index))
+                .filter(|block| block.start <= at && !block.fresh)
+                .ok_or(StructuralHold::LiveDeletion)?;
+            at = block.end;
+            self.may_delete((client, index))?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn may_delete(&mut self, at: At) -> Result<(), StructuralHold> {
+        let BlockKind::Item(content) = self.block(at).kind else {
+            return Err(StructuralHold::LiveDeletion);
+        };
+        let Effective { parent, key } = self.resolve(at)?;
+        let allowed = match (parent, key) {
+            (_, None) if is_root(parent, ROOT_SEQUENCE) => {
+                content == BLOCK_ITEM_FORMAT_REF_NUMBER || {
+                    let boundary = self.is_boundary(at)?;
+                    self.reads_again |= boundary;
+                    boundary
+                }
+            }
+            (_, Some(key)) if is_root(parent, ROOT_CONTAINERS) => {
+                let rewritten = content == BLOCK_ITEM_ANY_REF_NUMBER && self.records.contains(key);
+                self.reads_again |= rewritten;
+                rewritten
+            }
+            (ParentDescriptor::Item(id), Some(_)) if content == BLOCK_ITEM_ANY_REF_NUMBER => {
+                let parent_at = self.item_at(*id)?;
+                let boundary = self.is_boundary(parent_at)?;
+                self.reads_again |= boundary;
+                boundary
+            }
+            _ => false,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(StructuralHold::LiveDeletion)
+        }
+    }
+}
+
+fn is_root(parent: &ParentDescriptor, name: &str) -> bool {
+    matches!(parent, ParentDescriptor::Root(root) if root == name)
 }
 
 impl<'a> Block<'a> {
