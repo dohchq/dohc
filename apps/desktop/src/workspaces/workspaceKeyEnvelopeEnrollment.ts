@@ -172,7 +172,7 @@ export async function enrollWorkspaceKeyEnvelope(input: {
     return;
   }
 
-  if (dataKey === "missing" && input.resume && input.passphrase === undefined) return;
+  if (input.resume && input.passphrase === undefined) return;
   const envelopeJson = await downloadEnvelope(input.transport);
   if (envelopeJson === null) {
     if (dataKey === "missing") throw new Error(NO_PASSPHRASE_YET);

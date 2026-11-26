@@ -428,24 +428,27 @@ describe("workspace key-envelope daemon custody boundary", () => {
 });
 
 describe("workspace key-envelope resume", () => {
-  it("resumes a computer without the key and leaves its protected files locked", async () => {
-    let asked = false;
-    await enrollWorkspaceKeyEnvelope({
-      workspaceId: WORKSPACE_ID,
-      dataKey: "missing",
-      resume: true,
-      transport: {
-        downloadKeyEnvelope: async () => {
-          asked = true;
-          throw new Error("Resume asked the server for the key");
+  it.each(["missing", null] as const)(
+    "resumes a computer without the key and leaves protected files locked (%s)",
+    async (dataKey) => {
+      let asked = false;
+      await enrollWorkspaceKeyEnvelope({
+        workspaceId: WORKSPACE_ID,
+        dataKey,
+        resume: true,
+        transport: {
+          downloadKeyEnvelope: async () => {
+            asked = true;
+            throw new Error("Resume asked the server for the key");
+          },
+        } as never,
+        installDataKey: async () => {
+          throw new Error("Resume installed a key");
         },
-      } as never,
-      installDataKey: async () => {
-        throw new Error("Resume installed a key");
-      },
-    });
-    expect(asked).toBe(false);
-  });
+      });
+      expect(asked).toBe(false);
+    },
+  );
 });
 
 describe("workspace key-envelope conflict retries", () => {
