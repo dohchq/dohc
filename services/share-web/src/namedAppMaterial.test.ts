@@ -43,6 +43,11 @@ it("maps only the bound publication routes and forwards filtered account authori
       `/blobs/${"b".repeat(64)}?authorityRevision=3`,
       `/blobs/${"b".repeat(64)}?authorityRevision=3`,
     ],
+    [
+      "GET",
+      "/backend/events?authorityRevision=3&since=trips%3A1%2Cnotes%3A0&hold=25000",
+      "/events?authorityRevision=3&since=trips%3A1%2Cnotes%3A0&hold=25000",
+    ],
     ["POST", "/backend/attempt", "/attempt"],
     ["POST", "/backend/invoke", "/invoke"],
     ["POST", "/backend/upload", "/upload"],
@@ -87,6 +92,9 @@ it("refuses destination, publication, query, and method widening before forwardi
     [prefix + `/blobs/${"b".repeat(64)}?authorityRevision=1&authorityRevision=2`, "GET"],
     [prefix + `/blobs/${"b".repeat(64)}?authorityRevision=1&extra=true`, "GET"],
     [prefix + `/blobs/${"b".repeat(64)}?authorityRevision=0`, "GET"],
+    [prefix + "/backend/events", "GET"],
+    [prefix + "/backend/events?authorityRevision=1&since=&hold=0&extra=1", "GET"],
+    [prefix + "/backend/events?authorityRevision=1&since=&hold=0", "POST"],
     [prefix + "/backend/invoke", "DELETE"],
     [prefix + "/backend/invoke?caller=owner", "POST"],
   ])

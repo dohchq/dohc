@@ -2221,6 +2221,67 @@ it("lets the owner list, review, approve and open an official app over several C
     });
   expect((await added(id(1))).revision).toBeGreaterThan(0);
   expect((await added(id(11))).revision).toBeGreaterThan(0);
+  expect(f.host.appEventRevisions(launch, app, 1).collections).toEqual([
+    { dataset: "c0", datasetId: id(1), revision: f.host.datasetRevision("w", id(1)) },
+    { dataset: "c1", datasetId: id(11), revision: f.host.datasetRevision("w", id(11)) },
+  ]);
+});
+
+it("tells a member which of a workspace app's Collections changed only where they can read, and nothing once one is hidden", async () => {
+  const f = await memberFixture();
+  const second = await f.collection(id(11), "second");
+  f.host.setDataGrant(owner, {
+    workspaceId: "w",
+    datasetId: id(11),
+    grantId: "ana-grant",
+    grant: { ...anaGrant(second.revisionSha256), operationIds: [id(7)] },
+  });
+  const shared = f.app([memberRevision, second]);
+  const both = [
+    { dataset: "c0", datasetId: id(1), revision: f.host.datasetRevision("w", id(1)) },
+    { dataset: "c1", datasetId: id(11), revision: f.host.datasetRevision("w", id(11)) },
+  ];
+  expect(f.host.appEventRevisions(owner, shared, 1)).toEqual({
+    workspaceId: "w",
+    actor: "named:w:owner",
+    collections: both,
+  });
+  expect(f.host.appEventRevisions(ana, shared, 1)).toEqual({
+    workspaceId: "w",
+    actor: "named:w:ana",
+    collections: [both[0]],
+  });
+  expect(() => f.host.appEventRevisions(ana, shared, 2)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+  f.rule(null, "second");
+  expect(() => f.host.appEventRevisions(ana, shared, 1)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+  expect(f.host.appEventRevisions(owner, shared, 1).collections).toEqual(both);
+});
+
+it("tells a Member app's viewer only about Collections both they and the author can read", async () => {
+  const f = await memberAppFixture();
+  const second = await f.collection(id(11), "second");
+  for (const [grantId, operationIds] of [
+    ["ana-grant", [id(6), id(7)]],
+    ["ben-grant", [id(7)]],
+  ] as const)
+    f.host.setDataGrant(owner, {
+      workspaceId: "w",
+      datasetId: id(11),
+      grantId,
+      grant: { ...anaGrant(second.revisionSha256), operationIds: [...operationIds] },
+    });
+  const app = f.publish(undefined, ana, [memberRevision, second]);
+  f.allow(ben, app);
+  f.allow(owner, app);
+  expect(f.host.appEventRevisions(ben, app, 1)).toMatchObject({
+    actor: "named:w:ben",
+    collections: [{ dataset: "c0", datasetId: id(1) }],
+  });
+  expect(f.host.appEventRevisions(owner, app, 1).collections).toHaveLength(2);
 });
 
 it("lets the owner review a Member app on a phone and open it only once allowed, within both reaches", async () => {

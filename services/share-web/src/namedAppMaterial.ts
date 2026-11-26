@@ -25,8 +25,8 @@ function checked(options: MaterialOptions) {
 }
 
 /**
- * Sends a launch's request for its publication's descriptor, summary, blobs or
- * backend to the relay's workspace path for that publication, with `credential`
+ * Sends a launch's request for its publication's descriptor, summary, blobs,
+ * Collection changes or backend to the relay's workspace path for that publication, with `credential`
  * and the exchange key. Any other request is refused without reaching the relay.
  */
 function relayFetcher(
@@ -68,6 +68,12 @@ function relayFetcher(
       )
         return refuse();
       path = target + url.pathname.slice(prefix.length) + url.search;
+    } else if (
+      request.method === "GET" &&
+      url.pathname === prefix + "/backend/events" &&
+      [...url.searchParams.keys()].join() === "authorityRevision,since,hold"
+    ) {
+      path = target + "/events" + url.search;
     } else if (
       summary &&
       request.method === "POST" &&

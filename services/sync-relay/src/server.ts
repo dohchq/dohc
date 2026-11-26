@@ -283,6 +283,8 @@ export interface CreateSyncRelayHandlerOptions {
   linkLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
+  // A signed-in person's reads of their apps' Collection changes, keyed by person.
+  appEventReadRateLimiter?: TokenBucketLimiter;
   // Posts of notices to other people, keyed by sender.
   noticePostRateLimiter?: TokenBucketLimiter;
   // Changes to a workspace's automation host, and to the server's runs, keyed by owner.
@@ -413,6 +415,11 @@ export function createSyncRelayHandler({
     LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
+  appEventReadRateLimiter = new TokenBucketLimiter(
+    LINK_LOG_READ_BUCKET_CAPACITY,
+    LINK_LOG_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
+  ),
   noticePostRateLimiter = new TokenBucketLimiter(
     NOTICE_POST_BUCKET_CAPACITY,
     NOTICE_POST_REFILL_PER_SECOND,
@@ -1176,6 +1183,11 @@ export function createSyncRelayHandler({
     return { capabilityToken, capability };
   };
 
+  const limitAppEvents = (route: { action: string }, userId: string) => {
+    if (route.action === "events" && !appEventReadRateLimiter.allow(userId, nowMs()))
+      throw relayError("link_read_rate_limited");
+  };
+
   const requireFreshLinkRead = (
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
@@ -1759,6 +1771,7 @@ export function createSyncRelayHandler({
           )
             throw notFound();
           const { userId, guard } = await phoneApps.authorizeLaunch(launchId!, scope);
+          limitAppEvents(route, userId);
           // The guard goes with the request: rechecked after its body, and inside each commit.
           const answer = await respondToDatasetApp(
             request,
@@ -1797,6 +1810,7 @@ export function createSyncRelayHandler({
         }
         const actor = await resolveNamedActor(actorRequest, route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
+        limitAppEvents(route, actor.userId);
         const person =
           route.action === "consent" &&
           actorRequest === request &&
@@ -1816,7 +1830,12 @@ export function createSyncRelayHandler({
           userId: actor.userId,
           ...(person ? { person: true as const } : {}),
         };
-        return await respondToDatasetApp(request, route, auth);
+        const signedIn = async () => {
+          const again = await resolveActor(actorRequest, actor.workspaceId);
+          if (again.workspaceId !== actor.workspaceId || again.userId !== actor.userId)
+            throw notFound();
+        };
+        return await respondToDatasetApp(request, route, auth, false, signedIn);
       }
       if (route.route === "link-app-publication")
         return respondToLinkAppPublication(request, route);

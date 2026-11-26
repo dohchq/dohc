@@ -6,7 +6,7 @@ export type AppBackendAction =
   | "attempt"
   /** A published app's declared outside call, sent with a workspace secret. */
   | "external"
-  /** A link app waits here for its Collection to change. */
+  /** A published app waits here for its Collections to change. */
   | "events"
   | "descriptor"
   | "summary"

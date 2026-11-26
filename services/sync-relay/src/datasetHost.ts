@@ -1799,38 +1799,45 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       publication,
       servedPublication,
       externalPublication,
-      /** The revision of a link app's Collection, only while the link can run one of its reads now. */
-      appEventRevision(auth: AppBackendAuth, publicationId: string, authorityRevision: number) {
-        const published = auth.kind === "link" ? publication(auth, publicationId) : null;
-        const cap = published?.capability;
-        if (!published || !cap || published.authorityRevision !== authorityRevision)
+      /** The revisions of a published app's Collections that the caller can run one of its reads on now. */
+      appEventRevisions(auth: AppBackendAuth, publicationId: string, authorityRevision: number) {
+        const published = publication(auth, publicationId);
+        if (!published || published.local || published.authorityRevision !== authorityRevision)
           throw notFound();
-        const caller = published.authority.caller;
-        const readable = cap.operations.some((operation) => {
-          if (!operation.readOnly) return false;
-          try {
-            host.authorize(auth, {
-              workspaceId: published.workspaceId,
-              datasetId: cap.datasetId,
-              revision: cap.revision,
-              revisionSha256: cap.revisionSha256,
-              operationId: operation.operationId,
-              access: { kind: "app", appId: publicationId },
-            });
-            return true;
-          } catch (error) {
-            if (error instanceof DatasetHostError) return false;
-            throw error;
-          }
-        });
-        if (!readable || caller.kind !== "link") throw notFound();
-        return {
-          workspaceId: published.workspaceId,
-          datasetId: cap.datasetId,
-          grantId: caller.grantId,
+        const { workspaceId } = published;
+        const readable = (cap: AppDatasetCapability) =>
+          cap.operations.some((operation) => {
+            if (!operation.readOnly) return false;
+            try {
+              host.authorize(auth, {
+                workspaceId,
+                datasetId: cap.datasetId,
+                revision: cap.revision,
+                revisionSha256: cap.revisionSha256,
+                operationId: operation.operationId,
+                access: { kind: "app", appId: publicationId },
+              });
+              return true;
+            } catch (error) {
+              if (error instanceof DatasetHostError) return false;
+              if (error instanceof RelayError && error.code === "not_found") return false;
+              throw error;
+            }
+          });
+        const collections = published.capabilities.filter(readable).map((cap) => ({
           dataset: cap.alias ?? "",
-          revision: datasetRevision(published.workspaceId, cap.datasetId),
-        };
+          datasetId: cap.datasetId,
+          revision: datasetRevision(workspaceId, cap.datasetId),
+        }));
+        const caller = published.authority.caller;
+        const actor =
+          auth.kind === "named"
+            ? `named:${workspaceId}:${auth.userId}`
+            : caller.kind === "link"
+              ? `link:${caller.grantId}`
+              : null;
+        if (!actor || !collections.length) throw notFound();
+        return { workspaceId, actor, collections };
       },
       datasetRevision,
       requireCollectionFile,

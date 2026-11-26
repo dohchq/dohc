@@ -311,16 +311,22 @@ Shared datasets have one configured writer; unavailable hosts cannot accept
 offline shared writes. Cross-dataset transactions are unsupported.
 See the [runtime contract](../../packages/app-backend-runtime/README.md).
 
-A link app hears that its Collection changed through a held read,
-`/sync/link/app-publications/<id>/backend/events`. It answers only the
-Collection's alias and revision, so a link holder learns when anyone writes
-there, but nothing about what was written. The relay answers only while the
-link can run one of the app's read operations: the same check an invoke makes,
-including pause, block, narrowing, archive, and withdrawal. A link that can only
-write gets no answer. The relay checks again before every answer, and wakes held
-reads at least once a second while writes happen, so an ended link's held read
-is refused within about a second. Held reads count against the link read
-budget, at most 256 per link grant and 1,024 in all.
+A published app hears that its Collections changed through a held read:
+`/sync/link/app-publications/<id>/backend/events` for a link, and
+`/sync/<workspace>/app-publications/<id>/backend/events` for a Workspace
+Publication, a Member app, or a phone launch, which share-web reaches with the
+person's own sign-in or launch. It answers only each Collection's alias and
+revision, so a caller learns when anyone writes there, but nothing about what
+was written. It lists only the Collections where the caller can run one of the
+app's read operations: the same check an invoke makes, including pause, block,
+folder rules, a Member app's two reaches, narrowing, archive, and withdrawal.
+A Collection the caller can only write to is left out, and with none left the
+relay refuses. The relay checks access and the caller's sign-in or phone launch
+again before every answer. It wakes held reads at least once a second while writes
+happen, so a held read whose access ended is refused within about a second.
+Held reads are capped at 256 per link grant or per signed-in person in a
+workspace, and 1,024 in all. Link reads count against the link read budget, and
+signed-in reads against a budget of their own per person.
 See the [route tests](../../services/sync-relay/src/datasetRoutes.test.ts).
 
 Persistent Collection workers isolate SQLite memory differently by host runtime.
