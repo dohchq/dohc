@@ -719,7 +719,14 @@ it("runs a shared app's outside calls on the server with the secret its owner ap
 
 it("runs the outside calls of an app approved on the owner's computer, for the owner alone, until it is withdrawn", async () => {
   const sent: SafeOutboundRequest[] = [];
-  const f = await httpFixture(undefined, true, limits, definition, {
+  let clientKind: "browser" | "desktop" = "browser";
+  const f = await httpFixture(undefined, false, limits, definition, {
+    resolveAccountSession: async (request) => ({
+      userId: request.headers.get("authorization")!.slice(7),
+      sessionId: "session",
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind,
+    }),
     appExternalTransport: {
       resolve: async (rawUrl) => {
         const url = new URL(rawUrl);
@@ -781,6 +788,10 @@ it("runs the outside calls of an app approved on the owner's computer, for the o
       },
     }),
   };
+  expect(await (await f.http("w/local-apps", { localApp: candidate })).json()).toMatchObject({
+    error: "Approve an app that calls outside services from the dohc desktop app.",
+  });
+  clientKind = "desktop";
   const approved = await f.http("w/local-apps", { localApp: candidate });
   expect(approved.status).toBe(200);
   const { publicationId, authorityRevision } = (await approved.json()) as {

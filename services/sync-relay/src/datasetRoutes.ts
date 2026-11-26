@@ -306,7 +306,17 @@ export function createDatasetRoutes(
     request: Request,
     route: DatasetRoute,
     auth: Extract<AppBackendAuth, { kind: "named" }>,
+    fromDesktop: () => Promise<boolean> = async () => false,
   ): Promise<Response> => {
+    const localApp = async (raw: object) => {
+      const candidate = record(raw, ["localApp"]).localApp;
+      if (Object.hasOwn(Object(candidate), "external") && !(await fromDesktop()))
+        throw relayError(
+          "conflict",
+          "Approve an app that calls outside services from the dohc desktop app.",
+        );
+      return candidate;
+    };
     if (route.action === "import") {
       if (!route.transferId || !["GET", "POST"].includes(request.method))
         throw relayError("method_not_allowed");
@@ -823,7 +833,7 @@ export function createDatasetRoutes(
           if (raw && typeof raw === "object" && Object.hasOwn(raw, "localApp")) {
             return host.approveLocalAppWorkspace(auth, {
               workspaceId: route.workspaceId,
-              candidate: record(raw, ["localApp"]).localApp,
+              candidate: await localApp(raw),
             });
           }
           const body = record(raw, ["publicationId", "enabled"]);
@@ -839,7 +849,7 @@ export function createDatasetRoutes(
           if (raw && typeof raw === "object" && Object.hasOwn(raw, "localApp"))
             return host.approveLocalApp(auth, {
               ...scope,
-              candidate: record(raw, ["localApp"]).localApp,
+              candidate: await localApp(raw),
             });
           const body = record(raw, ["publicationId", "enabled"]);
           if (typeof body.enabled !== "boolean") throw badRequest("Invalid app binding.");
@@ -984,13 +994,14 @@ export function createDatasetAppRoutes(
       }
     }
     if (route.action === "external") {
-      if (!options.external || !options.publications) throw notFound();
+      if (!options.external) throw notFound();
       if (request.method !== "POST") throw relayError("method_not_allowed");
       if (new URL(request.url).search) throw badRequest("App operations do not accept a query.");
       const served = {
         publicationId: route.publicationId,
         ...host.externalPublication(auth, route.publicationId),
       };
+      if (!options.publications && !served.local) throw notFound();
       const signal = AbortSignal.any([
         request.signal,
         storage.unavailable,

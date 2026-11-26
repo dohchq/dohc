@@ -57,7 +57,10 @@ export function createLocalUnconnectedApps(options: {
       return options.store.activate(
         { kind: "unconnected", resourceId: "", publicationId, prepared, agent },
         signal,
-        (_previous, displaced, commit) => displace(displaced, commit),
+        (previous, displaced, commit) =>
+          displace(displaced, () =>
+            displace(previous?.publicationId === publicationId ? undefined : previous, commit),
+          ),
       );
     },
     describe(value: LocalAppRow) {

@@ -140,6 +140,12 @@ export async function startTestRelay(
     nowMs: () => Date.now(),
     // Only the owner calls in these tests.
     resolveActor: (_request, workspaceId) => ({ workspaceId, userId: "owner" }),
+    resolveAccountSession: async () => ({
+      userId: "owner",
+      sessionId: "desktop",
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
+    }),
     ...options,
   });
   const server = serveFetchHandler({

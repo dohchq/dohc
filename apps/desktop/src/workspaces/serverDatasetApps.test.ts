@@ -835,11 +835,20 @@ it("sends a synced workspace's outside call through its server, which adds the s
     },
   );
   const published = await host.apps.activate(app, new AbortController().signal);
-  const call = () =>
+  const call = (approved = published) =>
     host.apps.external!(
-      published.publicationId,
-      { authorityRevision: published.authorityRevision, operation: "events", input: {} },
+      approved.publicationId,
+      { authorityRevision: approved.authorityRevision, operation: "events", input: {} },
       new AbortController().signal,
+    );
+  const onServer = (publicationId: string) =>
+    expect.poll(
+      () =>
+        relay.storage.db
+          .prepare(
+            "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+          )
+          .get(publicationId)?.candidate,
     );
   // The server holds the workspace's secrets, and tells the owner what is missing.
   await expect(call()).rejects.toMatchObject({
@@ -875,13 +884,24 @@ it("sends a synced workspace's outside call through its server, which adds the s
   paused = "Sync is paused for this workspace.";
   await expect(call()).rejects.toMatchObject({ refusal: { code: "external_unavailable" } });
   expect(sent).toHaveLength(1);
-  await host.apps.withdraw(published.publicationId, published.authorityRevision);
-  await expect
-    .poll(
-      () =>
-        relay.storage.db
-          .prepare("SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w'")
-          .get()?.candidate,
-    )
-    .toBe("");
+  paused = null;
+  files.set("stats/main.ts", "export const version = 2;");
+  const updated = await host.apps.activate(
+    await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "stats", versionId: "main" },
+      {
+        deferredWrites: [],
+        adapter: sourceCaptureAdapter(files),
+        compile: compileClosedApp,
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        resolveDatasetRevision: async () => revision,
+      },
+    ),
+    new AbortController().signal,
+  );
+  await onServer(published.publicationId).toBe("");
+  expect(await call(updated)).toEqual({ status: 200, data: { events: 3 } });
+  await host.apps.withdraw(updated.publicationId, updated.authorityRevision);
+  await onServer(updated.publicationId).toBe("");
 });
