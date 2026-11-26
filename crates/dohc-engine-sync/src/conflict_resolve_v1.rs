@@ -7618,6 +7618,63 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_of_a_refused_format_two_successor_is_kept_with_it() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Text, Transact};
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let raw = yrs::Doc::with_client_id(11);
+        let successor_bytes = store
+            .get_binary_blob(&successor)
+            .expect("read successor")
+            .expect("successor blob");
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
+            .expect("load successor");
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
+            .insert(&mut raw.transact_mut(), 0, "z");
+        let edit = store
+            .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
+            .expect("edit blob");
+        let mut next = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false}),
+        );
+        next.relay_seq = Some(1);
+        let applied = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the pull goes on");
+        match applied.primary {
+            crate::ApplyDisposition::Refused(refusal) => {
+                assert_eq!(refusal.reason.message(), NEWER_BODY_FORMAT)
+            }
+            other => panic!("the edit was not refused as newer: {other:?}"),
+        }
+        let kept: Vec<(i64, String)> = store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT origin_seq,update_sha256 FROM replication_refused_ydoc_blobs \
+                     WHERE origin_id='peer' ORDER BY origin_seq",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()
+            })
+            .expect("kept blobs");
+        assert_eq!(kept, [(0, successor), (1, edit)]);
+    }
+
+    #[test]
     fn a_successor_that_splits_an_emoji_is_refused_and_the_pull_goes_on() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
         refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);

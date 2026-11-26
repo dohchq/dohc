@@ -4154,7 +4154,7 @@ fn a_format_two_base_on_an_engine_that_does_not_read_format_two_is_refused_for_i
     let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
     let base = note.encode_full_state();
     let claim = store.put_binary_blob(&base).unwrap();
-    let delta = note.richdoc_append_paragraph("Later");
+    let delta = format_two_sequence_edit(&note, 7, "z");
     let delta_sha = store.put_binary_blob(&delta).unwrap();
     let other = Ydoc::wire();
     other.plaintext_insert(0, "other");
@@ -4256,6 +4256,73 @@ fn kept_delta_and_queue(
         .unwrap()
 }
 
+pub(crate) fn format_two_sequence_edit(note: &Ydoc, client: u64, text: &str) -> Vec<u8> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Text, Transact};
+    let other = yrs::Doc::with_client_id(client);
+    other
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&note.encode_full_state()).expect("decode"))
+        .expect("load note");
+    let before = other.transact().state_vector();
+    let sequence = other.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
+    sequence.insert(&mut other.transact_mut(), 1, text);
+    other.transact().encode_state_as_update_v1(&before)
+}
+
+#[test]
+fn a_delta_parked_before_its_format_two_base_is_kept_with_the_base() {
+    let (_scratch, mut store) = test_store();
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let claim = store.put_binary_blob(&note.encode_full_state()).unwrap();
+    let delta = store
+        .put_binary_blob(&format_two_sequence_edit(&note, 7, "z"))
+        .unwrap();
+    let payload = |blob: &str, base: bool| json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"richdoc","updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":base});
+    let mut outcomes = Vec::new();
+    for (origin, relay_seq, blob, base) in [("editor", 1, &delta, false), ("peer", 2, &claim, true)]
+    {
+        let mut arriving = envelope(origin, 0, "ws", payload(blob, base));
+        arriving.op_kind = "ydoc.update".into();
+        arriving.relay_seq = Some(relay_seq);
+        outcomes.push(
+            apply_ydoc_envelope(
+                &mut store,
+                &mut Default::default(),
+                &arriving,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap()
+            .primary,
+        );
+    }
+    assert!(
+        matches!(&outcomes[0], ApplyDisposition::Applied(result) if result.deferred),
+        "{:?}",
+        outcomes[0]
+    );
+    match &outcomes[1] {
+        ApplyDisposition::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { reason },
+            ..
+        }) => assert_eq!(reason, "ydoc-note-uses-a-newer-body-format"),
+        refused => panic!("the base was not refused as newer: {refused:?}"),
+    }
+    assert_eq!(
+        kept_delta_and_queue(&store, "editor", 0),
+        (Some(delta.clone()), 0)
+    );
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    crate::drain_deferred_ydoc_for_key(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("nothing is left to wait for the base");
+}
+
 #[test]
 fn a_delta_for_a_kept_format_two_base_behind_a_format_one_head_is_kept_too() {
     let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
@@ -4266,7 +4333,7 @@ fn a_delta_for_a_kept_format_two_base_behind_a_format_one_head_is_kept_too() {
         let (_scratch, mut store) = test_store();
         let newer = store.put_binary_blob(&note.encode_full_state()).unwrap();
         let later = store
-            .put_binary_blob(&note.richdoc_append_paragraph("Later"))
+            .put_binary_blob(&format_two_sequence_edit(&note, 7, "z"))
             .unwrap();
         let head_claim = store.put_binary_blob(&head.encode_full_state()).unwrap();
         let more = store

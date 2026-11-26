@@ -3470,7 +3470,7 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
     use yrs::{ReadTxn, Text, Transact};
     let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
     let base = note.encode_full_state();
-    let typed = |client: u64| {
+    let typed = |client: u64, letter: &str| {
         let other = yrs::Doc::with_client_id(client);
         other
             .transact_mut()
@@ -3478,10 +3478,11 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
             .expect("load note");
         let before = other.transact().state_vector();
         let sequence = other.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
-        sequence.insert(&mut other.transact_mut(), 1, "z");
+        sequence.insert(&mut other.transact_mut(), 1, letter);
         let after = other.transact();
         after.encode_state_as_update_v1(&before)
     };
+    let held = typed(6, "y");
     let mut ts = fresh_store("format-two-switch-off");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -3497,6 +3498,21 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
             )
             .expect("claim format-2 base"),
         );
+        apply_remote_update(
+            &mut ts.store,
+            &mut WriterDocCache::new(),
+            &key,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 1,
+                bytes: held.clone(),
+            },
+            None,
+            None,
+            &NoFaults,
+            1_050,
+        )
+        .expect("a typed letter applies");
     });
     let before = load_persisted(&ts.store, &key)
         .expect("load")
@@ -3507,8 +3523,8 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
         &key,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
-            origin_seq: 1,
-            bytes: typed(7),
+            origin_seq: 2,
+            bytes: typed(7, "z"),
         },
         None,
         None,
@@ -3520,11 +3536,34 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
         remote.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
         "{remote:?}"
     );
+    let deduped = ts
+        .store
+        .write_with(&NoFaults, |tx| {
+            apply_remote_update_in_transaction_with_projection(
+                tx,
+                &WriterDocCache::new(),
+                &mut RemoteAppendProbe::default(),
+                &key,
+                &RemoteUpdate {
+                    origin_id: "elsewhere".to_owned(),
+                    origin_seq: 1,
+                    bytes: held.clone(),
+                },
+                None,
+                None,
+                1_100,
+            )
+        })
+        .map(drop);
+    assert!(
+        deduped.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{deduped:?}"
+    );
     let local = record_local_update(
         &mut ts.store,
         &mut WriterDocCache::new(),
         &key,
-        &typed(8),
+        &typed(8, "z"),
         LocalAppend::default(),
         &NoFaults,
         1_100,
@@ -3551,15 +3590,25 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
         folded.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
         "{folded:?}"
     );
+    let frontmatter = after
+        .doc
+        .replace_frontmatter_for_fold("---\nstatus: open\n---\nA note.\n")
+        .map(drop);
+    assert!(
+        frontmatter.as_ref().err().map(CollabError::code)
+            == Some("ydoc-note-uses-a-newer-body-format"),
+        "{frontmatter:?}"
+    );
     dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
         let reread = load_persisted(&ts.store, &key)
             .expect("load")
             .expect("note");
         let text = reread.doc.project(ContentKind::Richdoc).expect("project");
         assert!(
-            text.content.contains("A note.") && !text.content.contains('z'),
+            text.content.contains('y') && !text.content.contains('z'),
             "{}",
             text.content
         );
+        assert!(!text.content.contains("status"), "{}", text.content);
     });
 }
