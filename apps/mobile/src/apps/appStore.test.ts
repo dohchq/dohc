@@ -278,7 +278,11 @@ describe("teardown", () => {
     const cases: [string, Answer[], boolean][] = [
       ["withdrawn", [page([version(B, true, "trip")])], true],
       ["revoked elsewhere", [page([version(A)])], true],
-      ["a link version beside a newer one", [page([version(B, false, "events/signup", true)])], true],
+      [
+        "a link version beside a newer one",
+        [page([version(B, false, "events/signup", true)])],
+        true,
+      ],
       ["revoked beside a newer version", [page([version(A), version(B, true)])], true],
       ["still approved", [page([version(A, true)])], false],
       ["a failed read", [{ status: 503 }], false],
