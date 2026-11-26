@@ -3571,6 +3571,25 @@ export async function listSitePackages(
   return mapped.sort((a, b) => a.root.localeCompare(b.root));
 }
 
+export async function listSiteRoots(
+  rootPath: string,
+  ownedListing: Pick<ListWorkspaceFilesResult, "files">,
+): Promise<Array<Pick<SitePackageInfo, "root" | "title" | "entryPath" | "sourceFiles">>> {
+  const sources = await Promise.all(
+    ownedListing.files.map((file) => sourceForFile(rootPath, file.path)),
+  );
+  const paths = ownedListing.files.map((file) => file.path).sort();
+  return discoverSites(sources).map((site) => {
+    const root = normalizeRoot(site.root);
+    return {
+      root,
+      title: site.title,
+      entryPath: entryPathFor(root, site.entry),
+      sourceFiles: paths.filter((path) => isUnder(root, path)),
+    };
+  });
+}
+
 export async function getDetectedSitePackage(
   rootPath: string,
   site: WorkspaceSite,

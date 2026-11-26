@@ -8,6 +8,7 @@ import type { SitePreviewMode } from "../ipc/bridgeContract";
 import {
   getDetectedSitePackage,
   listSitePackages,
+  listSiteRoots,
   sourceForFile,
   type SitePackageInfo,
 } from "./sitePackage";
@@ -22,15 +23,17 @@ export interface OwnedSiteCatalog<Workspace> {
   ): Promise<SitePackageInfo | null>;
 }
 
+const ownedListing = async (reads: OwnedWorkspaceReadPort) =>
+  (await reads.prepareSearch()).listing ?? (await reads.listFiles());
+
+export const listOwnedSiteRoots = async (rootPath: string, reads: OwnedWorkspaceReadPort) =>
+  listSiteRoots(rootPath, await ownedListing(reads));
+
 export function createOwnedSiteCatalog<Workspace extends { rootPath: string }>(input: {
   reads(workspace: Workspace): OwnedWorkspaceReadPort;
 }): OwnedSiteCatalog<Workspace> {
-  const listOwnedPackages = async (workspace: Workspace) => {
-    const reads = input.reads(workspace);
-    const searchView = await reads.prepareSearch();
-    const listed = searchView.listing ?? (await reads.listFiles());
-    return listSitePackages(workspace.rootPath, listed);
-  };
+  const listOwnedPackages = async (workspace: Workspace) =>
+    listSitePackages(workspace.rootPath, await ownedListing(input.reads(workspace)));
 
   return {
     list: listOwnedPackages,

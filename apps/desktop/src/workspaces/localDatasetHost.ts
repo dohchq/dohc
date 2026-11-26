@@ -53,7 +53,10 @@ import {
   type JsonValue,
 } from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
-import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import {
+  parseAppPublicationCandidate,
+  type AppPublicationCandidate,
+} from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import type { LocalAppExternal } from "./localAppExternal";
@@ -2319,7 +2322,7 @@ export async function localDatasetStoreId(workspaceRoot: string): Promise<string
 
 export async function readLocalAppApprovals(
   workspaceRoot: string,
-): Promise<Array<{ appRoot: string; kind: string; resourceId: string }>> {
+): Promise<Array<{ appRoot: string; targets: string[]; manifestSha256: string | null }>> {
   return withStoreHere(await realpath(workspaceRoot), async (path) => {
     if (path === null) return [];
     const db = openStore(path, true);
@@ -2327,16 +2330,25 @@ export async function readLocalAppApprovals(
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='local_app_roots'").get()) return [];
       const active = (table: string) =>
         `${table} ON r.active_kind=? AND p.publication_id=r.active_publication_id AND p.active=1 AND p.authority_revision=r.revision`;
-      return db
+      const rows = db
         .prepare(
-          `SELECT r.app_root AS appRoot, r.active_kind AS kind, p.collection_path AS resourceId FROM local_app_roots r JOIN ${active("local_collection_apps p")}
-           UNION ALL SELECT r.app_root, r.active_kind, p.dataset_id FROM local_app_roots r JOIN ${active("local_dataset_apps p")} ORDER BY appRoot`,
+          `SELECT r.app_root AS appRoot, p.candidate FROM local_app_roots r JOIN ${active("local_collection_apps p")}
+           UNION ALL SELECT r.app_root, p.candidate FROM local_app_roots r JOIN ${active("local_dataset_apps p")} ORDER BY appRoot`,
         )
-        .all("collection", "dataset") as Array<{
-        appRoot: string;
-        kind: string;
-        resourceId: string;
-      }>;
+        .all("collection", "dataset") as Array<{ appRoot: string; candidate: string }>;
+      return rows.map(({ appRoot, candidate }) => {
+        const { capabilities, inputs } = JSON.parse(candidate) as AppPublicationCandidate;
+        return {
+          appRoot,
+          targets: capabilities.map((capability) =>
+            capability.kind === "dataset"
+              ? `dataset-id:${capability.datasetId}`
+              : `collection:${capability.collectionPath}`,
+          ),
+          manifestSha256:
+            inputs.find((input) => input.path === `${appRoot}/app.publish.json`)?.sha256 ?? null,
+        };
+      });
     } finally {
       db.close();
     }

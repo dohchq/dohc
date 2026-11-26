@@ -378,6 +378,7 @@ async function fixture(
     create,
     list,
     inspect,
+    sources,
   };
 }
 
@@ -669,12 +670,18 @@ body`,
 
   it("lists each app root's active approval read-only, following a move between kinds", async () => {
     const f = await fixture();
+    const manifestSha256 = () =>
+      createHash("sha256").update(f.sources.get("trip/app.publish.json")!).digest("hex");
     expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
-      { appRoot: "trip", kind: "collection", resourceId: "trip/responses" },
+      { appRoot: "trip", targets: ["collection:trip/responses"], manifestSha256: manifestSha256() },
     ]);
     await f.host.apps.activate(await f.datasetApp(f.host), signal());
     expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
-      { appRoot: "trip", kind: "dataset", resourceId: definition.datasetId },
+      {
+        appRoot: "trip",
+        targets: [`dataset-id:${definition.datasetId}`],
+        manifestSha256: manifestSha256(),
+      },
     ]);
   });
 

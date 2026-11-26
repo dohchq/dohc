@@ -60,6 +60,12 @@ automations:
       - post: Added
         group: Trip
       - run-file: scripts/sum.js
+  - id: copy
+    name: Copy task
+    when: record-added
+    do:
+      - add-record:
+          Name: '=record.Name'
 `;
 
 function workspace(files: Record<string, string>, overrides: Partial<RegistryEntry> = {}) {
@@ -97,7 +103,7 @@ function workspace(files: Record<string, string>, overrides: Partial<RegistryEnt
     })),
   };
   const approvals: GraphApproval[] = [
-    { appRoot: "apps/board", kind: "collection", resourceId: "Tasks" },
+    { appRoot: "apps/board", targets: ["collection:Tasks"], manifestSha256: null },
   ];
   const deps = {
     withAdapter: async <T>(_workspace: RegistryEntry, run: (value: never) => Promise<T>) =>
@@ -140,6 +146,7 @@ it("connects Collections, Datasets, apps, automations, and Groups from workspace
   expect(result.complete).toBe(true);
   expect(result.nodes.map((node) => node.id)).toEqual([
     "app:apps/board",
+    "automation:collection:tasks-yaml#copy",
     "automation:collection:tasks-yaml#from-chat",
     "collection:People",
     "collection:Tasks",
@@ -165,6 +172,11 @@ it("connects Collections, Datasets, apps, automations, and Groups from workspace
       approval: "requested",
     },
     {
+      source: "automation:collection:tasks-yaml#copy",
+      target: "collection:Tasks",
+      kind: "automation-action",
+    },
+    {
       source: "automation:collection:tasks-yaml#from-chat",
       target: "Tasks/scripts/sum.js",
       kind: "automation-runs-file",
@@ -181,7 +193,7 @@ it("connects Collections, Datasets, apps, automations, and Groups from workspace
     },
     {
       source: "collection:Tasks",
-      target: "automation:collection:tasks-yaml#from-chat",
+      target: "automation:collection:tasks-yaml#copy",
       kind: "automation-trigger",
     },
     { source: "collection:Tasks", target: "collection:People", kind: "relation" },
@@ -208,6 +220,47 @@ it("marks access the manifest requests but this computer has not approved", asyn
   ]);
 });
 
+it("shows every Dataset an app was approved for, until its manifest changes", async () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  const files: Record<string, string> = {
+    ...FILES,
+    "Trips/dataset.json": dataset(20, "Trips", "Trips"),
+  };
+  const { reader, entry, approvals } = workspace(files);
+  approvals.splice(0, 1, {
+    appRoot: "apps/board",
+    targets: [`dataset-id:${uuid(10)}`, `dataset-id:${uuid(20)}`],
+    manifestSha256: sha(files["apps/board/app.publish.json"]!),
+  });
+  const appEdges = async () =>
+    (await reader.connections(entry)).edges
+      .filter((edge) => edge.kind === "app-uses-data")
+      .map((edge) => [edge.target, edge.approval]);
+  expect(await appEdges()).toEqual([
+    ["dataset:Ledger/dataset.json", "approved"],
+    ["dataset:Trips/dataset.json", "approved"],
+  ]);
+  files["apps/board/app.publish.json"] = files["apps/board/app.publish.json"]!.replace(
+    '["list"]',
+    '["list","submit"]',
+  );
+  expect(await appEdges()).toEqual([
+    ["dataset:Ledger/dataset.json", "requested"],
+    ["dataset:Trips/dataset.json", "approved"],
+  ]);
+});
+
+it("cuts a long title so the answer stays valid", async () => {
+  const { reader, entry, adapter } = workspace(FILES);
+  adapter.getCollection.mockResolvedValue({
+    path: "Tasks",
+    schema: { name: "T".repeat(5000), fields: [] },
+    recordCount: 0,
+  } as never);
+  const result = LinksConnectionsResult.parse(await reader.connections(entry));
+  expect(result.nodes.find((node) => node.id === "collection:Tasks")?.title).toHaveLength(200);
+});
+
 it("keeps one malformed manifest from failing the graph", async () => {
   const { reader, entry } = workspace({ ...FILES, "apps/board/app.publish.json": "{" });
   const result = await reader.connections(entry);
@@ -226,20 +279,23 @@ it("lists nothing for a received share and never reads its engine", async () => 
   expect(deps.groups).not.toHaveBeenCalled();
 });
 
-it("reuses the answer until a structural file or an approval changes", async () => {
+it("reuses the answer until a structural file, a record, or an approval changes", async () => {
   const files: Record<string, string> = { ...FILES };
   const { reader, entry, adapter, approvals } = workspace(files);
   await reader.connections(entry);
-  files["Tasks/one.md"] = "# Edited";
+  files["apps/board/index.html"] = "<p>Edited</p>";
   await reader.connections(entry);
   expect(adapter.listCollections).toHaveBeenCalledTimes(1);
   files["Tasks/automations.yaml"] = AUTOMATIONS.replace("Tasks from chat", "Chat tasks");
   const renamed = await reader.connections(entry);
   expect(adapter.listCollections).toHaveBeenCalledTimes(2);
-  expect(renamed.nodes.find((node) => node.kind === "automation")?.title).toBe("Chat tasks");
-  approvals.splice(0);
+  expect(renamed.nodes.find((node) => node.id.endsWith("#from-chat"))?.title).toBe("Chat tasks");
+  files["Tasks/one.md"] = "---\nName: Fixed\n---\n";
   await reader.connections(entry);
   expect(adapter.listCollections).toHaveBeenCalledTimes(3);
+  approvals.splice(0);
+  await reader.connections(entry);
+  expect(adapter.listCollections).toHaveBeenCalledTimes(4);
 });
 
 it("cuts an answer over 64 KiB to whole nodes and reports it incomplete", () => {

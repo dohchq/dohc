@@ -921,7 +921,7 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import { readFolderAppWorkspaceSources } from "./workspaces/folderAppWorkspaceSources";
 import { createFolderAppDetection } from "./workspaces/folderAppDetection";
-import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
+import { createOwnedSiteCatalog, listOwnedSiteRoots } from "./workspaces/ownedSiteCatalog";
 import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
 import { resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
@@ -4483,7 +4483,7 @@ const workspaceConnections = createWorkspaceGraphConnections<RegistryEntry>({
   withAdapter: withEngineAdapter,
   apps: (workspace) =>
     withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
-      ownedSiteCatalog.list(operation.workspace),
+      listOwnedSiteRoots(operation.workspace.rootPath, ownedWorkspaceReadsFor(operation.workspace)),
     ),
   approvals: (workspace) => readLocalAppApprovals(workspace.rootPath),
   groups: async (workspace) =>

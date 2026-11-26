@@ -14,6 +14,7 @@ import {
   type LinksConnectionNode,
   type LinksConnectionsResult,
 } from "@dohc/workspace-contracts/links";
+import { cutText } from "@dohc/workspace-contracts/names";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isDatasetDescriptor } from "./datasetAddress";
@@ -37,7 +38,7 @@ export type GraphApp = {
   entryPath: string | null;
   sourceFiles: string[];
 };
-export type GraphApproval = { appRoot: string; kind: string; resourceId: string };
+export type GraphApproval = { appRoot: string; targets: string[]; manifestSha256: string | null };
 export type GraphGroup = { id: string; kind: string; name: string; slug: string };
 
 export const CONNECTION_LIMITS = { collections: 200, datasets: 100, apps: 100, records: 200 };
@@ -111,9 +112,14 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       deps.groups(workspace),
     ]);
     const signature = createHash("sha256").update(JSON.stringify([versionId, approvals, groups]));
+    const collectionFolders = new Set(
+      files
+        .filter((file) => posix.basename(file.path) === "collection.yaml")
+        .map((file) => posix.dirname(file.path)),
+    );
     for (const file of files)
       signature.update(
-        STRUCTURAL.has(posix.basename(file.path))
+        STRUCTURAL.has(posix.basename(file.path)) || collectionFolders.has(posix.dirname(file.path))
           ? `${file.path}\0${file.sha256}\n`
           : `${file.path}\n`,
       );
@@ -121,7 +127,7 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
     const cached = cache.get(workspaceId);
     if (cached?.key === key) return cached.value;
 
-    const listed = new Set(files.map((file) => file.path));
+    const shas = new Map(files.map((file) => [file.path, file.sha256]));
     const nodes = new Map<string, LinksConnectionNode>();
     const edges = new Map<string, LinksConnectionEdge>();
     const records: LinksConnectionsResult["records"] = [];
@@ -135,7 +141,7 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         edges.set(JSON.stringify([value.source, value.target, value.kind, value.approval]), value);
     };
     const readText = async (path: string) => {
-      if (!listed.has(path)) return null;
+      if (!shas.has(path)) return null;
       const file = await adapter.readTextFile({
         workspaceId,
         versionId,
@@ -231,7 +237,7 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       return id;
     };
     const ownerFolders = [...owners.keys()].filter(
-      (folder) => folder !== "." && listed.has(join(folder, "automations.yaml")),
+      (folder) => folder !== "." && shas.has(join(folder, "automations.yaml")),
     );
     const automationFiles = await eachLimited(ownerFolders, async (folder) => ({
       folder,
@@ -254,18 +260,15 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
           title: automation.name,
           enabled: automation.enabled,
         });
-        edge({ source: owner.id, target: id, kind: "automation-trigger" });
-        if (automation.when.kind === "group-message") {
-          const group = groupNode(automation.when.group);
-          if (group) edge({ source: group, target: id, kind: "automation-trigger" });
-        }
+        const trigger =
+          automation.when.kind === "group-message" ? groupNode(automation.when.group) : owner.id;
+        if (trigger) edge({ source: trigger, target: id, kind: "automation-trigger" });
         for (const { step } of stepsInOrder(automation)) {
           const target =
             step.kind === "post"
               ? groupNode(step.group)
-              : (step.kind === "add-record" || step.kind === "find" || step.kind === "invoke") &&
-                  step.collection
-                ? owners.get(step.collection)?.id
+              : step.kind === "add-record" || step.kind === "find" || step.kind === "invoke"
+                ? owners.get(step.collection ?? folder)?.id
                 : null;
           if (target) edge({ source: id, target, kind: "automation-action" });
         }
@@ -300,32 +303,34 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         title: app.title,
         entryPath: app.entryPath,
       });
-      const approved = new Set(
-        approvals
-          .filter((approval) => approval.appRoot === app.root)
-          .map((approval) =>
-            approval.kind === "collection"
-              ? `collection:${approval.resourceId}`
-              : datasetIds.get(approval.resourceId),
-          )
-          .filter((target) => target !== undefined && nodes.has(target)),
-      );
-      for (const target of approved)
-        edge({ source: id, target: target!, kind: "app-uses-data", approval: "approved" });
+      const approval = approvals.find((entry) => entry.appRoot === app.root);
       const manifest = manifests[index];
-      const requested = [
-        ...(manifest?.collection ? [`collection:${manifest.collection.collectionPath}`] : []),
-        ...(manifest?.dataset ? [`dataset:${manifest.dataset.datasetPath}`] : []),
-        ...(manifest?.datasets ?? []).map((entry) => `dataset:${entry.reference.datasetPath}`),
-      ];
+      const requested =
+        approval && approval.manifestSha256 === shas.get(join(app.root, "app.publish.json"))
+          ? []
+          : [
+              ...(manifest?.collection ? [`collection:${manifest.collection.collectionPath}`] : []),
+              ...(manifest?.dataset ? [`dataset:${manifest.dataset.datasetPath}`] : []),
+              ...(manifest?.datasets ?? []).map(
+                (entry) => `dataset:${entry.reference.datasetPath}`,
+              ),
+            ].filter((target) => nodes.has(target));
+      for (const target of approval?.targets ?? []) {
+        const node = target.startsWith("dataset-id:")
+          ? datasetIds.get(target.slice("dataset-id:".length))
+          : target;
+        if (node && nodes.has(node) && !requested.includes(node))
+          edge({ source: id, target: node, kind: "app-uses-data", approval: "approved" });
+      }
       for (const target of requested)
-        if (!approved.has(target) && nodes.has(target))
-          edge({ source: id, target, kind: "app-uses-data", approval: "requested" });
+        edge({ source: id, target, kind: "app-uses-data", approval: "requested" });
     });
 
     const value = fitConnections({
       scope: "workspace",
-      nodes: [...nodes.values()].sort((a, b) => byText(a.id, b.id)),
+      nodes: [...nodes.values()]
+        .map((node) => ({ ...node, title: cutText(node.title, 200) }))
+        .sort((a, b) => byText(a.id, b.id)),
       edges: [...edges]
         .sort(([a], [b]) => byText(a, b))
         .map(([, value]) => value)

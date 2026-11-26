@@ -14,6 +14,7 @@ import {
   createLocalDatasetHost,
   type LocalDatasetAgent,
   type LocalDatasetHost,
+  readLocalAppApprovals,
 } from "./localDatasetHost";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
@@ -1006,6 +1007,10 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
       ],
     },
   ]);
+  expect(
+    (await readLocalAppApprovals(f.workspaceRoot)).find((entry) => entry.appRoot === "tower")
+      ?.targets,
+  ).toEqual([`dataset-id:${id(1)}`, `dataset-id:${id(101)}`]);
 
   await expect(
     f.host.apps.request(activated.publicationId, "invoke", {
