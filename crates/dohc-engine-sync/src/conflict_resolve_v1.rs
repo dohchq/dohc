@@ -3866,7 +3866,7 @@ fn prepare_local_lineage_in_tx(
                         content_kind: marker.content_kind,
                         result_sha256: &result.blob_sha256,
                     },
-                    doc.note_schema_version(),
+                    doc.successor_schema_version(),
                 );
                 let successor = fresh_successor_base(
                     &identity,

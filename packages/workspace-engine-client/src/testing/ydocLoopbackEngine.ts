@@ -133,28 +133,20 @@ function deriveObjectId(fileLookupKey: string): string {
 
 // Mirrors `dohc_engine_collab::seed_client_id`: one client per head moment,
 // so every device seeding one replicated head sends the same seed.
-function seedClientId(
-  workspace: string,
-  versionId: string,
-  objectId: string,
-  contentKind: YdocContentKind,
-  file: LoopbackFile,
+export function seedClientId(
+  fields: readonly [string, string, string, YdocContentKind, string, string],
+  schemaVersion: 1 | 2,
 ): number {
-  return (
-    createHash("sha256")
-      .update(
-        JSON.stringify([
-          workspace,
-          versionId,
-          objectId,
-          contentKind,
-          file.headMomentId,
-          sha256(file.content),
-        ]),
-      )
-      .digest()
-      .readUInt32BE(0) || 1
+  const hash = createHash("sha256").update(
+    schemaVersion === 2 ? "dohc:ydoc-seed-client:v1-format2" : "dohc:ydoc-seed-client:v1",
   );
+  for (const field of fields) {
+    const bytes = Buffer.from(field),
+      length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.length));
+    hash.update(length).update(bytes);
+  }
+  return Math.max(1, hash.digest().readUInt32BE(0));
 }
 
 function lineageKey(workspace: string, versionId: string, objectId: string): string {
@@ -321,6 +313,7 @@ export interface YdocLoopbackEngineOptions {
   // One deliberate exception mirrors the daemon exactly: a seed-only session
   //  settles without invoking this hook at all.
   materialize?: (input: { path: string; content: string }) => void;
+  newNoteBodySequence?: boolean;
 }
 
 export class YdocLoopbackEngine implements EngineTransport {
@@ -655,6 +648,8 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (seedBlobSha256 !== undefined && seed !== undefined)
       this.seedBlobs.set(seedBlobSha256, seed);
     const seedContent = seedBlobSha256 === undefined ? seed : undefined;
+    const seedSchemaVersion =
+      this.options.newNoteBodySequence === true && contentKind === "richdoc" ? 2 : 1;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
@@ -684,7 +679,18 @@ export class YdocLoopbackEngine implements EngineTransport {
         ...(seed !== undefined && file !== undefined
           ? {
               ...(seedContent !== undefined ? { seedContent } : { seedBlobSha256 }),
-              seedClientId: seedClientId(request.workspace, versionId, objectId, contentKind, file),
+              seedClientId: seedClientId(
+                [
+                  request.workspace,
+                  versionId,
+                  objectId,
+                  contentKind,
+                  file.headMomentId,
+                  sha256(file.content),
+                ],
+                seedSchemaVersion,
+              ),
+              ...(seedSchemaVersion === 2 ? { seedSchemaVersion } : {}),
             }
           : {}),
       },

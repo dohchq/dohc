@@ -30,7 +30,7 @@ import {
   type YdocAdapterSession,
   type YdocDeliveredHead,
 } from "./ydocLiveAdapter";
-import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
+import { seedClientId, YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
 import { isWellFormedUtf16 } from "./utf16Ledger";
 import {
   openEngineYdocProviderSession,
@@ -2408,6 +2408,52 @@ describe("seeding an absent lineage", () => {
     } finally {
       admitBodySequenceNotes(false);
     }
+  });
+
+  it("names the seed client the engine names, in each format", () => {
+    const fields = ["workspace", "main", "object", "richdoc", "moment", "blob"] as const;
+    expect(seedClientId(fields, 1)).toBe(3_076_933_556);
+    expect(seedClientId(fields, 2)).toBe(963_707_788);
+  });
+
+  it("seeds a new note in format 2 from an engine that writes new notes in format 2, and records an edit to it", async () => {
+    const content = "# Shared\n\nText\n";
+    const engine = new YdocLoopbackEngine({
+      newNoteBodySequence: true,
+      projectRichdoc: ydocProjection.yDocToMarkdown,
+    });
+    engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: PATH, content });
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    });
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "richdoc",
+    });
+    const [seed] = recordedUpdates(engine, true);
+    const note = new Y.Doc();
+    Y.applyUpdate(note, seed!);
+    expect(formatOf(note)).toEqual({
+      marker: 2,
+      underBody: false,
+      inSequence: true,
+      markdown: content,
+    });
+    const typed = new Y.Doc();
+    Y.applyUpdate(typed, Y.encodeStateAsUpdate(session.doc));
+    const before = Y.encodeStateVector(typed);
+    const sequence = typed.getText("sequence");
+    sequence.insert(sequence.length, " more");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(typed, before));
+    const [edit] = recordedUpdates(engine, false);
+    expect(clientsOf(edit!)).not.toContain([...clientsOf(seed!)][0]);
+    expect(engine.sessionText(engine.activeSessionIds()[0]!)).toBe("# Shared\n\nText more\n");
+    await session.close();
+    adapter.dispose();
   });
 
   it("refuses an open answer that names a format it does not know, and seeds nothing", async () => {

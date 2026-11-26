@@ -373,6 +373,10 @@ struct YdocOpenResult {
     /// device seeding the same head originates the same base.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_client_id: Option<u32>,
+    /// Set to 2 when the client must seed in format 2; see
+    /// `dohc_engine_collab::new_note_schema_version`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_schema_version: Option<u8>,
     /// Set instead of `seed_content` for a seed past the in-band cap: the
     /// digest the client reads the seed by through `versionedText.readBlob`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1793,6 +1797,9 @@ impl EngineService {
             },
             seed_content,
             seed_client_id: state.seed_client_id,
+            seed_schema_version: state
+                .seed_client_id
+                .and((state.seed_schema_version == 2).then_some(2)),
             seed_blob_sha256,
             artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
                 state
@@ -3462,6 +3469,7 @@ mod tests {
             .unwrap();
         drop(egress);
         assert_eq!(session["seedContent"], markdown);
+        assert!(session.get("seedSchemaVersion").is_none());
         service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
             "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true,
             "expectedLineageClaimId":session["lineageClaimId"]

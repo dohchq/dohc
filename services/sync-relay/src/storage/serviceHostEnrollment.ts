@@ -7,7 +7,7 @@ import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import * as Y from "yjs";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
-import { documentParams, liveJournalSeedClientId } from "./liveUpdateJournal";
+import { documentParams, liveJournalSeedClientIds } from "./liveUpdateJournal";
 import {
   effectiveShareSelector,
   isLiveEditShareSelector,
@@ -901,7 +901,7 @@ export function bindStoppedNoteClient(
       .get(workspaceId, objectId, lineageClaimId)
   )
     return;
-  const seed = liveJournalSeedClientId(storage, document);
+  const seeds = liveJournalSeedClientIds(storage, document);
   const blob = storage.db
     .prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
     .get(workspaceId, update);
@@ -915,7 +915,7 @@ export function bindStoppedNoteClient(
   const params = documentParams(document);
   const unbound = clients.filter(
     (clientId) =>
-      clientId !== seed &&
+      !seeds.includes(clientId) &&
       !storage.db
         .prepare(
           `SELECT 1 FROM ${LIVE_AUTHOR_CLIENTS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND client_id=?`,

@@ -294,6 +294,8 @@ function declareDohcRootSchema(doc: Y.Doc, contentKind?: YdocContentKind): void 
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+  doc.getText("sequence");
+  doc.getMap("containers");
   if (contentKind === "scene") {
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);

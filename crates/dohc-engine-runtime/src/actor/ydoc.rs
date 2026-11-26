@@ -71,6 +71,9 @@ pub struct YdocOpenState {
     /// The Yjs client the seed of `seed_content` must use. Present exactly
     /// when `seed_content` is; see [`dohc_engine_collab::seed_client_id`].
     pub seed_client_id: Option<u32>,
+    /// The rich-document schema version the seed of `seed_content` is
+    /// written in; see [`dohc_engine_collab::new_note_schema_version`].
+    pub seed_schema_version: u8,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
     /// Record facts the open's deferred drain committed, in drain order. The
@@ -2573,10 +2576,12 @@ pub(super) fn ydoc_open_state_on_store(
     let seed = (content_kind != ContentKind::Scene && !lineage_existing)
         .then_some(head.as_ref())
         .flatten();
+    let seed_schema_version = dohc_engine_collab::new_note_schema_version(content_kind);
     let seed_client_id = seed.map(|snapshot| {
         dohc_engine_collab::seed_client_id(
             &key,
             content_kind,
+            seed_schema_version,
             &snapshot.latest_moment_id,
             &snapshot.blob_sha256,
         )
@@ -2600,6 +2605,7 @@ pub(super) fn ydoc_open_state_on_store(
         restore_generation,
         seed_content: seed_client_id.and(head).map(|snapshot| snapshot.text),
         seed_client_id,
+        seed_schema_version,
         artifact_assets,
         seed_materialization_jobs,
         record_facts,
