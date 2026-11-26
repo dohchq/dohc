@@ -135,7 +135,7 @@ function mergedRows(rows: Row[]): Row[] {
     const group =
       row.kind === "action"
         ? `action ${row.key}`
-        : `${row.label}|${row.fields.map((field) => field.text).join(",")}`;
+        : JSON.stringify([row.label, row.fields.map((field) => field.text)]);
     const seen = byGroup.get(group);
     if (!seen) {
       byGroup.set(group, { ...row, fields: row.fields.map((field) => ({ ...field })) });
@@ -519,7 +519,7 @@ function AudienceTable({
         ).map((group) => (
           <tbody key={group.label}>
             <tr>
-              <th scope="colgroup" colSpan={4} className="px-3 pb-1 pt-3 text-left font-normal">
+              <th scope="rowgroup" colSpan={4} className="px-3 pb-1 pt-3 text-left font-normal">
                 <SectionLabel>{group.label}</SectionLabel>
               </th>
             </tr>
@@ -533,7 +533,6 @@ function AudienceTable({
                     <input
                       type="checkbox"
                       aria-label={`Let anyone with the link use ${operation.name}`}
-                      title={`Let anyone with the link use ${operation.name}`}
                       checked={choice!.selected.has(operation.operationId)}
                       disabled={choice!.disabled || choice!.shared.has(operation.operationId)}
                       {...(choice!.shared.has(operation.operationId)

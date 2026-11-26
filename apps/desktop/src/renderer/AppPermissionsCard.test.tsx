@@ -119,4 +119,36 @@ describe("AppAccessSummary multi-table wording", () => {
     const text = screen.getByTestId("app-access").textContent ?? "";
     expect(text).toContain("Expenses: Adds recordsTitle, CurrencyNew");
   });
+
+  it("keeps reads apart when a field name contains a comma", () => {
+    const read = (n: number, fields: string[]) => ({
+      operationId: id(n),
+      name: `list${n}`,
+      access: "owner" as const,
+      readOnly: true,
+      display: { kind: "read" as const, label: "List", fields },
+    });
+    const capability: AppDatasetCapability = {
+      kind: "dataset",
+      datasetId: id(1),
+      name: "Guests",
+      revision: 1,
+      revisionSha256: "a".repeat(64),
+      operationIds: [id(20), id(21)],
+      operations: [read(20, ["Record ID", "Last,First"]), read(21, ["Record ID", "Last", "First"])],
+    };
+
+    render(
+      <AppAccessSummary
+        capabilities={[capability]}
+        approved={null}
+        failed={false}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    const text = screen.getByTestId("app-access").textContent ?? "";
+    expect(text).toContain("Reads recordsRecord ID, Last,First");
+    expect(text).toContain("Reads recordsRecord ID, Last, First");
+  });
 });

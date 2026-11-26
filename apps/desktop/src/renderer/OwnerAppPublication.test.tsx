@@ -654,9 +654,7 @@ describe("owner app publication", () => {
         'Runs "Submit"',
       ),
     );
-    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain(
-      "Adds records with Item",
-    );
+    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain("Item");
   });
 
   it("shows plain-English dataset action summaries and surfaces address warnings in the share-link review card", async () => {
