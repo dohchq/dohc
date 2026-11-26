@@ -287,6 +287,20 @@ async fn startup_replay_settles_an_older_builds_pending_env_template_write() {
             .expect("pending jobs")
     };
     assert_eq!(pending(&database), 1);
+    let job_id: String = Connection::open(&database)
+        .expect("sqlite")
+        .query_row(
+            "SELECT job_id FROM materialization_jobs WHERE target_path = '.env.example'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job id");
+    let component: String = job_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let temp = root.join(format!(".dohc-write-{component}.tmp"));
+    std::fs::write(&temp, "API_KEY=plaintext").expect("temp");
     let actor = supervisor.open(&database, 3).expect("reopen").actor;
 
     actor
@@ -297,6 +311,7 @@ async fn startup_replay_settles_an_older_builds_pending_env_template_write() {
     supervisor.close(&database).expect("close");
     assert_eq!(pending(&database), 0);
     assert!(!root.join(".env.example").exists());
+    assert!(!temp.exists(), "{}", temp.display());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
