@@ -232,7 +232,7 @@ export function createWorkspaceApps(options: {
         saved.save(apps);
         const running = runner.state();
         const listed = apps.find((app) => app.publicationId === running?.publicationId);
-        const replaced = apps.some((app) => !app.member && app.appRoot === running?.appRoot);
+        const replaced = apps.some((app) => app.owner && app.appRoot === running?.appRoot);
         if (running && mine()(running) && (listed ? !listed.approved : !replaced))
           runner.end((scope) => scope === running);
         set({ apps, problem: null, failures: state.failures });
@@ -278,7 +278,7 @@ export function createWorkspaceApps(options: {
         workspaceId,
         publicationId: app.publicationId,
         name: app.name,
-        appRoot: app.member ? null : app.appRoot,
+        appRoot: app.owner ? app.appRoot : null,
       };
       try {
         const shown = await runner.start(scope, (ended) => {
