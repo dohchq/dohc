@@ -65,7 +65,7 @@ The desktop app currently includes:
 
 Local work does not require an account or server. Sync and sharing use a server you operate or dohc Drive.
 
-**dohc Drive is in invite-only beta.** It is the managed service, with a planned free tier, and it hosts the apps you publish. dohc handles hosting, setup, and maintenance. [Request an invite](https://dohc.computer/#drive). If you have one, connect the desktop app to `https://drive.dohc.computer`. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
+**dohc Drive is in invite-only alpha.** It is the managed service, with a planned free tier, and it hosts the apps you publish. dohc handles hosting, setup, and maintenance. [Request an invite](https://dohc.computer/#drive). If you have one, connect the desktop app to `https://drive.dohc.computer`. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
 
 Follow the [self-hosting guide](docs/how-to/self-host.md) to set up a server and connect the desktop app.
 
