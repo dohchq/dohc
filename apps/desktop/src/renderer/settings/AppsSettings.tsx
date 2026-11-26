@@ -6,6 +6,7 @@ import {
   type SitePackageInfo,
   type SitePreviewMode,
 } from "../../ipc/bridgeContract";
+import { DEFAULT_APPS_SETTINGS } from "../../settings/userSettings";
 import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -66,6 +67,8 @@ export function AppsSettings(props: {
   // Null while main has not answered. Absent in a shared view, which runs no commands.
   trust?: { trusted: boolean | null; onOpen: () => void };
   pinned: readonly string[];
+  sendToPhones: boolean;
+  onSendToPhonesChange: (sendToPhones: boolean) => void;
   onSetPinned?: (appRoot: string, pinned: boolean) => void;
   onOpenApp?: (appRoot: string) => void;
   onError?: ReportError;
@@ -208,6 +211,22 @@ export function AppsSettings(props: {
             </SecondaryButton>
           </SettingRow>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection title="Phones">
+        <SettingRow
+          title="Send apps to your phones"
+          description="This computer builds your apps and sends each change to your phones."
+          modified={props.sendToPhones !== DEFAULT_APPS_SETTINGS.sendToPhones}
+          onReset={() => props.onSendToPhonesChange(DEFAULT_APPS_SETTINGS.sendToPhones)}
+          testId="settings-row-send-to-phones"
+        >
+          <SwitchControl
+            label="Send apps to your phones"
+            checked={props.sendToPhones}
+            onChange={props.onSendToPhonesChange}
+          />
+        </SettingRow>
       </SettingsSection>
 
       <section aria-label="Apps in this workspace" className="mt-8">

@@ -157,6 +157,7 @@ import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
+import { usePhoneAppNotices } from "./shell/usePhoneAppNotices";
 import {
   OTHER_ACCOUNT_NOTICE,
   ShellErrorReporter,
@@ -5321,6 +5322,12 @@ function WorkspaceShell(props: {
     show: showCaptureHolds,
     reportShellError,
     reportShellFailure,
+  });
+  usePhoneAppNotices({
+    workspaceId,
+    apps: syncStatus ? syncStatus.appsNotSent : null,
+    report: reportShellFailure,
+    clear: clearIdentity,
   });
   useEffect(() => {
     return bridge().onCaptureHolds((event) => {

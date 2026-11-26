@@ -1757,6 +1757,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     })
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  appsNotSent: z.array(z.object({ appRoot: z.string().min(1), reason: z.string() })).optional(),
   outsideChanges: z.array(OutsideChange).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
@@ -8466,6 +8467,17 @@ export const chatDispatchNoticeOperations = {
   },
 } as const satisfies OperationTable;
 
+export const phoneAppOperations = {
+  retryPhoneApp: {
+    capabilityId: "app.phone.retry",
+    scope: "workspace",
+    channel: "desktop:retry-phone-app",
+    payload: WorkspaceIdPayload.extend({ appRoot: z.string().min(1) }),
+    guard: "active-workspace",
+    inactiveMessage: "Open this workspace to send its apps to your phones again.",
+  },
+} as const satisfies OperationTable;
+
 // Whether this computer's agent holds the workspace's run slot. The revision
 // rises on every change in any workspace, so a reader keeps the newest answer.
 export const AgentRunStateEvent = z.object({
@@ -9570,6 +9582,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSecretsOperations>,
     OperationBridge<typeof incomingWebhooksOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
+    OperationBridge<typeof phoneAppOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,

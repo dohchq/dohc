@@ -538,6 +538,11 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
   errorReports: true,
 };
 
+export const AppsUserSettings = z.object({ sendToPhones: z.boolean() }).strict();
+export type AppsUserSettings = z.infer<typeof AppsUserSettings>;
+
+export const DEFAULT_APPS_SETTINGS: AppsUserSettings = { sendToPhones: true };
+
 // How long dohc keeps a finished agent run's log (agents/runLogRetention.ts):
 // 30 days unless the settings file asks for longer, or for "forever".
 export const DEFAULT_RUN_LOG_KEEP_DAYS = 30;
@@ -598,6 +603,7 @@ export const DesktopUserSettings = z
     agents: AgentsSettings.default({}),
     sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
     privacy: PrivacySettings.default(DEFAULT_PRIVACY_SETTINGS),
+    apps: AppsUserSettings.default(DEFAULT_APPS_SETTINGS),
     agentRunLogs: AgentRunLogsSettings.default(DEFAULT_AGENT_RUN_LOGS_SETTINGS),
   })
   .strict();
@@ -621,6 +627,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   agents: {},
   sidebar: DEFAULT_SIDEBAR_SETTINGS,
   privacy: DEFAULT_PRIVACY_SETTINGS,
+  apps: DEFAULT_APPS_SETTINGS,
   agentRunLogs: DEFAULT_AGENT_RUN_LOGS_SETTINGS,
 };
 

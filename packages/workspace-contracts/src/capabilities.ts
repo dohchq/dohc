@@ -160,6 +160,9 @@ const LISTED_CAPABILITIES = {
     "Choose a personal color for an agent shown in the admitted workspace.",
     { ipc: ["setAgentColor"] },
   ),
+  "app.phone.retry": capability("Try again to send an app to your phones.", {
+    ipc: ["retryPhoneApp"],
+  }),
   "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {
     ipc: ["setAppPinned"],
   }),

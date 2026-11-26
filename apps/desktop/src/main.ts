@@ -170,6 +170,8 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
+import { prepareOwnerAppPublication, readLocalAppSource } from "./workspaces/ownerAppPublication";
+import { createPhoneAppSender } from "./workspaces/phoneAppSender";
 import {
   createLocalOwnerAppPublicationHandler,
   localOwnerCliCaller,
@@ -433,6 +435,7 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  phoneAppOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
@@ -3757,6 +3760,7 @@ function engineForWorkspace(
       if (applied) signalChatWrite(workspace.workspaceId);
       // A deferred wake's message or decision may have arrived. An empty pull brought nothing to wait for.
       void chatWakes.pulled({ applied, recovered });
+      phoneAppSender?.pulled(workspace.workspaceId, !!applied);
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       refreshShareLabels();
@@ -4012,6 +4016,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   onWatcherBatch: (workspace, events) => {
     onWatcherBatch(workspace, events);
     withWorkspaceAttachment(workspace, () => folderAppDetection.settledEvents(workspace, events));
+    phoneAppSender?.filesChanged(workspace.workspaceId, events.map((event) => event.path));
   },
   onObservationResync: async (workspace) => {
     await onObservationResync(workspace);
@@ -4131,6 +4136,9 @@ const activity = {
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
       pendingShareWhileOpen: pendingShareWhileOpen(workspaceId),
+      ...(phoneAppSender?.notSent(workspaceId).length
+        ? { appsNotSent: phoneAppSender.notSent(workspaceId) }
+        : {}),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -8192,6 +8200,8 @@ let personalMemberApps:
       }>;
     }
   | undefined;
+type PhoneAppWorkspace = DesktopWorkspaceOperation["workspace"];
+let phoneAppSender: ReturnType<typeof createPhoneAppSender<PhoneAppWorkspace>> | null = null;
 let ownerAppPublicationForCli:
   | ((
       input: OwnerAppPublicationRequest,
@@ -10379,6 +10389,7 @@ const settingsIpc = createSettingsIpc<
     chatWakes.resume();
     // The save comes first, so the pass that follows reads the saved agents.
     agentThreads().settingsChanged();
+    phoneAppSender?.settingChanged(settings.settings.apps.sendToPhones);
   },
   publishRunners: () => {
     void chatWakes.runnersChanged();
@@ -12097,6 +12108,60 @@ function registerIpcHandlers(): void {
   });
   ownerAppPublicationForCli = (input, agent) =>
     cliOwnerPublication(input.workspaceId, input, agent);
+  phoneAppSender = createPhoneAppSender<PhoneAppWorkspace>({
+    enabled: async () => (await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones,
+    atHead: (workspaceId) => {
+      try {
+        const status = activity.getStatus(workspaceId);
+        return (
+          status.pendingChangeCount === 0 && status.lastSyncedAtMs !== null && !status.syncFailure
+        );
+      } catch {
+        return false;
+      }
+    },
+    withWorkspace: async (workspaceId, work) => {
+      const entry = findWorkspace(workspaceId);
+      if (!entry?.remote || shareViewIsPresent(entry.shareView)) return;
+      await workspaceAuthorities.withOperation(workspaceId, (operation) =>
+        work(operation.workspace, operation.signal),
+      );
+    },
+    credentials: async (workspace) => (await remoteForWorkspace(workspace)).credentials,
+    apps: (workspace) => ownedSiteCatalog.list(workspace),
+    sourceRevision: async (workspace, appRoot, signal) => {
+      const source = await withEngineAdapter(workspace, (adapter) =>
+        readLocalAppSource(
+          { workspaceId: workspace.workspaceId, appRoot, versionId: "main" },
+          { adapter, signal, assertCurrent: () => signal.throwIfAborted(), deferredWrites: [] },
+        ),
+      );
+      if (!source) throw new Error("dohc could not read this app. Restart dohc and try again.");
+      return source.sourceRevision;
+    },
+    prepare: async (workspace, appRoot, signal) => {
+      const { deferredWrites } = await ownerPublicationDependencies.flushCapture(workspace);
+      const prepared = await withEngineAdapter(workspace, (adapter) =>
+        prepareOwnerAppPublication({ workspaceId: workspace.workspaceId, appRoot }, null, {
+          adapter,
+          signal,
+          assertCurrent: () => signal.throwIfAborted(),
+          compile: ownerPublicationDependencies.compile,
+          resolveDatasetRevision: (binding) => resolveDatasetRevision(workspace, binding, signal),
+          deferredWrites,
+        }),
+      );
+      if (!prepared)
+        throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      return prepared;
+    },
+    relayJson: ownerPublicationDependencies.relayJson,
+    upload: ownerPublicationDependencies.upload,
+    changed: (workspaceId) => notifyRenderer({ workspaceId }),
+  });
+  registerOperations(operationBoundary, phoneAppOperations, {
+    retryPhoneApp: ({ workspaceId, appRoot }) => void phoneAppSender?.retry(workspaceId, appRoot),
+  });
   const undoAcceptedResponse = async (
     workspace: DesktopRendererWorkspaceOperation["workspace"],
     input: AppResponseUndoSelection,

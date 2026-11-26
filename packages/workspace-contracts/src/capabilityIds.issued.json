@@ -42,6 +42,7 @@
   "app.member.source",
   "app.member.withdraw",
   "app.personal.folder",
+  "app.phone.retry",
   "app.pin.set",
   "app.publication.approve",
   "app.publication.cancel",
