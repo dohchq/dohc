@@ -102,12 +102,10 @@ export function createPhoneApps(options: {
    * would refuse; while `reviewing`, a Member app the person hasn't allowed is still answered.
    */
   served(auth: AppBackendAuth, publicationId: string, reviewing: boolean): Served;
-  /** A person's name as the relay shows it to people they share with. */
   authorName?(userId: string): Promise<string | null>;
 }) {
   const { storage } = options;
   const context = storage as StorageContext;
-  // Refusals the phone shows: a Member app to review, or review again, reads as a changed app.
   function served(userId: string, workspaceId: string, id: string, reviewing: boolean): Served {
     try {
       return options.served({ kind: "named", workspaceId, userId }, id, reviewing);
@@ -155,19 +153,14 @@ export function createPhoneApps(options: {
     return row;
   }
 
-  // An active Member app in this workspace, within both reaches; once allowed unless `reviewing`.
   function memberApp(userId: string, workspaceId: string, id: string, reviewing: boolean) {
     const row = memberAppRow(context, id);
-    const publication = context.db
-      .prepare("SELECT created_at_ms FROM sync_relay_app_publications WHERE publication_id = ?")
-      .get(id);
-    if (!row || row.workspaceId !== workspaceId || !publication || !options.limits)
-      throw notFound();
+    if (!row || row.workspaceId !== workspaceId || !options.limits) throw notFound();
     const published = served(userId, workspaceId, id, reviewing);
     if (!published?.member || published.local || hiddenFile(published.candidate.appRoot))
       throw notFound();
     const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
-    const createdAtMs = Number(publication.created_at_ms);
+    const { createdAtMs } = row;
     const approved =
       approval !== null &&
       approval.authorityRevision === published.authorityRevision &&
@@ -211,7 +204,6 @@ export function createPhoneApps(options: {
     if (current.authorityRevision !== binding.authorityRevision) throw notFound();
   }
 
-  // The authors whose names a read shows, read before its answer so the answer waits for nothing.
   function authors(workspaceId: string, operation: string, input: unknown): string[] {
     if (operation === "memberApps") {
       const cursor = (input as { cursor?: unknown } | null)?.cursor;
@@ -358,7 +350,6 @@ export function createPhoneApps(options: {
         ended(launchHashes);
         return { revoked };
       }
-      // A Member app answers its review, source and allowing before the person allowed it, and launches only after.
       const row = member
         ? memberApp(userId, workspaceId, id, operation !== "appLaunch")
         : publication(userId, workspaceId, id);
@@ -388,7 +379,6 @@ export function createPhoneApps(options: {
             approval && approved
               ? { approvalId: approval.approvalId, approvedAtMs: approval.approvedAtMs }
               : null,
-          // A Member app lists each Collection's operations both its author and the owner can run, at their lower level.
           ...("member" in row
             ? {
                 name: row.member.slug,
@@ -436,13 +426,10 @@ export function createPhoneApps(options: {
       if (row.authorityRevision !== authorityRevision)
         throw relayError("conflict", "This app changed. Review it again.");
       if (operation === "appApprove") {
-        // Allowing a Member app records the person's consent to exactly the operations reviewed, which holds wherever
-        // they open it, with the phone's approval.
         if ("member" in row && body.scopeDigest !== row.member.digest)
           throw "scopeDigest" in body
             ? relayError("conflict", "This app changed. Review it again.")
             : badRequest("Invalid app arguments.");
-        // Launches from before the app came to reach more never resume once it's allowed again.
         if ("member" in row && row.member.consent !== "current")
           end({ userId, workspaceId, publicationId: id });
         return context.tx(() => {

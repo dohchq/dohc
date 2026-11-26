@@ -79,6 +79,7 @@ import {
   type WriteMemberAppInput,
   type MemberAppScopeCollection,
 } from "./storage/memberApps";
+import { deletePhoneAppLaunches } from "./storage/phoneApps";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePaths, collectionFilePresent } from "./storage/collectionFilePresence";
@@ -2266,8 +2267,14 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         return storage.tx(() => {
           const published = namedPublication(auth, publicationId, true);
           if (!published.member) throw notFound();
-          const { scope, digest } = published.member;
+          const { scope, digest, consent } = published.member;
           if (digest !== scopeDigest) throw new MemberAppRefusal("changed");
+          if (consent !== "current")
+            deletePhoneAppLaunches(storage, {
+              userId: auth.userId,
+              workspaceId: auth.workspaceId,
+              publicationId,
+            });
           recordMemberAppConsent(storage, {
             workspaceId: auth.workspaceId,
             viewerUserId: auth.userId,

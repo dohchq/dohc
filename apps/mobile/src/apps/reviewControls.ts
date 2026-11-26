@@ -22,7 +22,6 @@ export function reviewControls(
   };
 }
 
-/** The line a review leads with. */
 export function reviewStatus(
   review: Pick<AppReview, "approved" | "member">,
   phoneWrites: boolean,
@@ -35,7 +34,6 @@ export function reviewStatus(
   return review.member ? appWords.reviewToOpen : appWords.approveToOpen;
 }
 
-/** A Member app's state in Home's list, beside its name. Null once allowed, when the list shows its check instead. */
 export function memberAppState(app: Pick<PhoneApp, "approved" | "member">): string | null {
   if (!app.member || app.approved) return null;
   return app.member.consent === "changed" ? appWords.updated : appWords.toReview;

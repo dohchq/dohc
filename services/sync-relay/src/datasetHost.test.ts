@@ -2124,6 +2124,14 @@ it("refuses a phone launch of a Member app once it is withdrawn, taken down, or 
   await expect(f.invoke(owner, id(6), {}, app, "desktop")).rejects.toMatchObject(reviewRequired);
 
   await allow(app);
+  const allowed = await open(app);
+  // Ana gains add and the owner allows it in the browser: the phone's launch from before never resumes.
+  f.grant("ana-grant", [id(5), id(6), id(7)]);
+  f.allow(owner, app);
+  await expect(f.invoke(allowed, id(6), {}, app, "allowed-in-browser")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  f.grant("ana-grant", [id(6), id(7)]);
   const reopened = await open(app);
   withdrawMemberApp(f.storage, { workspaceId: "w", actorUserId: "owner", publicationId: app });
   await expect(f.invoke(reopened, id(6), {}, app, "withdrawn")).rejects.toThrow();

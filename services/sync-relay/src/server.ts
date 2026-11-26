@@ -579,7 +579,6 @@ export function createSyncRelayHandler({
       if (!datasetHost) throw notFound();
       return datasetHost.servedPublication(auth, publicationId, reviewing);
     },
-    // A Member app's author by name or address, never "the owner" when the relay knows neither.
     async authorName(userId) {
       const name = await accountDisplayName(lookupUserDisplayName, userId);
       const email = await lookupUserEmail?.(userId);

@@ -13,9 +13,7 @@ export type MemberConsent = "none" | "current" | "changed";
  * only once the viewer allowed what it can do.
  */
 export interface MemberApp {
-  /** The name its author shared it under. */
   readonly name: string;
-  /** Its author's name, or null when the server has none to show. */
   readonly author: string | null;
   readonly consent: MemberConsent;
 }
@@ -91,7 +89,6 @@ export const shortVersion = (app: { readonly sourceRevision: string }) =>
 const readAuthor = (value: unknown): string | null | undefined =>
   isFields(value) && (value.name === null || text(value.name, 320)) ? value.name : undefined;
 
-/** A version, and for a Member app its name, author and the person's allowing: undefined when unreadable. */
 function readVersion(item: unknown, member: boolean): PhoneApp | null {
   if (
     !isFields(item) ||

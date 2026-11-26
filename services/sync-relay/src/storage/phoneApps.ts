@@ -271,20 +271,25 @@ export function endPhoneAppLaunches(
   storage: SyncRelayStorage,
   scope: PhoneAppLaunchScope,
 ): string[] {
-  return context(storage).tx(() =>
-    launchHashes(
-      db(storage)
-        .prepare(
-          `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE user_id = ?1
-         AND (?2 IS NULL OR session_id = ?2) AND (?3 IS NULL OR workspace_id = ?3) AND (?4 IS NULL OR publication_id = ?4)
-         RETURNING token_hash, launch_host`,
-        )
-        .all(
-          scope.userId,
-          scope.sessionId ?? null,
-          scope.workspaceId ?? null,
-          scope.publicationId ?? null,
-        ),
-    ),
+  return context(storage).tx(() => deletePhoneAppLaunches(storage, scope));
+}
+
+export function deletePhoneAppLaunches(
+  storage: SyncRelayStorage,
+  scope: PhoneAppLaunchScope,
+): string[] {
+  return launchHashes(
+    db(storage)
+      .prepare(
+        `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE user_id = ?1
+       AND (?2 IS NULL OR session_id = ?2) AND (?3 IS NULL OR workspace_id = ?3) AND (?4 IS NULL OR publication_id = ?4)
+       RETURNING token_hash, launch_host`,
+      )
+      .all(
+        scope.userId,
+        scope.sessionId ?? null,
+        scope.workspaceId ?? null,
+        scope.publicationId ?? null,
+      ),
   );
 }
