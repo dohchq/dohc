@@ -50,6 +50,18 @@ export function threadShownByLog(
 }
 
 type Cursor = Pick<AccountFeedStanding, "floor" | "log" | "journal"> & { reach: string | null };
+
+/** The chat records a Group's readers share. Follows and read places are the owner's own. */
+const SHARED_CHAT_OPS = new Set([
+  "chat.channel.create",
+  "chat.thread.create",
+  "chat.message.append",
+  "chat.message.delete",
+  "chat.message.tombstone",
+  "chat.reaction.set",
+  "chat.decision.set",
+  "chat.attachment.add",
+]);
 type FeedStorage = Pick<
   SyncRelayStorage,
   | "accountFeedStanding"
@@ -82,6 +94,10 @@ function parseCursor(value: string | null): Cursor {
   }
   return { floor, log, journal, reach: match?.[4] ?? null };
 }
+
+/** Whether a cursor this feed answered still names the reach the caller has now. */
+export const cursorReaches = (cursor: string, member: PhoneMember | null) =>
+  parseCursor(cursor).reach === reachMark(member);
 
 /** The cursor of everything the workspace's log and journal hold now, for the owner or this Member. */
 export function currentAccountFeedCursor(
@@ -130,6 +146,14 @@ function readChanges(
   });
   const log = rows.length === ROWS_PER_READ ? rows.at(-1)!.relaySeq : standing.log;
   const threadShown = new Map<string, boolean>();
+  const groupShown = (channelWireId: string | null) =>
+    member === null ||
+    (channelWireId !== null &&
+      channelShown(
+        member,
+        channelWireId,
+        storage.findChannelCreateKind(workspaceId, channelWireId),
+      ));
   const shown = (threadId: string) => {
     let known = threadShown.get(threadId);
     if (known === undefined) {
@@ -140,6 +164,7 @@ function readChanges(
   };
   for (const row of rows) {
     if (row.moment) {
+      if (member !== null && row.moment.versionId !== "main") continue;
       // An object that moves into or out of a secret path, or a path a Member's reach hides, shows as changed, from
       // where it can be seen.
       const visible = [row.moment.path, row.moment.previousPath].filter(
@@ -148,7 +173,8 @@ function readChanges(
       if (visible.length === 0) continue;
       files.add(row.moment.objectId);
       if (visible.some(isPage)) pages.add(row.moment.objectId);
-    } else if (row.chat && (row.threadId === null ? member === null : shown(row.threadId))) {
+    } else if (row.chat && (member === null || SHARED_CHAT_OPS.has(row.opKind))) {
+      if (row.threadId === null ? !groupShown(row.channelWireId) : !shown(row.threadId)) continue;
       chatsChanged = true;
       if (row.threadId !== null) chats.add(row.threadId);
     }

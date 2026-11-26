@@ -1,11 +1,15 @@
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { hiddenFile } from "./accountFeed";
 import { authorizeShareGrantAction } from "./shareAuthorization";
-import { isWorkspaceSelector } from "./shareFilter";
+import { isWorkspaceSelector, withheldLinkText } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { workspaceMemberGrantId } from "./storage/workspaceMembers";
-import { workspaceGroupReachable, type WorkspaceShareSelector } from "./workspaceReach";
+import {
+  workspaceFileReach,
+  workspaceGroupReachable,
+  type WorkspaceShareSelector,
+} from "./workspaceReach";
 
 /**
  * What a Member or an Admin reaches on their phone in a workspace they joined:
@@ -56,4 +60,30 @@ export function channelShown(
     member === null ||
     workspaceGroupReachable(member.selector, channelWireId, { channelKind: () => kind })
   );
+}
+
+/** The owner's own read places in a chat answer, as a reader with none sees them. */
+const OWNER_READ_STATE: Readonly<Record<string, unknown>> = {
+  unread: false,
+  unreadCount: 0,
+  readPosition: null,
+};
+
+/**
+ * A chat answer as a Member reads it: every file link their reach doesn't cover reads "(a file not shared here)", as
+ * in their browser, and no unread count or read place of the owner's shows.
+ */
+export function memberChatAnswer<Answer>(member: PhoneMember, answer: Answer): Answer {
+  const files = workspaceFileReach(member.selector);
+  const served = (value: unknown, key?: string): unknown => {
+    if (key !== undefined && Object.hasOwn(OWNER_READ_STATE, key)) return OWNER_READ_STATE[key];
+    if (typeof value === "string") return withheldLinkText(value, files);
+    if (Array.isArray(value)) return value.map((item) => served(item));
+    if (value !== null && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value).map(([name, item]) => [name, served(item, name)]),
+      );
+    return value;
+  };
+  return served(answer) as Answer;
 }

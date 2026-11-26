@@ -681,7 +681,7 @@ it("mints no owner's phone ticket for a workspace hidden from the phone or owned
         workspaceId: scope.workspaceId,
         showOnPhone: false,
       }),
-    ).toBe("owner");
+    ).toBe(true);
     expect(state.storage.mintLiveTicket(ownerMint)).toBeNull();
     state.storage.setShowOnPhone({
       userId: "owner-1",

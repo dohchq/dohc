@@ -10,7 +10,12 @@ import {
   runAccountWrite,
 } from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
-import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
+import {
+  cursorReaches,
+  currentAccountFeedCursor,
+  readAccountFeed,
+  type AccountFeedWaits,
+} from "./accountFeed";
 import {
   isAccountOperation,
   runAccountOperation,
@@ -232,6 +237,13 @@ export function createAccountOperationRoute(options: {
         authorize: () => check(false),
       });
       await check(false);
+      const now = memberOf(caller.userId);
+      if (!cursorReaches(answer.cursor, now))
+        return jsonResponse({
+          ok: true,
+          cursor: currentAccountFeedCursor(storage, route.workspaceId, now),
+          replace: true,
+        });
       return jsonResponse({ ok: true, ...answer });
     }
     if (wakeFeed) {

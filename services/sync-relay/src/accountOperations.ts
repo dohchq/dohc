@@ -41,7 +41,7 @@ import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError } from "./errors";
 import { untilAborted } from "./namedLiveFrameHost";
-import { channelShown, pathShown, type PhoneMember } from "./phoneMember";
+import { channelShown, memberChatAnswer, pathShown, type PhoneMember } from "./phoneMember";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
@@ -132,6 +132,15 @@ type ParsedOperation = {
 
 export const ACCOUNT_READ_DEADLINE_MS = 12_000;
 
+const CHAT_OPERATIONS: ReadonlySet<ServerOperation> = new Set([
+  "groups",
+  "threads",
+  "groupsFull",
+  "fileChats",
+  "chat",
+  "show",
+]);
+
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
 
@@ -199,15 +208,17 @@ export async function runAccountOperation(
           ),
         );
         const result =
-          request.operation === "groupsFull" && input.visitor.phone && input.member === null
-            ? phoneGroups(
-                server.storage.declaredAgentNames({
-                  accountId: input.owner,
-                  workspaceId: input.workspaceId,
-                }),
-                read as GroupsResult,
-              )
-            : read;
+          input.member !== null && CHAT_OPERATIONS.has(request.operation)
+            ? memberChatAnswer(input.member, read)
+            : request.operation === "groupsFull" && input.visitor.phone && input.member === null
+              ? phoneGroups(
+                  server.storage.declaredAgentNames({
+                    accountId: input.owner,
+                    workspaceId: input.workspaceId,
+                  }),
+                  read as GroupsResult,
+                )
+              : read;
         await authorize();
         if (!("ok" in result) || result.ok)
           server.copies.hold(input.visitor.userId, input.workspaceId);

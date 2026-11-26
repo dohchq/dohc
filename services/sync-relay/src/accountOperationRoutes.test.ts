@@ -3970,18 +3970,18 @@ describe("a Member's phone reads in a workspace they joined", () => {
   it("keeps reading after the owner hides it on their phone, and stops when the Member hides it", async () => {
     const { storage, h } = await joined();
     expect(storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false })).toBe(
-      "owner",
+      true,
     );
     expect(files(await answer(await h(op("trip", "listFiles", {}, asBen))))).toEqual([
       "docs/plan.md",
     ]);
     expect(storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false })).toBe(
-      "member",
+      true,
     );
     expect((await h(op("trip", "listFiles", {}, asBen))).status).toBe(404);
     expect(storage.showsOnPhone("ana", "trip")).toBe(false);
     expect(storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true })).toBe(
-      "owner",
+      true,
     );
     expect(storage.showsOnPhone("ben", "trip")).toBe(false);
   });
@@ -4033,5 +4033,66 @@ describe("a Member's phone reads in a workspace they joined", () => {
       await feed(await h(changes(String(replaced.cursor).split(".").slice(0, 3).join(".")))),
       "the owner's cursor names no reach",
     ).toMatchObject({ changed: {} });
+  });
+
+  it("withholds file links the Member's reach doesn't cover, and the owner's read places", async () => {
+    const { h, engine, planning } = await joined();
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-stay",
+      messageId: "message-links",
+      author: { kind: "human", displayName: "Cara" },
+      authorActorKey: null,
+      body: "See @[private/budget.md] and @[docs/plan.md]",
+    });
+    const owner = JSON.stringify(
+      await answer(await h(op("trip", "chat", { threadId: "thread-stay" }))),
+    );
+    const member = JSON.stringify(
+      await answer(await h(op("trip", "chat", { threadId: "thread-stay" }, asBen))),
+    );
+    expect(owner).toContain("@[private/budget.md]");
+    expect(member).not.toContain("private/budget.md");
+    expect(member).toContain("(a file not shared here)");
+    expect(member).toContain("@[docs/plan.md]");
+    const groups = JSON.stringify(await answer(await h(op("trip", "groupsFull", {}, asBen))));
+    expect(groups).toContain(planning.channelId);
+    expect(groups).not.toMatch(/"unreadCount":[1-9]|"unread":true/u);
+  });
+
+  it("leaves the owner's read places, branch moments and hidden Groups out of the Member's feed, and names a new Group", async () => {
+    const { storage, activity, h } = await joined();
+    const { cursor } = await json(await h(op("trip", "groups", {}, asBen)));
+    const write = logWriter(storage, activity);
+    write("chat.thread.read.set", { threadId: "thread-stay", accountUserId: "ana" });
+    const branch = write("moment.append", {
+      objectId: "object-branch",
+      path: "docs/branch.md",
+      versionId: "main",
+    });
+    (storage as StorageContext).db
+      .prepare(
+        "UPDATE sync_relay_object_moments SET version_id = 'v-branch' WHERE workspace_id = 'trip' AND relay_seq = ?",
+      )
+      .run(branch);
+    expect(await feed(await h(changes(String(cursor), { headers: asBen })))).toMatchObject({
+      changed: {},
+    });
+    write("chat.channel.create", {
+      channelId: "channel-new",
+      wireId: "wire-new",
+      name: "New",
+      slug: "new",
+      kind: "channel",
+      createdAtMs: 1,
+    });
+    expect(await feed(await h(changes(String(cursor), { headers: asBen })))).toMatchObject({
+      changed: { chats: [] },
+    });
+    expect(
+      await feed(await h(changes(String(cursor).split(".").slice(0, 3).join(".")))),
+      "the owner hears their own read place",
+    ).toMatchObject({ changed: { chats: ["thread-stay"] } });
   });
 });

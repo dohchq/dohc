@@ -1110,11 +1110,7 @@ export interface SyncRelayStorage {
   listAccountWorkspaces(userId: string): import("./accountWorkspaces").AccountWorkspace[];
   showsOnPhone(userId: string, workspaceId: string): boolean;
   phoneRole(userId: string, workspaceId: string): import("./accountWorkspaces").PhoneRole | null;
-  setShowOnPhone(input: {
-    userId: string;
-    workspaceId: string;
-    showOnPhone: boolean;
-  }): import("./accountWorkspaces").PhoneRole | null;
+  setShowOnPhone(input: { userId: string; workspaceId: string; showOnPhone: boolean }): boolean;
   endAccountReasonsOfHiddenOrDisownedCopies(): void;
   recordAccountOperation(
     input: import("./operationRecords").RecordOperationInput,

@@ -60,11 +60,20 @@ export async function startServerCopies(options: ServerCopiesOptions) {
   // Account visits held now, by credential and by the visiting account.
   const callerVisits = new Map<string, number>();
   const accountVisits = new Map<string, number>();
-  const holds = new Map<string, { userId: string; timer: ReturnType<typeof setTimeout> }>();
-  const release = (workspaceId: string) => {
-    clearTimeout(holds.get(workspaceId)?.timer);
-    holds.delete(workspaceId);
+  const holds = new Map<
+    string,
+    { workspaceId: string; userId: string; timer: ReturnType<typeof setTimeout> }
+  >();
+  const holdKey = (workspaceId: string, userId: string) => JSON.stringify([workspaceId, userId]);
+  const release = (key: string) => {
+    clearTimeout(holds.get(key)?.timer);
+    holds.delete(key);
   };
+  const releaseWorkspace = (workspaceId: string) => {
+    for (const [key, held] of [...holds]) if (held.workspaceId === workspaceId) release(key);
+  };
+  const held = (workspaceId: string) =>
+    [...holds.values()].some((entry) => entry.workspaceId === workspaceId);
   let wantedBesidesHolds = new Set<string>();
   const waiters = new Set<() => void>();
   const recheck = () => {
@@ -130,7 +139,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
       AUTOMATION_SERVER_MAX_WORKSPACES,
     );
     wantedBesidesHolds = new Set([...running, ...publishing]);
-    for (const [workspaceId, { userId }] of [...holds].reverse()) {
+    for (const [key, { workspaceId, userId }] of [...holds].reverse()) {
       const listed = ids.includes(workspaceId);
       const copy = replicas.replica(workspaceId);
       if (
@@ -139,7 +148,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         storage.phoneRole(userId, workspaceId) === null ||
         (!listed && ids.length >= AUTOMATION_SERVER_MAX_WORKSPACES)
       )
-        release(workspaceId);
+        release(key);
       else if (!listed) ids.push(workspaceId);
     }
     return new Map(
@@ -148,7 +157,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         const reasons: CopyReason[] = [];
         if (runs.has(workspaceId) || (visit !== undefined && visit.actions > visit.accountActions))
           reasons.push("automation");
-        if ((visit !== undefined && visit.accountActions > 0) || holds.has(workspaceId))
+        if ((visit !== undefined && visit.accountActions > 0) || held(workspaceId))
           reasons.push("account");
         if (publishing.has(workspaceId)) reasons.push("publication");
         return [workspaceId, reasons];
@@ -163,7 +172,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     ...options,
     wanted,
     holdOnly: (workspaceId) =>
-      holds.has(workspaceId) && !visits.has(workspaceId) && !wantedBesidesHolds.has(workspaceId),
+      held(workspaceId) && !visits.has(workspaceId) && !wantedBesidesHolds.has(workspaceId),
     onChanged: (workspaceId) => {
       options.onChanged?.(workspaceId);
       recheck();
@@ -367,16 +376,17 @@ export async function startServerCopies(options: ServerCopiesOptions) {
 
   /** Keeps the copy a while after a read, for the account that read it. Each account holds at most its visit limit. */
   function hold(userId: string, workspaceId: string): void {
-    release(workspaceId);
-    const mine = [...holds].filter(([, held]) => held.userId === userId);
+    const key = holdKey(workspaceId, userId);
+    release(key);
+    const mine = [...holds].filter(([, entry]) => entry.userId === userId);
     const over = Math.max(0, mine.length + 1 - ACCOUNT_VISITS_PER_ACCOUNT);
     for (const [id] of mine.slice(0, over)) release(id);
     const timer = setTimeout(() => {
-      holds.delete(workspaceId);
+      holds.delete(key);
       replicas.reconcile();
     }, READ_HOLD_MS);
     timer.unref?.();
-    holds.set(workspaceId, { userId, timer });
+    holds.set(key, { workspaceId, userId, timer });
   }
 
   return {
@@ -386,10 +396,9 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     replica: (workspaceId: string) => replicas.replica(workspaceId),
     /** Ask for a pass; a visit can retry its workspace immediately. */
     reconcile: (workspaceId?: string) => replicas.reconcile(workspaceId),
-    /** Ends the copy's hold when it is this account's. */
+    /** Ends this account's hold on the copy. Another account's hold keeps it. */
     endHold(workspaceId: string, userId: string) {
-      if (holds.get(workspaceId)?.userId !== userId) return;
-      release(workspaceId);
+      release(holdKey(workspaceId, userId));
       replicas.reconcile();
     },
     /** A copy became ready for automation visits. */
@@ -397,7 +406,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       for (const id of workspaceIds) {
         visits.delete(id);
-        release(id);
+        releaseWorkspace(id);
       }
       await replicas.deleteWorkspaces(workspaceIds);
     },

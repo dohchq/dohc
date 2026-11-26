@@ -72,9 +72,11 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
 
 const moment = (relaySeq: number, objectId: string, path: string): AccountFeedLogRow => ({
   relaySeq,
+  opKind: "moment.append",
   chat: false,
   threadId: null,
-  moment: { objectId, path, previousPath: null },
+  channelWireId: null,
+  moment: { objectId, versionId: "main", path, previousPath: null },
 });
 const range = <Row>(from: number, to: number, row: (position: number) => Row) =>
   Array.from({ length: to - from + 1 }, (_, index) => row(from + index));

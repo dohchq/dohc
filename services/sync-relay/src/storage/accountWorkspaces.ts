@@ -126,16 +126,16 @@ export function phoneRole(
  * Sets "Show on phone" for one person in a workspace they own or joined.
  * Only the owner turning it off ends the account's reason for the server's
  * copy, which then goes once its open visits end, unless automations still
- * keep it. Returns null, and changes nothing, when the person is not in the
- * workspace; otherwise their role.
+ * keep it. Returns false, and changes nothing, when the person is not in the
+ * workspace.
  */
 export function setShowOnPhone(
   storage: StorageContext,
   input: { userId: string; workspaceId: string; showOnPhone: boolean },
-): PhoneRole | null {
+): boolean {
   return storage.tx(() => {
     const role = workspaceRoleOf(storage, input.workspaceId, input.userId)?.role ?? null;
-    if (role === null) return null;
+    if (role === null) return false;
     if (input.showOnPhone) {
       storage.db
         .prepare(
@@ -150,6 +150,6 @@ export function setShowOnPhone(
         .run(input.workspaceId, input.userId);
       if (role === "owner") endCopyReasonInTransaction(storage, input.workspaceId, "account");
     }
-    return role;
+    return true;
   });
 }

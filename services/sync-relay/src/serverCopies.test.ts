@@ -297,6 +297,26 @@ describe("the hold a read keeps on its copy", () => {
     expect(run.wanted().has("held")).toBe(false);
   });
 
+  it("keeps the owner's hold when a Member who read the copy ends theirs", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    await read(run, "trip");
+    const member: CopyVisitor = {
+      reason: "account",
+      userId: "ben",
+      caller: "ben-phone",
+      signal: new AbortController().signal,
+      phone: true,
+    };
+    await run.copies.withServerCopy(OWNER, "trip", member, async () => {
+      run.copies.hold("ben", "trip");
+    });
+    run.copies.endHold("trip", "ben");
+    await vi.waitFor(() => expect(run.wanted().get("trip")).toEqual(["account"]));
+    run.copies.endHold("trip", OWNER);
+    await vi.waitFor(() => expect(run.wanted().has("trip")).toBe(false));
+  });
+
   it("ends when the workspace stops showing on the phone", async () => {
     const storage = await relay();
     const run = await copies(storage);
