@@ -11315,13 +11315,13 @@ function registerIpcHandlers(): void {
     ) => {
       const { capture } = await requireEngineCapture(workspace.workspaceId, "Collections");
       return capture.withVersionLock(async () => {
-        const previous = mainVersionLocks.get(workspace.workspaceId);
         mainVersionLocks.set(workspace.workspaceId, capture);
         try {
           return await work();
         } finally {
-          if (previous) mainVersionLocks.set(workspace.workspaceId, previous);
-          else mainVersionLocks.delete(workspace.workspaceId);
+          if (mainVersionLocks.get(workspace.workspaceId) === capture) {
+            mainVersionLocks.delete(workspace.workspaceId);
+          }
         }
       });
     },

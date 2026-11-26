@@ -1008,6 +1008,10 @@ describe("SitePreviewPage", () => {
   it("holds preview, AppView, and Review app while active version is unresolved", async () => {
     const appViewBridge = {
       ...bridgeMock,
+      getSitePackage: vi.fn(async () => ({
+        ...site,
+        scripts: { dev: "vite" },
+      })),
       appView: vi.fn(async (request: { viewId: string }) => ({
         kind: "unapproved" as const,
         viewId: request.viewId,
@@ -1022,6 +1026,7 @@ describe("SitePreviewPage", () => {
         version={{ id: "main", name: "Main" }}
         versionPending
         siteRoot="report"
+        onShareSite={vi.fn()}
       />,
     );
     await waitFor(() => expect(appViewBridge.getSitePackage).toHaveBeenCalled());
@@ -1033,6 +1038,16 @@ describe("SitePreviewPage", () => {
     expect(reviewButton.disabled).toBe(true);
     await userEvent.click(reviewButton);
     expect(appViewBridge.publishOwnerApp).not.toHaveBeenCalled();
+    expect((screen.getByTestId("site-preview-share") as HTMLButtonElement).disabled).toBe(true);
+
+    await userEvent.click(screen.getByTestId("site-preview-options"));
+    const devItem = await screen.findByTestId("site-preview-dev");
+    const staticItem = screen.getByTestId("site-preview-static");
+    expect(devItem.getAttribute("aria-disabled")).toBe("true");
+    expect(staticItem.getAttribute("aria-disabled")).toBe("true");
+    await userEvent.click(devItem);
+    await userEvent.click(staticItem);
+    expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
 
     view.rerender(
       <SitePreviewPage

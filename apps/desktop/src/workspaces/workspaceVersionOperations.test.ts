@@ -719,7 +719,6 @@ describe("switchVersion", () => {
       }
     });
     await enteredLock;
-    // Simulate close clearing the active entry then retiring live sessions and stopping capture.
     activeCapture = null;
     const closing = engine.settleAndCloseAllLiveSessions().then(() => engine.stop());
     releaseWork();

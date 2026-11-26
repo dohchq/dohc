@@ -368,6 +368,7 @@ export function SitePreviewPage(props: {
   // preview Restricted Mode shows in place of Dev or Build is not a choice.
   const start = useCallback(
     async (mode: SitePreviewMode, restart: boolean, remember = true) => {
+      if (versionPending) return null;
       const request = ++previewStartRequestRef.current;
       const requestContext = siteContext;
       const isCurrent = () =>
@@ -424,10 +425,11 @@ export function SitePreviewPage(props: {
         if (isCurrent() && !replaced) setRunningMode(null);
       }
     },
-    [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext],
+    [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext, versionPending],
   );
 
   const prepareShare = useCallback(async () => {
+    if (versionPending) return;
     const request = ++shareRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
@@ -526,6 +528,7 @@ export function SitePreviewPage(props: {
     runningMode,
     siteContext,
     start,
+    versionPending,
   ]);
   const prepareShareRef = useRef(prepareShare);
   prepareShareRef.current = prepareShare;
@@ -724,6 +727,7 @@ export function SitePreviewPage(props: {
     null;
 
   const chooseMode = (mode: SitePreviewMode) => {
+    if (versionPending) return;
     if (trust.trusted !== true && !props.sharedView && site && previewRunsAppCode(site, mode)) {
       setBlocked({ mode, share: false });
       return;
@@ -840,7 +844,7 @@ export function SitePreviewPage(props: {
               data-testid="site-preview-share"
               aria-label="Share app"
               title="Share app"
-              disabled={runningMode !== null}
+              disabled={runningMode !== null || versionPending}
               onClick={() => site && void prepareShare()}
               className="size-7"
             >
@@ -931,7 +935,7 @@ export function SitePreviewPage(props: {
                   id: mode,
                   label: runningMode === mode ? "Starting…" : modeLabel(mode),
                   checked: preview?.mode === mode,
-                  disabled: runningMode !== null,
+                  disabled: runningMode !== null || versionPending,
                   testId: `site-preview-${mode}`,
                   onSelect: () => chooseMode(mode),
                 })),
