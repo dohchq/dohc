@@ -176,7 +176,16 @@ function fixture(
       unchangedFileCount: 1,
       conflictCount: 0,
       replacedProtectedPaths: [".env"],
+      skippedProtectedPaths: [],
     })),
+    updateVersionFromMain: vi.fn<Capture["updateVersionFromMain"]>(async () => ({
+      mergedFileCount: 1,
+      unchangedFileCount: 0,
+      conflictCount: 0,
+      replacedProtectedPaths: [],
+      skippedProtectedPaths: [".env"],
+    })),
+    setVersionArchived: vi.fn<Capture["setVersionArchived"]>(async () => undefined),
     resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(
@@ -1128,6 +1137,7 @@ describe("desktop CLI workspace context", () => {
         unchangedFileCount: 1,
         conflictCount: 3,
         replacedProtectedPaths: [],
+        skippedProtectedPaths: [],
       });
       expect((await cli("version", "merge", "Draft")).stdout).toBe(
         "Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n",

@@ -421,6 +421,12 @@ shared fixtures test. Older builds kept templates as protected files. An engine 
 deletes those encrypted rows once and leaves the file on disk and its ordinary history
 alone. Sync still skips template operations that older peers send.
 
+A computer that receives protected files without the key keeps syncing everything else
+and leaves them locked. The key leaves a computer only wrapped by the owner's passphrase
+(scrypt and AES-GCM) with a key check, and Unlock in Settings › Sync installs it and
+restores the protected files missing on disk. The relay replaces a wrapped key only with
+one that wraps the same key, and keeps no history copy of it.
+
 The protected copies dohc keeps in `.dohc/local` are plain text, because the key sits
 beside them. On Windows that folder and every staged file are private to the user
 (`crates/dohc-windows-files/src/private_dir.rs`,

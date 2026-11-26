@@ -109,8 +109,20 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
         unchangedFileCount: 1,
         conflictCount: 1,
         replacedProtectedPaths: [".env"],
+        skippedProtectedPaths: [],
       };
     }),
+    updateVersionFromMain: vi.fn<Operations["updateVersionFromMain"]>(async () => {
+      steps.push("update");
+      return {
+        mergedFileCount: 1,
+        unchangedFileCount: 0,
+        conflictCount: 0,
+        replacedProtectedPaths: [],
+        skippedProtectedPaths: [".env"],
+      };
+    }),
+    setVersionArchived: vi.fn<Operations["setVersionArchived"]>().mockResolvedValue(undefined),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => {
       steps.push("conflicts");
       return conflictPage;
@@ -445,6 +457,7 @@ describe("registered workspace version handlers", () => {
       unchangedFileCount: 1,
       conflictCount: 1,
       replacedProtectedPaths: [".env"],
+      skippedProtectedPaths: [],
       nextAfterConflictId: "next-conflict",
       conflicts: [
         {
@@ -459,7 +472,10 @@ describe("registered workspace version handlers", () => {
       ],
     });
     expect(h.operations.mergeVersionIntoMain).toHaveBeenCalledExactlyOnceWith(versionId);
-    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith();
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith(undefined, {
+      sourceVersionId: versionId,
+      targetVersionId: "main",
+    });
     expect(h.steps).toEqual(["capture", "merge", "notify", "conflicts"]);
   });
 
@@ -470,6 +486,7 @@ describe("registered workspace version handlers", () => {
       unchangedFileCount: 2,
       conflictCount: 0,
       replacedProtectedPaths: [],
+      skippedProtectedPaths: [],
     });
     await expect(
       h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId }),
@@ -478,10 +495,37 @@ describe("registered workspace version handlers", () => {
       unchangedFileCount: 2,
       conflictCount: 0,
       replacedProtectedPaths: [],
+      skippedProtectedPaths: [],
       conflicts: [],
       nextAfterConflictId: null,
     });
     expect(h.operations.listOpenConflictsPage).not.toHaveBeenCalled();
+  });
+
+  it("updates a version from Main and lists the protected files it left", async () => {
+    const h = harness();
+    await expect(
+      h.invoke(ops.updateWorkspaceVersion.channel, { workspaceId, versionId }),
+    ).resolves.toEqual({
+      mergedFileCount: 1,
+      unchangedFileCount: 0,
+      conflictCount: 0,
+      replacedProtectedPaths: [],
+      skippedProtectedPaths: [".env"],
+      conflicts: [],
+      nextAfterConflictId: null,
+    });
+    expect(h.operations.updateVersionFromMain).toHaveBeenCalledExactlyOnceWith(versionId);
+    expect(h.steps).toEqual(["capture", "update", "notify"]);
+  });
+
+  it("archives a version and notifies the renderer", async () => {
+    const h = harness();
+    await expect(
+      h.invoke(ops.archiveWorkspaceVersion.channel, { workspaceId, versionId, archived: true }),
+    ).resolves.toBeUndefined();
+    expect(h.operations.setVersionArchived).toHaveBeenCalledExactlyOnceWith(versionId, true);
+    expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId });
   });
 
   it("passes the conflict cursor without draining subsequent pages", async () => {
@@ -495,7 +539,32 @@ describe("registered workspace version handlers", () => {
       conflicts: [{ conflictId: "conflict" }],
       nextAfterConflictId: "next-conflict",
     });
-    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith("previous");
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith(
+      "previous",
+      undefined,
+    );
+  });
+
+  it("forwards the optional pair when listing or resolving conflicts", async () => {
+    const h = harness();
+    const pair = { sourceVersionId: versionId, targetVersionId: "main" };
+    await h.invoke(ops.listWorkspaceVersionConflicts.channel, {
+      workspaceId,
+      afterConflictId: "previous",
+      pair,
+    });
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith("previous", pair);
+    await h.invoke(ops.resolveWorkspaceVersionConflict.channel, {
+      workspaceId,
+      conflictId: "conflict",
+      resolution: { kind: "keep-current" },
+      pair,
+    });
+    expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith(
+      "conflict",
+      { kind: "keep-current" },
+      pair,
+    );
   });
 
   it.each([
@@ -516,7 +585,11 @@ describe("registered workspace version handlers", () => {
           resolution,
         }),
       ).resolves.toMatchObject({ nextAfterConflictId: "next-conflict" });
-      expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith("conflict", expected);
+      expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith(
+        "conflict",
+        expected,
+        undefined,
+      );
       expect(h.queueCloudSync).toHaveBeenCalledExactlyOnceWith(workspaceId);
       expect(h.steps).toEqual(["capture", "resolve", "sync", "notify"]);
     },

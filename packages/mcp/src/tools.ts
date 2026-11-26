@@ -180,6 +180,8 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_create_version: ["version.create"],
     dohc_switch_version: ["version.switch"],
     dohc_merge_version: ["version.merge"],
+    dohc_update_version: ["version.update"],
+    dohc_archive_version: ["version.archive"],
     dohc_resolve_version_conflict: ["version.conflict.resolve"],
     dohc_duplicate_file: ["file.duplicate"],
     dohc_move_path: ["file.move"],
@@ -2258,8 +2260,8 @@ export async function undoOperation(
 
 // The versions menu's reads. Owner workspace only; files History does not
 // track and secret files are left out.
-export async function listVersions(ctx: ToolContext) {
-  return requestCli(ctx, "versionList", {});
+export async function listVersions(ctx: ToolContext, args?: { includeArchived?: boolean }) {
+  return requestCli(ctx, "versionList", args?.includeArchived ? { includeArchived: true } : {});
 }
 export async function compareVersion(
   ctx: ToolContext,
@@ -2279,6 +2281,18 @@ export async function switchVersion(ctx: ToolContext, args: { version: string })
 }
 export async function mergeVersion(ctx: ToolContext, args: { version: string }) {
   return requestCli(ctx, "versionMerge", args);
+}
+export async function updateVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionUpdate", args);
+}
+export async function archiveVersion(
+  ctx: ToolContext,
+  args: { version: string; restore?: boolean },
+) {
+  return requestCli(ctx, "versionArchive", {
+    version: args.version,
+    restore: args.restore ?? false,
+  });
 }
 export async function resolveVersionConflict(
   ctx: ToolContext,

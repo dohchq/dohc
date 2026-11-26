@@ -182,6 +182,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // Secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
+    "secret_merge_bases",
     "secret_moments",
     // Durable Y.Doc tables.
     "ydoc_docs",
@@ -281,7 +282,12 @@ const REQUIRED_TABLES: &[&str] = &[
 
 /// Columns a migration added to an existing table, which the table's presence
 /// does not prove.
-const REQUIRED_COLUMNS: &[(&str, &str)] = &[("live_audit_events", "restore_generation")];
+const REQUIRED_COLUMNS: &[(&str, &str)] = &[
+    ("live_audit_events", "restore_generation"),
+    ("versions", "archived_at_ms"),
+    ("merge_bases", "merge_seq"),
+    ("secret_merge_bases", "merge_seq"),
+];
 
 /// How an existing file was classified by the fingerprint fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

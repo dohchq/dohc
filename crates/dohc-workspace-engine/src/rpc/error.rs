@@ -728,6 +728,10 @@ fn map_domain(error: &DomainError) -> WireError {
                 | "held-change-shared-owner"
                 | "restore-path-collision"
                 | "restore-head-changed"
+                | "version-archived"
+                | "version-is-main"
+                | "version-is-active"
+                | "version-has-open-conflicts"
                 | "ydoc-note-uses-a-newer-body-format"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),

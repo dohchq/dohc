@@ -1734,6 +1734,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Why protected files such as `.env` wait on the workspace secret key, as
   // the engine's code, such as `key-missing`. Omitted while the key works.
   secretKeyUnavailable: z.string().min(1).optional(),
+  // "locked": protected files from other computers wait for this computer to
+  // unlock them with the workspace passphrase. "need-passphrase": this
+  // computer's protected files need a passphrase before other computers can
+  // open them.
+  protectedFiles: z.enum(["locked", "need-passphrase"]).optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
   // A protected file's change a sync replaced, kept on this computer, as
@@ -2334,6 +2339,7 @@ export const HistoryVersionMarker = z
     kind: z.enum(["main", "named"]),
     name: z.string(),
     createdAtMs: z.number().int(),
+    archivedAtMs: z.number().int().optional(),
     forkPoint: z
       .object({ versionId: OPAQUE_ID, momentId: OPAQUE_ID.optional() })
       .strict()
@@ -3565,6 +3571,9 @@ export const WorkspaceVersionRecord = z.object({
   canMergeIntoMain: z.boolean(),
   // The version this one was made from. Main has none.
   madeFromVersionId: OPAQUE_ID.optional(),
+  // When this computer archived the version. Archived versions stay out of
+  // the version menu until restored.
+  archivedAtMs: z.number().optional(),
 });
 export type WorkspaceVersionRecord = z.infer<typeof WorkspaceVersionRecord>;
 
@@ -3689,6 +3698,13 @@ export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
 export const MergeWorkspaceVersionPayload = SwitchWorkspaceVersionPayload;
 export type MergeWorkspaceVersionPayload = z.infer<typeof MergeWorkspaceVersionPayload>;
 
+export const ArchiveWorkspaceVersionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
+  archived: z.boolean(),
+});
+export type ArchiveWorkspaceVersionPayload = z.infer<typeof ArchiveWorkspaceVersionPayload>;
+
 // Every conflict-carrying result is page-shaped: the daemon pages
 // `conflicts.list` under a byte budget, and these results pass one such page
 // through. Non-null nextAfterConflictId: more open conflicts exist past this
@@ -3702,17 +3718,25 @@ export const MergeWorkspaceVersionResult = z.object({
   // a clean merge into a conflicted one. The count sentence over the cards
   // reads the loaded rows instead: it describes what the user is looking at.
   conflictCount: z.number().int().min(0),
-  // Protected files whose Main copy the merge replaced. Paths only, never
-  // contents: the result lists them because they never become conflicts.
+  // Protected files whose copy in the target the merge replaced. Paths only,
+  // never contents: the result lists them because they never become conflicts.
   replacedProtectedPaths: z.array(PATH_STRING),
+  // Protected files both sides changed, which an update left as they were.
+  skippedProtectedPaths: z.array(PATH_STRING),
   conflicts: z.array(WorkspaceVersionConflict),
   nextAfterConflictId: OPAQUE_ID.nullable(),
 });
 export type MergeWorkspaceVersionResult = z.infer<typeof MergeWorkspaceVersionResult>;
 
+const VersionConflictPair = z.object({
+  sourceVersionId: OPAQUE_ID,
+  targetVersionId: OPAQUE_ID,
+});
+
 export const ListWorkspaceVersionConflictsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   afterConflictId: OPAQUE_ID.optional(),
+  pair: VersionConflictPair.optional(),
 });
 export type ListWorkspaceVersionConflictsPayload = z.infer<
   typeof ListWorkspaceVersionConflictsPayload
@@ -3744,6 +3768,7 @@ export const ResolveWorkspaceVersionConflictPayload = z.object({
     z.object({ kind: z.literal("keep-incoming") }),
     z.object({ kind: z.literal("keep-combined"), text: VERSION_TEXT }),
   ]),
+  pair: VersionConflictPair.optional(),
 });
 export type ResolveWorkspaceVersionConflictPayload = z.infer<
   typeof ResolveWorkspaceVersionConflictPayload
@@ -3934,6 +3959,20 @@ export const workspaceVersionOperations = {
     channel: "desktop:merge-workspace-version",
     payload: MergeWorkspaceVersionPayload,
     result: MergeWorkspaceVersionResult,
+    ...versionGuard,
+  },
+  updateWorkspaceVersion: {
+    capabilityId: "version.update",
+    channel: "desktop:update-workspace-version",
+    payload: MergeWorkspaceVersionPayload,
+    result: MergeWorkspaceVersionResult,
+    ...versionGuard,
+  },
+  archiveWorkspaceVersion: {
+    capabilityId: "version.archive",
+    channel: "desktop:archive-workspace-version",
+    payload: ArchiveWorkspaceVersionPayload,
+    result: z.void(),
     ...versionGuard,
   },
   listWorkspaceVersionConflicts: {

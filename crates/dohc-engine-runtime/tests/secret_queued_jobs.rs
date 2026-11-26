@@ -52,13 +52,17 @@ impl Workspace {
     }
 
     fn fork(&self, version: &str) {
+        self.fork_from(version, "main");
+    }
+
+    fn fork_from(&self, version: &str, from: &str) {
         VersionedTextStore::new(&mut EngineStore::open(&self.db, 2).unwrap())
             .create_named_version(
                 &CreateNamedVersion {
                     workspace_id: WS.into(),
                     new_version_id: version.into(),
                     name: version.into(),
-                    from_version_id: "main".into(),
+                    from_version_id: from.into(),
                     now_ms: 2,
                     request_id: None,
                 },
@@ -574,10 +578,32 @@ async fn inactive_version_ignores_the_active_file(block: impl Fn(&Path)) {
         .unwrap();
     workspace.close();
     workspace.fork("draft");
+    std::fs::write(workspace.root.join(".env"), "VALUE=main-next\n").unwrap();
+    let actor = workspace.open(3);
+    workspace
+        .write(
+            &actor,
+            "main",
+            ".env",
+            "VALUE=main-next\n",
+            "main-next",
+            SecretWriteDisk::AlreadyOnDisk,
+        )
+        .await
+        .unwrap();
+    workspace.close();
     std::fs::remove_file(workspace.root.join(".env")).unwrap();
     block(&workspace.root.join(".env"));
-    let actor = workspace.open(3);
+    let actor = workspace.open(4);
 
+    workspace
+        .apply(&actor, ".env", "main", "draft", "d-apply")
+        .await
+        .unwrap();
+    workspace
+        .restore(&actor, ".env", "d-apply", "d-restore")
+        .await
+        .unwrap();
     workspace
         .write(
             &actor,
@@ -587,14 +613,6 @@ async fn inactive_version_ignores_the_active_file(block: impl Fn(&Path)) {
             "d-write",
             workspace.queue(),
         )
-        .await
-        .unwrap();
-    workspace
-        .apply(&actor, ".env", "main", "draft", "d-apply")
-        .await
-        .unwrap();
-    workspace
-        .restore(&actor, ".env", "d-apply", "d-restore")
         .await
         .unwrap();
     workspace
@@ -783,7 +801,7 @@ async fn another_versions_pending_delete_leaves_the_file_in_place() {
         .unwrap();
     workspace.close();
     workspace.fork("draft");
-    workspace.fork("empty");
+    workspace.fork_from("empty", "draft");
     let actor = workspace.open(3);
     workspace
         .delete(&actor, "empty", "foo.env", "empty-delete")

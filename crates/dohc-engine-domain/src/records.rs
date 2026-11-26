@@ -74,6 +74,7 @@ pub struct VersionRecord {
     pub created_at_ms: i64,
     pub fork_version_id: Option<String>,
     pub fork_moment_id: Option<String>,
+    pub archived_at_ms: Option<i64>,
 }
 
 /// The materialized current state of a text object within a version.

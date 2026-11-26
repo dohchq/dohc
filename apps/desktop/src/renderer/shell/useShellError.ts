@@ -109,6 +109,7 @@ export type ShellErrorKind =
   | "cloud-sync-folder"
   | "file-recovery-unavailable"
   | "secret-key-unavailable"
+  | "protected-files"
   | "kept-files"
   | "retained-copies"
   | "saved-tabs"
@@ -229,7 +230,7 @@ function secretKeyWords(reason: string): string {
     case "volume-shares-new-files":
       return VOLUME_SHARES_NEW_FILES_WORDS;
     case "key-missing":
-      return `The workspace secret key file is missing. Restore ${SECRET_KEY_FILE} from a backup.`;
+      return `The workspace secret key file is missing. If another computer protected these files with a passphrase, unlock them in Settings › Sync. Otherwise restore ${SECRET_KEY_FILE} from a backup.`;
     case "key-corrupt":
       return `The workspace secret key file is damaged. Restore ${SECRET_KEY_FILE} from a backup.`;
     default:
@@ -1001,6 +1002,36 @@ export function useShellError(
     },
     [clearKind, push],
   );
+  const reportProtectedFiles = useCallback(
+    (state: "locked" | "need-passphrase" | null, openSyncSettings: () => void) => {
+      if (state === null) {
+        clearKind("protected-files");
+        return;
+      }
+      push(
+        {
+          tone: "warning",
+          ...(state === "locked"
+            ? {
+                title: "Protected files are locked on this computer",
+                message:
+                  "Files such as .env from your other computers wait until you unlock them with the workspace passphrase. Everything else keeps syncing.",
+              }
+            : {
+                title: "Your other computers can't open protected files yet",
+                message:
+                  "Files such as .env sync encrypted with a key only this computer has. Protect them with a passphrase so your other computers can unlock them.",
+              }),
+          retry: null,
+          action: { label: "Sync settings", run: openSyncSettings },
+          target: { to: "sync-settings" },
+          kind: "protected-files",
+        },
+        "repeat",
+      );
+    },
+    [clearKind, push],
+  );
   // History stopped recording for this workspace. Its identity names the
   // workspace, so a later report replaces the row and a healthy status
   // clears it; null clears it. `reasons` are extra Copy details lines,
@@ -1710,6 +1741,7 @@ export function useShellError(
     showSavedTabsNotice,
     reportRecoveryUnavailable,
     reportSecretKeyUnavailable,
+    reportProtectedFiles,
     showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,

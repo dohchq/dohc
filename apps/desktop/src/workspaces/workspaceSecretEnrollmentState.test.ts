@@ -120,8 +120,23 @@ describe("desktop workspace secret enrollment state", () => {
       sessions,
     );
     expect(loaded).toEqual(key);
-    loaded?.fill(0);
+    if (Buffer.isBuffer(loaded)) loaded.fill(0);
     key.fill(0);
+    await sessions.closeAll();
+  });
+
+  it("reports a missing key when protected files arrived without one", async () => {
+    const root = await createTestScratch("dohc-secret-enrollment-");
+    await createEngineDb(root);
+    const daemon = new SecretStateDaemon();
+    daemon.protectedRowsExist = true;
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemon,
+    });
+
+    await expect(
+      readWorkspaceDataKeyForEnrollment({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions),
+    ).resolves.toBe("missing");
     await sessions.closeAll();
   });
 

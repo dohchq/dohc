@@ -130,6 +130,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import { SECRET_KEY_RELATIVE_PATH } from "./workspaceDataKey";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -348,9 +349,11 @@ export interface WorkspaceVersionMergeResult {
   // rows themselves are open conflicts in the engine; readers page them
   // through listOpenConflictsPage instead of carrying them here.
   conflictCount: number;
-  // Protected files whose Main copy this merge replaced with the version's,
-  // in merge order. They never conflict, so the result has to name them.
+  // Protected files whose copy in the target this merge replaced, in merge
+  // order. They never conflict, so the result has to name them.
   replacedProtectedPaths: string[];
+  // Protected files both sides changed, which an update leaves as they were.
+  skippedProtectedPaths: string[];
 }
 
 // One page of open conflicts, the engine's own `conflicts.list` page passed
@@ -761,7 +764,7 @@ export interface WorkspaceEngineCapture {
   // Version operations. Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
-  listVersions(): Promise<WorkspaceVersionsSnapshot>;
+  listVersions(options?: { includeArchived?: boolean }): Promise<WorkspaceVersionsSnapshot>;
   // Creates a named version forked from the active version's current disk
   // state and makes it active. Disk content is untouched (the fork starts as
   // an identical copy).
@@ -783,9 +786,15 @@ export interface WorkspaceEngineCapture {
   // Merges a named version into Main through the engine merge API. When Main
   // is the active version, merged results are materialized to disk.
   mergeVersionIntoMain(sourceVersionId: string): Promise<WorkspaceVersionMergeResult>;
+  // Brings Main's changes into a named version made from Main, the same way.
+  updateVersionFromMain(versionId: string): Promise<WorkspaceVersionMergeResult>;
+  setVersionArchived(versionId: string, archived: boolean): Promise<void>;
   // One page of open conflicts; pass the previous page's nextAfterConflictId
   // to continue.
-  listOpenConflictsPage(afterConflictId?: string): Promise<WorkspaceVersionConflictPage>;
+  listOpenConflictsPage(
+    afterConflictId?: string,
+    pair?: { sourceVersionId: string; targetVersionId: string },
+  ): Promise<WorkspaceVersionConflictPage>;
   countOpenConflicts(): Promise<number>;
   // Open conflicts a merge left, per version they came from, read from at most
   // `pageLimit` pages without any conflict's text. `more` says the list ran on.
@@ -819,6 +828,7 @@ export interface WorkspaceEngineCapture {
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
+    pair?: { sourceVersionId: string; targetVersionId: string },
   ): Promise<WorkspaceVersionConflictResolveOutcome>;
   // History reads: the active version's moment timeline and one
   // moment's full payload. Reads drain the capture chain first so the
@@ -988,6 +998,7 @@ export interface WorkspaceEngineCapture {
   // remains available to the next pass instead of being skipped forever.
   runRelaySync<T>(task: (materializePage: MaterializeRelayPullPage) => Promise<T>): Promise<T>;
   withVersionLock<T>(work: () => Promise<T>): Promise<T>;
+  restoreLockedProtectedFiles(): Promise<void>;
   // Journaled edits only. Owner-outbox acknowledgements use their live lane.
   onDurableLocalChange(handler: (path: string) => void): () => void;
   readonly shuttingDown: boolean;
@@ -1061,6 +1072,7 @@ export interface WorkspaceEngineCaptureOptions {
   // Why protected files such as `.env` wait on the workspace secret key, such
   // as `key-missing`, or null while the key works.
   onSecretKeyUnavailable?: (reason: string | null) => void;
+  onProtectedFilesLocked?: (locked: boolean) => void;
   onOutsideWriteCopies?: (
     paths: readonly (readonly [string, string, string])[] | null,
     readError: string | null,
@@ -4960,6 +4972,17 @@ export function createWorkspaceEngineCapture(
   // its way to the workspace folder, and every write/delete registers an
   // expected engine event. A pre-existing non-text/unreadable file at a
   // secret path is never clobbered (same never-clobber rule as text).
+  async function presentOnDisk(path: string): Promise<boolean> {
+    try {
+      await lstat(join(rootPath, path));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  const secretKeyFileExists = () => presentOnDisk(SECRET_KEY_RELATIVE_PATH);
+
   async function planSecretMaterialization(
     targetVersionId: string,
     previousVersionId: string,
@@ -5019,14 +5042,326 @@ export function createWorkspaceEngineCapture(
     return { kind: "write", path: snapshot.path, text: snapshot.text };
   }
 
+  function versionRefusalError(error: unknown, fallbackName?: string): Error | null {
+    const code =
+      error instanceof DaemonRefusalError
+        ? error.message
+        : error instanceof VersionedTextStoreError
+          ? error.code
+          : undefined;
+    if (code === "version-is-main") return new Error("Main can't be archived.");
+    if (code === "version-is-active") {
+      return new Error("Switch to another version before archiving this one.");
+    }
+    if (code === "version-has-open-conflicts") {
+      return new Error("Decide this version's open conflicts before archiving it.");
+    }
+    if (code === "version-archived") {
+      return new Error(
+        fallbackName
+          ? `Restore version "${fallbackName}" before switching to it.`
+          : "Restore this version before switching to it.",
+      );
+    }
+    return null;
+  }
+
   async function versionsSnapshot(
     engine: Pick<VersionedTextStore, "listVersions" | "getActiveVersion">,
+    includeArchived = false,
   ): Promise<WorkspaceVersionsSnapshot> {
     const [versions, activeVersionId] = await Promise.all([
-      engine.listVersions({ workspaceId }),
+      engine.listVersions({ workspaceId, ...(includeArchived ? { includeArchived: true } : {}) }),
       activeVersionIdOf(engine),
     ]);
     return { versions, activeVersionId };
+  }
+
+  // Merges a named version into Main, or Main into a named version made from
+  // it. Paths the opposite direction left in conflict refuse until decided, so
+  // one decision is never asked twice from two sides.
+  function mergeVersionPair(
+    versionId: string,
+    intoMain: boolean,
+  ): Promise<WorkspaceVersionMergeResult> {
+    const sourceVersionId = intoMain ? versionId : ENGINE_MAIN_VERSION_ID;
+    const targetVersionId = intoMain ? ENGINE_MAIN_VERSION_ID : versionId;
+    // The files already merged. A failure after the first says the merge
+    // stopped partway.
+    let mergedFileCount = 0;
+    const merge = async () => {
+      const policy = await readPolicyForTask();
+      const engine = await engineStore();
+      const activeVersionId = await activeVersionIdOf(engine);
+      const correlationId = `version-${intoMain ? "merge" : "update"}-${createId()}`;
+      // A merge materializes results into the active
+      // folder. Vacate live sessions first so a later settle can't overwrite
+      // the merged result / reopen a stale lineage.
+      await settleAndCloseLiveYDocSessions(
+        () => true,
+        intoMain ? "Saved latest edits before merging" : "Saved latest edits before updating",
+      );
+      // Capture the latest disk edits so the merge sees them (whichever
+      // side is active).
+      await engine.flushCapture?.();
+      const versions = await engine.listVersions({ workspaceId, includeArchived: true });
+      const named = versions.find((version) => version.id === versionId);
+      if (!named || named.kind !== "named") {
+        throw new Error(
+          intoMain
+            ? "Only a named version can merge into Main."
+            : "Only a named version can update from Main.",
+        );
+      }
+      if (!intoMain && named.forkPoint?.versionId !== ENGINE_MAIN_VERSION_ID) {
+        throw new Error(`Version "${named.name}" wasn't made from Main.`);
+      }
+      if (named.archivedAtMs !== undefined) {
+        throw new Error(
+          `Restore version "${named.name}" before ${intoMain ? "merging" : "updating"} it.`,
+        );
+      }
+      const metadata: ActorNeutralWriteMetadata = {
+        origin: "api",
+        summary: intoMain
+          ? `Merged version "${named.name}" into Main`
+          : `Updated version "${named.name}" from Main`,
+        correlationId,
+      };
+      const deletedPaths: string[] = [];
+      const changedPaths: string[] = [];
+      {
+        let afterPath: string | undefined;
+        do {
+          const page = await engine.compareVersionFilesPage({
+            workspaceId,
+            sourceVersionId,
+            targetVersionId,
+            includeBaseDrift: true,
+            ...(afterPath !== undefined ? { afterPath } : {}),
+          });
+          for (const entry of page.entries) {
+            changedPaths.push(entry.path);
+            if (entry.status === "deleted") deletedPaths.push(entry.path);
+          }
+          afterPath = page.nextAfterPath ?? undefined;
+        } while (afterPath !== undefined);
+      }
+      // Each text merge reaches disk at once. A path the target loses that another
+      // spelling of the same file replaces merges first, like the protected
+      // half below, so its delete cannot remove the new spelling's file.
+      const deleted = new Set(deletedPaths);
+      const writtenKeys = new Set(
+        changedPaths.filter((path) => !deleted.has(path)).map(pathCollisionKey),
+      );
+      const respelled = new Set(
+        deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
+      );
+      const mergeSteps = changedPaths.filter((path) => !respelled.has(path));
+      const ordered = await orderFileSteps(
+        engine,
+        mergeSteps.map((path) => ({ path, delete: deleted.has(path) })),
+      );
+      const mergeOrder = [...respelled, ...ordered];
+      // Scope the conflict check to this version pair: opposite-direction
+      // conflicts block until decided, while same-direction paths always re-run
+      // through the engine so fresh conflicts dedupe and stale ones re-merge.
+      const openSameDirectionPaths = new Set<string>();
+      let openOtherWay = false;
+      {
+        let afterConflictId: string | undefined;
+        do {
+          const page = await engine.listTextConflicts({
+            workspaceId,
+            status: "open",
+            bodies: "withheld",
+            ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+          });
+          for (const conflict of page.conflicts) {
+            if (conflict.metadata.origin === "sync") continue;
+            if (
+              conflict.sourceVersionId === sourceVersionId &&
+              conflict.targetVersionId === targetVersionId
+            ) {
+              openSameDirectionPaths.add(conflict.path);
+            } else if (
+              conflict.sourceVersionId === targetVersionId &&
+              conflict.targetVersionId === sourceVersionId
+            ) {
+              openOtherWay = true;
+            }
+          }
+          afterConflictId = page.nextAfterConflictId ?? undefined;
+        } while (afterConflictId !== undefined);
+      }
+      if (openOtherWay) {
+        throw new Error(
+          intoMain
+            ? `Decide the conflicts from updating "${named.name}" from Main before merging it.`
+            : `Decide the conflicts from merging "${named.name}" into Main before updating it.`,
+        );
+      }
+      const inOrder = new Set(mergeOrder);
+      for (const path of [...openSameDirectionPaths].sort(compareEnginePaths)) {
+        if (!inOrder.has(path)) mergeOrder.push(path);
+      }
+      const materializations: MaterializeOperation[] = [];
+      let conflictCount = 0;
+      let unchangedFileCount = 0;
+      for (const path of mergeOrder) {
+        const result = await engine.mergeTextFileFromVersion({
+          workspaceId,
+          targetVersionId,
+          sourceVersionId,
+          path,
+          metadata,
+        });
+        if (result.kind === "unchanged") {
+          unchangedFileCount += 1;
+          continue;
+        }
+        if (result.kind === "conflict") {
+          conflictCount += 1;
+          continue;
+        }
+        mergedFileCount += 1;
+      }
+      // Secret files merge through the encrypted path: whole-file,
+      // merge-base-aware, and never a conflict record (conflict records
+      // carry side texts, which protected contents must never ride). Into
+      // Main, a secret the version changed wins and Main's previous state
+      // stays one protected moment back in history. Into a version, a
+      // secret both sides changed stays as it was.
+      const secrets = secretStoreFor();
+      const replacedProtectedPaths: string[] = [];
+      const skippedProtectedPaths: string[] = [];
+      const secretPaths: string[] = [];
+      {
+        let secretAfterPath: string | undefined;
+        do {
+          const page = await secrets.compareSecretFileVersions({
+            workspaceId,
+            targetVersionId,
+            sourceVersionId,
+            includeBaseDrift: true,
+            ...(secretAfterPath !== undefined ? { afterPath: secretAfterPath } : {}),
+          });
+          for (const entry of page.entries) secretPaths.push(entry.path);
+          secretAfterPath = page.nextAfterPath ?? undefined;
+        } while (secretAfterPath !== undefined);
+      }
+      for (const path of secretPaths) {
+        const applied = await secrets.applySecretFileFromVersion({
+          workspaceId,
+          targetVersionId,
+          sourceVersionId,
+          path,
+          metadata: {
+            origin: "api",
+            summary: intoMain
+              ? `Updated ${pathBasename(path)} from version "${named.name}"`
+              : `Updated ${pathBasename(path)} from Main`,
+            correlationId,
+          },
+        });
+        if (applied.diverged) {
+          skippedProtectedPaths.push(path);
+          continue;
+        }
+        if (!applied.changed) {
+          unchangedFileCount += 1;
+          continue;
+        }
+        mergedFileCount += 1;
+        replacedProtectedPaths.push(path);
+        if (activeVersionId === targetVersionId) {
+          const materialized = await secrets.materializeSecretFile({
+            workspaceId,
+            versionId: targetVersionId,
+            path,
+          });
+          materializations.push(
+            materialized.present
+              ? {
+                  kind: "write",
+                  path,
+                  text: materialized.text,
+                  protected: true,
+                }
+              : { kind: "delete", path, protected: true },
+          );
+        }
+      }
+      // The folder shows the active version; only a merge into the active
+      // version changes what is on disk.
+      if (activeVersionId === targetVersionId) {
+        await materialize(deletesBeforeWrites(materializations), policy);
+      }
+      return {
+        mergedFileCount,
+        unchangedFileCount,
+        conflictCount,
+        replacedProtectedPaths,
+        skippedProtectedPaths,
+      };
+    };
+    return enqueueResult(intoMain ? "merge version into Main" : "update version from Main", () =>
+      merge().catch((error: unknown) => {
+        throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+      }),
+    );
+  }
+
+  async function readOpenConflictsPage(
+    afterConflictId?: string,
+    pair?: { sourceVersionId: string; targetVersionId: string },
+  ): Promise<WorkspaceVersionConflictPage> {
+    const engine = await engineStore();
+    if (!pair) {
+      return engine.listTextConflicts({
+        workspaceId,
+        status: "open",
+        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+      });
+    }
+    const matchesPair = (conflict: {
+      metadata: { origin: string };
+      sourceVersionId: string;
+      targetVersionId: string;
+    }) =>
+      conflict.metadata.origin !== "sync" &&
+      conflict.sourceVersionId === pair.sourceVersionId &&
+      conflict.targetVersionId === pair.targetVersionId;
+    let cursor = afterConflictId;
+    for (;;) {
+      const page = await engine.listTextConflicts({
+        workspaceId,
+        status: "open",
+        ...(cursor !== undefined ? { afterConflictId: cursor } : {}),
+      });
+      const conflicts = page.conflicts.filter(matchesPair);
+      if (conflicts.length === 0) {
+        if (page.nextAfterConflictId === null) return { conflicts, nextAfterConflictId: null };
+        cursor = page.nextAfterConflictId;
+        continue;
+      }
+      let nextAfterConflictId: string | null = null;
+      let probeCursor = page.nextAfterConflictId;
+      while (probeCursor !== null) {
+        const probe = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          bodies: "withheld",
+          afterConflictId: probeCursor,
+        });
+        if (probe.conflicts.some(matchesPair)) {
+          nextAfterConflictId = probeCursor;
+          break;
+        }
+        probeCursor = probe.nextAfterConflictId;
+      }
+      return { conflicts, nextAfterConflictId };
+    }
   }
 
   // Wraps one background capture task so its overall outcome (ok / failed)
@@ -9044,9 +9379,9 @@ export function createWorkspaceEngineCapture(
       return resumeAdmission;
     },
 
-    async listVersions() {
+    async listVersions(listOptions) {
       const engine = await engineStore();
-      return versionsSnapshot(engine);
+      return versionsSnapshot(engine, listOptions?.includeArchived === true);
     },
 
     createVersion(name) {
@@ -9083,7 +9418,7 @@ export function createWorkspaceEngineCapture(
           // Create-and-switch: the fork is content-identical to the disk, so no
           // materialization is needed.
           await engine.setActiveVersion({ workspaceId, versionId: version.id });
-          return versionsSnapshot(engine);
+          return versionsSnapshot(engine, true);
         });
       });
     },
@@ -9097,6 +9432,12 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await listTextFileMetadata(engine, versionId);
+        const target = (await engine.listVersions({ workspaceId, includeArchived: true })).find(
+          (version) => version.id === versionId,
+        );
+        if (target?.archivedAtMs !== undefined) {
+          throw new Error(`Restore version "${target.name}" before switching to it.`);
+        }
         const runSwitch = <T>(work: () => Promise<T>) =>
           options.aroundVersionSwitch ? options.aroundVersionSwitch(work) : work();
         return runSwitch(async () => {
@@ -9132,7 +9473,11 @@ export function createWorkspaceEngineCapture(
           for (const path of changedPaths) {
             if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
           }
-          await engine.setActiveVersion({ workspaceId, versionId });
+          try {
+            await engine.setActiveVersion({ workspaceId, versionId });
+          } catch (error) {
+            throw versionRefusalError(error, target?.name) ?? error;
+          }
           return { activeVersionId: versionId, changedFileCount };
         });
       });
@@ -9226,200 +9571,26 @@ export function createWorkspaceEngineCapture(
     },
 
     mergeVersionIntoMain(sourceVersionId) {
-      // The version's files already in Main. A failure after the first says
-      // the merge stopped partway.
-      let mergedFileCount = 0;
-      const merge = async () => {
-        const policy = await readPolicyForTask();
-        const engine = await engineStore();
-        const activeVersionId = await activeVersionIdOf(engine);
-        const correlationId = `version-merge-${createId()}`;
-        // A merge materializes results into the active
-        // folder. Vacate live sessions first so a later settle can't overwrite
-        // the merged result / reopen a stale lineage.
-        await settleAndCloseLiveYDocSessions(() => true, "Saved latest edits before merging");
-        // Capture the latest disk edits so the merge sees them (whichever
-        // side is active).
-        await engine.flushCapture?.();
-        const versions = await engine.listVersions({ workspaceId });
-        const source = versions.find((version) => version.id === sourceVersionId);
-        if (!source || source.kind !== "named") {
-          throw new Error("Only a named version can merge into Main.");
-        }
-        const metadata: ActorNeutralWriteMetadata = {
-          origin: "api",
-          summary: `Merged version "${source.name}" into Main`,
-          correlationId,
-        };
-        // Paths identical on both sides need no merge; everything else goes
-        // through the engine's three-way per-file merge (which preserves
-        // base/current/incoming when it conflicts). The differing paths come
-        // from the engine's metadata listing, one page at a time — the walk
-        // needs paths, never text bodies.
-        const deletedPaths: string[] = [];
-        const changedPaths: string[] = [];
-        {
-          let afterPath: string | undefined;
-          do {
-            const page = await engine.compareVersionFilesPage({
-              workspaceId,
-              sourceVersionId,
-              targetVersionId: ENGINE_MAIN_VERSION_ID,
-              ...(afterPath !== undefined ? { afterPath } : {}),
-            });
-            for (const entry of page.entries) {
-              changedPaths.push(entry.path);
-              if (entry.status === "deleted") deletedPaths.push(entry.path);
-            }
-            afterPath = page.nextAfterPath ?? undefined;
-          } while (afterPath !== undefined);
-        }
-        // Each text merge reaches disk at once. A path Main loses that another
-        // spelling of the same file replaces merges first, like the protected
-        // half below, so its delete cannot remove the new spelling's file.
-        const deleted = new Set(deletedPaths);
-        const writtenKeys = new Set(
-          changedPaths.filter((path) => !deleted.has(path)).map(pathCollisionKey),
-        );
-        const respelled = new Set(
-          deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
-        );
-        const mergeSteps = changedPaths.filter((path) => !respelled.has(path));
-        const ordered = await orderFileSteps(
-          engine,
-          mergeSteps.map((path) => ({ path, delete: deleted.has(path) })),
-        );
-        const mergeOrder = [...respelled, ...ordered];
-        // Re-running the merge resumes: a path that already has an open
-        // conflict for this version pair re-surfaces that conflict instead of
-        // recording a duplicate. Only the paths are retained from the walk.
-        const openConflictPaths = new Set<string>();
-        {
-          let afterConflictId: string | undefined;
-          do {
-            const page = await engine.listTextConflicts({
-              workspaceId,
-              status: "open",
-              // Paths only, like the compare walk above. Hydrating here would
-              // fetch every withheld body of every open conflict and keep none.
-              bodies: "withheld",
-              ...(afterConflictId !== undefined ? { afterConflictId } : {}),
-            });
-            for (const conflict of page.conflicts) {
-              if (
-                conflict.sourceVersionId === sourceVersionId &&
-                conflict.targetVersionId === ENGINE_MAIN_VERSION_ID
-              ) {
-                openConflictPaths.add(conflict.path);
-              }
-            }
-            afterConflictId = page.nextAfterConflictId ?? undefined;
-          } while (afterConflictId !== undefined);
-        }
-        const materializations: MaterializeOperation[] = [];
-        let conflictCount = 0;
-        let unchangedFileCount = 0;
-        for (const path of mergeOrder) {
-          if (openConflictPaths.has(path)) {
-            conflictCount += 1;
-            continue;
-          }
-          const result = await engine.mergeTextFileFromVersion({
-            workspaceId,
-            targetVersionId: ENGINE_MAIN_VERSION_ID,
-            sourceVersionId,
-            path,
-            metadata,
-          });
-          if (result.kind === "unchanged") {
-            unchangedFileCount += 1;
-            continue;
-          }
-          if (result.kind === "conflict") {
-            conflictCount += 1;
-            continue;
-          }
-          mergedFileCount += 1;
-        }
-        // Secret files merge through the encrypted path: whole-file,
-        // fork-base-aware, and never a conflict record (conflict records
-        // carry side texts, which protected contents must never ride). When
-        // the source changed a secret since its fork, the source side wins
-        // and Main's previous state stays one protected moment back in
-        // history — restorable, so nothing is lost.
-        const secrets = secretStoreFor();
-        const secretChanges: SecretFileComparePage["entries"] = [];
-        const replacedProtectedPaths: string[] = [];
-        {
-          let secretAfterPath: string | undefined;
-          do {
-            const page = await secrets.compareSecretFileVersions({
-              workspaceId,
-              targetVersionId: ENGINE_MAIN_VERSION_ID,
-              sourceVersionId,
-              ...(secretAfterPath !== undefined ? { afterPath: secretAfterPath } : {}),
-            });
-            secretChanges.push(...page.entries);
-            secretAfterPath = page.nextAfterPath ?? undefined;
-          } while (secretAfterPath !== undefined);
-        }
-        for (const change of secretChanges) {
-          const applied = await secrets.applySecretFileFromVersion({
-            workspaceId,
-            targetVersionId: ENGINE_MAIN_VERSION_ID,
-            sourceVersionId,
-            path: change.path,
-            metadata: {
-              origin: "api",
-              summary: `Updated ${pathBasename(change.path)} from version "${source.name}"`,
-              correlationId,
-            },
-          });
-          if (!applied.changed) {
-            unchangedFileCount += 1;
-            continue;
-          }
-          mergedFileCount += 1;
-          replacedProtectedPaths.push(change.path);
-          if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
-            const materialized = await secrets.materializeSecretFile({
-              workspaceId,
-              versionId: ENGINE_MAIN_VERSION_ID,
-              path: change.path,
-            });
-            materializations.push(
-              materialized.present
-                ? {
-                    kind: "write",
-                    path: change.path,
-                    text: materialized.text,
-                    protected: true,
-                  }
-                : { kind: "delete", path: change.path, protected: true },
-            );
-          }
-        }
-        // The folder shows the active version; only a merge into the active
-        // version changes what is on disk.
-        if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
-          await materialize(deletesBeforeWrites(materializations), policy);
-        }
-        return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
-      };
-      return enqueueResult("merge version into Main", () =>
-        merge().catch((error: unknown) => {
-          throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
-        }),
-      );
+      return mergeVersionPair(sourceVersionId, true);
     },
 
-    async listOpenConflictsPage(afterConflictId) {
-      const engine = await engineStore();
-      return engine.listTextConflicts({
-        workspaceId,
-        status: "open",
-        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+    updateVersionFromMain(versionId) {
+      return mergeVersionPair(versionId, false);
+    },
+
+    setVersionArchived(versionId, archived) {
+      return enqueueResult(archived ? "archive version" : "restore version", async () => {
+        const engine = await engineStore();
+        try {
+          await engine.setVersionArchived({ workspaceId, versionId, archived });
+        } catch (error) {
+          throw versionRefusalError(error) ?? error;
+        }
       });
+    },
+
+    listOpenConflictsPage(afterConflictId, pair) {
+      return readOpenConflictsPage(afterConflictId, pair);
     },
 
     async countOpenConflicts() {
@@ -9453,7 +9624,11 @@ export function createWorkspaceEngineCapture(
         });
         for (const conflict of result.conflicts) {
           if (conflict.metadata.origin === "sync") continue;
-          counts.set(conflict.sourceVersionId, (counts.get(conflict.sourceVersionId) ?? 0) + 1);
+          const versionId =
+            conflict.sourceVersionId === ENGINE_MAIN_VERSION_ID
+              ? conflict.targetVersionId
+              : conflict.sourceVersionId;
+          counts.set(versionId, (counts.get(versionId) ?? 0) + 1);
         }
         afterConflictId = result.nextAfterConflictId ?? undefined;
         if (afterConflictId === undefined) break;
@@ -9582,7 +9757,7 @@ export function createWorkspaceEngineCapture(
       return await (await engineStore()).deleteRetainedCopies(copies);
     },
 
-    resolveConflict(conflictId, resolution) {
+    resolveConflict(conflictId, resolution, pair) {
       return enqueueResult("resolve conflict", async () => {
         const engine = await engineStore();
         // The engine refuses to resolve a file an open document holds, so
@@ -9613,16 +9788,10 @@ export function createWorkspaceEngineCapture(
           );
         }
         await engine.reconcileCapture?.();
-        const remaining = await engine.listTextConflicts({
-          workspaceId,
-          status: "open",
-        });
+        const remaining = await readOpenConflictsPage(undefined, pair);
         return {
           conflict: result.conflict,
-          remaining: {
-            conflicts: remaining.conflicts,
-            nextAfterConflictId: remaining.nextAfterConflictId,
-          },
+          remaining,
         };
       });
     },
@@ -10792,6 +10961,7 @@ export function createWorkspaceEngineCapture(
           const policy = await readPolicyForTask();
           const activeVersionId = await activeVersionIdOf(engine);
           const materializations: MaterializeOperation[] = [];
+          let locked: boolean | undefined;
           for (const change of changed) {
             // A failed disk materialization leaves the relay cursor behind.
             // If the user switches versions before the retry, the redelivered
@@ -10807,6 +10977,8 @@ export function createWorkspaceEngineCapture(
               continue;
             }
             if (change.contentKind === "secret") {
+              locked ??= !(await secretKeyFileExists());
+              if (locked) continue;
               const materialized = await secretStoreFor().materializeSecretFile({
                 workspaceId,
                 versionId: change.versionId,
@@ -10844,6 +11016,7 @@ export function createWorkspaceEngineCapture(
             materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
           await materialize(materializations, policy);
+          if (locked !== undefined) options.onProtectedFilesLocked?.(locked);
           // The daemon watcher must manifest the pulled disk state before the
           // caller can make its next edit. Otherwise a fast local edit can
           // coalesce with this materialization as the path's first sight, and
@@ -10851,6 +11024,22 @@ export function createWorkspaceEngineCapture(
           await engine.reconcileCapture?.();
         };
         return await task(materializePage);
+      });
+    },
+
+    restoreLockedProtectedFiles() {
+      return enqueueResult("restore locked protected files", async () => {
+        if (!(await secretKeyFileExists())) return;
+        const engine = await engineStore();
+        const policy = await readPolicyForTask();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const absent: MaterializeOperation[] = [];
+        for (const operation of await planSecretMaterialization(activeVersionId, activeVersionId))
+          if (operation.kind === "write" && !(await presentOnDisk(operation.path)))
+            absent.push(operation);
+        await materialize(absent, policy);
+        await engine.reconcileCapture?.();
+        options.onProtectedFilesLocked?.(false);
       });
     },
 

@@ -3820,6 +3820,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("legacy_env_template_secrets.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 113,
+        id: "v2-version-lifecycle",
+        sql: "ALTER TABLE versions ADD COLUMN archived_at_ms INTEGER;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 114,
+        id: "v2-merge-bases-bidirectional",
+        sql: include_str!("merge_bases_bidirectional.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -6035,6 +6047,14 @@ mod tests {
                 "v2-legacy-env-template-secrets",
                 "ff762aec19b44fe21680c00e845aed4ad180525837d87cd56714fd0b82a26029",
             ),
+            (
+                "v2-version-lifecycle",
+                "819a6c24a3377d25bd05aec46989fd143c847f02a826faaae471e1c8ff249cc3",
+            ),
+            (
+                "v2-merge-bases-bidirectional",
+                "72a93ceffe4dc0030240dc969356f91c6001884671531c1b003852eb93033ce9",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6118,6 +6138,95 @@ mod tests {
         println!(
             "CONVERSATION_LINKS_MIGRATION_MEASUREMENT {{\"aliases\":500000,\"objects\":50000,\"versions\":10,\"migrationUs\":{migration_us},\"aliasIndexUs\":{index_us},\"databaseBytesBefore\":{bytes_before},\"databaseBytesAfter\":{bytes_after}}}"
         );
+    }
+
+    #[test]
+    fn version_lifecycle_and_two_way_merge_bases_upgrade_rows_from_main_111() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-version-lifecycle");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 112);
+        assert_eq!(BASELINE_MIGRATIONS[before + 1].ordinal, 114);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main');
+             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',0);
+             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms,fork_version_id) VALUES ('ws','feat','named','Feature',1,'main');
+             INSERT INTO merge_bases(workspace_id,source_version_id,path,base_exists,prior_exists) VALUES ('ws','feat','a.md',0,0);",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(
+                &mut conn,
+                &BASELINE_MIGRATIONS[..=before + 1],
+                &ctx,
+                &NoFaults
+            )
+            .unwrap(),
+            MigrationOutcome::Applied { newly_applied: 2 }
+        );
+        let archived: Vec<Option<i64>> = conn
+            .prepare("SELECT archived_at_ms FROM versions ORDER BY version_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(archived, [None, None]);
+        let (merged_into, merge_seq): (String, i64) = conn
+            .query_row(
+                "SELECT merged_into, merge_seq FROM merge_bases",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (merged_into.as_str(), merge_seq),
+            ("main", 1),
+            "a merge recorded before was a merge into Main"
+        );
+        assert!(
+            conn.execute("UPDATE merge_bases SET merged_into = 'other'", [])
+                .is_err()
+        );
+        conn.execute(
+            "INSERT INTO merge_bases(workspace_id,source_version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','a.md',0,0,'named',2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','.env',0,0,'named',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','.env',0,0,'main',2)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists)                  VALUES ('ws','feat','.env.local',1,0)",
+                [],
+            )
+            .is_err(),
+            "a recorded secret base carries its sealed fields"
+        );
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute("DELETE FROM versions WHERE version_id = 'feat'", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM merge_bases) + (SELECT COUNT(*) FROM secret_merge_bases)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

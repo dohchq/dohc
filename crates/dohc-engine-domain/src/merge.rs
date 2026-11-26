@@ -2,18 +2,19 @@
 
 use crate::conflicts::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
-    WriteBinaryFile, enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
-    load_text_conflict_in_tx, write_binary_file_in_tx,
+    WriteBinaryFile, check_or_supersede_open_merge_conflict, enqueue_delete, enqueue_write,
+    insert_text_conflict_if_absent, load_text_conflict_in_tx, write_binary_file_in_tx,
 };
 use crate::error::DomainError;
 use crate::records::{
     DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord, TextSnapshot,
-    VersionKind, WriteResult, WriteText,
+    WriteResult, WriteText,
 };
 use crate::store::{
     VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_file_object, get_moment,
-    hash_fields, lookup_request, record_merge_request, validate_delete_input, validate_path,
-    validate_write_input, write_result_from_moment, write_text_in_tx,
+    hash_fields, lookup_request, record_merge_request, require_unarchived_version,
+    validate_delete_input, validate_path, validate_write_input, write_result_from_moment,
+    write_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
@@ -330,6 +331,8 @@ impl VersionedTextStore<'_> {
                 }
                 return reconstruct_merge(tx, input, &recorded);
             }
+            require_unarchived_version(tx, &input.workspace_id, &input.target_version_id)?;
+            require_unarchived_version(tx, &input.workspace_id, &input.source_version_id)?;
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
                 target_version_id: input.target_version_id.clone(),
@@ -337,6 +340,33 @@ impl VersionedTextStore<'_> {
                 path: input.path.clone(),
             };
             let comparison = compare_text_file_versions_in_db(tx, &compare_input)?;
+            fn head_of(side: &Option<ComparisonSide>) -> Option<(&'static str, &str, &str, &str)> {
+                side.as_ref().map(|s| {
+                    (
+                        if s.binary { "binary" } else { "text" },
+                        s.snapshot.blob_sha256.as_str(),
+                        s.snapshot.object_id.as_str(),
+                        s.snapshot.latest_moment_id.as_str(),
+                    )
+                })
+            }
+            if let Some(existing) = check_or_supersede_open_merge_conflict(
+                tx,
+                &input.workspace_id,
+                &input.target_version_id,
+                &input.source_version_id,
+                &input.path,
+                head_of(&comparison.current),
+                head_of(&comparison.incoming),
+                input.now_ms,
+            )? {
+                let result = MergeTextFileResult::Conflict {
+                    comparison,
+                    conflict: Box::new(existing),
+                    deduped: true,
+                };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
             if comparison_sides_equal(&comparison.current, &comparison.incoming) {
                 let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::AlreadySame,
@@ -453,6 +483,14 @@ impl VersionedTextStore<'_> {
                     &incoming.snapshot.text,
                 )
             {
+                if text == current.snapshot.text {
+                    let result = MergeTextFileResult::Unchanged {
+                        reason: MergeUnchangedReason::AlreadySame,
+                        comparison,
+                        deduped: false,
+                    };
+                    return finish_merge(tx, input, &payload_hash, result, &after);
+                }
                 let write_input = merge_write_input(input, &text);
                 validate_write_input(&write_input)?;
                 let write = write_text_in_tx(tx, &write_input)?;
@@ -497,59 +535,87 @@ impl VersionedTextStore<'_> {
         after_path: Option<&str>,
         limit: usize,
     ) -> Result<VersionFileChangePage, DomainError> {
+        self.compare_version_files_page_with_drift(
+            workspace_id,
+            source_version_id,
+            target_version_id,
+            after_path,
+            limit,
+            false,
+        )
+    }
+
+    pub fn compare_version_files_page_with_drift(
+        &self,
+        workspace_id: &str,
+        source_version_id: &str,
+        target_version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+        include_base_drift: bool,
+    ) -> Result<VersionFileChangePage, DomainError> {
         if limit == 0 {
             return Err(DomainError::InvalidInput {
                 reason: "limit must be positive",
             });
         }
-        // `usize as i64` wraps on overflow and SQLite treats a negative LIMIT
-        // as unbounded — refuse instead of full-scanning.
         let limit_i64 = i64::try_from(limit).map_err(|_| DomainError::InvalidInput {
             reason: "limit must be positive",
         })?;
         self.store.read_with(|conn| {
             validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
             let after_path = after_path.unwrap_or("");
+            let pair = if include_base_drift {
+                merge_pair(conn, workspace_id, source_version_id, target_version_id)?
+            } else {
+                None
+            };
             let target =
                 compare_side_page(conn, workspace_id, target_version_id, after_path, limit_i64)?;
             let source =
                 compare_side_page(conn, workspace_id, source_version_id, after_path, limit_i64)?;
-            // Merge the two path-ordered sides. Each merged row takes at least
-            // one row from a side, so the first `limit` rows of each side hold
-            // the first `limit` paths of both.
-            let (mut target, mut source) =
-                (target.into_iter().peekable(), source.into_iter().peekable());
+            let bases = match &pair {
+                Some((named, _)) => {
+                    compare_base_page(conn, workspace_id, named, after_path, limit_i64)?
+                }
+                None => Vec::new(),
+            };
+            let (mut target, mut source, mut bases) = (
+                target.into_iter().peekable(),
+                source.into_iter().peekable(),
+                bases.into_iter().peekable(),
+            );
             let mut entries = Vec::new();
             let mut rows_merged = 0usize;
             let mut last_scanned_path = None;
             while rows_merged < limit {
-                let (t, s) = match (target.peek(), source.peek()) {
-                    (None, None) => break,
-                    (Some(t), Some(s)) if t.path == s.path => (target.next(), source.next()),
-                    (Some(t), Some(s)) if t.path < s.path => (target.next(), None),
-                    (Some(_), None) => (target.next(), None),
-                    (_, Some(_)) => (None, source.next()),
-                };
+                let next_path = [
+                    target.peek().map(|r| r.path.as_str()),
+                    source.peek().map(|r| r.path.as_str()),
+                    bases.peek().map(|r| r.path.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(str::to_owned);
+                let Some(path) = next_path else { break };
+                let t = target.next_if(|r| r.path == path);
+                let s = source.next_if(|r| r.path == path);
+                let b = bases.next_if(|r| r.path == path);
                 rows_merged += 1;
+                last_scanned_path = Some(path.clone());
                 let entry = match (t, s) {
-                    (None, Some(s)) => {
-                        last_scanned_path = Some(s.path.clone());
-                        Some(VersionFileChangeEntry {
-                            binary: s.kind == "binary",
-                            path: s.path,
-                            status: VersionFileChangeStatus::Added,
-                        })
-                    }
-                    (Some(t), None) => {
-                        last_scanned_path = Some(t.path.clone());
-                        Some(VersionFileChangeEntry {
-                            binary: t.kind == "binary",
-                            path: t.path,
-                            status: VersionFileChangeStatus::Deleted,
-                        })
-                    }
+                    (None, Some(s)) => Some(VersionFileChangeEntry {
+                        binary: s.kind == "binary",
+                        path: s.path,
+                        status: VersionFileChangeStatus::Added,
+                    }),
+                    (Some(t), None) => Some(VersionFileChangeEntry {
+                        binary: t.kind == "binary",
+                        path: t.path,
+                        status: VersionFileChangeStatus::Deleted,
+                    }),
                     (Some(t), Some(s)) => {
-                        last_scanned_path = Some(t.path.clone());
                         let same = t.kind == s.kind
                             && match t.kind.as_str() {
                                 "text" => t.blob == s.blob,
@@ -560,13 +626,44 @@ impl VersionedTextStore<'_> {
                                     });
                                 }
                             };
-                        (!same).then(|| VersionFileChangeEntry {
+                        let drifted = if same && let Some((named, _)) = &pair {
+                            let tip_id = side_row_identity(&s)?;
+                            base_differs_from_agreed_tip(
+                                conn,
+                                workspace_id,
+                                named,
+                                &s.path,
+                                Some(tip_id),
+                                b.as_ref(),
+                            )?
+                        } else {
+                            false
+                        };
+                        (!same || drifted).then(|| VersionFileChangeEntry {
                             binary: t.kind == "binary" || s.kind == "binary",
                             path: t.path,
                             status: VersionFileChangeStatus::Modified,
                         })
                     }
-                    (None, None) => unreachable!(),
+                    (None, None) => {
+                        let drifted = if let Some((named, _)) = &pair {
+                            base_differs_from_agreed_tip(
+                                conn,
+                                workspace_id,
+                                named,
+                                &path,
+                                None,
+                                b.as_ref(),
+                            )?
+                        } else {
+                            false
+                        };
+                        drifted.then_some(VersionFileChangeEntry {
+                            binary: false,
+                            path,
+                            status: VersionFileChangeStatus::Modified,
+                        })
+                    }
                 };
                 if let Some(entry) = entry {
                     entries.push(entry);
@@ -580,6 +677,170 @@ impl VersionedTextStore<'_> {
             })
         })
     }
+}
+
+struct CompareBaseRow {
+    path: String,
+    fb_kind: Option<String>,
+    fb_blob: Option<String>,
+    fb_bin: Option<String>,
+    has_merge_base: bool,
+}
+
+fn side_row_identity(row: &CompareSideRow) -> Result<(&'static str, &str), DomainError> {
+    match row.kind.as_str() {
+        "text" => Ok((
+            "text",
+            row.blob.as_deref().ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot lacks blob_sha256",
+            })?,
+        )),
+        "binary" => Ok((
+            "binary",
+            row.bin.as_deref().ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot lacks binary_sha256",
+            })?,
+        )),
+        _ => Err(DomainError::StateCorrupt {
+            reason: "snapshot has an invalid content kind",
+        }),
+    }
+}
+
+const COMPARE_BASE_PAGE_SQL: &str = "WITH page(path) AS ( \
+        SELECT path FROM fork_base_snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?3 \
+        UNION SELECT path FROM merge_bases WHERE workspace_id = ?1 AND source_version_id = ?2 AND path > ?3 \
+        ORDER BY 1 LIMIT ?4) \
+     SELECT p.path, fb.content_kind, fb.blob_sha256, fb.binary_sha256, \
+            EXISTS(SELECT 1 FROM merge_bases m WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = p.path) \
+     FROM page p \
+     LEFT JOIN fork_base_snapshots fb \
+       ON fb.workspace_id = ?1 AND fb.version_id = ?2 AND fb.path = p.path \
+     ORDER BY p.path";
+
+fn compare_base_page(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
+    after_path: &str,
+    limit: i64,
+) -> Result<Vec<CompareBaseRow>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(COMPARE_BASE_PAGE_SQL)
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, named_version_id, after_path, limit],
+            |row| {
+                Ok(CompareBaseRow {
+                    path: row.get(0)?,
+                    fb_kind: row.get(1)?,
+                    fb_blob: row.get(2)?,
+                    fb_bin: row.get(3)?,
+                    has_merge_base: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    rows.collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)
+}
+
+fn base_differs_from_agreed_tip(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
+    path: &str,
+    tip_id: ContentIdentity<'_>,
+    base_row: Option<&CompareBaseRow>,
+) -> Result<bool, DomainError> {
+    fn key_of<'a>(
+        kind: Option<&str>,
+        blob: Option<&'a str>,
+        bin: Option<&'a str>,
+    ) -> ContentIdentity<'a> {
+        match kind {
+            Some("binary") => bin.map(|s| ("binary", s)),
+            Some(_) => blob.map(|s| ("text", s)),
+            None => None,
+        }
+    }
+    if !base_row.is_some_and(|row| row.has_merge_base) {
+        let fb = base_row.and_then(|r| {
+            key_of(
+                r.fb_kind.as_deref(),
+                r.fb_blob.as_deref(),
+                r.fb_bin.as_deref(),
+            )
+        });
+        return Ok(fb != tip_id);
+    }
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
+                    target_after_kind, target_after_sha256, \
+                    base_content_kind, base_blob_sha256, base_binary_sha256, \
+                    prior_content_kind, prior_blob_sha256, prior_binary_sha256 \
+             FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 \
+             ORDER BY merge_seq ASC",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    type MergeBaseRow = (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<MergeBaseRow> = stmt
+        .query_map(params![workspace_id, named_version_id, path], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    let chosen = rows
+        .iter()
+        .find_map(|r| {
+            let before = r.2.as_deref().zip(r.3.as_deref());
+            let after = r.4.as_deref().zip(r.5.as_deref());
+            (tip_id == before && tip_id != after).then_some((r.1, &r.9, &r.10, &r.11))
+        })
+        .unwrap_or_else(|| {
+            let last = rows.last().expect("has_merge_base guaranteed row");
+            (last.0, &last.6, &last.7, &last.8)
+        });
+    let base_id = (chosen.0 != 0)
+        .then(|| {
+            key_of(
+                chosen.1.as_deref(),
+                chosen.2.as_deref(),
+                chosen.3.as_deref(),
+            )
+        })
+        .flatten();
+    Ok(base_id != tip_id)
 }
 
 struct CompareSideRow {
@@ -675,11 +936,14 @@ where
         MergeTextFileResult::Delete { comparison, .. } => Some((comparison, None)),
         // A version unchanged since its base brings nothing; recording it
         // would overwrite the row that detects an undo of the last merge.
+        // Same for a line merge that reproduced the target while tips still differ.
         MergeTextFileResult::Unchanged {
             reason: MergeUnchangedReason::AlreadySame,
             comparison,
             ..
-        } if !comparison_sides_equal(&comparison.incoming, &comparison.base) => {
+        } if comparison_sides_equal(&comparison.current, &comparison.incoming)
+            && !comparison_sides_equal(&comparison.incoming, &comparison.base) =>
+        {
             Some((comparison, content_identity(&comparison.current)))
         }
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
@@ -901,34 +1165,28 @@ fn compare_text_file_versions_in_db(
     conn: &Connection,
     input: &CompareTextFileVersions,
 ) -> Result<VersionedTextComparison, DomainError> {
-    let target_exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.target_version_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    if target_exists.is_none() {
-        return Err(DomainError::VersionNotFound);
+    for version_id in [&input.target_version_id, &input.source_version_id] {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![input.workspace_id, version_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if exists.is_none() {
+            return Err(DomainError::VersionNotFound);
+        }
     }
-    let source: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT kind, fork_version_id FROM versions \
-             WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.source_version_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    let Some((kind, fork_version_id)) = source else {
-        return Err(DomainError::VersionNotFound);
-    };
-    if VersionKind::from_db(&kind)? != VersionKind::Named
-        || fork_version_id.as_deref() != Some(input.target_version_id.as_str())
-    {
+    let Some((named_version_id, merged_into)) = merge_pair(
+        conn,
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.target_version_id,
+    )?
+    else {
         return Err(DomainError::ForkBaseNotFound);
-    }
+    };
     let current = select_snapshot(
         conn,
         "snapshots",
@@ -936,19 +1194,25 @@ fn compare_text_file_versions_in_db(
         &input.target_version_id,
         &input.path,
     )?;
-    let base = select_merge_base(
-        conn,
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-        &current,
-    )?;
     let incoming = select_snapshot(
         conn,
         "snapshots",
         &input.workspace_id,
         &input.source_version_id,
         &input.path,
+    )?;
+    let (parent_side, named_side) = if merged_into == MERGED_INTO_PARENT {
+        (&current, &incoming)
+    } else {
+        (&incoming, &current)
+    };
+    let base = select_merge_base(
+        conn,
+        &input.workspace_id,
+        &named_version_id,
+        &input.path,
+        parent_side,
+        named_side,
     )?;
     let status = comparison_status(&base, &current, &incoming);
     Ok(VersionedTextComparison {
@@ -983,7 +1247,13 @@ fn select_snapshot(
          LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
     );
-    select_side(conn, &sql, workspace_id, version_id, path)
+    select_side(
+        conn,
+        &sql,
+        params![workspace_id, version_id, path],
+        workspace_id,
+        version_id,
+    )
 }
 
 /// What a side holds: its content kind and content address, or `None` when
@@ -997,17 +1267,51 @@ fn content_identity(side: &Option<ComparisonSide>) -> ContentIdentity<'_> {
     })
 }
 
-/// The base a merge of `path` from a named version compares against: what
-/// the version last merged at that path, or its fork point if it never has.
-/// When the target holds what it held just before that merge, and not what
-/// the merge left, the merge was undone there; the base is then the one that
-/// merge itself used, so merging again applies the version's change again.
-fn select_merge_base(
+pub(crate) const MERGED_INTO_PARENT: &str = "main";
+pub(crate) const MERGED_INTO_NAMED: &str = "named";
+
+/// The named version whose merge base a merge between `source` and `target`
+/// reads and records, and which side the merge writes: the version's fork
+/// parent (`MERGED_INTO_PARENT`) or the named version (`MERGED_INTO_NAMED`).
+pub(crate) fn merge_pair(
     conn: &Connection,
     workspace_id: &str,
     source_version_id: &str,
+    target_version_id: &str,
+) -> Result<Option<(String, &'static str)>, DomainError> {
+    let fork_of = |version_id: &str| -> Result<Option<String>, DomainError> {
+        conn.query_row(
+            "SELECT fork_version_id FROM versions \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND kind = 'named'",
+            params![workspace_id, version_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(DomainError::sql_corrupt)
+    };
+    if fork_of(source_version_id)?.as_deref() == Some(target_version_id) {
+        return Ok(Some((source_version_id.to_owned(), MERGED_INTO_PARENT)));
+    }
+    if fork_of(target_version_id)?.as_deref() == Some(source_version_id) {
+        return Ok(Some((target_version_id.to_owned(), MERGED_INTO_NAMED)));
+    }
+    Ok(None)
+}
+
+/// The base a merge of `path` between a named version and its fork parent
+/// compares against: what the last merge in either direction carried at that
+/// path, or the fork point if none has. When the side that merge wrote holds
+/// what it held just before, and not what the merge left, the merge was
+/// undone there; the base is then the one that merge itself used, so merging
+/// again applies the change again.
+fn select_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
     path: &str,
-    current: &Option<ComparisonSide>,
+    parent_side: &Option<ComparisonSide>,
+    named_side: &Option<ComparisonSide>,
 ) -> Result<Option<ComparisonSide>, DomainError> {
     type MergeBaseRow = (
         i64,
@@ -1016,44 +1320,62 @@ fn select_merge_base(
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     );
-    let row: Option<MergeBaseRow> = conn
-        .query_row(
+    let mut stmt = conn
+        .prepare(
             "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
-             target_after_kind, target_after_sha256 FROM merge_bases \
-             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
-            params![workspace_id, source_version_id, path],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
+             target_after_kind, target_after_sha256, merged_into FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 \
+             ORDER BY merge_seq ASC",
         )
-        .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let Some((base_exists, prior_exists, before_kind, before_sha, after_kind, after_sha)) = row
-    else {
+    let rows: Vec<MergeBaseRow> = stmt
+        .query_map(params![workspace_id, named_version_id, path], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    if rows.is_empty() {
         return select_snapshot(
             conn,
             "fork_base_snapshots",
             workspace_id,
-            source_version_id,
+            named_version_id,
             path,
         );
-    };
-    let held = content_identity(current);
-    let before = before_kind.as_deref().zip(before_sha.as_deref());
-    let after = after_kind.as_deref().zip(after_sha.as_deref());
-    let (side, exists) = if held == before && held != after {
-        ("prior", prior_exists)
-    } else {
-        ("base", base_exists)
-    };
+    }
+    let (chosen_dir, side, exists) = rows
+        .iter()
+        .find_map(
+            |(_, prior_exists, before_kind, before_sha, after_kind, after_sha, merged_into)| {
+                let held = content_identity(if merged_into == MERGED_INTO_PARENT {
+                    parent_side
+                } else {
+                    named_side
+                });
+                let before = before_kind.as_deref().zip(before_sha.as_deref());
+                let after = after_kind.as_deref().zip(after_sha.as_deref());
+                (held == before && held != after).then_some((
+                    merged_into.as_str(),
+                    "prior",
+                    *prior_exists,
+                ))
+            },
+        )
+        .unwrap_or_else(|| {
+            let latest = rows.last().expect("rows is non-empty");
+            (latest.6.as_str(), "base", latest.0)
+        });
     if exists == 0 {
         return Ok(None);
     }
@@ -1064,15 +1386,23 @@ fn select_merge_base(
          m.{side}_content_kind, m.{side}_binary_sha256, bb.byte_length FROM merge_bases m \
          LEFT JOIN blobs b ON b.sha256 = m.{side}_blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256 = m.{side}_binary_sha256 \
-         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3"
+         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3 \
+         AND m.merged_into = ?4"
     );
-    select_side(conn, &sql, workspace_id, source_version_id, path)
+    select_side(
+        conn,
+        &sql,
+        params![workspace_id, named_version_id, path, chosen_dir],
+        workspace_id,
+        named_version_id,
+    )
 }
 
-/// Record that `comparison.path` of a named version reached its fork parent:
-/// the incoming side becomes the path's merge base, the base the comparison
-/// used becomes its prior, and the target's content before (`current`) and
-/// after (`target_after`) tell a later merge whether this one was undone.
+/// Record that `comparison.path` crossed between a named version and its
+/// fork parent: the incoming side becomes the path's merge base, the base the
+/// comparison used becomes its prior, and the target's content before
+/// (`current`) and after (`target_after`) tell a later merge whether this one
+/// was undone.
 fn record_merge_base(
     tx: &Transaction<'_>,
     comparison: &VersionedTextComparison,
@@ -1124,15 +1454,48 @@ fn record_merge_base(
             [text(kind), text(sha)]
         })
     }
+    let Some((named_version_id, merged_into)) = merge_pair(
+        tx,
+        &comparison.workspace_id,
+        &comparison.source_version_id,
+        &comparison.target_version_id,
+    )?
+    else {
+        return Err(DomainError::ForkBaseNotFound);
+    };
+    let other_dir = if merged_into == MERGED_INTO_PARENT {
+        MERGED_INTO_NAMED
+    } else {
+        MERGED_INTO_PARENT
+    };
+    let (in_kind, in_sha) = match content_identity(&comparison.incoming) {
+        Some((k, s)) => (Some(k), Some(s)),
+        None => (None, None),
+    };
+    tx.execute(
+        "DELETE FROM merge_bases \
+         WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 AND merged_into = ?4 \
+           AND (target_after_kind IS NOT ?5 OR target_after_sha256 IS NOT ?6)",
+        params![
+            comparison.workspace_id,
+            named_version_id,
+            comparison.path,
+            other_dir,
+            in_kind,
+            in_sha
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
     let mut values = vec![
         text(&comparison.workspace_id),
-        text(&comparison.source_version_id),
+        text(&named_version_id),
         text(&comparison.path),
     ];
     values.extend(side(&comparison.incoming));
     values.extend(side(&comparison.base));
     values.extend(identity(content_identity(&comparison.current)));
     values.extend(identity(target_after));
+    values.push(text(merged_into));
     tx.execute(
         "INSERT OR REPLACE INTO merge_bases (workspace_id, source_version_id, path, \
          base_exists, base_object_id, base_content_kind, base_blob_sha256, \
@@ -1141,9 +1504,12 @@ fn record_merge_base(
          prior_exists, prior_object_id, prior_content_kind, prior_blob_sha256, \
          prior_binary_sha256, prior_updated_at_ms, prior_latest_moment_id, \
          prior_metadata_origin, prior_metadata_summary, prior_metadata_correlation_id, \
-         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256) \
+         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256, \
+         merged_into, merge_seq) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, \
+         COALESCE((SELECT MAX(merge_seq) FROM merge_bases \
+                   WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3), 0) + 1)",
         rusqlite::params_from_iter(values),
     )
     .map_err(DomainError::sql_persist)?;
@@ -1161,19 +1527,13 @@ pub(crate) fn record_resolved_merge_conflict(
     let Some(target_after) = target_after else {
         return Ok(());
     };
-    let source: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT kind, fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![conflict.workspace_id, conflict.source_version_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    let Some((kind, fork_version_id)) = source else {
-        return Ok(());
-    };
-    if VersionKind::from_db(&kind)? != VersionKind::Named
-        || fork_version_id.as_deref() != Some(conflict.target_version_id.as_str())
+    if merge_pair(
+        tx,
+        &conflict.workspace_id,
+        &conflict.source_version_id,
+        &conflict.target_version_id,
+    )?
+    .is_none()
     {
         return Ok(());
     }
@@ -1239,9 +1599,9 @@ fn conflict_state_side(
 fn select_side(
     conn: &Connection,
     sql: &str,
+    query_params: impl rusqlite::Params,
     workspace_id: &str,
     version_id: &str,
-    path: &str,
 ) -> Result<Option<ComparisonSide>, DomainError> {
     type SideRow = (
         String,
@@ -1258,7 +1618,7 @@ fn select_side(
         Option<i64>,
     );
     let row: Option<SideRow> = conn
-        .query_row(sql, params![workspace_id, version_id, path], |row| {
+        .query_row(sql, query_params, |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,

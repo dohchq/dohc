@@ -115,6 +115,8 @@ struct SecretsCompareParams {
     after_path: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    include_base_drift: bool,
 }
 
 #[derive(Deserialize)]
@@ -565,6 +567,7 @@ impl EngineService {
                 params.after_path,
                 limit,
                 key,
+                params.include_base_drift,
             ),
         )
         .await?;
@@ -669,7 +672,7 @@ impl EngineService {
             if has_state {
                 return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
             }
-            return Ok(json!({ "changed": false, "moment": Value::Null }));
+            return Ok(json!({ "changed": false, "moment": Value::Null, "diverged": false }));
         };
         let result = open
             .actor
@@ -693,6 +696,7 @@ impl EngineService {
         Ok(json!({
             "changed": result.changed,
             "moment": result.moment.as_ref().map(secret_moment_json),
+            "diverged": result.diverged,
         }))
     }
 

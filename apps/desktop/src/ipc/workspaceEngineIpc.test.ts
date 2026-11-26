@@ -2967,6 +2967,7 @@ describe("owner History path policy", () => {
       kind: "named" as const,
       name: "Draft",
       createdAtMs: 10,
+      archivedAtMs: 50,
     };
     h.capture.listMoments
       .mockResolvedValueOnce({ ...historyPage("private/a.md"), versionMarkers: [marker] })

@@ -578,7 +578,9 @@ const fileDeleteArgsSchema = z
   })
   .strict();
 
-const versionListArgsSchema = z.object(argsBase).strict();
+const versionListArgsSchema = z
+  .object({ ...argsBase, includeArchived: z.boolean().optional() })
+  .strict();
 // `version` is a version's name or id, as version list prints them.
 const versionCompareArgsSchema = z
   .object({
@@ -599,6 +601,8 @@ const versionSwitchArgsSchema = z
   .object({ ...argsBase, version: z.string().min(1).max(200) })
   .strict();
 const versionMergeArgsSchema = versionSwitchArgsSchema;
+const versionUpdateArgsSchema = versionSwitchArgsSchema;
+const versionArchiveArgsSchema = versionSwitchArgsSchema.extend({ restore: z.boolean() }).strict();
 // Keep one side of a conflict, or replace both with combined text. Combined
 // text replaces the file, so it has the file write limit.
 export const versionResolutionSchema = z.discriminatedUnion("keep", [
@@ -1150,6 +1154,12 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     .object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema })
     .strict(),
   z
+    .object({ ...requestBase, verb: z.literal("versionUpdate"), args: versionUpdateArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionArchive"), args: versionArchiveArgsSchema })
+    .strict(),
+  z
     .object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema })
     .strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
@@ -1334,6 +1344,8 @@ export const CLI_CAPABILITIES = distinct(
     versionCreate: ["version.create"],
     versionSwitch: ["version.switch"],
     versionMerge: ["version.merge"],
+    versionUpdate: ["version.update"],
+    versionArchive: ["version.archive"],
     versionResolve: ["version.conflict.resolve"],
     keptCopies: ["file.kept.list"],
     collectionsWaiting: ["workspace.status"],
@@ -2147,6 +2159,7 @@ const versionListResultSchema = z.discriminatedUnion("ok", [
             createdAtMs: z.number(),
             canMergeIntoMain: z.boolean(),
             madeFromVersionId: z.string().min(1).optional(),
+            archivedAtMs: z.number().optional(),
           })
           .strict(),
       ),
@@ -2247,20 +2260,34 @@ const versionSwitchResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 // conflictCount counts every conflict the merge left. The page lists the
-// open conflicts, from this merge and earlier ones, as version conflicts does.
+// open conflicts for this pair.
+const versionMergeSuccessSchema = z
+  .object({
+    ok: z.literal(true),
+    version: versionNameSchema,
+    mergedFileCount: z.number().int().nonnegative(),
+    unchangedFileCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    ...versionConflictsPage,
+  })
+  .strict();
 const versionMergeResultSchema = z.union([
-  z
-    .object({
-      ok: z.literal(true),
-      version: versionNameSchema,
-      mergedFileCount: z.number().int().nonnegative(),
-      unchangedFileCount: z.number().int().nonnegative(),
-      conflictCount: z.number().int().nonnegative(),
-      ...versionConflictsPage,
-    })
+  versionMergeSuccessSchema,
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+// An update reports as a merge does, and counts the protected files both
+// sides changed, which it left as the version has them.
+const versionUpdateResultSchema = z.union([
+  versionMergeSuccessSchema
+    .extend({ skippedProtectedFileCount: z.number().int().nonnegative() })
     .strict(),
   rawFailureSchema,
   historyPolicyUnreadableSchema,
+]);
+const versionArchiveResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema, archived: z.boolean() }).strict(),
+  rawFailureSchema,
 ]);
 // The open conflicts that remain, as version conflicts lists them.
 const versionResolveResultSchema = versionConflictsResultSchema;
@@ -3002,6 +3029,8 @@ export const cliResultSchemas = distinct(
     versionCreate: versionCreateResultSchema,
     versionSwitch: versionSwitchResultSchema,
     versionMerge: versionMergeResultSchema,
+    versionUpdate: versionUpdateResultSchema,
+    versionArchive: versionArchiveResultSchema,
     versionResolve: versionResolveResultSchema,
     keptCopies: keptCopiesResultSchema,
     // The engine's answer: Collection updates wait for an unfinished pull.

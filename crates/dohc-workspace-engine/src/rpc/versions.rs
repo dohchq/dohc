@@ -301,6 +301,8 @@ struct VersionsCompareFilesParams {
     after_path: Option<String>,
     #[serde(default)]
     byte_budget: Option<usize>,
+    #[serde(default)]
+    include_base_drift: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -308,6 +310,8 @@ struct VersionsCompareFilesParams {
 struct VersionsListParams {
     #[serde(default)]
     after_version_id: Option<String>,
+    #[serde(default)]
+    include_archived: bool,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +337,15 @@ struct VersionsSetActiveParams {
     version_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsSetArchivedParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    archived: bool,
+}
+
 pub(super) fn version_record_json(version: &VersionRecord) -> Value {
     let mut value = json!({
         "id": version.version_id,
@@ -347,6 +360,9 @@ pub(super) fn version_record_json(version: &VersionRecord) -> Value {
             fork_point["momentId"] = json!(moment_id);
         }
         value["forkPoint"] = fork_point;
+    }
+    if let Some(archived_at_ms) = version.archived_at_ms {
+        value["archivedAtMs"] = json!(archived_at_ms);
     }
     value
 }
@@ -1217,6 +1233,7 @@ impl EngineService {
                 params.target_version_id,
                 params.after_path,
                 200,
+                params.include_base_drift,
             ),
         )
         .await?;
@@ -1338,6 +1355,9 @@ impl EngineService {
         if active.version_id == target.version_id {
             return Ok(version_record_json(&target));
         }
+        if target.archived_at_ms.is_some() {
+            return Err(WireError::new(ErrorCode::InvalidParams, "version-archived"));
+        }
 
         let fence = self
             .version_fence()
@@ -1363,6 +1383,27 @@ impl EngineService {
         }
     }
 
+    pub(super) async fn versions_set_archived(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsSetArchivedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let version = open
+            .actor
+            .set_version_archived(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.archived.then(now_ms).transpose()?,
+                Arc::new(NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
+    }
+
     pub(super) async fn versions_list(
         &self,
         ctx: &RequestContext,
@@ -1378,6 +1419,9 @@ impl EngineService {
             open.actor.list_versions(open.workspace_id.clone()),
         )
         .await?;
+        if !params.include_archived {
+            versions.retain(|version| version.archived_at_ms.is_none());
+        }
         // Keyset resume over the domain's stable ordering: the composite
         // sort key makes a SQL cursor awkward, and version counts are
         // small — resuming positionally over the loaded ordered vector is
@@ -1403,6 +1447,7 @@ impl EngineService {
                     "createdAtMs": version.created_at_ms,
                     "forkVersionId": version.fork_version_id,
                     "forkMomentId": version.fork_moment_id,
+                    "archivedAtMs": version.archived_at_ms,
                 })
             })
             .collect();

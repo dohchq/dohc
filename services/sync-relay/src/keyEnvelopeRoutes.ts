@@ -25,8 +25,9 @@ export function createKeyEnvelopeRoutes(
       // Create-only on first write; CAS via If-Match (sha256 of the envelope
       // being replaced) thereafter. A stale or absent precondition is a 409,
       // never a silent overwrite — the envelope is the only recovery path
-      // for the wrapped workspace key. Replaced envelopes are retained in
-      // the history table by storage.putKeyEnvelope.
+      // for the wrapped workspace key. storage.putKeyEnvelope keeps a
+      // replaced envelope in history unless the replacement carries the same
+      // key check, and then drops every history copy with that key check.
       const result = storage.putKeyEnvelope({
         workspaceId,
         envelopeJson,

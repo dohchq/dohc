@@ -53,6 +53,8 @@ import {
   createVersion,
   switchVersion,
   mergeVersion,
+  updateVersion,
+  archiveVersion,
   resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
@@ -421,10 +423,10 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_versions",
     {
       description:
-        "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
-      inputSchema: {},
+        "List the workspace's versions and which one is active. Archived versions are hidden unless includeArchived is true. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
+      inputSchema: { includeArchived: z.boolean().optional() },
     },
-    async () => text(await listVersions(ctx)),
+    async (args) => text(await listVersions(ctx, args)),
   );
   register(
     "dohc_compare_version",
@@ -475,10 +477,28 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await mergeVersion(ctx, args)),
   );
   register(
+    "dohc_update_version",
+    {
+      description:
+        "Bring Main's changes into a version made from Main, named by its name or id from dohc_list_versions. Returns the merged and conflict counts, the count of protected files both sides changed (left as the version has them), and the first page of open conflicts. In an update's conflicts, current is the version and incoming is Main. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+      inputSchema: { version: z.string().min(1).max(200) },
+    },
+    async (args) => text(await updateVersion(ctx, args)),
+  );
+  register(
+    "dohc_archive_version",
+    {
+      description:
+        "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main, the active version, and versions with open conflicts can't be archived. Owner workspace only.",
+      inputSchema: { version: z.string().min(1).max(200), restore: z.boolean().optional() },
+    },
+    async (args) => text(await archiveVersion(ctx, args)),
+  );
+  register(
     "dohc_resolve_version_conflict",
     {
       description:
-        "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
+        "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in an update, current is the version and incoming is Main; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
       inputSchema: { conflictId: z.string().min(1).max(200), resolution: versionResolutionSchema },
     },
     async (args) => text(await resolveVersionConflict(ctx, args)),

@@ -12,6 +12,8 @@ export const USAGE_ACTION_IDS = [
   "version.switch",
   "version.compare",
   "version.merge",
+  "version.update",
+  "version.archive",
   "version.conflict.resolve",
   "file.kept.save",
   "search.start",

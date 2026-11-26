@@ -51,6 +51,8 @@ describe("renderer usage", () => {
       [
         "version.create",
         "version.merge",
+        "version.update",
+        "version.archive",
         "version.conflict.resolve",
         "file.kept.save",
         "crash.send",
@@ -168,6 +170,7 @@ describe("renderer usage", () => {
         unchangedFileCount: 0,
         conflictCount: 0,
         replacedProtectedPaths: [],
+        skippedProtectedPaths: [],
         conflicts: [],
         nextAfterConflictId: null,
       },
