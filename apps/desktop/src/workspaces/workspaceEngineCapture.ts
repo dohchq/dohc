@@ -436,6 +436,9 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  // Whether History holds exactly `bytes` as the protected file at `path`,
+  // so Restore could bring them back. Never throws.
+  keepsProtectedBytes?(path: string, bytes: Buffer): Promise<boolean>;
   orderFilePaths?(paths: string[], deleting: boolean): Promise<string[]>;
   readDuplicate(operationId: string, path: string): Promise<{ path: string } | null>;
   hasPath(path: string): Promise<boolean>;
@@ -8768,6 +8771,16 @@ export function createWorkspaceEngineCapture(
             result = {
               value: await work({
                 policy,
+                keepsProtectedBytes: async (path, bytes) => {
+                  try {
+                    if (bytes.length > MAX_PROTECTED_HISTORY_BYTES) return false;
+                    const text = bytes.toString("utf8");
+                    if (!Buffer.from(text, "utf8").equals(bytes)) return false;
+                    return await secretStoreFor().secretTextRecorded({ workspaceId, path, text });
+                  } catch {
+                    return false;
+                  }
+                },
                 recordDisk: async (path, files) => {
                   const readable = async (file: string) => {
                     assertEngineWritablePath(file, policy);
