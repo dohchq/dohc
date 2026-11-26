@@ -1436,6 +1436,31 @@ describe("localStagedApps", () => {
     expect(resumedRows.result.map((r) => r.notes)).toEqual(["backfilled"]);
   }, 60_000);
 
+  it("keeps the likely secret scan in the staged review", async () => {
+    const { staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const token = `ghp_${"a".repeat(36)}`;
+    files.set(
+      "personal-control-tower/index.tsx",
+      `${files.get("personal-control-tower/index.tsx")}
+const key = "${token}";
+`,
+    );
+    const signal = new AbortController().signal;
+
+    const summary = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+
+    const expected = [{ path: "personal-control-tower/index.tsx", prefix: "ghp_" }];
+    expect(summary.likelySecrets).toEqual(expected);
+    expect((await staged.list("personal-control-tower"))[0]?.likelySecrets).toEqual(expected);
+    expect(JSON.stringify(summary)).not.toContain(token);
+  }, 60_000);
+
   it("rejects staged proposals whose review display metadata was altered on disk", async () => {
     const { workspaceRoot, staged } = await openFixture();
     const files = await loadControlTowerFiles();

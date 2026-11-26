@@ -33,6 +33,7 @@ import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
+import { SECRET_PREFIXES } from "@dohc/security-contract/secret-prefix";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import {
   ServerAccountDeletionPreview,
@@ -9336,6 +9337,9 @@ export const EngineYDocSaveStateEvent = z.object({
   workspaceId: WORKSPACE_ID,
   path: z.string(),
   state: SaveStateSchema,
+  // The likely secret token kind the settled file holds, null for none.
+  // Absent when this event did not write the file.
+  secret: z.enum(SECRET_PREFIXES).nullable().optional(),
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
   // The file changed outside dohc while this session held it. `unsaved` is
   // whether the document had edits no save carried.

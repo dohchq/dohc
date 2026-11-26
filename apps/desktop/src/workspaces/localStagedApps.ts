@@ -190,6 +190,7 @@ interface StoredStageProposal {
     candidateDigest: string;
     sourceRevision: string;
     sourcePaths: string[];
+    likelySecrets: StagedAppSummary["likelySecrets"];
     displayCapabilities: AppPublicationCandidate["capabilities"];
   };
   receipts: Record<string, StoredReceipt>;
@@ -271,6 +272,7 @@ function summarizeStage(proposal: StoredStageProposal): StagedAppSummary {
     createdAtMs: proposal.createdAtMs,
     sourceRevision: proposal.app.sourceRevision,
     sourcePaths: proposal.app.sourcePaths,
+    likelySecrets: proposal.app.likelySecrets,
     collections,
     capabilities: proposal.app.displayCapabilities,
     externalNetwork: true,
@@ -284,11 +286,12 @@ function computeReviewDigest(input: {
   candidateDigest: string;
   sourceRevision: string;
   sourcePaths: readonly string[];
+  likelySecrets: StagedAppSummary["likelySecrets"];
   displayCapabilities: readonly AppPublicationCandidate["capabilities"][number][];
 }): string {
   return sha256(
     JSON.stringify([
-      "dohc-staged-app-review-v2",
+      "dohc-staged-app-review-v3",
       input.workspaceId,
       input.appRoot,
       input.collections.map((entry) => [
@@ -309,6 +312,7 @@ function computeReviewDigest(input: {
       input.candidateDigest,
       input.sourceRevision,
       input.sourcePaths,
+      input.likelySecrets,
       input.displayCapabilities,
     ]),
   );
@@ -408,6 +412,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           candidateDigest: parsed.app.candidateDigest,
           sourceRevision: parsed.app.sourceRevision,
           sourcePaths: parsed.app.sourcePaths,
+          likelySecrets: parsed.app.likelySecrets,
           displayCapabilities: parsed.app.displayCapabilities,
         }) !== parsed.reviewDigest
       )
@@ -825,6 +830,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
         candidateDigest,
         sourceRevision: preparedApp.candidate.sourceRevision,
         sourcePaths,
+        likelySecrets: preparedApp.likelySecrets,
         displayCapabilities,
       });
 
@@ -848,6 +854,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           candidateDigest,
           sourceRevision: preparedApp.candidate.sourceRevision,
           sourcePaths,
+          likelySecrets: preparedApp.likelySecrets,
           displayCapabilities,
         },
         receipts: {},
@@ -964,6 +971,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           candidateDigest: proposal.app.candidateDigest,
           sourceRevision: proposal.app.sourceRevision,
           sourcePaths: proposal.app.sourcePaths,
+          likelySecrets: proposal.app.likelySecrets,
           displayCapabilities: proposal.app.displayCapabilities,
         });
         if (

@@ -131,6 +131,7 @@ export interface EngineYDocSessionCapture {
         authorCapacity?: boolean,
         readOnlyCause?: ReadOnlyTransitionCause,
         failure?: unknown,
+        secret?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["secret"],
       ) => void;
     },
   ): Promise<EngineYDocSessionProvider>;
@@ -218,6 +219,7 @@ interface SessionEvent {
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   changedOutside?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["changedOutside"];
   textRemoved?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["textRemoved"];
+  secret?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["secret"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -773,7 +775,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
-            lastEvent.editRefusal?.message === event.editRefusal?.message
+            lastEvent.editRefusal?.message === event.editRefusal?.message &&
+            lastEvent.secret === event.secret
           )
             return;
           signals.emit(event);
@@ -817,7 +820,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 }),
               );
             },
-            onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure, secret) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               if (
                 !shared &&
@@ -853,6 +856,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   ...(authorCapacity ? { authorCapacity: true } : {}),
                   ...(readOnlyCause ? { readOnlyCause } : {}),
                   ...(saveFailure ? { saveFailure } : {}),
+                  ...(secret !== undefined ? { secret } : {}),
                 }),
               );
             },

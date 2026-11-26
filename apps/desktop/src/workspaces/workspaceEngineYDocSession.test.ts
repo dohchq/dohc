@@ -1480,6 +1480,54 @@ async function retainLineage(
   editor.destroy();
 }
 
+it("reports a likely secret token in the settled file, and none once it goes", async () => {
+  const secrets: Array<string | null | undefined> = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state, _token, event, _capacity, _cause, _failure, secret) => {
+      if (state === "saved" && event === "outcome") secrets.push(secret);
+    },
+  });
+  const editor = mirrorEditor(session);
+  const token = `xoxp-${"a".repeat(30)}`;
+  typeIntoBody(editor, `Slack ${token}`);
+  await session.settleNow();
+  expect(await readFile(join(root, PATH), "utf8")).toContain(token);
+  expect(secrets).toEqual(["xoxp-"]);
+
+  editor.getXmlFragment("body").delete(0, editor.getXmlFragment("body").length);
+  typeIntoBody(editor, "Moved to .env.");
+  await session.settleNow();
+  expect(secrets).toEqual(["xoxp-", null]);
+  editor.destroy();
+  await session.close();
+});
+
+it("finds a likely secret token split across two reads of the settled file", async () => {
+  const secrets: Array<string | null | undefined> = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state, _token, event, _capacity, _cause, _failure, secret) => {
+      if (state === "saved" && event === "outcome") secrets.push(secret);
+    },
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Marker.");
+  await session.settleNow();
+  const next = (await readFile(join(root, PATH), "utf8")).indexOf("Marker.") + "Marker.".length + 2;
+  const filler = `${"w".repeat(65_536 - next - 11)} `;
+  const token = `ghp_${"a".repeat(30)}`;
+  typeIntoBody(editor, `${filler}${token}`);
+  await session.settleNow();
+  const saved = await readFile(join(root, PATH), "utf8");
+  expect(saved.indexOf(token)).toBe(65_526);
+  expect(secrets).toEqual([null, "ghp_"]);
+  editor.destroy();
+  await session.close();
+});
+
 async function openRecordingStates(path = PATH) {
   const states: string[] = [];
   const saveSeq = createEngineYDocSaveSeqState();

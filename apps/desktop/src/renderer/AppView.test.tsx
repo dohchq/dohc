@@ -85,6 +85,7 @@ const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   versionId: "main",
   sourceRevision: "b".repeat(64),
   sourcePaths: ["preorders/frontend.js"],
+  likelySecrets: [],
   capabilities: [],
   externalNetwork: true,
   local: true,

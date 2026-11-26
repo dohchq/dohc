@@ -9,6 +9,12 @@ import {
   VOLUME_SHARES_NEW_FILES_WORDS,
 } from "../../ipc/errorWords";
 import { quoteRemovedText } from "@dohc/ydoc-projection/removed-text";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import {
+  likelySecretPrefix,
+  secretPrefixLabel,
+  type SecretPrefix,
+} from "@dohc/security-contract/secret-prefix";
 import { bridge } from "../bridge";
 import { copyNoteAsMarkdown } from "../DocumentMenu";
 import type { ErrorDetailField } from "./copyDetails";
@@ -91,11 +97,14 @@ export function saveFailureNotice(
 // on disk, or met a file that is read-only only inside dohc, such as a share
 // with View access. Each of those has its own words. `retry` saves the file
 // again from its editor, and answers false when the editor has closed or can
-// no longer write the file.
+// no longer write the file. `secret` is the kind of likely secret token the
+// written text holds, null for none, and absent when nothing was written or
+// the file is protected.
 interface TextSave {
   workspaceId: string;
   path: string;
   failure: { cause?: unknown; retry: () => boolean } | null;
+  secret?: SecretPrefix | null;
 }
 
 const textSaveListeners = new Set<(save: TextSave) => void>();
@@ -104,9 +113,15 @@ export function reportTextSave(
   workspaceId: string,
   path: string,
   failure: TextSave["failure"],
+  writtenText?: string,
 ): void {
   const failed = failure && !isShareReadOnlyRefusal(failure.cause) ? failure : null;
-  for (const listener of [...textSaveListeners]) listener({ workspaceId, path, failure: failed });
+  const secret =
+    writtenText === undefined || classifyEngineFilePath(path).kind !== "tracked"
+      ? undefined
+      : likelySecretPrefix(writtenText);
+  for (const listener of [...textSaveListeners])
+    listener({ workspaceId, path, failure: failed, secret });
 }
 
 interface DocumentReplacement {
@@ -345,6 +360,25 @@ export function useDocumentSaveNotices(input: {
         identity,
       });
     };
+    const secrets = new Map<string, SecretPrefix>();
+    const secretSaved = (path: string, secret: SecretPrefix | null | undefined): void => {
+      if (secret === undefined || (secrets.get(path) ?? null) === secret) return;
+      const identity = `secret-in-file:${owner}:${path}`;
+      if (secret === null) {
+        secrets.delete(path);
+        latest.current.clear(identity);
+        return;
+      }
+      secrets.set(path, secret);
+      latest.current.report({
+        tone: "warning",
+        title: `${path} has ${secretPrefixLabel(secret)}`,
+        message: "Move it to a .env file. dohc keeps .env files encrypted in History and sync.",
+        retry: null,
+        target: { to: "file", path },
+        identity,
+      });
+    };
     const stopDocuments = bridge().onEngineYDocSaveState((event) => {
       if (!current()) return;
       const refusal = event.editRefusal;
@@ -366,6 +400,7 @@ export function useDocumentSaveNotices(input: {
       if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
         return;
       sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
+      secretSaved(event.path, event.secret);
       // An author-capacity refusal has its own notice, including one a Try
       // again ran into, so this document's save notice gives way to it.
       if (event.authorCapacity) forget(event.path, "engine");
@@ -375,6 +410,7 @@ export function useDocumentSaveNotices(input: {
     });
     const textSave = (save: TextSave): void => {
       if (!current() || save.workspaceId !== owner) return;
+      secretSaved(save.path, save.secret);
       const failed = save.failure;
       if (!failed) {
         forget(save.path, "text");
