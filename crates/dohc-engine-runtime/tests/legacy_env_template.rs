@@ -110,6 +110,12 @@ fn store_as_older_build_template(database: &Path, version_id: Option<&str>) {
             .execute(sql, params![version_id])
             .expect("store the row as an older build did");
     }
+    connection
+        .execute(
+            "DELETE FROM engine_migrations WHERE id = 'v2-legacy-env-template-secrets'",
+            [],
+        )
+        .expect("open as a store the migration has not run on");
 }
 
 fn paths(database: &Path, table: &str, version_id: &str) -> Vec<String> {
@@ -207,10 +213,46 @@ async fn a_new_version_leaves_an_older_builds_env_template_rows_behind() {
     assert_eq!(listed, [".env"]);
     supervisor.close(&database).expect("close");
     assert_eq!(paths(&database, "secret_fork_bases", "feature"), [".env"]);
-    assert_eq!(
-        paths(&database, "secret_files", "main"),
-        [".env", ".env.example"]
-    );
+    assert_eq!(paths(&database, "secret_files", "main"), [".env"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_and_the_secret_list_leave_out_an_older_builds_env_template() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = open_main(&supervisor, &database, root).await;
+    write_secret(
+        &actor,
+        root,
+        "main",
+        ".env.local",
+        SecretWriteDisk::AlreadyOnDisk,
+        2,
+    )
+    .await;
+    supervisor.close(&database).expect("close");
+    store_as_older_build_template(&database, None);
+    let actor = supervisor.open(&database, 3).expect("reopen").actor;
+
+    let history = actor
+        .history_page(WORKSPACE.to_owned(), None, None, None, 10, None)
+        .await
+        .expect("history");
+    let listed = actor
+        .list_secret_files_page(WORKSPACE.to_owned(), "main".to_owned(), None, 10)
+        .await
+        .expect("main secrets");
+
+    let protected: Vec<&str> = history
+        .protected_moments
+        .iter()
+        .map(|moment| moment.path.as_str())
+        .collect();
+    assert_eq!(protected, Vec::<&str>::new());
+    assert!(listed.is_empty(), "{listed:?}");
+    supervisor.close(&database).expect("close");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

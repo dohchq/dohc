@@ -336,45 +336,6 @@ describe("merge materialization order", () => {
     }
   });
 
-  it("switches versions past a .env.example an older build kept as a protected file", async () => {
-    const root = await createTestScratch("dohc-legacy-env-template-");
-    const loopback = new VersionedLoopbackEngine();
-    const send = loopback.sendRequest.bind(loopback);
-    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
-      const response = await send(request);
-      if (request.method !== VERSIONED_METHOD.secretsList || !("result" in response)) {
-        return response;
-      }
-      const result = response.result as { secrets: JsonValue[] };
-      return {
-        ...response,
-        result: {
-          ...result,
-          secrets: [
-            ...result.secrets,
-            { path: ".env.example", byteLength: 6, updatedAtMs: 1, latestMomentId: "older-build" },
-          ],
-        },
-      };
-    });
-    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "a.md", text: "main\n" });
-    await write(root, "a.md", "main\n");
-    await write(root, ".env.example", "TOKEN=\n");
-    const sessions = mockLiveSessions(loopback);
-    const stores = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
-      sessions,
-    );
-    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
-    try {
-      await engine.createVersion("Draft");
-      await expect(engine.switchVersion("main")).resolves.toBeDefined();
-      expect(await readFile(join(root, ".env.example"), "utf8")).toBe("TOKEN=\n");
-    } finally {
-      await engine.stop();
-    }
-  });
-
   // The engine places each text merge on disk before the next one starts.
 
   it.each([

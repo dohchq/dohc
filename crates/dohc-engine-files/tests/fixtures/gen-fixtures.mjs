@@ -268,6 +268,7 @@ const resolutionCases = [
   ["ignored-floor-traversal", "a/../b.md", blanketFiles, blanketVisibility],
   ["ignored-floor-absolute", "C:/absolute.md", blanketFiles, blanketVisibility],
   ["secret-floor-percent-encoded", "encoded/secrets%2eenv", blanketFiles, blanketVisibility],
+  ["secret-floor-dotted-env-folder-template", ".env./.env.sample", blanketFiles, blanketVisibility],
   ["blanket-then-directory-rule", "docs/guide.md", blanketFiles, blanketVisibility],
   ["blanket-then-file-rule", "docs/private.md", blanketFiles, blanketVisibility],
   ["unmatched-path-keeps-defaults", "notes/plan.md", blanketFiles, blanketVisibility],

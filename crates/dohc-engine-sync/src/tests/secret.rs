@@ -2057,6 +2057,30 @@ fn an_env_template_secret_op_from_an_older_build_is_skipped_not_refused() {
         read_replication_acked_seq(&engine, "ws", "older-template-peer").expect("ack"),
         1
     );
+    for (seq, path) in [(0, "../.env.example"), (1, "config//.env.sample")] {
+        let delete = envelope(
+            "unsafe-template-peer",
+            seq,
+            "secret.file.delete",
+            json!({"versionId": "main", "path": path, "metadata": {"origin": "sync"}}),
+        );
+        assert!(
+            matches!(
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &delete,
+                    &NoFaults,
+                    &NoLiveLeases,
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(_),
+                    ..
+                })
+            ),
+            "{path}"
+        );
+    }
 }
 
 #[test]

@@ -4941,9 +4941,10 @@ export function createWorkspaceEngineCapture(
   ): Promise<MaterializeOperation[]> {
     const secrets = secretStoreFor();
     const operations: MaterializeOperation[] = [];
-    const targetSecrets = (
-      await secrets.listSecretFiles({ workspaceId, versionId: targetVersionId })
-    ).filter((stat) => isSecretPath(stat.path));
+    const targetSecrets = await secrets.listSecretFiles({
+      workspaceId,
+      versionId: targetVersionId,
+    });
     const targetPaths = new Set(targetSecrets.map((stat) => stat.path));
     for (const stat of targetSecrets) {
       const disk = await readDiskSecretState(rootPath, stat.path);
@@ -4967,7 +4968,7 @@ export function createWorkspaceEngineCapture(
       versionId: previousVersionId,
     });
     for (const stat of previousSecrets) {
-      if (targetPaths.has(stat.path) || !isSecretPath(stat.path)) continue;
+      if (targetPaths.has(stat.path)) continue;
       const disk = await readDiskSecretState(rootPath, stat.path);
       if (disk.kind !== "text") continue;
       operations.push({ kind: "delete", path: stat.path, protected: true });
@@ -9303,7 +9304,7 @@ export function createWorkspaceEngineCapture(
               sourceVersionId,
               ...(secretAfterPath !== undefined ? { afterPath: secretAfterPath } : {}),
             });
-            secretChanges.push(...page.entries.filter((entry) => isSecretPath(entry.path)));
+            secretChanges.push(...page.entries);
             secretAfterPath = page.nextAfterPath ?? undefined;
           } while (secretAfterPath !== undefined);
         }

@@ -40,7 +40,6 @@ use crate::merge::VersionFileChangeStatus;
 use crate::records::{ApplySecretFileFromVersion, InbandSecret};
 use crate::store::{validate_identifier, validate_path};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
-use dohc_engine_files::policy::names_env_template;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, enqueue_delete_job, enqueue_job, put_binary_blob,
@@ -818,24 +817,6 @@ pub(crate) fn fork_version_in_tx(
         params![workspace_id, to_version_id, from_version_id],
     )
     .map_err(DomainError::sql_persist)?;
-    let paths = tx
-        .prepare("SELECT path FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2")
-        .and_then(|mut stmt| {
-            stmt.query_map(params![workspace_id, to_version_id], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(DomainError::sql_corrupt)?;
-    for path in paths.iter().filter(|path| names_env_template(path)) {
-        for sql in [
-            "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-            "DELETE FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-        ] {
-            tx.execute(sql, params![workspace_id, to_version_id, path])
-                .map_err(DomainError::sql_persist)?;
-        }
-    }
     Ok(())
 }
 
@@ -1115,9 +1096,6 @@ pub fn compare_secret_files_page_keyless(
                 })?;
             rows_fetched += 1;
             last_scanned_path = Some(path.clone());
-            if names_env_template(path) {
-                continue;
-            }
             match (&t_path, &s_path) {
                 (None, Some(_)) => entries.push(SecretCompareEntry {
                     path: path.clone(),

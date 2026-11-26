@@ -194,12 +194,19 @@ fn validate_canonical_secret_path(path: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
+fn names_canonical_env_template(path: &str) -> bool {
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    classification == PathClassification::Tracked
+        && normalized.as_deref() == Some(path)
+        && names_env_template(path)
+}
+
 fn apply_put(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     p: SecretPut,
 ) -> Result<SecretApplyResult, SyncError> {
-    if names_env_template(&p.path) {
+    if names_canonical_env_template(&p.path) {
         return Ok(SecretApplyResult::default());
     }
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
@@ -243,7 +250,7 @@ fn apply_delete(
     op: &ReplicationEnvelope,
     p: SecretDelete,
 ) -> Result<SecretApplyResult, SyncError> {
-    if names_env_template(&p.path) {
+    if names_canonical_env_template(&p.path) {
         return Ok(SecretApplyResult::default());
     }
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
@@ -664,7 +671,7 @@ fn require_version(
 }
 
 fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
-    if !names_env_template(&row.path) {
+    if !names_canonical_env_template(&row.path) {
         validate_canonical_secret_path(&row.path)?;
     }
     validate_base64(&row.iv_base64, SECRET_IV_BYTES, "secret fork iv is invalid")?;

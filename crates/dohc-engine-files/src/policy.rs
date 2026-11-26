@@ -250,18 +250,17 @@ pub fn segments_are_secret<S: AsRef<str>>(segments: &[S]) -> bool {
 
 const ENV_TEMPLATE_NAMES: [&str; 3] = [".env.example", ".env.template", ".env.sample"];
 
+/// Whether `path`'s basename, folded like the write floor folds it, is an env
+/// template name such as `.env.example`, whatever its folders.
+pub fn has_env_template_basename(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or_default();
+    ENV_TEMPLATE_NAMES.contains(&strip_windows_alias_suffix(basename).to_lowercase().as_str())
+}
+
 /// Whether `path` is an env template such as `.env.example`, which older
 /// builds kept as a protected file and which is now an ordinary file.
 pub fn names_env_template(path: &str) -> bool {
-    let segments: Vec<String> = path
-        .split('/')
-        .map(strip_windows_alias_suffix)
-        .map(str::to_lowercase)
-        .collect();
-    !segments_are_secret(&segments)
-        && segments
-            .last()
-            .is_some_and(|basename| ENV_TEMPLATE_NAMES.contains(&basename.as_str()))
+    has_env_template_basename(path) && !normalized_path_is_secret(path)
 }
 
 fn classify_normalized_secret(path: &str) -> PathClassification {
