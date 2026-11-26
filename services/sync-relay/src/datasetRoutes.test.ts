@@ -578,7 +578,14 @@ it("approves an app on the owner's computer whose candidate is up to the publica
 
 it("runs a shared app's outside calls on the server with the secret its owner approved", async () => {
   const sent: SafeOutboundRequest[] = [];
+  let clientKind: "browser" | "desktop" = "browser";
   const f = await httpFixture(undefined, true, limits, definition, {
+    resolveAccountSession: async (request) => ({
+      userId: request.headers.get("authorization")!.slice(7),
+      sessionId: "session",
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind,
+    }),
     appExternalTransport: {
       resolve: async (rawUrl) => {
         const url = new URL(rawUrl);
@@ -646,22 +653,19 @@ it("runs a shared app's outside calls on the server with the secret its owner ap
     ownerUserId: "owner",
     limits,
   });
-  const publish = () =>
-    f.storage.publishAppPublication({
-      workspaceId: "w",
-      ownerUserId: "owner",
+  const share = () =>
+    f.http("w/app-publications", {
       shareId: "s",
       grantId: "g",
-      generation: 1,
+      expectedGrantGeneration: 1,
       candidate: { ...previous, sourceRevision: "e".repeat(64), capabilities: [], external },
-      blobs: [],
-      limits,
-      nowMs: 10,
-    }).publicationId;
-  // Sharing names a secret the server must hold.
-  expect(publish).toThrow(/Add secret POSTHOG_KEY/);
+    });
+  // Only the desktop app shares it, and sharing names a secret the server must hold.
+  expect(await (await share()).json()).toMatchObject({ error: /from the dohc desktop app/ });
+  clientKind = "desktop";
+  expect(await (await share()).json()).toMatchObject({ error: /Add secret POSTHOG_KEY/ });
   expect(saveSecret("phx_first", "create", 10).ok).toBe(true);
-  const publicationId = publish();
+  const { publicationId } = (await (await share()).json()) as { publicationId: string };
   const call = (operation: string, headers: Record<string, string>, authorityRevision = 1) =>
     f.http(
       headers.authorization?.startsWith("Bearer")
@@ -701,6 +705,16 @@ it("runs a shared app's outside calls on the server with the secret its owner ap
   });
   expect((await (await call("count", owner)).json()).message).toMatch(/replaced after you shared/);
   expect(sent).toHaveLength(3);
+  const lifecycle = (action: string, expectedAuthorityRevision: number) =>
+    f.http(`w/app-publications/${publicationId}/${action}`, { expectedAuthorityRevision });
+  expect((await lifecycle("withdraw", 1)).status).toBe(200);
+  clientKind = "browser";
+  expect(await (await lifecycle("reactivate", 2)).json()).toMatchObject({
+    error: /from the dohc desktop app/,
+  });
+  clientKind = "desktop";
+  expect((await lifecycle("reactivate", 2)).status).toBe(200);
+  expect((await call("count", f.publicHeaders, 3)).status).toBe(200);
 });
 
 it("runs an app on the owner's computer as that app, within its approval, for the owner alone", async () => {

@@ -593,7 +593,8 @@ approved operations for local-only workspaces, at most 8 at a time per workspace
 workspaces refuse them for now.
 
 The relay runs a published app's operations with its own sealed secret vault. Publishing
-never copies a local secret to the server. When the owner publishes, the relay records each
+never copies a local secret to the server. The relay accepts publishing or reactivating such
+an app only from the owner's desktop session. When the owner publishes, the relay records each
 secret's identity (usage, allowed hosts, and creation time) with the approval, and refuses
 to publish if the secret is missing or doesn't fit. Before each send it checks that the
 secret still has that identity, so a rotated value keeps working and a recreated or
