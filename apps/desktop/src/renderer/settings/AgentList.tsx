@@ -619,6 +619,11 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
   );
 }
 
+export type AgentsOpen = { agentId: string } | { add: true };
+// Settings mounts the list again each time it comes back to Agents, with the
+// same request, so each request is acted on once.
+const openedRequests = new WeakSet<AgentsOpen>();
+
 /**
  * Settings › Agents: every agent in the order the file lists them, with the
  * entries dohc could not use in their place. A row opens that agent's page.
@@ -659,10 +664,10 @@ export function AgentList(props: {
   onClearError?: (identity: string) => void;
   onNotice?: (message: string, undo?: () => void) => void;
   // The personal agent whose page opens once the roster answers, by id, such
-  // as the one a sign-in notice names. The list shows when the roster no
-  // longer holds it. Each request is a new object, so the same agent can be
-  // asked for again.
-  openAgent?: { agentId: string };
+  // as the one a sign-in notice names, or the Add agent sheet. The list shows
+  // when the roster no longer holds the agent. Each request is a new object,
+  // so the same one can be asked for again.
+  openAgent?: AgentsOpen;
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
@@ -835,7 +840,11 @@ export function AgentList(props: {
   // When the roster doesn't hold it, the list shows, as after Remove.
   const [wanted, setWanted] = useState<string | null>(null);
   useEffect(() => {
-    if (props.openAgent) setWanted(props.openAgent.agentId);
+    const open = props.openAgent;
+    if (!open || openedRequests.has(open)) return;
+    openedRequests.add(open);
+    if ("agentId" in open) setWanted(open.agentId);
+    else setSheetOpen(true);
   }, [props.openAgent]);
   useEffect(() => {
     if (wanted === null || personal.state.status === "loading") return;

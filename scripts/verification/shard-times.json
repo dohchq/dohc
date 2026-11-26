@@ -528,8 +528,6 @@
   "apps/desktop/src/renderer/workbench/About.test.tsx": 3.032,
   "apps/desktop/src/renderer/workbench/accessReason.test.ts": 0.05,
   "apps/desktop/src/renderer/workbench/actorPresentation.test.ts": 0.074,
-  "apps/desktop/src/renderer/workbench/AddAgentForm.connector.test.tsx": 2.622,
-  "apps/desktop/src/renderer/workbench/AddAgentForm.test.tsx": 1.976,
   "apps/desktop/src/renderer/workbench/AgentBadge.test.tsx": 0.747,
   "apps/desktop/src/renderer/workbench/agentChat.test.ts": 0.05,
   "apps/desktop/src/renderer/workbench/AgentColorPicker.test.tsx": 3.724,

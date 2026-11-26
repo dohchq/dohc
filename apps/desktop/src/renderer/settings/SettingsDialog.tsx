@@ -68,6 +68,7 @@ import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { useWorkspaceTrust } from "../useWorkspaceTrust";
 import type { SharingFocus } from "../workbench/SharingView";
+import type { AgentsOpen } from "./AgentList";
 import { SharingSearchResults, useSharingSearch } from "./SharingSearchResults";
 import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
@@ -172,8 +173,9 @@ export function SettingsDialog(props: {
   // takes focus.
   focus?: CustomizeTarget;
   // The personal agent whose page Settings › Agents opens, by id, such as
-  // the one a sign-in notice names. Each request is a new object.
-  openAgent?: { agentId: string };
+  // the one a sign-in notice names, or its Add agent sheet. Each request is a
+  // new object.
+  openAgent?: AgentsOpen;
   onClose: () => void;
   cloud?: CloudSettings;
   /** Closes Settings and opens the Sharing view on a lane or a share search found. */

@@ -69,15 +69,6 @@ export function launchProfile(launch: AgentLaunch): AgentLaunchProfile | undefin
   return "tool" in launch ? launch : undefined;
 }
 
-/** The chosen tool, else the typed command, else null for neither. */
-export function launchFrom(
-  profile: AgentLaunchProfile | undefined,
-  command: string,
-  current?: AgentLaunchProfile,
-): AgentLaunch | null {
-  return profile ?? launchFromCommand(command, current);
-}
-
 /**
  * What a typed command saves. Only detection picks a tool's program, so a
  * command keeps the current profile only while it starts that same program.

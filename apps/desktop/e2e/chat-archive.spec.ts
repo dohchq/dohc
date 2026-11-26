@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { installFakeAgentTools } from "./helpers/agentTools";
+import { installFakeAgentTools, seedNova } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import {
@@ -30,6 +30,7 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest(temp, "chat-archive");
+    await seedNova(temp, `node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
@@ -37,14 +38,6 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await page.emulateMedia({ reducedMotion: "reduce" });
     const panel = await openChatsView(page);
 
-    await panel.getByTestId("chats-add-agent-open").click();
-    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await page.getByText("Advanced", { exact: true }).click();
-    await page
-      .getByTestId("chats-add-agent-command")
-      .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
-    await page.getByTestId("chats-add-agent-submit").click();
-    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await expect(panel.getByTestId("chats-my-agent")).toHaveCount(1);
 
     const group = panel.getByTestId("chats-channel").filter({ hasText: "general" });

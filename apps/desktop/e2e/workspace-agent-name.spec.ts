@@ -1,11 +1,9 @@
 import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
-import { resolve, join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
-import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { installFakeAgentTools } from "./helpers/agentTools";
+import { installFakeAgentTools, seedNova } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
@@ -19,23 +17,13 @@ test("a named agent replies to a group mention with its owner on hover and focus
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeFile(
-      join(temp.homeDir, USER_SETTINGS_FILE),
-      JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }),
-    );
+    const command = `node "${resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs")}" report`;
+    await seedNova(temp, command, { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } });
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await page.getByTestId(activityPin("chats")).click();
-    await page.getByTestId("chats-add-agent-open").click();
-    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await expect(page.getByLabel("Your name", { exact: true })).toHaveCount(0);
-    const command = `node "${resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs")}" report`;
-    await page.getByText("Advanced", { exact: true }).click();
-    await page.getByTestId("chats-add-agent-command").fill(command);
-    await page.getByTestId("chats-add-agent-submit").click();
-    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await expect(
       page
         .locator('[data-testid="chats-my-agent"][data-agent-id="default"]')

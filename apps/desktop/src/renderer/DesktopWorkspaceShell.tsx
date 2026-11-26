@@ -291,6 +291,7 @@ import { shareSenderParts } from "./ShareSender";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
+import type { AgentsOpen } from "./settings/AgentList";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { titleBarNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { workspaceName } from "./Titlebar";
@@ -879,8 +880,9 @@ function WorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   // The part a Customize… command opened Settings for, if one did.
   const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
-  // The personal agent whose page Settings › Agents opens, if a notice named one.
-  const [settingsAgent, setSettingsAgent] = useState<{ agentId: string } | null>(null);
+  // The personal agent whose page Settings › Agents opens, if a notice named
+  // one, or its Add agent sheet.
+  const [settingsAgent, setSettingsAgent] = useState<AgentsOpen | null>(null);
   // The owner's live-document list, holding the workspace it was opened for
   // rather than a bare flag. The render below only matches the current
   // workspace, so a switch cannot leave the previous workspace's list — or
@@ -954,6 +956,10 @@ function WorkspaceShell(props: {
     [showSettings],
   );
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
+  const openAddAgent = useCallback(() => {
+    openSettings("agents");
+    setSettingsAgent({ add: true });
+  }, [openSettings]);
 
   const workspaceId = props.workspace.workspaceId;
   const focusRoot = useRef<HTMLDivElement>(null);
@@ -7962,6 +7968,7 @@ function WorkspaceShell(props: {
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    onAddAgent: openAddAgent,
     onOpenSettings: openSettings,
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,
@@ -8013,6 +8020,7 @@ function WorkspaceShell(props: {
     onShareRowMounted: handleShareRowMounted,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    onAddAgent: openAddAgent,
     onOpenSettings: openSettings,
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,

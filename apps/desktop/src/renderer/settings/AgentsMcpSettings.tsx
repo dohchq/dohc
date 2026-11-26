@@ -9,14 +9,14 @@ import type {
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { ErrorDetailField } from "../shell/copyDetails";
-import { AgentList } from "./AgentList";
+import { AgentList, type AgentsOpen } from "./AgentList";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
   // A joined workspace's id on the relay, which its agent link names.
   membersWorkspaceId?: string;
   workspaceName: string;
-  openAgent?: { agentId: string };
+  openAgent?: AgentsOpen;
   onError?: (
     message: string,
     cause?: unknown,

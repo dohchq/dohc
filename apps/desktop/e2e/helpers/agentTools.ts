@@ -5,6 +5,8 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { AGENT_TOOLS } from "../../src/agents/agentToolCatalog";
 import type { McpConfigResult } from "../../src/ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../src/settings/userSettings";
+import { USER_SETTINGS_FILE } from "../../src/settings/userSettingsStore";
 import { desktopRoot, testSearchPath } from "./desktopApp";
 import { openChatsView, type TempWorkspace } from "./workspace";
 
@@ -28,6 +30,29 @@ export async function installFakeAgentTools(
   }
   const path = `${bin}${delimiter}${testSearchPath}`;
   return { PATH: path, Path: path };
+}
+
+// Writes settings, before launch, with Nova as the agent "default", started
+// by `command`.
+export async function seedNova(
+  temp: Pick<TempWorkspace, "homeDir">,
+  command: string,
+  settings: DesktopUserSettings = DEFAULT_USER_SETTINGS,
+): Promise<void> {
+  const seeded: DesktopUserSettings = {
+    ...settings,
+    agents: {
+      default: {
+        name: "Nova",
+        hue: "olive",
+        launch: { command },
+        changesFiles: true,
+        enabled: true,
+        timeoutMinutes: 5,
+      },
+    },
+  };
+  await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(seeded, null, 2)}\n`);
 }
 
 // Opens the chat with the agent the settings call "default".
