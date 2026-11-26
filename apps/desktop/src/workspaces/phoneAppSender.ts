@@ -38,11 +38,14 @@ const OwnerPage = z.object({
       active: z.boolean(),
       appRoot: z.string().optional(),
       sourceRevision: z.string().optional(),
+      ownerState: z.enum(["pending", "current"]).optional(),
     }),
   ),
   nextCursor: z.string().nullable(),
 });
 type OwnerRow = z.infer<typeof OwnerPage>["publications"][number];
+type Versions = { current?: OwnerRow; pending?: OwnerRow };
+const newest = (versions: Versions | undefined) => versions?.pending ?? versions?.current;
 const Published = z.object({
   publicationId: z.string(),
   authorityRevision: z.number().int(),
@@ -157,7 +160,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     const credentials = await deps.credentials(workspace);
     const base = `/sync/${encodeURIComponent(workspaceId)}/app-publications`;
     const current = async () => {
-      const rows = new Map<string, OwnerRow>();
+      const rows = new Map<string, Versions>();
       let cursor: string | null = null;
       do {
         const page = OwnerPage.parse(
@@ -167,8 +170,12 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
             { signal },
           ),
         );
-        for (const row of page.publications)
-          if (row.active && row.appRoot !== undefined) rows.set(row.appRoot, row);
+        for (const row of page.publications) {
+          if (!row.active || row.appRoot === undefined) continue;
+          const versions = rows.get(row.appRoot) ?? {};
+          versions[row.ownerState === "pending" ? "pending" : "current"] = row;
+          rows.set(row.appRoot, versions);
+        }
         cursor = page.nextCursor;
       } while (cursor);
       return rows;
@@ -184,8 +191,9 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     inputs.set(workspaceId, read);
     for (const appRoot of failures.get(workspaceId)?.keys() ?? [])
       if (appRoot && !apps.includes(appRoot)) settle(workspaceId, appRoot, null);
-    for (const [appRoot, row] of published) {
-      if (apps.includes(appRoot)) continue;
+    for (const [appRoot, versions] of published) {
+      const row = versions.current ?? versions.pending;
+      if (apps.includes(appRoot) || !row) continue;
       await deps
         .relayJson(credentials, `${base}/${row.publicationId}/withdraw`, {
           method: "POST",
@@ -211,7 +219,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         candidate.capabilities.some((value) => value.kind === "collection-create")
       )
         throw new Error(PHONE_APP_REFUSED);
-      const expected = published.get(appRoot)?.publicationId ?? null;
+      const expected = newest(published.get(appRoot))?.publicationId ?? null;
       if (
         Buffer.byteLength(body(candidate, expected)) > APP_PUBLICATION_MAX_REQUEST_BYTES ||
         files.some((file) => file.bytes.byteLength > APP_PUBLICATION_MAX_BLOB_BYTES)
@@ -224,7 +232,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         row = await publish(candidate, expected);
       } catch (error) {
         signal.throwIfAborted();
-        const now = (await current()).get(appRoot);
+        const now = newest((await current()).get(appRoot));
         if ((now?.publicationId ?? null) === expected) throw error;
         await deps.catchUp(workspace, signal);
         const latest = (await deps.readSource(workspace, appRoot, signal)).sourceRevision;
@@ -232,13 +240,14 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         if (latest !== revision) return later(workspaceId);
         row = await publish(candidate, now?.publicationId ?? null);
       }
-      if (candidate.capabilities.length)
-        await deps.relayJson(credentials, `${base}/${row.publicationId}/backend/activate`, {
-          method: "POST",
-          signal,
-          body: JSON.stringify({ authorityRevision: row.authorityRevision }),
-        });
+      if (candidate.capabilities.length) await activate(row);
     };
+    const activate = (row: { publicationId: string; authorityRevision: number }) =>
+      deps.relayJson(credentials, `${base}/${row.publicationId}/backend/activate`, {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ authorityRevision: row.authorityRevision }),
+      });
     for (const appRoot of apps) {
       if (!(await deps.enabled())) return clearAll(workspaceId);
       signal.throwIfAborted();
@@ -247,9 +256,11 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         const source = await deps.readSource(workspace, appRoot, signal);
         revision = source.sourceRevision;
         for (const path of source.sourcePaths) read.add(path);
-        if (published.get(appRoot)?.sourceRevision !== revision) {
+        const head = newest(published.get(appRoot));
+        if (head?.sourceRevision !== revision || head.ownerState === "pending") {
           if (failures.get(workspaceId)?.get(appRoot)?.revision === revision) continue;
-          await send(appRoot, revision);
+          if (head?.sourceRevision === revision) await activate(head);
+          else await send(appRoot, revision);
         }
         settle(workspaceId, appRoot, null);
       } catch (error) {

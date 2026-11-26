@@ -31,6 +31,7 @@ type Row = { publicationId: string; authorityRevision: number; sourceRevision: s
 
 function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   const owner = new Map<string, Row>();
+  const pending = new Map<string, Row>();
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   let next = 1;
   let refuseNextPublish = false;
@@ -46,18 +47,32 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     if (!init?.method && state.listingFails) throw new Error("dohc could not reach the server.");
     if (!init?.method)
       return {
-        publications: [...owner].map(([appRoot, row]) => ({ ...row, appRoot, active: true })),
+        publications: [
+          ...[...owner].map(([appRoot, row]) => ({ ...row, appRoot, ownerState: "current" })),
+          ...[...pending].map(([appRoot, row]) => ({ ...row, appRoot, ownerState: "pending" })),
+        ].map((row) => ({ ...row, active: true })),
         nextCursor: null,
       };
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     posts.push({ path, body });
     const id = path.split("/").at(path.endsWith("/backend/activate") ? -3 : -2);
     if (path.endsWith("/withdraw")) {
-      for (const [root, row] of owner) if (row.publicationId === id) owner.delete(root);
+      for (const [root, row] of owner)
+        if (row.publicationId === id) {
+          owner.delete(root);
+          pending.delete(root);
+        }
+      for (const [root, row] of pending) if (row.publicationId === id) pending.delete(root);
       return { publicationId: id, active: false };
     }
-    if (path.endsWith("/backend/activate"))
+    if (path.endsWith("/backend/activate")) {
+      for (const [root, row] of pending)
+        if (row.publicationId === id) {
+          owner.set(root, row);
+          pending.delete(root);
+        }
       return { publicationId: id, authorityRevision: body.authorityRevision };
+    }
     const published = body.candidate as AppPublicationCandidate;
     if (refuseNextPublish) {
       refuseNextPublish = false;
@@ -103,6 +118,7 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   return {
     sender,
     owner,
+    pending,
     posts,
     state,
     prepare,
@@ -351,5 +367,63 @@ describe("createPhoneAppSender", () => {
     expect(test.posts).toHaveLength(1);
     expect(test.owner.get("apps/trip")?.publicationId).toBe("from-another-computer");
     expect(test.sender.notSent("ws")).toEqual([]);
+  });
+
+  it("activates a pending version with unchanged files instead of sending it again", async () => {
+    const test = harness({ apps: ["apps/books"], revisions: { "apps/books": "r1" } });
+    test.owner.set("apps/books", {
+      publicationId: "books-1",
+      authorityRevision: 1,
+      sourceRevision: "r0",
+    });
+    test.pending.set("apps/books", {
+      publicationId: "books-2",
+      authorityRevision: 1,
+      sourceRevision: "r1",
+    });
+    await test.sender.run("ws");
+    expect(test.prepare).not.toHaveBeenCalled();
+    expect(test.posts.map((post) => post.path)).toEqual([
+      "/sync/ws/app-publications/books-2/backend/activate",
+    ]);
+    expect(test.owner.get("apps/books")?.publicationId).toBe("books-2");
+  });
+
+  it("names the pending version as the one it expects when the files changed again", async () => {
+    const test = harness({ apps: ["apps/books"], revisions: { "apps/books": "r2" } });
+    test.owner.set("apps/books", {
+      publicationId: "books-1",
+      authorityRevision: 1,
+      sourceRevision: "r0",
+    });
+    test.pending.set("apps/books", {
+      publicationId: "books-2",
+      authorityRevision: 1,
+      sourceRevision: "r1",
+    });
+    await test.sender.run("ws");
+    expect(test.posts[0]!.body.expectedCurrentPublicationId).toBe("books-2");
+  });
+
+  it("withdraws a deleted app's current version, which takes its pending one too", async () => {
+    const test = harness({ apps: [], revisions: {} });
+    test.owner.set("apps/books", {
+      publicationId: "books-1",
+      authorityRevision: 3,
+      sourceRevision: "r0",
+    });
+    test.pending.set("apps/books", {
+      publicationId: "books-2",
+      authorityRevision: 1,
+      sourceRevision: "r1",
+    });
+    await test.sender.run("ws");
+    expect(test.posts).toEqual([
+      {
+        path: "/sync/ws/app-publications/books-1/withdraw",
+        body: { expectedAuthorityRevision: 3 },
+      },
+    ]);
+    expect(test.pending.size).toBe(0);
   });
 });
