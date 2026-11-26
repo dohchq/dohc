@@ -811,25 +811,24 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed`
         : switched.reason;
     }
-    case "versionMerge": {
-      const merge = result as CliResultByVerb["versionMerge"];
-      if (!merge.ok) return merge.reason;
-      return [
-        `Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
-        ...conflictLines(merge),
-      ].join("\n");
-    }
+    case "versionMerge":
     case "versionUpdate": {
-      const update = result as CliResultByVerb["versionUpdate"];
-      if (!update.ok) return update.reason;
-      return [
-        `Updated ${lineSafe(update.version.name)} from Main · ${counted(update.mergedFileCount, "file", "files")} merged · ${counted(update.conflictCount, "conflict", "conflicts")}`,
-        ...(update.skippedProtectedFileCount > 0
+      const outcome = result as CliResultByVerb["versionMerge"] | CliResultByVerb["versionUpdate"];
+      if (!outcome.ok) return outcome.reason;
+      const head =
+        verb === "versionUpdate"
+          ? `Updated ${lineSafe(outcome.version.name)} from Main`
+          : `Merged ${lineSafe(outcome.version.name)} into Main`;
+      const skipped =
+        "skippedProtectedFileCount" in outcome && outcome.skippedProtectedFileCount > 0
           ? [
-              `${counted(update.skippedProtectedFileCount, "protected file", "protected files")} changed on both sides kept the version's copy`,
+              `${counted(outcome.skippedProtectedFileCount, "protected file", "protected files")} changed on both sides kept the version's copy`,
             ]
-          : []),
-        ...conflictLines(update),
+          : [];
+      return [
+        `${head} · ${counted(outcome.mergedFileCount, "file", "files")} merged · ${counted(outcome.conflictCount, "conflict", "conflicts")}`,
+        ...skipped,
+        ...conflictLines(outcome),
       ].join("\n");
     }
     case "versionArchive": {

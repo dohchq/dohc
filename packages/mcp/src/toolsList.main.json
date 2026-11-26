@@ -2,7 +2,7 @@
   "owner": [
     {
       "name": "dohc_archive_version",
-      "description": "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main and the active version can't be archived. Owner workspace only.",
+      "description": "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main, the active version, and versions with open conflicts can't be archived. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3251,10 +3251,14 @@
     },
     {
       "name": "dohc_list_versions",
-      "description": "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
+      "description": "List the workspace's versions and which one is active. Archived versions are hidden unless includeArchived is true. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
       "inputSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "includeArchived": {
+            "type": "boolean"
+          }
+        },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

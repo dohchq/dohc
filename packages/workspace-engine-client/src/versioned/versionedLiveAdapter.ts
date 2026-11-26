@@ -429,13 +429,17 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async listVersions(input: { workspaceId: string }): Promise<VersionRecord[]> {
+  async listVersions(input: {
+    workspaceId: string;
+    includeArchived?: boolean;
+  }): Promise<VersionRecord[]> {
     this.assertWorkspace(input.workspaceId);
     const records: VersionRecord[] = [];
     let afterVersionId: string | undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.versionsList, {
         ...(afterVersionId !== undefined ? { afterVersionId } : {}),
+        ...(input.includeArchived ? { includeArchived: true } : {}),
       });
       records.push(
         ...page.versions.map((row) => ({
@@ -789,6 +793,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     sourceVersionId: string;
     targetVersionId: string;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<{
     entries: VersionedMethodResultMap["versions.compareFiles"]["entries"];
     nextAfterPath: string | null;
@@ -799,6 +804,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       sourceVersionId: input.sourceVersionId,
       targetVersionId: input.targetVersionId,
       ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+      ...(input.includeBaseDrift ? { includeBaseDrift: true } : {}),
     });
     return { entries: page.entries, nextAfterPath: page.nextCursor };
   }
@@ -1748,6 +1754,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     targetVersionId: string;
     sourceVersionId: string;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<{
     entries: SecretCompareEntry[];
     nextAfterPath: string | null;
@@ -1759,6 +1766,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       sourceVersionId: input.sourceVersionId,
       limit: 500,
       ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+      ...(input.includeBaseDrift ? { includeBaseDrift: true } : {}),
     });
     return { entries: page.entries, nextAfterPath: page.nextAfterPath };
   }

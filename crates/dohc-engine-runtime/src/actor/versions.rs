@@ -60,15 +60,17 @@ impl ActorHandle {
         target_version_id: String,
         after_path: Option<String>,
         limit: usize,
+        include_base_drift: bool,
     ) -> Result<VersionFileChangePage, RuntimeError> {
         self.run(move |store, _| {
             VersionedTextStore::new(store)
-                .compare_version_files_page(
+                .compare_version_files_page_with_drift(
                     &workspace_id,
                     &source_version_id,
                     &target_version_id,
                     after_path.as_deref(),
                     limit,
+                    include_base_drift,
                 )
                 .map_err(RuntimeError::from)
         })

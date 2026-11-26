@@ -35,6 +35,7 @@ it("offers the version tools to the owner only and sends them as the agent", asy
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     await client.callTool({ name: "dohc_list_versions", arguments: {} });
+    await client.callTool({ name: "dohc_list_versions", arguments: { includeArchived: true } });
     await client.callTool({
       name: "dohc_compare_version",
       arguments: { version: "Draft", afterPath: "a.md" },
@@ -64,6 +65,10 @@ it("offers the version tools to the owner only and sends them as the agent", asy
     expect.objectContaining({
       verb: "versionList",
       args: expect.objectContaining({ actor: "agent" }),
+    }),
+    expect.objectContaining({
+      verb: "versionList",
+      args: expect.objectContaining({ actor: "agent", includeArchived: true }),
     }),
     expect.objectContaining({
       verb: "versionCompare",

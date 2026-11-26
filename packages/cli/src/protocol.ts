@@ -578,7 +578,9 @@ const fileDeleteArgsSchema = z
   })
   .strict();
 
-const versionListArgsSchema = z.object(argsBase).strict();
+const versionListArgsSchema = z
+  .object({ ...argsBase, includeArchived: z.boolean().optional() })
+  .strict();
 // `version` is a version's name or id, as version list prints them.
 const versionCompareArgsSchema = z
   .object({
@@ -2258,34 +2260,27 @@ const versionSwitchResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 // conflictCount counts every conflict the merge left. The page lists the
-// open conflicts, from this merge and earlier ones, as version conflicts does.
+// open conflicts for this pair.
+const versionMergeSuccessSchema = z
+  .object({
+    ok: z.literal(true),
+    version: versionNameSchema,
+    mergedFileCount: z.number().int().nonnegative(),
+    unchangedFileCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    ...versionConflictsPage,
+  })
+  .strict();
 const versionMergeResultSchema = z.union([
-  z
-    .object({
-      ok: z.literal(true),
-      version: versionNameSchema,
-      mergedFileCount: z.number().int().nonnegative(),
-      unchangedFileCount: z.number().int().nonnegative(),
-      conflictCount: z.number().int().nonnegative(),
-      ...versionConflictsPage,
-    })
-    .strict(),
+  versionMergeSuccessSchema,
   rawFailureSchema,
   historyPolicyUnreadableSchema,
 ]);
 // An update reports as a merge does, and counts the protected files both
 // sides changed, which it left as the version has them.
 const versionUpdateResultSchema = z.union([
-  z
-    .object({
-      ok: z.literal(true),
-      version: versionNameSchema,
-      mergedFileCount: z.number().int().nonnegative(),
-      unchangedFileCount: z.number().int().nonnegative(),
-      conflictCount: z.number().int().nonnegative(),
-      skippedProtectedFileCount: z.number().int().nonnegative(),
-      ...versionConflictsPage,
-    })
+  versionMergeSuccessSchema
+    .extend({ skippedProtectedFileCount: z.number().int().nonnegative() })
     .strict(),
   rawFailureSchema,
   historyPolicyUnreadableSchema,

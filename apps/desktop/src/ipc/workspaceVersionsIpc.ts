@@ -82,6 +82,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
   async function mergeResultForIpc(
     capture: VersionOperations,
     workspaceId: string,
+    pair: { sourceVersionId: string; targetVersionId: string },
     result: WorkspaceVersionMergeResult,
   ) {
     notifyRenderer({ workspaceId });
@@ -89,7 +90,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
     // read back one page at a time like every other conflict reader.
     const page =
       result.conflictCount > 0
-        ? await capture.listOpenConflictsPage()
+        ? await capture.listOpenConflictsPage(undefined, pair)
         : { conflicts: [], nextAfterConflictId: null };
     return {
       mergedFileCount: result.mergedFileCount,
@@ -126,7 +127,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
     },
     async listWorkspaceVersions(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const snapshot = await capture.listVersions();
+      const snapshot = await capture.listVersions({ includeArchived: true });
       return {
         versions: snapshot.versions.map(workspaceVersionForIpc),
         activeVersionId: snapshot.activeVersionId,
@@ -172,13 +173,23 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
     async mergeWorkspaceVersion(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const result = await capture.mergeVersionIntoMain(input.versionId);
-      return await mergeResultForIpc(capture, input.workspaceId, result);
+      return await mergeResultForIpc(
+        capture,
+        input.workspaceId,
+        { sourceVersionId: input.versionId, targetVersionId: "main" },
+        result,
+      );
     },
 
     async updateWorkspaceVersion(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const result = await capture.updateVersionFromMain(input.versionId);
-      return await mergeResultForIpc(capture, input.workspaceId, result);
+      return await mergeResultForIpc(
+        capture,
+        input.workspaceId,
+        { sourceVersionId: "main", targetVersionId: input.versionId },
+        result,
+      );
     },
 
     async archiveWorkspaceVersion(input) {

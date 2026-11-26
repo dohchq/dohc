@@ -7,9 +7,9 @@ use crate::records::{
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
     hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
-    validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
-    validate_path, validate_write_input, version_is_active, write_revived_text_in_tx,
-    write_text_in_tx,
+    require_unarchived_version, validate_delete_input, validate_identifier, validate_moment_id,
+    validate_moment_metadata, validate_path, validate_write_input, version_is_active,
+    write_revived_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
@@ -817,6 +817,10 @@ impl VersionedTextStore<'_> {
                     reason: "conflict is not open",
                 });
             }
+            if conflict.metadata.origin != "sync" {
+                require_unarchived_version(tx, &input.workspace_id, &conflict.target_version_id)?;
+                require_unarchived_version(tx, &input.workspace_id, &conflict.source_version_id)?;
+            }
             // Before any write. The caller's answer carries this conflict, one
             // control frame has to hold that answer, and withholding removes
             // only bodies — so a conflict whose remaining strings cannot fit
@@ -1124,6 +1128,81 @@ pub fn revived_incoming_object_id(conflict: &TextConflict) -> Option<&str> {
         .as_ref()
         .map(|incoming| incoming.object_id.as_str())
         .or(conflict.incoming.binary_object_id.as_deref())
+}
+
+pub(crate) type ConflictHeadIdentity<'a> = Option<(&'static str, &'a str, &'a str, &'a str)>;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_or_supersede_open_merge_conflict(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    target_version_id: &str,
+    source_version_id: &str,
+    path: &str,
+    current_head: ConflictHeadIdentity<'_>,
+    incoming_head: ConflictHeadIdentity<'_>,
+    now_ms: i64,
+) -> Result<Option<TextConflict>, DomainError> {
+    let ids: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT conflict_id FROM conflicts \
+                 WHERE workspace_id = ?1 AND target_version_id = ?2 AND source_version_id = ?3 \
+                   AND path = ?4 AND status = 'open' AND metadata_origin != 'sync' \
+                 ORDER BY created_at_ms ASC, conflict_id ASC",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![workspace_id, target_version_id, source_version_id, path],
+                |row| row.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        rows.collect::<Result<_, _>>()
+            .map_err(DomainError::sql_corrupt)?
+    };
+    fn side_head(side: &ConflictFileState) -> ConflictHeadIdentity<'_> {
+        if !side.is_present() {
+            return None;
+        }
+        match side.content_kind {
+            ConflictContentKind::Text => side.snapshot.as_ref().map(|s| {
+                (
+                    "text",
+                    s.blob_sha256.as_str(),
+                    s.object_id.as_str(),
+                    s.latest_moment_id.as_str(),
+                )
+            }),
+            ConflictContentKind::Binary => Some((
+                "binary",
+                side.binary_sha256.as_deref()?,
+                side.binary_object_id.as_deref()?,
+                side.binary_latest_moment_id.as_deref()?,
+            )),
+        }
+    }
+    let mut fresh = None;
+    for conflict_id in ids {
+        let Some(existing) = load_text_conflict_in_tx(tx, workspace_id, &conflict_id)? else {
+            continue;
+        };
+        if fresh.is_none()
+            && side_head(&existing.current) == current_head
+            && side_head(&existing.incoming) == incoming_head
+        {
+            fresh = Some(existing);
+            continue;
+        }
+        tx.execute(
+            "UPDATE conflicts SET status = 'resolved', chosen_from = 'current', \
+             resolution = 'kept-current', updated_at_ms = ?3 \
+             WHERE workspace_id = ?1 AND conflict_id = ?2",
+            params![workspace_id, conflict_id, now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    Ok(fresh)
 }
 
 /// Whether this machine ever stored `object_id` as a file in the version.

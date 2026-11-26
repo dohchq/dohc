@@ -977,7 +977,7 @@ export function createCaptureLiveStores(
       runMutation(async (adapter) => await adapter.setVersionArchived(input)),
     createNamedVersion: (input: { workspaceId: string; name: string; fromVersionId: string }) =>
       runMutation(async (adapter) => await adapter.createNamedVersion(input)),
-    listVersions: (input: { workspaceId: string }) =>
+    listVersions: (input: { workspaceId: string; includeArchived?: boolean }) =>
       runRead(async (adapter) => await adapter.listVersions(input)),
 
     async readTextFile(input: { workspaceId: string; versionId: string; path: string }) {
@@ -1317,6 +1317,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       targetVersionId: string;
       afterPath?: string;
+      includeBaseDrift?: boolean;
     }) {
       return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
     },

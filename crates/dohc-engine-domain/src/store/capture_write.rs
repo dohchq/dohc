@@ -4,10 +4,11 @@ use super::{
     bounded_identifier, committed, delete_result_from_moment, delete_text_in_tx, get_file_object,
     get_moment, get_snapshot, get_snapshot_meta, hash_author_fields, hash_fields,
     hash_optional_text_fields, lookup_request, moment_by_order, moment_exists, next_moment_order,
-    object_has_live_alias, record_request, reject_reserved_capture_origin, text_blob_sha256,
-    validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
-    validate_moment_metadata, validate_plaintext_storable_path, version_exists,
-    write_result_from_moment, write_result_with_text,
+    object_has_live_alias, record_request, reject_reserved_capture_origin,
+    require_writable_version, text_blob_sha256, validate_addressable_plaintext_path,
+    validate_identifier, validate_moment_id, validate_moment_metadata,
+    validate_plaintext_storable_path, version_exists, write_result_from_moment,
+    write_result_with_text,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -1714,8 +1715,8 @@ fn write_normalized_text_in_tx(
     conditions: Option<&str>,
 ) -> Result<WriteResult, DomainError> {
     let ws = input.workspace_id;
-    if prepared.is_none() && !version_exists(tx, ws, input.version_id)? {
-        return Err(DomainError::VersionNotFound);
+    if prepared.is_none() {
+        require_writable_version(tx, ws, input.version_id, input.metadata_origin)?;
     }
 
     let blob = prepared

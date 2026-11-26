@@ -457,6 +457,7 @@
     "version merge": "version.merge",
     "version update": "version.update",
     "version archive": "version.archive",
+    "version restore": "version.archive",
     "version resolve": "version.conflict.resolve",
     "automation list": "automation.list",
     "automation switch": "automation.switch",

@@ -2260,8 +2260,8 @@ export async function undoOperation(
 
 // The versions menu's reads. Owner workspace only; files History does not
 // track and secret files are left out.
-export async function listVersions(ctx: ToolContext) {
-  return requestCli(ctx, "versionList", {});
+export async function listVersions(ctx: ToolContext, args?: { includeArchived?: boolean }) {
+  return requestCli(ctx, "versionList", args?.includeArchived ? { includeArchived: true } : {});
 }
 export async function compareVersion(
   ctx: ToolContext,

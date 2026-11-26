@@ -1,9 +1,9 @@
 use super::{
     VersionedTextStore, alias_object_id, blob_text, committed, get_file_object, get_moment,
     get_snapshot, hash_author_fields, hash_fields, hash_optional_text_fields, lookup_request,
-    moment_exists, next_moment_order, record_request, snapshot_text_view, upsert_snapshot,
-    validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
-    validate_moment_metadata, validate_plaintext_storable_path, version_exists, version_is_active,
+    moment_exists, next_moment_order, record_request, require_writable_version, snapshot_text_view,
+    upsert_snapshot, validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
+    validate_moment_metadata, validate_plaintext_storable_path, version_is_active,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -129,9 +129,7 @@ where
     }
     let (object, before) = {
         let conn = tx;
-        if !version_exists(conn, ws, &input.version_id)? {
-            return Err(DomainError::VersionNotFound);
-        }
+        require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
         let object_id = alias_object_id(conn, ws, &input.version_id, &input.from_path)?
             .ok_or(DomainError::FileNotFound)?;
         let before = get_snapshot(conn, ws, &input.version_id, &object_id)?
@@ -502,9 +500,7 @@ fn delete_text_in_tx_prepared(
         }
         return reconstruct_delete(tx, input);
     }
-    if !version_exists(tx, ws, &input.version_id)? {
-        return Err(DomainError::VersionNotFound);
-    }
+    require_writable_version(tx, ws, &input.version_id, &input.metadata_origin)?;
     let object_id = alias_object_id(tx, ws, &input.version_id, &input.path)?
         .ok_or(DomainError::FileNotFound)?;
     if let Some(expected) = expected_object_id

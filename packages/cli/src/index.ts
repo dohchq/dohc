@@ -164,7 +164,11 @@ function buildCliRequest(
       return {
         protocolVersion: common.protocolVersion,
         verb: command.verb,
-        args: { cwd: common.cwd, actor: common.actor },
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          ...(command.includeArchived ? { includeArchived: true } : {}),
+        },
       };
     case "versionCompare":
       return {

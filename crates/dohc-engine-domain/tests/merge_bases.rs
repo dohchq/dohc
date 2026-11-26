@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dohc_engine_domain::{
-    CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
+    CreateNamedVersion, DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
@@ -482,13 +482,21 @@ fn undoing_first_direction_after_second_direction_keeps_both_sides_work() {
         feat_text(&mut store, "a.md").as_deref(),
         Some("MAIN\n2\n3\n4\nFEAT")
     );
-    // Restore Main to before its merge.
+    // Restore Main to before its merge: updating Draft is a no-op that keeps Draft's undo record.
     put(&mut store, "main", "a.md", "MAIN\n2\n3\n4\n5");
-    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(outcome(&update(&mut store, "a.md")), "already same");
     assert_eq!(
         feat_text(&mut store, "a.md").as_deref(),
         Some("MAIN\n2\n3\n4\nFEAT"),
         "updating Draft after undoing Main's merge must keep Draft's original edit"
+    );
+    // Restore Draft to before its update: Main's edit must still reach Draft.
+    put(&mut store, "feat", "a.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "restoring Draft after a no-op update must still receive Main's edit"
     );
 
     // Direction 2: edit separate lines in Main & Draft, update Draft from Main, merge Draft->Main, undo Draft.
@@ -504,14 +512,184 @@ fn undoing_first_direction_after_second_direction_keeps_both_sides_work() {
         main_text(&mut store, "b.md").as_deref(),
         Some("MAIN\n2\n3\n4\nFEAT")
     );
-    // Restore Draft to before its update.
+    // Restore Draft to before its update: merging Draft is a no-op that keeps Main's undo record.
     put(&mut store, "feat", "b.md", "1\n2\n3\n4\nFEAT");
-    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "already same");
     assert_eq!(
         main_text(&mut store, "b.md").as_deref(),
         Some("MAIN\n2\n3\n4\nFEAT"),
         "merging Draft after undoing Draft's update must keep Main's original edit"
     );
+    // Restore Main to before its merge: Draft's edit must still reach Main.
+    put(&mut store, "main", "b.md", "MAIN\n2\n3\n4\n5");
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "restoring Main after a no-op merge must still receive Draft's edit"
+    );
+}
+
+#[test]
+fn agreed_deletion_advances_merge_base_when_base_drift_is_included() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "gone.md", "A");
+    fork(&mut store);
+    for version in ["main", "feat"] {
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: version.to_owned(),
+                    path: "gone.md".to_owned(),
+                    moment_id: id("del"),
+                    request_id: None,
+                    metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 200,
+                },
+                &NO_FAULTS,
+            )
+            .expect("delete");
+    }
+    let plain = VersionedTextStore::new(&mut store)
+        .compare_version_files_page_with_drift(WS, "feat", "main", None, 50, false)
+        .expect("plain compare");
+    assert!(plain.entries.is_empty());
+    let drifted = VersionedTextStore::new(&mut store)
+        .compare_version_files_page_with_drift(WS, "feat", "main", None, 50, true)
+        .expect("drift compare");
+    assert_eq!(
+        drifted
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gone.md"]
+    );
+    assert_eq!(outcome(&merge(&mut store, "gone.md")), "already same");
+    put(&mut store, "main", "gone.md", "recreated");
+    assert_eq!(outcome(&update(&mut store, "gone.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "gone.md").as_deref(),
+        Some("recreated")
+    );
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn stale_same_direction_merge_conflict_is_superseded_on_rerun() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "c.md", "base");
+    fork(&mut store);
+    put(&mut store, "main", "c.md", "main-1");
+    put(&mut store, "feat", "c.md", "feat-1");
+    let first_id = conflict_id(&merge(&mut store, "c.md"));
+    // Rerunning while live heads still match dedupes the existing open conflict.
+    let dedup = merge(&mut store, "c.md");
+    assert_eq!(conflict_id(&dedup), first_id);
+    assert!(matches!(
+        dedup,
+        MergeTextFileResult::Conflict { deduped: true, .. }
+    ));
+    assert_eq!(open_conflicts(&mut store), 1);
+
+    // Editing Main makes the conflict stale; rerunning supersedes it cleanly.
+    put(&mut store, "main", "c.md", "main-2");
+    let second = merge(&mut store, "c.md");
+    let second_id = conflict_id(&second);
+    assert_ne!(second_id, first_id);
+    assert!(matches!(
+        second,
+        MergeTextFileResult::Conflict { deduped: false, .. }
+    ));
+    assert_eq!(open_conflicts(&mut store), 1);
+
+    // Matching the other side supersedes the conflict and converges cleanly.
+    put(&mut store, "main", "c.md", "feat-1");
+    assert_eq!(outcome(&merge(&mut store, "c.md")), "already same");
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn archiving_a_version_with_open_conflicts_is_refused_and_archived_cannot_write() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "base");
+    fork(&mut store);
+    put(&mut store, "main", "x.md", "main-1");
+    put(&mut store, "feat", "x.md", "feat-1");
+    let cid = conflict_id(&update(&mut store, "x.md"));
+
+    let err = VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect_err("version with open conflicts cannot be archived");
+    assert!(matches!(
+        err,
+        DomainError::InvalidInput {
+            reason: "version-has-open-conflicts"
+        }
+    ));
+
+    resolve(&mut store, &cid, ResolveConflictKind::KeepCurrent);
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive after resolve");
+
+    let write_err = VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "feat".to_owned(),
+                object_id: id("obj"),
+                path: "x.md".to_owned(),
+                text: "blocked".to_owned(),
+                moment_id: id("m"),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1000,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("write into archived version must fail");
+    assert!(matches!(
+        write_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+    let active_err = VersionedTextStore::new(&mut store)
+        .set_active_version(WS, "feat", &NO_FAULTS)
+        .expect_err("activating archived version must fail");
+    assert!(matches!(
+        active_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+    let fork_err = VersionedTextStore::new(&mut store)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "child".to_owned(),
+                name: "child".to_owned(),
+                from_version_id: "feat".to_owned(),
+                now_ms: 1001,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("forking archived version must fail");
+    assert!(matches!(
+        fork_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
 }
 
 #[test]

@@ -649,11 +649,11 @@ Returns `{ ok: true, status: "queued" } | { ok: false, status: "switched-off", r
 
 ### `dohc_list_versions`
 
-List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.
+List the workspace's versions and which one is active. Archived versions are hidden unless includeArchived is true. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 
-No arguments.
+- `includeArchived`: `boolean`
 
 Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId?, archivedAtMs? }[], activeVersionId } | { ok: false, reason }`.
 
@@ -706,11 +706,11 @@ Changes the workspace, so a shared view does not offer it.
 
 - `version`: `string`. Required.
 
-Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, skippedProtectedFileCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId, skippedProtectedFileCount } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_archive_version`
 
-Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main and the active version can't be archived. Owner workspace only.
+Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main, the active version, and versions with open conflicts can't be archived. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -2787,7 +2787,9 @@ dohc version list [options]
 
 List the versions and which one is active.
 
-A version's madeFromVersionId is the id of the version it was made from.
+A version's madeFromVersionId is the id of the version it was made from. Archived versions are hidden unless --archived is set.
+
+- `--archived`: Include archived versions.
 
 With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId?, archivedAtMs? }[], activeVersionId }`.
 
@@ -2863,7 +2865,7 @@ Bring Main's changes into a version made from Main.
 
 Prints the open conflicts the update leaves. A protected file both sides changed stays as the version has it.
 
-With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, skippedProtectedFileCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId, skippedProtectedFileCount }`.
 
 #### `dohc version archive`
 
@@ -2871,11 +2873,21 @@ With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedF
 dohc version archive <version> [options]
 ```
 
-Archive a version, or restore an archived one.
+Archive a version.
 
-An archived version keeps its files and leaves the version menu. Main and the active version can't be archived.
+An archived version keeps its files and leaves the version menu. Main, the active version, and versions with open conflicts can't be archived.
 
-- `--restore`: Restore an archived version.
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, archived }`.
+
+#### `dohc version restore`
+
+```sh
+dohc version restore <version> [options]
+```
+
+Restore an archived version.
+
+Returns an archived version to the version menu.
 
 With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, archived }`.
 

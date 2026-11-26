@@ -758,7 +758,7 @@ export interface WorkspaceEngineCapture {
   // Version operations. Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
-  listVersions(): Promise<WorkspaceVersionsSnapshot>;
+  listVersions(options?: { includeArchived?: boolean }): Promise<WorkspaceVersionsSnapshot>;
   // Creates a named version forked from the active version's current disk
   // state and makes it active. Disk content is untouched (the fork starts as
   // an identical copy).
@@ -785,7 +785,10 @@ export interface WorkspaceEngineCapture {
   setVersionArchived(versionId: string, archived: boolean): Promise<void>;
   // One page of open conflicts; pass the previous page's nextAfterConflictId
   // to continue.
-  listOpenConflictsPage(afterConflictId?: string): Promise<WorkspaceVersionConflictPage>;
+  listOpenConflictsPage(
+    afterConflictId?: string,
+    pair?: { sourceVersionId: string; targetVersionId: string },
+  ): Promise<WorkspaceVersionConflictPage>;
   countOpenConflicts(): Promise<number>;
   // Open conflicts a merge left, per version they came from, read from at most
   // `pageLimit` pages without any conflict's text. `more` says the list ran on.
@@ -4999,18 +5002,43 @@ export function createWorkspaceEngineCapture(
     return { kind: "write", path: snapshot.path, text: snapshot.text };
   }
 
+  function versionRefusalError(error: unknown, fallbackName?: string): Error | null {
+    const code =
+      error instanceof DaemonRefusalError
+        ? error.message
+        : error instanceof VersionedTextStoreError
+          ? error.code
+          : undefined;
+    if (code === "version-is-main") return new Error("Main can't be archived.");
+    if (code === "version-is-active") {
+      return new Error("Switch to another version before archiving this one.");
+    }
+    if (code === "version-has-open-conflicts") {
+      return new Error("Decide this version's open conflicts before archiving it.");
+    }
+    if (code === "version-archived") {
+      return new Error(
+        fallbackName
+          ? `Restore version "${fallbackName}" before switching to it.`
+          : "Restore this version before switching to it.",
+      );
+    }
+    return null;
+  }
+
   async function versionsSnapshot(
     engine: Pick<VersionedTextStore, "listVersions" | "getActiveVersion">,
+    includeArchived = false,
   ): Promise<WorkspaceVersionsSnapshot> {
     const [versions, activeVersionId] = await Promise.all([
-      engine.listVersions({ workspaceId }),
+      engine.listVersions({ workspaceId, ...(includeArchived ? { includeArchived: true } : {}) }),
       activeVersionIdOf(engine),
     ]);
     return { versions, activeVersionId };
   }
 
   // Merges a named version into Main, or Main into a named version made from
-  // it. Paths both directions left in conflict refuse the other direction, so
+  // it. Paths the opposite direction left in conflict refuse until decided, so
   // one decision is never asked twice from two sides.
   function mergeVersionPair(
     versionId: string,
@@ -5036,7 +5064,7 @@ export function createWorkspaceEngineCapture(
       // Capture the latest disk edits so the merge sees them (whichever
       // side is active).
       await engine.flushCapture?.();
-      const versions = await engine.listVersions({ workspaceId });
+      const versions = await engine.listVersions({ workspaceId, includeArchived: true });
       const named = versions.find((version) => version.id === versionId);
       if (!named || named.kind !== "named") {
         throw new Error(
@@ -5060,11 +5088,6 @@ export function createWorkspaceEngineCapture(
           : `Updated version "${named.name}" from Main`,
         correlationId,
       };
-      // Paths identical on both sides need no merge; everything else goes
-      // through the engine's three-way per-file merge (which preserves
-      // base/current/incoming when it conflicts). The differing paths come
-      // from the engine's metadata listing, one page at a time — the walk
-      // needs paths, never text bodies.
       const deletedPaths: string[] = [];
       const changedPaths: string[] = [];
       {
@@ -5074,6 +5097,7 @@ export function createWorkspaceEngineCapture(
             workspaceId,
             sourceVersionId,
             targetVersionId,
+            includeBaseDrift: true,
             ...(afterPath !== undefined ? { afterPath } : {}),
           });
           for (const entry of page.entries) {
@@ -5099,47 +5123,32 @@ export function createWorkspaceEngineCapture(
         mergeSteps.map((path) => ({ path, delete: deleted.has(path) })),
       );
       const mergeOrder = [...respelled, ...ordered];
-      // Re-running the merge resumes: a path that already has an open
-      // conflict for this version pair re-surfaces that conflict instead of
-      // recording a duplicate. Any other unresolved conflict involving either
-      // participant blocks until decided so open conflicts on Main or the
-      // version never leak into another merge's resolution list.
-      const openConflictPaths = new Set<string>();
+      // Scope the conflict check to this version pair: opposite-direction
+      // conflicts block until decided, while same-direction paths always re-run
+      // through the engine so fresh conflicts dedupe and stale ones re-merge.
+      const openSameDirectionPaths = new Set<string>();
       let openOtherWay = false;
-      let openBlockingConflict = false;
       {
         let afterConflictId: string | undefined;
         do {
           const page = await engine.listTextConflicts({
             workspaceId,
             status: "open",
-            // Paths only, like the compare walk above. Hydrating here would
-            // fetch every withheld body of every open conflict and keep none.
             bodies: "withheld",
             ...(afterConflictId !== undefined ? { afterConflictId } : {}),
           });
           for (const conflict of page.conflicts) {
+            if (conflict.metadata.origin === "sync") continue;
             if (
               conflict.sourceVersionId === sourceVersionId &&
               conflict.targetVersionId === targetVersionId
             ) {
-              openConflictPaths.add(conflict.path);
-              continue;
-            }
-            if (
+              openSameDirectionPaths.add(conflict.path);
+            } else if (
               conflict.sourceVersionId === targetVersionId &&
               conflict.targetVersionId === sourceVersionId
             ) {
               openOtherWay = true;
-              continue;
-            }
-            if (
-              conflict.sourceVersionId === sourceVersionId ||
-              conflict.targetVersionId === sourceVersionId ||
-              conflict.sourceVersionId === targetVersionId ||
-              conflict.targetVersionId === targetVersionId
-            ) {
-              openBlockingConflict = true;
             }
           }
           afterConflictId = page.nextAfterConflictId ?? undefined;
@@ -5152,21 +5161,14 @@ export function createWorkspaceEngineCapture(
             : `Decide the conflicts from merging "${named.name}" into Main before updating it.`,
         );
       }
-      if (openBlockingConflict) {
-        throw new Error(
-          intoMain
-            ? `Decide the open conflicts before merging "${named.name}" into Main.`
-            : `Decide the open conflicts before updating "${named.name}" from Main.`,
-        );
+      const inOrder = new Set(mergeOrder);
+      for (const path of [...openSameDirectionPaths].sort(compareEnginePaths)) {
+        if (!inOrder.has(path)) mergeOrder.push(path);
       }
       const materializations: MaterializeOperation[] = [];
       let conflictCount = 0;
       let unchangedFileCount = 0;
       for (const path of mergeOrder) {
-        if (openConflictPaths.has(path)) {
-          conflictCount += 1;
-          continue;
-        }
         const result = await engine.mergeTextFileFromVersion({
           workspaceId,
           targetVersionId,
@@ -5193,13 +5195,21 @@ export function createWorkspaceEngineCapture(
       const secrets = secretStoreFor();
       const replacedProtectedPaths: string[] = [];
       const skippedProtectedPaths: string[] = [];
-      const [sourceSecrets, targetSecrets] = await Promise.all([
-        secrets.listSecretFiles({ workspaceId, versionId: sourceVersionId }),
-        secrets.listSecretFiles({ workspaceId, versionId: targetVersionId }),
-      ]);
-      const secretPaths = [
-        ...new Set([...sourceSecrets.map((s) => s.path), ...targetSecrets.map((s) => s.path)]),
-      ].sort(compareEnginePaths);
+      const secretPaths: string[] = [];
+      {
+        let secretAfterPath: string | undefined;
+        do {
+          const page = await secrets.compareSecretFileVersions({
+            workspaceId,
+            targetVersionId,
+            sourceVersionId,
+            includeBaseDrift: true,
+            ...(secretAfterPath !== undefined ? { afterPath: secretAfterPath } : {}),
+          });
+          for (const entry of page.entries) secretPaths.push(entry.path);
+          secretAfterPath = page.nextAfterPath ?? undefined;
+        } while (secretAfterPath !== undefined);
+      }
       for (const path of secretPaths) {
         const applied = await secrets.applySecretFileFromVersion({
           workspaceId,
@@ -9259,9 +9269,9 @@ export function createWorkspaceEngineCapture(
       return resumeAdmission;
     },
 
-    async listVersions() {
+    async listVersions(listOptions) {
       const engine = await engineStore();
-      return versionsSnapshot(engine);
+      return versionsSnapshot(engine, listOptions?.includeArchived === true);
     },
 
     createVersion(name) {
@@ -9295,7 +9305,7 @@ export function createWorkspaceEngineCapture(
         // Create-and-switch: the fork is content-identical to the disk, so no
         // materialization is needed.
         await engine.setActiveVersion({ workspaceId, versionId: version.id });
-        return versionsSnapshot(engine);
+        return versionsSnapshot(engine, true);
       });
     },
 
@@ -9308,7 +9318,7 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await listTextFileMetadata(engine, versionId);
-        const target = (await engine.listVersions({ workspaceId })).find(
+        const target = (await engine.listVersions({ workspaceId, includeArchived: true })).find(
           (version) => version.id === versionId,
         );
         if (target?.archivedAtMs !== undefined) {
@@ -9346,7 +9356,11 @@ export function createWorkspaceEngineCapture(
         for (const path of changedPaths) {
           if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
         }
-        await engine.setActiveVersion({ workspaceId, versionId });
+        try {
+          await engine.setActiveVersion({ workspaceId, versionId });
+        } catch (error) {
+          throw versionRefusalError(error, target?.name) ?? error;
+        }
         return { activeVersionId: versionId, changedFileCount };
       });
     },
@@ -9445,21 +9459,41 @@ export function createWorkspaceEngineCapture(
     setVersionArchived(versionId, archived) {
       return enqueueResult(archived ? "archive version" : "restore version", async () => {
         const engine = await engineStore();
-        if (versionId === ENGINE_MAIN_VERSION_ID) throw new Error("Main can't be archived.");
-        if (archived && versionId === (await activeVersionIdOf(engine))) {
-          throw new Error("Switch to another version before archiving this one.");
+        try {
+          await engine.setVersionArchived({ workspaceId, versionId, archived });
+        } catch (error) {
+          throw versionRefusalError(error) ?? error;
         }
-        await engine.setVersionArchived({ workspaceId, versionId, archived });
       });
     },
 
-    async listOpenConflictsPage(afterConflictId) {
+    async listOpenConflictsPage(afterConflictId, pair) {
       const engine = await engineStore();
-      return engine.listTextConflicts({
-        workspaceId,
-        status: "open",
-        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
-      });
+      if (!pair) {
+        return engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+        });
+      }
+      let cursor = afterConflictId;
+      for (;;) {
+        const page = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          ...(cursor !== undefined ? { afterConflictId: cursor } : {}),
+        });
+        const conflicts = page.conflicts.filter(
+          (conflict) =>
+            conflict.metadata.origin !== "sync" &&
+            conflict.sourceVersionId === pair.sourceVersionId &&
+            conflict.targetVersionId === pair.targetVersionId,
+        );
+        if (conflicts.length > 0 || page.nextAfterConflictId === null) {
+          return { conflicts, nextAfterConflictId: page.nextAfterConflictId };
+        }
+        cursor = page.nextAfterConflictId;
+      }
     },
 
     async countOpenConflicts() {

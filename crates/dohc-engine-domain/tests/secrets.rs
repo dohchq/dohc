@@ -1486,3 +1486,71 @@ fn secret_apply_refuses_archived_versions_in_both_directions() {
         ));
     }
 }
+
+#[test]
+fn agreed_secret_deletion_advances_merge_base_when_base_drift_is_included() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    forked_secret(&mut store, &key, "A=1\n");
+    for (version, moment_id) in [("main", "sm-del-main"), ("feat", "sm-del-feat")] {
+        SecretFileStore::new(&mut store, &key)
+            .delete_secret_file(
+                &SecretDelete {
+                    workspace_id: WS.to_owned(),
+                    version_id: version.to_owned(),
+                    path: ".env".to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 20,
+                },
+                &|_, _, _, _| Ok(Preimage::Absent),
+                &NO_FAULTS,
+            )
+            .unwrap();
+    }
+    let plain = dohc_engine_domain::secrets::compare_secret_files_page_with_drift(
+        &store,
+        Some(&key),
+        WS,
+        "feat",
+        "main",
+        None,
+        50,
+        false,
+    )
+    .unwrap();
+    assert!(plain.entries.is_empty());
+    let drifted = dohc_engine_domain::secrets::compare_secret_files_page_with_drift(
+        &store,
+        Some(&key),
+        WS,
+        "feat",
+        "main",
+        None,
+        50,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        drifted
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".env"]
+    );
+    let synced = apply_between(&mut store, &key, "feat", "main", "sm-sync-del");
+    assert!(!synced.changed && !synced.diverged);
+    write_version(&mut store, &key, "main", ".env", "A=2\n", "sm-recreate", 30);
+    let updated = apply_between(&mut store, &key, "main", "feat", "sm-update-recreate");
+    assert!(updated.changed && !updated.diverged);
+    assert_eq!(
+        secret_text(&mut store, &key, "feat").as_deref(),
+        Some("A=2\n")
+    );
+}

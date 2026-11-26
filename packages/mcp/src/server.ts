@@ -423,10 +423,10 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_versions",
     {
       description:
-        "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
-      inputSchema: {},
+        "List the workspace's versions and which one is active. Archived versions are hidden unless includeArchived is true. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
+      inputSchema: { includeArchived: z.boolean().optional() },
     },
-    async () => text(await listVersions(ctx)),
+    async (args) => text(await listVersions(ctx, args)),
   );
   register(
     "dohc_compare_version",
@@ -489,7 +489,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_archive_version",
     {
       description:
-        "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main and the active version can't be archived. Owner workspace only.",
+        "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main, the active version, and versions with open conflicts can't be archived. Owner workspace only.",
       inputSchema: { version: z.string().min(1).max(200), restore: z.boolean().optional() },
     },
     async (args) => text(await archiveVersion(ctx, args)),

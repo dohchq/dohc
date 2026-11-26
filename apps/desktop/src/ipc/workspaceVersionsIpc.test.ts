@@ -472,7 +472,10 @@ describe("registered workspace version handlers", () => {
       ],
     });
     expect(h.operations.mergeVersionIntoMain).toHaveBeenCalledExactlyOnceWith(versionId);
-    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith();
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith(undefined, {
+      sourceVersionId: versionId,
+      targetVersionId: "main",
+    });
     expect(h.steps).toEqual(["capture", "merge", "notify", "conflicts"]);
   });
 

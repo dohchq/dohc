@@ -115,8 +115,18 @@ export function isVersionMergeIdentity(identity: string | undefined): boolean {
 type MergeAnswer =
   // A null count: the merge left files to decide, and they were all decided
   // before the answer came.
-  | { kind: "merged"; mergedFileCount: number | null; replacedProtectedPaths: string[] }
-  | { kind: "decide"; conflictCount: number; replacedProtectedPaths: string[] }
+  | {
+      kind: "merged";
+      mergedFileCount: number | null;
+      replacedProtectedPaths: string[];
+      skippedProtectedPaths: string[];
+    }
+  | {
+      kind: "decide";
+      conflictCount: number;
+      replacedProtectedPaths: string[];
+      skippedProtectedPaths: string[];
+    }
   | { kind: "failed"; error: unknown };
 
 // A merge that answered after its dialog closed, as a toast and a Notices
@@ -210,7 +220,14 @@ function mergeNotice(
     };
   }
   const protectedPaths = answer.replacedProtectedPaths;
-  const protectedLine = protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, from) : null;
+  const skippedPaths = answer.skippedProtectedPaths;
+  const protectedParts = [
+    protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, from) : null,
+    skippedPaths.length > 0
+      ? `${protectedCount(skippedPaths.length)} changed in both kept ${into}'s copy.`
+      : null,
+  ].filter(Boolean);
+  const protectedLine = protectedParts.length > 0 ? protectedParts.join(" ") : null;
   const paths = protectedPaths.length > 0 ? { paths: protectedPaths } : {};
   if (answer.kind === "decide") {
     return {
@@ -986,14 +1003,20 @@ export function VersionMergeDialog(props: {
         result.conflictCount > 0 &&
         (result.conflicts.length > 0 || result.nextAfterConflictId !== null);
       if (!mounted.current) {
-        const { replacedProtectedPaths } = result;
+        const { replacedProtectedPaths, skippedProtectedPaths } = result;
         props.onAnsweredAway(
           decide
-            ? { kind: "decide", conflictCount: result.conflictCount, replacedProtectedPaths }
+            ? {
+                kind: "decide",
+                conflictCount: result.conflictCount,
+                replacedProtectedPaths,
+                skippedProtectedPaths,
+              }
             : {
                 kind: "merged",
                 mergedFileCount: result.conflictCount > 0 ? null : result.mergedFileCount,
                 replacedProtectedPaths,
+                skippedProtectedPaths,
               },
         );
         return;
@@ -1048,18 +1071,35 @@ export function VersionMergeDialog(props: {
     if (failure !== undefined) confirmButton.current?.focus();
   }, [failure]);
 
-  const onResolved = useCallback((remaining: ResolveWorkspaceVersionConflictResult) => {
-    windowGeneration.current += 1;
-    setStage(
-      remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
-        ? {
-            stage: "conflicts",
-            conflicts: remaining.conflicts,
-            nextAfterConflictId: remaining.nextAfterConflictId,
-          }
-        : { stage: "resolved-all" },
-    );
-  }, []);
+  const fromId = props.update ? "main" : source.id;
+  const intoId = props.update ? source.id : "main";
+  const forPair = useCallback(
+    (conflicts: readonly WorkspaceVersionConflict[]) =>
+      conflicts.filter(
+        (conflict) =>
+          conflict.origin === "merge" &&
+          conflict.sourceVersionId === fromId &&
+          conflict.targetVersionId === intoId,
+      ),
+    [fromId, intoId],
+  );
+
+  const onResolved = useCallback(
+    (remaining: ResolveWorkspaceVersionConflictResult) => {
+      windowGeneration.current += 1;
+      const scoped = forPair(remaining.conflicts);
+      setStage(
+        scoped.length > 0 || remaining.nextAfterConflictId !== null
+          ? {
+              stage: "conflicts",
+              conflicts: scoped,
+              nextAfterConflictId: remaining.nextAfterConflictId,
+            }
+          : { stage: "resolved-all" },
+      );
+    },
+    [forPair],
+  );
 
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
@@ -1073,16 +1113,17 @@ export function VersionMergeDialog(props: {
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
+    const scoped = forPair(page.conflicts);
     setStage((current) =>
       current.stage === "conflicts"
         ? {
             stage: "conflicts",
-            conflicts: [...current.conflicts, ...page.conflicts],
+            conflicts: [...current.conflicts, ...scoped],
             nextAfterConflictId: page.nextAfterConflictId,
           }
         : current,
     );
-  }, [stage, workspaceId]);
+  }, [forPair, stage, workspaceId]);
 
   // Closing while merging leaves the merge running, and its answer comes as a
   // notice. While conflicts are open, closing is explicit only ("Finish
@@ -1132,6 +1173,15 @@ export function VersionMergeDialog(props: {
                 sourceName={from}
                 collapsible
               />
+            ) : null}
+            {skippedProtectedPaths.length > 0 ? (
+              <p
+                data-testid="version-merge-skipped"
+                className="m-0 text-[13px] leading-5 text-muted"
+              >
+                {protectedCount(skippedProtectedPaths.length)} changed in both kept{" "}
+                <span className="font-medium text-ink">{into}</span>'s copy.
+              </p>
             ) : null}
             <ConflictList
               workspaceId={workspaceId}

@@ -185,7 +185,7 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
-  | { verb: "versionList" }
+  | { verb: "versionList"; includeArchived?: boolean }
   | { verb: "versionCompare"; version: string; afterPath?: string }
   | { verb: "versionConflicts"; afterConflictId?: string }
   | { verb: "versionCreate"; name: string }
@@ -2747,10 +2747,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         capabilityId: "version.list",
         summary: "List the versions and which one is active.",
         operands: "",
-        notes: ["A version's madeFromVersionId is the id of the version it was made from."],
+        flags: [{ name: "--archived", text: "Include archived versions." }],
+        notes: [
+          "A version's madeFromVersionId is the id of the version it was made from. Archived versions are hidden unless --archived is set.",
+        ],
         parse: (input) => {
           noExtraArgs(input.operands, "version list");
-          return { verb: "versionList" };
+          const includeArchived = input.flags.has("--archived");
+          return { verb: "versionList", ...(includeArchived ? { includeArchived: true } : {}) };
         },
       },
       compare: {
@@ -2840,16 +2844,26 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
       },
       archive: {
         capabilityId: "version.archive",
-        summary: "Archive a version, or restore an archived one.",
+        summary: "Archive a version.",
         operands: "<version>",
-        flags: [{ name: "--restore", text: "Restore an archived version." }],
         notes: [
-          "An archived version keeps its files and leaves the version menu. Main and the active version can't be archived.",
+          "An archived version keeps its files and leaves the version menu. Main, the active version, and versions with open conflicts can't be archived.",
         ],
         parse: (input) => ({
           verb: "versionArchive",
           version: versionOperand(input, "version archive"),
-          restore: input.flags.has("--restore"),
+          restore: false,
+        }),
+      },
+      restore: {
+        capabilityId: "version.archive",
+        summary: "Restore an archived version.",
+        operands: "<version>",
+        notes: ["Returns an archived version to the version menu."],
+        parse: (input) => ({
+          verb: "versionArchive",
+          version: versionOperand(input, "version restore"),
+          restore: true,
         }),
       },
       resolve: {

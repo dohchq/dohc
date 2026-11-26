@@ -199,6 +199,7 @@ type VersionsCreateNamedParams = JsonObject & {
 
 type VersionsListParams = JsonObject & {
   afterVersionId?: string;
+  includeArchived?: boolean;
 };
 
 type VersionsSetActiveParams = JsonObject & {
@@ -233,6 +234,7 @@ type VersionsCompareFilesParams = JsonObject & {
   targetVersionId: string;
   afterPath?: string;
   byteBudget?: number;
+  includeBaseDrift?: boolean;
 };
 
 type SecretsWriteParams = JsonObject & {
@@ -285,6 +287,7 @@ type SecretsCompareParams = JsonObject & {
   targetVersionId: string;
   afterPath?: string;
   limit?: number;
+  includeBaseDrift?: boolean;
 };
 
 type SecretsApplyParams = JsonObject & {

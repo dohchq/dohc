@@ -144,6 +144,7 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
   merge: "versionMerge",
   update: "versionUpdate",
   archive: "versionArchive",
+  restore: "versionArchive",
   resolve: "versionResolve",
 };
 

@@ -730,7 +730,8 @@ fn map_domain(error: &DomainError) -> WireError {
                 | "restore-head-changed"
                 | "version-archived"
                 | "version-is-main"
-                | "version-is-active"),
+                | "version-is-active"
+                | "version-has-open-conflicts"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),

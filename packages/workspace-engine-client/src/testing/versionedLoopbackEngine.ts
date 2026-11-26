@@ -236,7 +236,10 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.versionsCreateNamed]: {
     requiredStrings: ["workspaceId", "name", "fromVersionId"],
   },
-  [VERSIONED_METHOD.versionsList]: { optionalStrings: ["afterVersionId"] },
+  [VERSIONED_METHOD.versionsList]: {
+    optionalStrings: ["afterVersionId"],
+    optionalBools: ["includeArchived"],
+  },
   [VERSIONED_METHOD.versionsSetActive]: {
     requiredStrings: ["versionId"],
     optionalStrings: ["workspaceId"],
@@ -263,6 +266,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId", "afterPath"],
     optionalUsize: ["byteBudget"],
+    optionalBools: ["includeBaseDrift"],
   },
   [VERSIONED_METHOD.secretsWrite]: {
     requiredStrings: [...REQUIRED_SECRET_METADATA, "versionId", "path", "text", "momentId"],
@@ -291,6 +295,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["workspaceId", "sourceVersionId", "targetVersionId"],
     optionalStrings: ["afterPath"],
     optionalUsize: ["limit"],
+    optionalBools: ["includeBaseDrift"],
   },
   [VERSIONED_METHOD.secretsApply]: {
     requiredStrings: [
@@ -2254,12 +2259,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private versionsList(state: WorkspaceState, params: JsonObject): JsonValue {
     const afterVersionId = optionalString(params, "afterVersionId");
-    const versions = [...state.versions.values()].sort(
-      (left, right) =>
-        left.createdAtMs - right.createdAtMs ||
-        left.name.localeCompare(right.name) ||
-        left.id.localeCompare(right.id),
-    );
+    const includeArchived = params.includeArchived === true;
+    const versions = [...state.versions.values()]
+      .filter((version) => includeArchived || version.archivedAtMs === undefined)
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs ||
+          left.name.localeCompare(right.name) ||
+          left.id.localeCompare(right.id),
+      );
     const afterIndex =
       afterVersionId === undefined
         ? -1
@@ -2391,6 +2399,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const source = this.version(state, sourceVersionId);
     const target = this.version(state, targetVersionId);
+    if (source.archivedAtMs !== undefined || target.archivedAtMs !== undefined) {
+      throw new Error("version-archived");
+    }
     const named = this.mergeNamed(source, target);
     if (!named) throw new Error("fork-base-not-found");
     const incoming = source.files.get(path);
@@ -2403,6 +2414,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // its own kind check keeps a binary ancestor out.
     const liveSidesBinary = incoming?.contentKind === "binary" || current?.contentKind === "binary";
     if (this.filesEqual(incoming, current)) {
+      if (!this.filesEqual(incoming, base)) {
+        (named.mergeBase ??= new Map()).set(path, incoming && copyFile(incoming));
+      }
       const result: JsonObject = {
         status: "unchanged",
         reason: "already-same",
@@ -2442,6 +2456,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
           ? mergeMarkdown(base.text ?? "", current.text ?? "", incoming.text ?? "")
           : { status: "conflict" as const };
       if (cleanMerge.status === "merged") {
+        if (cleanMerge.text === current?.text) {
+          const result: JsonObject = {
+            status: "unchanged",
+            reason: "already-same",
+            comparison,
+            deduped: false,
+            materializeEnqueued: false,
+            materialized: false,
+            materializeOutcome: "skipped",
+          };
+          this.recordReplay(state, requestId, params, result, fingerprint);
+          return result;
+        }
         textToWrite = cleanMerge.text;
       } else {
         const result: JsonObject = {
@@ -2539,14 +2566,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const source = this.version(state, requiredString(params, "sourceVersionId", "compareFiles"));
     const target = this.version(state, requiredString(params, "targetVersionId", "compareFiles"));
     const afterPath = optionalString(params, "afterPath");
-    const paths = [...new Set([...source.files.keys(), ...target.files.keys()])]
+    const driftNamed =
+      params.includeBaseDrift === true ? this.mergeNamed(source, target) : undefined;
+    const paths = [
+      ...new Set([
+        ...source.files.keys(),
+        ...target.files.keys(),
+        ...(driftNamed ? driftNamed.textForkBase.keys() : []),
+        ...(driftNamed?.mergeBase ? driftNamed.mergeBase.keys() : []),
+      ]),
+    ]
       .filter((path) => afterPath === undefined || path > afterPath)
       .sort(comparePaths);
     const scannedPaths = paths.slice(0, COMPARE_PAGE_SIZE);
     const changes = scannedPaths.flatMap((path) => {
       const sourceFile = source.files.get(path);
       const targetFile = target.files.get(path);
-      if (this.filesEqual(sourceFile, targetFile)) return [];
+      if (this.filesEqual(sourceFile, targetFile)) {
+        if (!driftNamed || this.filesEqual(sourceFile, this.mergeBaseOf(driftNamed, path))) {
+          return [];
+        }
+        const entry: JsonObject = { path, status: "modified" };
+        if (sourceFile?.contentKind === "binary") entry.binary = true;
+        return [entry];
+      }
       const status: VersionChangeStatus = !targetFile
         ? "added"
         : !sourceFile
@@ -2704,19 +2747,37 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const target = this.version(state, requiredString(params, "targetVersionId", "secret compare"));
     const after = optionalString(params, "afterPath");
     const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
-    const paths = [...new Set([...source.secrets.keys(), ...target.secrets.keys()])]
+    const driftNamed =
+      params.includeBaseDrift === true ? this.mergeNamed(source, target) : undefined;
+    const baseOf = (path: string) =>
+      driftNamed?.secretMergeBase?.has(path)
+        ? driftNamed.secretMergeBase.get(path)
+        : driftNamed?.secretForkBase.get(path);
+    const paths = [
+      ...new Set([
+        ...source.secrets.keys(),
+        ...target.secrets.keys(),
+        ...(driftNamed ? driftNamed.secretForkBase.keys() : []),
+        ...(driftNamed?.secretMergeBase ? driftNamed.secretMergeBase.keys() : []),
+      ]),
+    ]
       .filter((path) => after === undefined || path > after)
-      .filter((path) => source.secrets.get(path) !== target.secrets.get(path))
+      .filter((path) => {
+        const s = source.secrets.get(path);
+        const t = target.secrets.get(path);
+        return s !== t || (driftNamed !== undefined && s !== baseOf(path));
+      })
       .sort();
     const page = paths.slice(0, limit);
     return {
       entries: page.map((path) => ({
         path,
-        status: !target.secrets.has(path)
-          ? "added"
-          : !source.secrets.has(path)
-            ? "deleted"
-            : "modified",
+        status:
+          !target.secrets.has(path) && source.secrets.has(path)
+            ? "added"
+            : target.secrets.has(path) && !source.secrets.has(path)
+              ? "deleted"
+              : "modified",
       })),
       nextAfterPath: paths.length > page.length ? (page.at(-1) ?? null) : null,
     };
@@ -2732,6 +2793,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
     if (!source || !target) throw new Error("invalid-version");
+    if (source.archivedAtMs !== undefined || target.archivedAtMs !== undefined) {
+      throw new Error("version-archived");
+    }
     validateSecretMomentId(momentId);
     const path = normalizedSecretPath(rawPath);
     const named = this.mergeNamed(source, target);

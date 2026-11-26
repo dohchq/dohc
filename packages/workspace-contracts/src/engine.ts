@@ -616,7 +616,10 @@ export interface VersionedTextStore {
     name: string;
     fromVersionId: VersionId;
   }): Promise<VersionRecord>;
-  listVersions(input: { workspaceId: WorkspaceId }): Promise<VersionRecord[]>;
+  listVersions(input: {
+    workspaceId: WorkspaceId;
+    includeArchived?: boolean;
+  }): Promise<VersionRecord[]>;
   writeTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -684,6 +687,7 @@ export interface VersionedTextStore {
     sourceVersionId: VersionId;
     targetVersionId: VersionId;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<VersionFileChangeEntryPage>;
   // Page-shaped on purpose: the engine pages `conflicts.list` under a
   // byte budget, and a drain here is what let one caller undo that. A caller
@@ -1899,6 +1903,7 @@ export interface SecretFileStore {
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
     afterPath?: string;
+    includeBaseDrift?: boolean;
   }): Promise<SecretFileComparePage>;
   // Whole-file merge of one secret path between a named version and its fork
   // parent. Secrets never produce conflict records (conflict records carry

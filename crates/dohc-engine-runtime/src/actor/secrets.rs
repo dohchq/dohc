@@ -10,10 +10,10 @@ use dohc_engine_domain::{
     DomainError, InbandSecret, SecretComparePage, SecretDelete, SecretDiskIntent, SecretFileStat,
     SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult, SecretWrite,
     SecretWriteResult, VersionedTextStore, apply_secret_file_from_version_with,
-    compare_secret_files_page_keyless, delete_secret_file_keyless_with, fork_version_keyless_with,
-    get_secret_moment_keyless, has_secret_state, list_secret_files_keyless_page,
-    list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
-    secret_file_len_keyless, validate_secret_path,
+    delete_secret_file_keyless_with, fork_version_keyless_with, get_secret_moment_keyless,
+    has_secret_state, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
+    validate_secret_path,
 };
 use dohc_engine_files::{
     ProjectionTargetKind, floor::path_collision_key, may_share_entry, probe_projection_target,
@@ -323,6 +323,7 @@ impl ActorHandle {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn compare_secret_files(
         &self,
         workspace_id: String,
@@ -331,9 +332,10 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
         key: Option<SecretDataKey>,
+        include_base_drift: bool,
     ) -> Result<SecretComparePage, RuntimeError> {
         self.run(move |store, _| {
-            compare_secret_files_page_keyless(
+            dohc_engine_domain::secrets::compare_secret_files_page_with_drift(
                 store,
                 key.as_ref(),
                 &workspace_id,
@@ -341,6 +343,7 @@ impl ActorHandle {
                 &target_version_id,
                 after_path.as_deref(),
                 limit,
+                include_base_drift,
             )
             .map_err(RuntimeError::from)
         })

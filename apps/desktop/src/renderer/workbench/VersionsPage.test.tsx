@@ -31,6 +31,7 @@ const bridgeMock = {
   createWorkspaceVersion: vi.fn(),
   archiveWorkspaceVersion: vi.fn(),
   updateWorkspaceVersion: vi.fn(),
+  resolveWorkspaceVersionConflict: vi.fn(),
 };
 
 const NOW = Date.UTC(2026, 10, 4, 12);
@@ -340,6 +341,53 @@ describe("VersionsPage", () => {
       expect(screen.getByTestId("version-merge-status").textContent).toBe(
         "Merged 2 files into Fresh",
       ),
+    );
+    expect(screen.getByTestId("version-merge-skipped").textContent).toBe(
+      "One protected file changed in both kept Fresh's copy.",
+    );
+  });
+
+  it("keeps the skipped protected files notice after resolving update conflicts", async () => {
+    const user = userEvent.setup();
+    bridgeMock.updateWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 0,
+      unchangedFileCount: 0,
+      conflictCount: 1,
+      replacedProtectedPaths: [],
+      skippedProtectedPaths: [".env"],
+      conflicts: [
+        {
+          conflictId: "c1",
+          path: "notes.md",
+          sourceVersionId: "main",
+          targetVersionId: "fresh",
+          origin: "merge",
+          contentKind: "text",
+          currentText: "fresh",
+          incomingText: "main",
+          baseText: "base",
+          waitingVersion: null,
+        },
+      ],
+      nextAfterConflictId: null,
+    });
+    bridgeMock.resolveWorkspaceVersionConflict.mockResolvedValue({
+      conflicts: [],
+      nextAfterConflictId: null,
+    });
+    render(<Page />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    await user.click(within(row("fresh")).getByTestId("versions-page-update"));
+    await user.click(
+      within(screen.getByTestId("version-merge-dialog")).getByTestId("version-merge-confirm"),
+    );
+    await waitFor(() => expect(screen.getByTestId("version-conflict-keep-current")).toBeTruthy());
+    expect(screen.getByTestId("version-merge-skipped").textContent).toBe(
+      "One protected file changed in both kept Fresh's copy.",
+    );
+    await user.click(screen.getByTestId("version-conflict-keep-current"));
+    await waitFor(() =>
+      expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged Main into Fresh"),
     );
     expect(screen.getByTestId("version-merge-skipped").textContent).toBe(
       "One protected file changed in both kept Fresh's copy.",

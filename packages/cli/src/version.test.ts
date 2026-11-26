@@ -4,6 +4,10 @@ import { parseCliArguments } from "./args";
 
 it("parses each version verb and refuses a missing or extra operand before transport", async () => {
   expect(parseCliArguments(["version", "list"], {})).toMatchObject({ verb: "versionList" });
+  expect(parseCliArguments(["version", "list", "--archived"], {})).toMatchObject({
+    verb: "versionList",
+    includeArchived: true,
+  });
   expect(parseCliArguments(["version", "compare", "Draft", "--after", "a.md"], {})).toMatchObject({
     verb: "versionCompare",
     version: "Draft",
@@ -202,8 +206,9 @@ it("updates a version from Main, and archives or restores one", async () => {
     version: "Draft",
     restore: false,
   });
-  expect(parseCliArguments(["version", "archive", "Draft", "--restore"], {})).toMatchObject({
+  expect(parseCliArguments(["version", "restore", "Draft"], {})).toMatchObject({
     verb: "versionArchive",
+    version: "Draft",
     restore: true,
   });
   const request = vi.fn(async (_sent: unknown) => ({
@@ -224,9 +229,9 @@ it("updates a version from Main, and archives or restores one", async () => {
     version: { id: "draft", name: "Draft" },
     archived: false,
   } as never);
-  expect(
-    (await executeCli({ argv: ["version", "archive", "Draft", "--restore"], request })).stdout,
-  ).toBe("Restored Draft · draft\n");
+  expect((await executeCli({ argv: ["version", "restore", "Draft"], request })).stdout).toBe(
+    "Restored Draft · draft\n",
+  );
   expect(
     request.mock.calls.map(([sent]) => (sent as { verb: string; args: unknown }).verb),
   ).toEqual(["versionUpdate", "versionArchive"]);
@@ -235,7 +240,9 @@ it("updates a version from Main, and archives or restores one", async () => {
   for (const argv of [
     ["version", "update"],
     ["version", "archive"],
+    ["version", "restore"],
     ["version", "archive", "Draft", "Later"],
+    ["version", "restore", "Draft", "Later"],
   ]) {
     expect((await executeCli({ argv, request })).exitCode, argv.join(" ")).toBe(1);
   }

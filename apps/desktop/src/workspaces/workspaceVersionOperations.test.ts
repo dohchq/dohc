@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  DaemonRefusalError,
   VERSIONED_METHOD,
   type ConflictRecord,
   type JsonObject,
@@ -459,6 +460,101 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       };
     }
 
+    if (request.method === VERSIONED_METHOD.versionsSetArchived) {
+      const workspace = this.requiredWorkspace(request);
+      const params = request.params as JsonObject;
+      if (params.archived === true) {
+        const versionId = String(params.versionId);
+        const hasOpen = [...this.conflicts.values()].some(
+          (conflict) =>
+            conflict.workspaceId === workspace &&
+            conflict.status === "open" &&
+            conflict.metadata.origin !== "sync" &&
+            (conflict.sourceVersionId === versionId || conflict.targetVersionId === versionId),
+        );
+        if (hasOpen) {
+          throw new DaemonRefusalError(
+            {
+              code: "INVALID_PARAMS",
+              message: "version-has-open-conflicts",
+              retry: "no",
+            },
+            null,
+          );
+        }
+      }
+      return super.sendRequest(request);
+    }
+
+    if (request.method === VERSIONED_METHOD.versionsMerge) {
+      const workspace = this.requiredWorkspace(request);
+      const params = request.params as JsonObject;
+      const targetVersionId = String(params.targetVersionId);
+      const sourceVersionId = String(params.sourceVersionId);
+      const path = String(params.path);
+      const liveTarget = (
+        await super.sendRequest({
+          id: this.internalRequestId--,
+          method: VERSIONED_METHOD.textRead,
+          workspace,
+          params: { versionId: targetVersionId, path },
+        })
+      ).result;
+      const liveSource = (
+        await super.sendRequest({
+          id: this.internalRequestId--,
+          method: VERSIONED_METHOD.textRead,
+          workspace,
+          params: { versionId: sourceVersionId, path },
+        })
+      ).result;
+      for (const [key, existing] of this.conflicts) {
+        if (
+          existing.workspaceId !== workspace ||
+          existing.status !== "open" ||
+          existing.metadata.origin === "sync" ||
+          existing.targetVersionId !== targetVersionId ||
+          existing.sourceVersionId !== sourceVersionId ||
+          existing.path !== path
+        ) {
+          continue;
+        }
+        if (
+          liveStateMatches(liveTarget, existing.current, path) &&
+          liveStateMatches(liveSource, existing.incoming, path)
+        ) {
+          this.requests.push(request);
+          const comparison = (
+            await super.sendRequest({
+              id: this.internalRequestId--,
+              method: VERSIONED_METHOD.versionsCompare,
+              workspace,
+              params: { targetVersionId, sourceVersionId, path },
+            })
+          ).result;
+          return {
+            id: request.id,
+            result: {
+              status: "conflict",
+              conflictId: existing.id,
+              comparison,
+              deduped: true,
+              materializeEnqueued: false,
+              materialized: false,
+              materializeOutcome: "skipped",
+            },
+          };
+        }
+        this.conflicts.set(key, {
+          ...existing,
+          status: "resolved",
+          chosenFrom: "current",
+          resolution: "kept-current",
+          updatedAtMs: this.conflictClock++,
+        });
+      }
+    }
+
     const response = await super.sendRequest(request);
     if (request.method !== VERSIONED_METHOD.versionsMerge) return response;
     const result = response.result as JsonObject;
@@ -910,9 +1006,11 @@ describe("updateVersionFromMain", () => {
     );
     await engine.switchVersion("main");
     await engine.setVersionArchived(draftId, true);
+    expect((await engine.listVersions()).versions.find((v) => v.id === draftId)).toBeUndefined();
     expect(
-      (await engine.listVersions()).versions.find((version) => version.id === draftId)
-        ?.archivedAtMs,
+      (await engine.listVersions({ includeArchived: true })).versions.find(
+        (version) => version.id === draftId,
+      )?.archivedAtMs,
     ).toEqual(expect.any(Number));
     await expect(engine.updateVersionFromMain(draftId)).rejects.toThrow(
       'Restore version "Draft" before updating it.',
@@ -925,22 +1023,51 @@ describe("updateVersionFromMain", () => {
     await engine.stop();
   });
 
-  it("blocks updating Draft B when Draft A left an open conflict on Main", async () => {
+  it("refuses archiving a version with open conflicts", async () => {
+    const { engine, draftId } = await draftAndMainChanged("draft\n");
+    expect((await engine.updateVersionFromMain(draftId)).conflictCount).toBe(1);
+    await expect(engine.setVersionArchived(draftId, true)).rejects.toThrow(
+      "Decide this version's open conflicts before archiving it.",
+    );
+    await engine.stop();
+  });
+
+  it("lets Draft B merge and update while Draft A has an open conflict, and supersedes stale conflicts", async () => {
     const { root, engine, draftId: draftA } = await draftAndMainChanged("draft-a\n");
     await engine.createVersion("Draft B");
     const draftB = await versionIdByName(engine, "Draft B");
-    await write(root, "plan.md", "draft-b\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+    await write(root, "b-only.md", "from B\n");
+    engine.observeFileEvents([{ path: "b-only.md", operation: "update" }]);
     await engine.flush();
     await engine.switchVersion("main");
 
     expect((await engine.mergeVersionIntoMain(draftA)).conflictCount).toBe(1);
-    await expect(engine.updateVersionFromMain(draftB)).rejects.toThrow(
-      'Decide the open conflicts before updating "Draft B" from Main.',
-    );
-    await expect(engine.mergeVersionIntoMain(draftB)).rejects.toThrow(
-      'Decide the open conflicts before merging "Draft B" into Main.',
-    );
+    expect((await engine.mergeVersionIntoMain(draftB)).mergedFileCount).toBe(1);
+    expect(await readText(root, "b-only.md")).toBe("from B\n");
+    expect((await engine.updateVersionFromMain(draftB)).conflictCount).toBe(0);
+    expect(
+      (
+        await engine.listOpenConflictsPage(undefined, {
+          sourceVersionId: draftB,
+          targetVersionId: "main",
+        })
+      ).conflicts,
+    ).toHaveLength(0);
+    expect(
+      (
+        await engine.listOpenConflictsPage(undefined, {
+          sourceVersionId: draftA,
+          targetVersionId: "main",
+        })
+      ).conflicts,
+    ).toHaveLength(1);
+
+    // Edit Main to match Draft A, making Draft A's open conflict stale; rerunning supersedes it.
+    await write(root, "plan.md", "draft-a\n");
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    expect((await engine.mergeVersionIntoMain(draftA)).conflictCount).toBe(0);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
     await engine.stop();
   });
 });

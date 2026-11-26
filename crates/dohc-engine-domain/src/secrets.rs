@@ -38,7 +38,9 @@
 use crate::error::DomainError;
 use crate::merge::{MERGED_INTO_NAMED, MERGED_INTO_PARENT, VersionFileChangeStatus, merge_pair};
 use crate::records::{ApplySecretFileFromVersion, InbandSecret};
-use crate::store::{validate_identifier, validate_path};
+use crate::store::{
+    require_unarchived_version, require_writable_version, validate_identifier, validate_path,
+};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
@@ -383,7 +385,7 @@ impl<'a> SecretFileStore<'a> {
         // reaches the duplicate-moment-id guard, so a committed retry is never
         // misreported as `DuplicateMomentId`.
         let no_op = self.store.read_with(|conn| {
-            require_version(conn, ws, &input.version_id)?;
+            require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
             if let Some(tip) = select_tip(conn, ws, &input.version_id, &path)? {
                 let current = aead::open(self.key, ws, &path, &tip)?;
                 if current.as_bytes() == input.text.as_bytes() {
@@ -1031,7 +1033,22 @@ const COMPARE_SECRET_FILES_PAGE_SQL: &str = "WITH page(path) AS ( \
         SELECT path FROM secret_files \
         WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4 \
         ORDER BY 1 LIMIT ?5) \
-     SELECT t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+     SELECT page.path, t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+            s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
+     FROM page \
+     LEFT JOIN secret_files AS t \
+       ON t.workspace_id = ?1 AND t.version_id = ?2 AND t.path = page.path \
+     LEFT JOIN secret_files AS s \
+       ON s.workspace_id = ?1 AND s.version_id = ?3 AND s.path = page.path \
+     ORDER BY page.path";
+
+const COMPARE_SECRET_FILES_WITH_DRIFT_SQL: &str = "WITH page(path) AS ( \
+        SELECT path FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?4 \
+        UNION SELECT path FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4 \
+        UNION SELECT path FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?6 AND path > ?4 \
+        UNION SELECT path FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?6 AND path > ?4 \
+        ORDER BY 1 LIMIT ?5) \
+     SELECT page.path, t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
             s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
      FROM page \
      LEFT JOIN secret_files AS t \
@@ -1051,6 +1068,29 @@ pub fn compare_secret_files_page_keyless(
     after_path: Option<&str>,
     limit: usize,
 ) -> Result<SecretComparePage, DomainError> {
+    compare_secret_files_page_with_drift(
+        store,
+        key,
+        workspace_id,
+        source_version_id,
+        target_version_id,
+        after_path,
+        limit,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compare_secret_files_page_with_drift(
+    store: &EngineStore,
+    key: Option<&SecretDataKey>,
+    workspace_id: &str,
+    source_version_id: &str,
+    target_version_id: &str,
+    after_path: Option<&str>,
+    limit: usize,
+    include_base_drift: bool,
+) -> Result<SecretComparePage, DomainError> {
     if limit == 0 {
         return Err(DomainError::InvalidInput {
             reason: "limit must be positive",
@@ -1059,108 +1099,150 @@ pub fn compare_secret_files_page_keyless(
     store.read_with(|conn| {
         require_version(conn, workspace_id, source_version_id)?;
         require_version(conn, workspace_id, target_version_id)?;
-        let mut stmt = conn
-            .prepare_cached(COMPARE_SECRET_FILES_PAGE_SQL)
-            .map_err(DomainError::sql_corrupt)?;
-        let rows = stmt
-            .query_map(
-                params![
-                    workspace_id,
-                    target_version_id,
-                    source_version_id,
-                    after_path.unwrap_or(""),
-                    limit as i64
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                    ))
-                },
-            )
-            .map_err(DomainError::sql_corrupt)?;
-        let mut entries = Vec::new();
-        let mut rows_fetched = 0usize;
-        let mut last_scanned_path = None;
-        for row in rows {
-            let (t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) =
-                row.map_err(DomainError::sql_corrupt)?;
-            let path = t_path
-                .as_ref()
-                .or(s_path.as_ref())
-                .ok_or(DomainError::StateCorrupt {
-                    reason: "secret comparison row has no path",
-                })?;
-            rows_fetched += 1;
-            last_scanned_path = Some(path.clone());
-            match (&t_path, &s_path) {
-                (None, Some(_)) => entries.push(SecretCompareEntry {
-                    path: path.clone(),
-                    status: VersionFileChangeStatus::Added,
-                }),
-                (Some(_), None) => entries.push(SecretCompareEntry {
-                    path: path.clone(),
-                    status: VersionFileChangeStatus::Deleted,
-                }),
-                (Some(_), Some(_)) => {
-                    if t_iv == s_iv && t_tag == s_tag && t_ct == s_ct {
-                        continue;
+        let pair = if include_base_drift {
+            merge_pair(conn, workspace_id, source_version_id, target_version_id)?
+        } else {
+            None
+        };
+        let after = after_path.unwrap_or("");
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+            ))
+        };
+        let mapped = if let Some((named, _)) = &pair {
+            let mut stmt = conn
+                .prepare_cached(COMPARE_SECRET_FILES_WITH_DRIFT_SQL)
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after,
+                        limit as i64,
+                        named
+                    ],
+                    map_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?
+        } else {
+            let mut stmt = conn
+                .prepare_cached(COMPARE_SECRET_FILES_PAGE_SQL)
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after,
+                        limit as i64
+                    ],
+                    map_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?
+        };
+        let sealed_from = |iv: &Option<String>,
+                           tag: &Option<String>,
+                           ct: &Option<String>,
+                           len: Option<i64>|
+         -> Result<SealedSecret, DomainError> {
+            let incomplete = || DomainError::StateCorrupt {
+                reason: "secret tip is incomplete",
+            };
+            SealedSecret::from_base64(
+                iv.as_deref().ok_or_else(incomplete)?,
+                tag.as_deref().ok_or_else(incomplete)?,
+                ct.as_deref().ok_or_else(incomplete)?,
+                usize::try_from(len.ok_or_else(incomplete)?).map_err(|_| {
+                    DomainError::StateCorrupt {
+                        reason: "secret tip has a negative byte length",
                     }
-                    let key = key.ok_or(DomainError::StateCorrupt {
-                        reason: "secret comparison needs a missing data key",
-                    })?;
-                    let target = SealedSecret::from_base64(
-                        t_iv.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        t_tag.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        t_ct.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        usize::try_from(t_len.ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?)
-                        .map_err(|_| DomainError::StateCorrupt {
-                            reason: "secret tip has a negative byte length",
-                        })?,
-                    )?;
-                    let source = SealedSecret::from_base64(
-                        s_iv.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        s_tag.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        s_ct.as_deref().ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?,
-                        usize::try_from(s_len.ok_or(DomainError::StateCorrupt {
-                            reason: "secret tip is incomplete",
-                        })?)
-                        .map_err(|_| DomainError::StateCorrupt {
-                            reason: "secret tip has a negative byte length",
-                        })?,
-                    )?;
-                    if aead::open(key, workspace_id, path, &target)?.as_bytes()
-                        != aead::open(key, workspace_id, path, &source)?.as_bytes()
-                    {
-                        entries.push(SecretCompareEntry {
-                            path: path.clone(),
-                            status: VersionFileChangeStatus::Modified,
-                        });
+                })?,
+            )
+            .map_err(DomainError::from)
+        };
+        let open_diff =
+            |path: &str, left: &SealedSecret, right: &SealedSecret| -> Result<bool, DomainError> {
+                if left == right {
+                    return Ok(false);
+                }
+                let key = key.ok_or(DomainError::StateCorrupt {
+                    reason: "secret comparison needs a missing data key",
+                })?;
+                Ok(aead::open(key, workspace_id, path, left)?.as_bytes()
+                    != aead::open(key, workspace_id, path, right)?.as_bytes())
+            };
+        let mut entries = Vec::new();
+        let rows_fetched = mapped.len();
+        let last_scanned_path = mapped.last().map(|row| row.0.clone());
+        for (path, t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) in mapped {
+            if path.is_empty() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "secret comparison row has no path",
+                });
+            }
+            let status = match (&t_path, &s_path) {
+                (None, Some(_)) => Some(VersionFileChangeStatus::Added),
+                (Some(_), None) => Some(VersionFileChangeStatus::Deleted),
+                (Some(_), Some(_)) => {
+                    let t_sealed = sealed_from(&t_iv, &t_tag, &t_ct, t_len)?;
+                    let s_sealed = sealed_from(&s_iv, &s_tag, &s_ct, s_len)?;
+                    if open_diff(&path, &t_sealed, &s_sealed)? {
+                        Some(VersionFileChangeStatus::Modified)
+                    } else if let Some((named, merged_into)) = &pair {
+                        let (t_opt, s_opt) = (Some(t_sealed), Some(s_sealed));
+                        let tips = if *merged_into == MERGED_INTO_NAMED {
+                            [&s_opt, &t_opt]
+                        } else {
+                            [&t_opt, &s_opt]
+                        };
+                        let base =
+                            select_secret_merge_base(conn, workspace_id, named, &path, tips)?;
+                        let drifted = match (&base, &s_opt) {
+                            (Some(b), Some(s)) => open_diff(&path, b, s)?,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        };
+                        drifted.then_some(VersionFileChangeStatus::Modified)
+                    } else {
+                        None
                     }
                 }
-                (None, None) => unreachable!(),
+                (None, None) => match &pair {
+                    Some((named, _))
+                        if select_secret_merge_base(
+                            conn,
+                            workspace_id,
+                            named,
+                            &path,
+                            [&None, &None],
+                        )?
+                        .is_some() =>
+                    {
+                        Some(VersionFileChangeStatus::Modified)
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(status) = status {
+                entries.push(SecretCompareEntry { path, status });
             }
         }
         Ok(SecretComparePage {
@@ -1566,7 +1648,7 @@ fn delete_secret_file_inner(
     // `DuplicateMomentId`. Only a delete that will actually change state
     // reaches the duplicate-moment-id guard.
     let has_tip = store.read_with(|conn| {
-        require_version(conn, ws, &input.version_id)?;
+        require_writable_version(conn, ws, &input.version_id, &input.metadata_origin)?;
         if select_tip(conn, ws, &input.version_id, &path)?.is_none() {
             return Ok(false);
         }
@@ -1984,33 +2066,13 @@ fn record_secret_merge_base(
         MERGED_INTO_PARENT
     };
     let incoming_id = secret_identity(incoming);
-    let other_after: Option<Option<String>> = tx
-        .query_row(
-            "SELECT target_after_sha256 FROM secret_merge_bases \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4",
-            params![workspace_id, named_version_id, path, other_dir],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    if let Some(after_sha) = other_after
-        && after_sha != incoming_id
-    {
-        tx.execute(
-            "DELETE FROM secret_merge_bases \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4",
-            params![workspace_id, named_version_id, path, other_dir],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
-    let next_seq: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(merge_seq), 0) + 1 FROM secret_merge_bases \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-            params![workspace_id, named_version_id, path],
-            |row| row.get(0),
-        )
-        .map_err(DomainError::sql_corrupt)?;
+    tx.execute(
+        "DELETE FROM secret_merge_bases \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4 \
+           AND target_after_sha256 IS NOT ?5",
+        params![workspace_id, named_version_id, path, other_dir, incoming_id],
+    )
+    .map_err(DomainError::sql_persist)?;
     let mut values = vec![
         Value::Text(workspace_id.to_owned()),
         Value::Text(named_version_id.to_owned()),
@@ -2021,13 +2083,14 @@ fn record_secret_merge_base(
     values.push(identity(before));
     values.push(identity(after));
     values.push(Value::Text(merged_into.to_owned()));
-    values.push(Value::Integer(next_seq));
     tx.execute(
         "INSERT OR REPLACE INTO secret_merge_bases (workspace_id, version_id, path, \
          base_exists, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
          prior_exists, prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, \
          prior_byte_length, target_before_sha256, target_after_sha256, merged_into, merge_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         COALESCE((SELECT MAX(merge_seq) FROM secret_merge_bases \
+                   WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3), 0) + 1)",
         rusqlite::params_from_iter(values),
     )
     .map_err(DomainError::sql_persist)?;
@@ -2073,33 +2136,6 @@ fn validate_origin(origin: &str) -> Result<(), DomainError> {
         Err(DomainError::InvalidInput {
             reason: "write metadata origin is invalid",
         })
-    }
-}
-
-fn require_unarchived_version(
-    conn: &Connection,
-    workspace_id: &str,
-    version_id: &str,
-) -> Result<(), DomainError> {
-    if version_id.is_empty() {
-        return Err(DomainError::InvalidInput {
-            reason: "version_id must not be empty",
-        });
-    }
-    let archived: Option<Option<i64>> = conn
-        .query_row(
-            "SELECT archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![workspace_id, version_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    match archived {
-        None => Err(DomainError::VersionNotFound),
-        Some(Some(_)) => Err(DomainError::InvalidInput {
-            reason: "version-archived",
-        }),
-        Some(None) => Ok(()),
     }
 }
 

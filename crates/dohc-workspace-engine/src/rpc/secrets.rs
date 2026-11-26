@@ -115,6 +115,8 @@ struct SecretsCompareParams {
     after_path: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    include_base_drift: bool,
 }
 
 #[derive(Deserialize)]
@@ -565,6 +567,7 @@ impl EngineService {
                 params.after_path,
                 limit,
                 key,
+                params.include_base_drift,
             ),
         )
         .await?;

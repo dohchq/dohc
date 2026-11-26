@@ -1016,9 +1016,7 @@ impl<'a> VersionedTextStore<'a> {
         ]);
         let ws = &input.workspace_id;
         self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.from_version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
+            require_unarchived_version(conn, ws, &input.from_version_id)?;
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(conn, request_id)?
             {
@@ -1079,9 +1077,7 @@ impl<'a> VersionedTextStore<'a> {
 
         let ws = &input.workspace_id;
         let prep = self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.from_version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
+            require_unarchived_version(conn, ws, &input.from_version_id)?;
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(conn, request_id)?
             {
@@ -1192,10 +1188,15 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<VersionRecord, DomainError> {
-        let record = self.require_version(workspace_id, version_id)?;
         let ws = workspace_id.to_owned();
         let ver = version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
+            let record = get_version(tx, &ws, &ver)?.ok_or(DomainError::VersionNotFound)?;
+            if record.archived_at_ms.is_some() {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-archived",
+                });
+            }
             ensure_no_pending_undo_in(tx, &ws)?;
             tx.execute(
                 "INSERT INTO active_versions (workspace_id, version_id) VALUES (?1, ?2) \
@@ -1203,10 +1204,9 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, ver],
             )
             .map_err(DomainError::sql_persist)?;
-            Ok::<_, DomainError>(())
+            Ok::<_, DomainError>(record)
         })?;
-        committed(outcome)?;
-        Ok(record)
+        committed(outcome)
     }
 
     pub fn set_version_archived(
@@ -1224,12 +1224,26 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "version-is-main",
                 });
             }
-            if archived_at_ms.is_some()
-                && get_active_version_in(tx, workspace_id)?.version_id == version_id
-            {
-                return Err(DomainError::InvalidInput {
-                    reason: "version-is-active",
-                });
+            if archived_at_ms.is_some() {
+                if get_active_version_in(tx, workspace_id)?.version_id == version_id {
+                    return Err(DomainError::InvalidInput {
+                        reason: "version-is-active",
+                    });
+                }
+                let has_open_conflicts: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id = ?1 \
+                         AND status = 'open' AND metadata_origin != 'sync' \
+                         AND (source_version_id = ?2 OR target_version_id = ?2))",
+                        params![workspace_id, version_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                if has_open_conflicts {
+                    return Err(DomainError::InvalidInput {
+                        reason: "version-has-open-conflicts",
+                    });
+                }
             }
             tx.execute(
                 "UPDATE versions SET archived_at_ms = ?3 WHERE workspace_id = ?1 AND version_id = ?2",
@@ -1253,6 +1267,42 @@ impl<'a> VersionedTextStore<'a> {
             .read_with(|conn| get_version(conn, workspace_id, version_id))?
             .ok_or(DomainError::VersionNotFound)
     }
+}
+
+pub(crate) fn require_unarchived_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), DomainError> {
+    let archived: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match archived {
+        None => Err(DomainError::VersionNotFound),
+        Some(Some(_)) => Err(DomainError::InvalidInput {
+            reason: "version-archived",
+        }),
+        Some(None) => Ok(()),
+    }
+}
+
+pub(crate) fn require_writable_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    metadata_origin: &str,
+) -> Result<(), DomainError> {
+    if metadata_origin == "sync" {
+        return version_exists(conn, workspace_id, version_id)?
+            .then_some(())
+            .ok_or(DomainError::VersionNotFound);
+    }
+    require_unarchived_version(conn, workspace_id, version_id)
 }
 
 /// Ensure the workspace's main version inside the caller's transaction.

@@ -2,8 +2,8 @@ use super::{
     VersionedTextStore, alias_object_id, bounded_identifier, committed, get_file_object,
     get_moment, get_snapshot, hash_author_fields, hash_fields, hash_optional_text_fields,
     lookup_request, moment_by_order, record_request, reject_reserved_capture_origin,
-    validate_identifier, validate_moment_id, validate_plaintext_storable_path, version_exists,
-    version_is_active,
+    require_writable_version, validate_identifier, validate_moment_id,
+    validate_plaintext_storable_path, version_is_active,
 };
 use crate::conflicts::{WriteBinaryFile, write_binary_file_in_tx};
 use crate::error::DomainError;
@@ -60,9 +60,12 @@ pub fn write_published_binary_in_tx(
     bounded_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     let path = validate_plaintext_storable_path(&input.path)?;
-    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
-        return Err(DomainError::VersionNotFound);
-    }
+    require_writable_version(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &input.metadata_origin,
+    )?;
     let sha256 = dohc_engine_storage::hex_sha256(&input.bytes);
     let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());

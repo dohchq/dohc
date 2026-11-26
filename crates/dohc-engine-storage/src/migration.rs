@@ -5907,7 +5907,7 @@ mod tests {
             ),
             (
                 "v2-merge-bases-bidirectional",
-                "6a9dea0fc40cb82eb20626b393bb8c13b7d505cdb6cf6b6286134e14f00e7ffd",
+                "72a93ceffe4dc0030240dc969356f91c6001884671531c1b003852eb93033ce9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
