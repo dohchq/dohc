@@ -103,7 +103,8 @@ export function FolderAccessSettings(props: {
   view: WorkspaceMembersView;
   rules: WorkspaceFolderRule[];
   busy: boolean;
-  run: (request: MembersRequest, onFailure: (message: string) => void) => Promise<boolean>;
+  // Resolves with the relay's answer, or null when the change didn't go through.
+  run: (request: MembersRequest, onFailure: (message: string) => void) => Promise<unknown>;
   reload: () => void;
 }) {
   const [edit, setEdit] = useState<Edit | null>(null);

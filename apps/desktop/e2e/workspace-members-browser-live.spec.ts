@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
@@ -26,6 +25,7 @@ import {
 // Postgres, the self-hosted server's live host running the native engine, the
 // self-host share-web behind the same HTTPS origin, and the owner's desktop.
 // The member's open is what makes the server host the page, as in the app.
+// The member gets there from the invitation email the server sends.
 //
 // workspace-members-live.spec.ts covers a member in the dohc app.
 
@@ -33,16 +33,6 @@ test.skip(
   !process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1",
   "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.",
 );
-
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): { get(...values: unknown[]): Record<string, unknown> | undefined };
-    close(): void;
-  };
-};
 
 const PATH = "notes/plan.md";
 const SEED = "# Fundraiser plan\n\nThe owner writes here.\n\nThe member writes here.\n";
@@ -56,20 +46,6 @@ async function clickDocument(page: Page, path: string) {
   }
   await revealExplorerPath(page, path);
   await explorerRow(page, path).click();
-}
-
-/** The member's grant in the workspace's membership share, which the invite link would lead to. */
-function memberGrant(relayDatabase: string, workspaceId: string): string | undefined {
-  const db = new DatabaseSync(relayDatabase, { readOnly: true });
-  try {
-    const row = db
-      .prepare(`SELECT g.grant_id AS grantId FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
-      WHERE s.workspace_id = ? AND g.status = 'active' AND json_extract(s.selector_json, '$.kind') = 'workspace'`)
-      .get(workspaceId);
-    return row ? String(row.grantId) : undefined;
-  } finally {
-    db.close();
-  }
 }
 
 test("@members-browser-live a member at Edit types in a page in the browser and the owner's dohc receives the text", async ({
@@ -99,6 +75,7 @@ test("@members-browser-live a member at Edit types in a page in the browser and 
     stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, {
       live: true,
       shareWeb: true,
+      relayMail: true,
       signal,
     });
     const origin = stack.relayUrl;
@@ -143,13 +120,27 @@ test("@members-browser-live a member at Edit types in a page in the browser and 
     const members = owner.page.getByTestId("settings-members-page");
     await expect(members).toBeVisible({ timeout: 30_000 });
     await members.getByTestId("settings-members-invite-email").fill(memberAccount.email);
+    const mailBefore = stack.account.mail.messages.length;
     await members.getByTestId("settings-members-invite-send").click();
     await expect(members.getByTestId("settings-members-invite-email")).toHaveValue("", {
       timeout: 30_000,
     });
+    await expect(members.getByTestId("settings-members-invite-sent")).toContainText(
+      `Emailed the invitation to ${memberAccount.email}.`,
+    );
     await expect(
       members.getByTestId("settings-members-row").filter({ hasText: memberAccount.email }),
     ).toBeVisible();
+    await owner.page.screenshot({ path: shot("member-invite-emailed"), animations: "disabled" });
+    await expect
+      .poll(() => stack!.account.mail.messages.length, { timeout: 30_000 })
+      .toBe(mailBefore + 1);
+    const invitation = stack.account.mail.messages[mailBefore]!;
+    expect(invitation).toMatch(new RegExp(`^To: .*${memberAccount.email}`, "mu"));
+    expect(invitation).toMatch(/^Subject: .*Ana[ _]invited[ _]you[ _]to[ _]/mu);
+    expect(invitation).not.toContain(memberAccount.password);
+    const browserLink = /^(https:\/\/\S+\/workspaces)\r?$/mu.exec(invitation)?.[1];
+    expect(browserLink).toBe(`${origin}/workspaces`);
     const edit = members
       .getByTestId("settings-members-level-control")
       .getByRole("radio", { name: "Edit" });
@@ -171,18 +162,18 @@ test("@members-browser-live a member at Edit types in a page in the browser and 
     await ownerTab.getByRole("button", { name: /^Close / }).click();
     await expect(ownerTab).toHaveCount(0);
 
-    // --- Sam opens the workspace in the browser and types in the page -------
-    const grantId = memberGrant(join(ownerTemp.baseDir, "relay-data", "relay.sqlite"), workspaceId);
-    expect(grantId).toBeDefined();
-    await sam.goto(`${origin}/s/workspace/${encodeURIComponent(grantId!)}`);
-    const files = sam.getByRole("navigation", { name: "Workspace files" });
+    // --- Sam follows the invitation email, then types in the page ----------
+    await sam.goto(browserLink!);
+    const joined = sam.getByRole("region", { name: "Joined" });
     const signIn = sam.getByRole("button", { name: "Sign in", exact: true });
-    await expect(signIn.or(files)).toBeVisible({ timeout: 30_000 });
+    await expect(signIn.or(joined)).toBeVisible({ timeout: 30_000 });
     if (await signIn.isVisible()) {
       await sam.getByLabel("Email", { exact: true }).fill(memberAccount.email);
       await sam.getByLabel("Password", { exact: true }).fill(memberAccount.password);
       await signIn.click();
     }
+    await joined.getByRole("link").first().click({ timeout: 30_000 });
+    const files = sam.getByRole("navigation", { name: "Workspace files" });
     await files.getByRole("treeitem", { name: "plan.md" }).click();
     const browserEditor = sam.getByRole("textbox", { name: "Shared file editor", exact: true });
     await expect(browserEditor).toHaveAttribute("contenteditable", "true", { timeout: 180_000 });

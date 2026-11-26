@@ -95,6 +95,7 @@ function levelChangedWords(access: ShareAccess, by: string | null | undefined): 
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
+const SIGN_UP = `/account/sign-up?next=${encodeURIComponent(WORKSPACES_PATH)}`;
 // On the page for another account, the control that signs out is Switch account.
 const SWITCH_FAILED = "dohc could not sign you out. Choose Switch account to try again.";
 const CHECK_CONNECTION = "Check your connection.";
@@ -462,6 +463,11 @@ function MemberEntry({
               error={error === SESSION_ENDED || error === CHECK_FAILED ? null : error}
               onSignIn={signIn}
             />
+            {target.kind === "list" && (
+              <p className="join-aside">
+                New to dohc? <a href={SIGN_UP}>Create an account</a>
+              </p>
+            )}
             {error === CHECK_FAILED && (
               <p className="join-error" role="alert">
                 {CHECK_FAILED}{" "}

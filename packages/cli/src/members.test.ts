@@ -187,7 +187,7 @@ describe("dohc members", () => {
         "Ice · Owner · ice@test",
         "Ana · Admin · ana@test · m-ana",
         "",
-        "Invites (dohc sends no email; each joins when they sign in with that address)",
+        "Invites (each joins when they sign in with that address)",
         "bo@test · Invited · m-bo",
         "",
         "Removed (dohc members let-back-in <id>)",
@@ -195,6 +195,38 @@ describe("dohc members", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it.each([
+    [{ invitationEmail: "sent" }, "Emailed the invitation."],
+    [
+      { invitationEmail: "unavailable" },
+      "No email sent: this server does not send email. Tell them to sign in to dohc with that address.",
+    ],
+    [
+      { invitationEmail: "recent" },
+      "No email sent: dohc already tried to email this invitation in the last minute. Wait a minute before trying again.",
+    ],
+    [
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      "No email sent: 50 of 50 invitation emails used in the last 24 hours. Tell them to sign in to dohc with that address.",
+    ],
+    [
+      { invitationEmail: "failed" },
+      "The invite stands, but dohc could not send the email. Run the same invite again to retry.",
+    ],
+  ])("says what became of an invite's email: %o", async (invitation, line) => {
+    const result = await executeCli({
+      argv: ["members", "invite", "bo@test"],
+      cwd: "/workspace",
+      env: {},
+      request: async () => ({ status: "ready", view, invitation }),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trimEnd().split("\n").at(-1)).toBe(line);
   });
 
   // The refusal keeps dohc as who could not, as "dohc could not reach the server." does.

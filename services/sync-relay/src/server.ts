@@ -941,6 +941,14 @@ export function createSyncRelayHandler({
     rateLimiters: automationPressRateLimiters,
   });
 
+  const emailInvitation = createShareInvitationEmailer({
+    storage,
+    nowMs,
+    sendEmail: sendShareInvitationEmail,
+    lookupVerifiedUserEmail,
+    lookupUserDisplayName: lookupAccountDisplayName,
+    relayPublicOrigin,
+  });
   const respondToWorkspaceMembers = createWorkspaceMemberRoutes({
     storage,
     nowMs,
@@ -955,6 +963,8 @@ export function createSyncRelayHandler({
     shareWebOrigin,
     hasValidRelayExchangeKey,
     discussionActivity,
+    emailInvitation,
+    browserOrigin: namedBrowser ? shareWebOrigin : undefined,
   });
   const respondToDirectMessages = createDirectMessageRoutes({
     storage,
@@ -1109,14 +1119,7 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
-    createShareInvitationEmailer({
-      storage,
-      nowMs,
-      sendEmail: sendShareInvitationEmail,
-      lookupVerifiedUserEmail,
-      lookupUserDisplayName: lookupAccountDisplayName,
-      relayPublicOrigin,
-    }),
+    emailInvitation,
     publicEditRelease,
     liveRooms,
   );

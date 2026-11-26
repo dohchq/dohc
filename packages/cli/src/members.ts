@@ -193,9 +193,34 @@ const WorkspaceMembersViewSchema = z
     "A member sees only active people and no emails.",
   ) satisfies z.ZodType<WorkspaceMembersView>;
 
+/** What became of an invite's email: the relay's answer, as a file or folder share's invite gets it. */
+export const InvitationEmailAnswer = z.union([
+  z.object({ invitationEmail: z.enum(["sent", "unavailable", "recent", "failed"]) }).strict(),
+  z
+    .object({
+      invitationEmail: z.literal("limit"),
+      invitationEmailLimit: z
+        .object({
+          limit: z.number().int().positive(),
+          windowHours: z.number().int().positive(),
+          sent: z.number().int().nonnegative(),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+export type InvitationEmailAnswer = z.infer<typeof InvitationEmailAnswer>;
+
 export const MembersResult = z.discriminatedUnion("status", [
-  // The workspace's people as the relay answered them for this account.
-  z.object({ status: z.literal("ready"), view: WorkspaceMembersViewSchema }).strict(),
+  // The workspace's people as the relay answered them for this account. An
+  // invite also says what became of its email.
+  z
+    .object({
+      status: z.literal("ready"),
+      view: WorkspaceMembersViewSchema,
+      invitation: InvitationEmailAnswer.optional(),
+    })
+    .strict(),
   // The relay lists no Members page for this account: membership ended, the
   // account was removed, or the workspace was never shared with members.
   z.object({ status: z.literal("refused") }).strict(),

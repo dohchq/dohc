@@ -132,7 +132,7 @@ export function verifyEmailPage(
     data: { token, next, "sign-up": closed ? CLOSED : undefined },
     main: `<h1>${heading}</h1>
 <p>${lead}</p>
-<p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : next === "/join" ? "Continue joining the workspace" : "Go to your account"}</a></p>
+<p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : next === "/join" ? "Continue joining the workspace" : next === "/workspaces" ? "Open your workspaces" : "Go to your account"}</a></p>
 <form id="form"${token || sent ? " hidden" : ""}>
 ${field("email", "Email", `type="email" name="email" autocomplete="username" required value="${escapeHtml(email ?? "")}"`)}
 <button type="submit">Send a new link</button>
