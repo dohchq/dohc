@@ -292,7 +292,7 @@ Where the calls run:
 - A shared app that creates Collection files can't declare `external`.
 - Synced workspaces refuse calls from apps approved on this computer for now.
 
-The server allows each workspace 120 calls in a row, then 1 each second, and each share link 30 in a row, then 1 every 2 seconds. A workspace runs at most 8 calls at once, and 2 of those are kept for the owner. A refusal names the limit. Visitors see only that the service isn't available. The owner sees what to fix.
+The server allows each workspace 120 calls in a row, then 1 each second, and each share link 30 in a row, then 1 every 2 seconds. A workspace runs at most 8 calls at once, and 2 of those are kept for the owner. A busy or rate-limit refusal names the limit, for visitors too. For any other refusal, visitors see only that the service isn't available, and the owner sees what to fix.
 
 ## Sandbox limits, clipboard, printing, and fullscreen
 
