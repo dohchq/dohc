@@ -1439,12 +1439,17 @@ impl Ydoc {
             .filter(|roots| body_sequence::holds_the_body(&roots.0, body))
     }
 
-    /// The note's blocks, read from whichever root holds its body.
     fn body_blocks(&self) -> Result<Vec<MarkdownNode>, CollabError> {
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let sequence = self.body_roots(&body);
         let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
         let txn = self.doc.transact();
+        if sequence
+            .as_ref()
+            .is_some_and(|(sequence, _)| sequence.len(&txn) == 0)
+        {
+            return Ok(Vec::new());
+        }
         body_reading(&txn, &body, sequence.as_ref(), &mut nodes, &mut bytes)
     }
 
@@ -2183,8 +2188,6 @@ impl Ydoc {
         )
     }
 
-    /// What folding the sequence onto `read` writes, or a new body when the
-    /// note holds none yet.
     fn sequence_written(
         &self,
         frag: &yrs::XmlFragmentRef,
