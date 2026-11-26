@@ -245,11 +245,16 @@ async function fixture(
       compiler: candidate.compilerIdentity,
       bundleDigest: candidate.bundleDigest,
     });
+    const current = base.storage.db
+      .prepare(
+        "SELECT publication_id FROM sync_relay_app_publications WHERE audience='owner' AND owner_state='current'",
+      )
+      .get();
     const result = base.storage.publishAppPublication({
       workspaceId: "w",
       ownerUserId: "owner",
       ...(audience === "owner"
-        ? {}
+        ? { expectedCurrentPublicationId: current ? String(current.publication_id) : null }
         : audience === "workspace"
           ? { shareId: "members" }
           : { shareId: "s", grantId: "g", generation: 1 }),
@@ -2693,7 +2698,7 @@ it("lets every member read the sharing switch and only the Owner and Admins chan
   });
 });
 
-it("opens an Owner Publication only on its owner's phone, keeps a running launch through a replacement, and binds only from the desktop", async () => {
+it("opens an Owner Publication only on its owner's phone, makes a version current only once its Collections are bound, and keeps a running launch through a replacement", async () => {
   const f = await memberFixture();
   const version = (operationIds: string[]) =>
     f.publishWith(
@@ -2718,7 +2723,14 @@ it("opens an Owner Publication only on its owner's phone, keeps a running launch
     device: "desktop",
   };
   const missing = expect.objectContaining({ code: "not_found" });
+  const { run, open } = ownerPhone(f);
+  const catalog = async () =>
+    ((await run("apps", {})).apps as { publicationId: string }[]).map((row) => row.publicationId);
   const app = version([id(5), id(6), id(7)]);
+  expect(await catalog()).not.toContain(app);
+  await expect(run("appReview", { publicationId: app })).rejects.toMatchObject({
+    code: "not_found",
+  });
   expect(() => f.host.bindPublication(owner, { workspaceId: "w", publicationId: app })).toThrow(
     missing,
   );
@@ -2741,19 +2753,32 @@ it("opens an Owner Publication only on its owner's phone, keeps a running launch
       access: { kind: "app", appId },
     });
   await expect(add(owner, app, "desktop")).rejects.toMatchObject({ code: "not_found" });
-  const { run, open } = ownerPhone(f);
   expect((await run("apps", {})).apps).toContainEqual(
-    expect.objectContaining({ publicationId: app, approved: false }),
+    expect.objectContaining({ publicationId: app, audience: "owner", approved: false }),
   );
+  expect(await run("appReview", { publicationId: app })).toMatchObject({ audience: "owner" });
   await run("appApprove", { publicationId: app, authorityRevision: 1 });
   const launch = await open(app);
   expect((await add(launch, app, "first")).revision).toBeGreaterThan(0);
   const next = version([id(5), id(6)]);
-  f.host.bindPublication(desktop, { workspaceId: "w", publicationId: next });
+  expect(await catalog()).toContain(app);
+  expect(await catalog()).not.toContain(next);
+  await expect(run("appReview", { publicationId: next })).rejects.toMatchObject({
+    code: "not_found",
+  });
+  const newest = version([id(5)]);
+  expect(() => f.host.bindPublication(desktop, { workspaceId: "w", publicationId: next })).toThrow(
+    missing,
+  );
+  expect(await catalog()).toContain(app);
+  expect((await add(launch, app, "while-pending")).revision).toBeGreaterThan(0);
+  f.host.bindPublication(desktop, { workspaceId: "w", publicationId: newest });
+  expect(await catalog()).toContain(newest);
+  expect(await catalog()).not.toContain(app);
+  expect(() => f.host.bindPublication(desktop, { workspaceId: "w", publicationId: app })).toThrow(
+    expect.objectContaining({ code: "conflict" }),
+  );
   expect((await add(launch, app, "still-open")).revision).toBeGreaterThan(0);
-  const listed = (await run("apps", {})).apps as { publicationId: string }[];
-  expect(listed.map((row) => row.publicationId)).toContain(next);
-  expect(listed.map((row) => row.publicationId)).not.toContain(app);
   await expect(run("appReview", { publicationId: app })).rejects.toMatchObject({
     code: "not_found",
   });

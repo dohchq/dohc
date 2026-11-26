@@ -195,13 +195,22 @@ export function createOwnerAppPublicationRoutes(options: {
       !!raw && typeof raw === "object" ? (raw as Record<string, unknown>).audience : undefined;
     const workspace = audience === "workspace",
       own = audience === "owner";
-    const input =
-      workspace || own
+    const input = own
+      ? record(raw, ["audience", "candidate", "expectedCurrentPublicationId"], ["agent"])
+      : workspace
         ? record(raw, ["audience", "candidate"], ["agent"])
         : record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"], ["agent"]);
     let owner;
-    if (own) owner = { workspaceId: route.workspaceId, ownerUserId };
-    else if (workspace) {
+    if (own) {
+      const expected = input.expectedCurrentPublicationId;
+      if (expected !== null && (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)))
+        throw badRequest("Invalid current publication.");
+      owner = {
+        workspaceId: route.workspaceId,
+        ownerUserId,
+        expectedCurrentPublicationId: typeof expected === "string" ? expected : null,
+      };
+    } else if (workspace) {
       const membership = getWorkspaceMembership(storage as StorageContext, route.workspaceId);
       if (!membership)
         throw relayError(

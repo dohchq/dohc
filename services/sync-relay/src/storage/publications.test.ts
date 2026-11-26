@@ -10,7 +10,12 @@ import {
 import { openSyncRelayStorage, type SyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
 import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
-import { approvePhoneApp, issuePhoneAppGrant } from "./phoneApps";
+import {
+  approvePhoneApp,
+  issuePhoneAppGrant,
+  phoneAppLaunch,
+  redeemPhoneAppGrant,
+} from "./phoneApps";
 import { rebuildTables } from "./rebuildTables";
 import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
@@ -1130,9 +1135,51 @@ it("refuses to recreate a missing marked takedown table", () => {
   );
 });
 
-const ownRequest = (sourceRevision = "1".repeat(64), nowMs = 10) => {
+const ownRequest = (
+  sourceRevision = "1".repeat(64),
+  nowMs = 10,
+  expectedCurrentPublicationId: string | null = null,
+) => {
   const { shareId: _s, grantId: _g, generation: _n, ...input } = request();
-  return { ...input, nowMs, candidate: { ...input.candidate, sourceRevision } };
+  return {
+    ...input,
+    nowMs,
+    expectedCurrentPublicationId,
+    candidate: { ...input.candidate, sourceRevision },
+  };
+};
+const phone = (f: ReturnType<typeof fixture>, publicationId: string, approvalId: string) => {
+  approvePhoneApp(f.storage, {
+    userId: "owner",
+    workspaceId: "w",
+    publicationId,
+    authorityRevision: 1,
+    newApprovalId: approvalId,
+    nowMs: 10,
+  });
+  return (name: string) => {
+    issuePhoneAppGrant(f.storage, {
+      userId: "owner",
+      sessionId: "phone",
+      workspaceId: "w",
+      publicationId,
+      authorityRevision: 1,
+      approvalId,
+      grantHash: digest(name),
+      expiresAtMs: 100,
+      nowMs: 10,
+    });
+    return () =>
+      redeemPhoneAppGrant(f.storage, {
+        grantHash: digest(name),
+        launchHash: digest(`launch-${name}`),
+        launchHost: `${name}.apps.test`,
+        workspaceId: "w",
+        publicationId,
+        nowMs: 20,
+        expiresAtMs: 100,
+      });
+  };
 };
 const ownRead = (publicationId: string) => ({
   workspaceId: "w",
@@ -1171,9 +1218,8 @@ it("keeps every publication, Member app and consent when the owner audience migr
   const audienceSql = String(before.sql)
     .replace("share_id TEXT,", "share_id TEXT NOT NULL,")
     .replace("'workspace', 'owner'", "'workspace'")
-    .replace(/\s*app_root TEXT,\s*replaced[^\n]*\n/, "\n")
-    .replace(/\s*CHECK \(\(audience = 'owner'\)[^\n]*/g, "")
-    .replace(/\s*CHECK \(replaced[^\n]*/, "");
+    .replace(/\s*app_root TEXT,\s*owner_state[^\n]*\n/, "\n")
+    .replace(/\s*CHECK \(\(audience = 'owner'\)[^\n]*/g, "");
   (f.storage as StorageContext).tx(() =>
     rebuildTables(
       f.raw,
@@ -1187,7 +1233,7 @@ it("keeps every publication, Member app and consent when the owner audience migr
         "sync_relay_app_viewer_consents",
       ],
       (table, sql) => (table === "sync_relay_app_publications" ? audienceSql : sql),
-      ["app_root", "replaced"],
+      ["app_root", "owner_state"],
     ),
   );
   const count = (table: string) =>
@@ -1200,7 +1246,7 @@ it("keeps every publication, Member app and consent when the owner audience migr
     "sync_relay_app_viewer_consents",
   ];
   const counts = tables.map(count);
-  expect(audienceSql).not.toMatch(/app_root|replaced|'owner'/);
+  expect(audienceSql).not.toMatch(/app_root|owner_state|'owner'/);
   expect(counts).toEqual([2, 1, 3, 1, 1]);
   f.restart();
   expect(tables.map(count)).toEqual(counts);
@@ -1216,35 +1262,19 @@ it("keeps every publication, Member app and consent when the owner audience migr
 
 it("replaces an owner's earlier version of an app, and deletes each once no launch runs it", async () => {
   const f = fixture();
-  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  const publish = (input: ReturnType<typeof ownRequest>) =>
+    f.storage.publishAppPublication(input).publicationId;
+  const first = publish(ownRequest());
   expect(listed(f)).toEqual([]);
   expect(listed(f, "owner")).toEqual([first]);
-  approvePhoneApp(f.storage, {
-    userId: "owner",
-    workspaceId: "w",
-    publicationId: first,
-    authorityRevision: 1,
-    newApprovalId: "a".repeat(32),
-    nowMs: 10,
-  });
-  issuePhoneAppGrant(f.storage, {
-    userId: "owner",
-    sessionId: "phone",
-    workspaceId: "w",
-    publicationId: first,
-    authorityRevision: 1,
-    approvalId: "a".repeat(32),
-    grantHash: "b".repeat(64),
-    expiresAtMs: 100,
-    nowMs: 10,
-  });
-  const second = f.storage.publishAppPublication(ownRequest("2".repeat(64), 20)).publicationId;
+  expect(phone(f, first, "a".repeat(32))("running")()).not.toBeNull();
+  const second = publish(ownRequest("2".repeat(64), 20, first));
   expect(listed(f, "owner")).toEqual([second]);
   expect(f.storage.readAppPublication(ownRead(first))).toMatchObject({
     active: true,
-    replaced: true,
+    ownerState: "replaced",
   });
-  const third = f.storage.publishAppPublication(ownRequest("3".repeat(64), 30)).publicationId;
+  const third = publish(ownRequest("3".repeat(64), 30, second));
   expect(rowExists(f, second)).toBe(false);
   expect(rowExists(f, first)).toBe(true);
   const manifestOf = (id: string) =>
@@ -1258,7 +1288,7 @@ it("replaces an owner's earlier version of an app, and deletes each once no laun
   expect(rowExists(f, first)).toBe(false);
   expect(f.storage.getBlob("w", firstManifest)).toBeNull();
   expect(f.storage.getBlob("w", manifestOf(third))).not.toBeNull();
-  const again = f.storage.publishAppPublication(ownRequest("1".repeat(64), 1000));
+  const again = f.storage.publishAppPublication(ownRequest("1".repeat(64), 1000, third));
   expect(again).toMatchObject({ publicationId: first, active: true, authorityRevision: 1 });
   expect(listed(f, "owner")).toEqual([first]);
   expect(rowExists(f, third)).toBe(false);
@@ -1270,11 +1300,51 @@ it("replaces an owner's earlier version of an app, and deletes each once no laun
   expect(rowExists(f, first)).toBe(false);
 });
 
+it("refuses an unused grant for a version replaced before it was redeemed, and keeps the launch already running it", () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  const grant = phone(f, first, "a".repeat(32));
+  expect(grant("running")()).not.toBeNull();
+  const unused = grant("unused");
+  f.storage.publishAppPublication(ownRequest("2".repeat(64), 20, first));
+  expect(unused()).toBeNull();
+  expect(phoneAppLaunch(f.storage, digest("launch-unused"), 30)).toBeNull();
+  expect(phoneAppLaunch(f.storage, digest("launch-running"), 30)).toMatchObject({
+    publicationId: first,
+  });
+});
+
+it("refuses a delayed retry of an earlier version, before and after it is reclaimed, and repeats the current one", async () => {
+  const f = fixture();
+  const publish = (input: Omit<ReturnType<typeof ownRequest>, "expectedCurrentPublicationId">) =>
+    f.storage.publishAppPublication(input).publicationId;
+  const conflict = expect.objectContaining({ code: "conflict" });
+  const first = publish(ownRequest());
+  expect(phone(f, first, "a".repeat(32))("running")()).not.toBeNull();
+  const second = publish(ownRequest("2".repeat(64), 20, first));
+  expect(() => publish(ownRequest())).toThrow(conflict);
+  expect(() => publish(ownRequest("1".repeat(64), 30, first))).toThrow(conflict);
+  expect(publish(ownRequest("2".repeat(64), 30, first))).toBe(second);
+  expect(listed(f, "owner")).toEqual([second]);
+  await f.storage.collectUnreferencedBlobs("w", { nowMs: 1000 });
+  expect(rowExists(f, first)).toBe(false);
+  expect(() => publish(ownRequest("1".repeat(64), 1000))).toThrow(conflict);
+  const { expectedCurrentPublicationId: _expected, ...unsure } = ownRequest(
+    "3".repeat(64),
+    1000,
+    second,
+  );
+  expect(() => publish(unsure)).toThrow(conflict);
+  expect(listed(f, "owner")).toEqual([second]);
+});
+
 it("publishes to the owner's phones over HTTP only without outside calls or Collection files, and lists them only when asked", async () => {
   const f = httpFixture();
   await f.upload();
   const { candidate } = ownRequest();
-  const body = { audience: "owner", candidate };
+  const body = { audience: "owner", candidate, expectedCurrentPublicationId: null };
+  const { expectedCurrentPublicationId: _expected, ...unsure } = body;
+  expect((await f.http("w/app-publications", unsure)).status).toBe(400);
   expect((await f.http("w/app-publications", body, "reader")).status).toBe(404);
   expect((await f.http("w/app-publications", { ...body, shareId: "s", grantId: "g" })).status).toBe(
     400,

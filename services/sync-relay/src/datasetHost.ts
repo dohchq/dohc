@@ -47,6 +47,7 @@ import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
 import {
+  activateOwnerPublication,
   publicationIdOf,
   requireLinkAppPublication,
   WHOLE_WORKSPACE,
@@ -2269,6 +2270,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         host.setBindings(auth, { workspaceId: input.workspaceId, operations }, () => {
           for (const { datasetId } of operations)
             requireDatasetActiveForApproval(input.workspaceId, datasetId);
+          activateOwnerPublication(storage, input.publicationId, nowMs());
         });
         return operations.map((entry) => entry.datasetId);
       },

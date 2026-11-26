@@ -152,7 +152,7 @@ export function initializeAppPublicationAudience(db: SqliteDb): void {
   const owned = db
     .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
     .get(OWNER_MIGRATION);
-  assertPublicationSchema(db, owned ? OWNER_SQL : AUDIENCE_SQL);
+  if (!owned) assertPublicationSchema(db, AUDIENCE_SQL);
 }
 
 function assertPublicationSchema(db: SqliteDb, sql: string): void {
@@ -178,11 +178,10 @@ const OWNER_SQL = `CREATE TABLE sync_relay_app_publications (
   authority_revision INTEGER NOT NULL CHECK (authority_revision BETWEEN 1 AND 9007199254740991),
   audience TEXT NOT NULL DEFAULT 'link' CHECK (audience IN ('link', 'workspace', 'owner')),
   app_root TEXT,
-  replaced INTEGER NOT NULL DEFAULT 0 CHECK (replaced IN (0, 1)),
+  owner_state TEXT CHECK (owner_state IN ('pending', 'current', 'replaced')),
   CHECK ((audience = 'link') = (grant_id IS NOT NULL AND grant_generation IS NOT NULL)),
   CHECK ((audience = 'owner') = (share_id IS NULL)),
-  CHECK ((audience = 'owner') = (app_root IS NOT NULL)),
-  CHECK (replaced = 0 OR audience = 'owner'),
+  CHECK ((audience = 'owner') = (app_root IS NOT NULL AND owner_state IS NOT NULL)),
   UNIQUE (publication_id, workspace_id),
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   FOREIGN KEY (grant_id, share_id) REFERENCES sync_relay_share_grants(grant_id, share_id) ON DELETE CASCADE,

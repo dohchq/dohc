@@ -27,7 +27,7 @@ import {
   type PhoneAppBinding,
   type PhoneAppLaunchScope,
 } from "./storage/phoneApps";
-import { publicationLinkIsCurrent } from "./storage/publications";
+import { publicationAudience, publicationLinkIsCurrent } from "./storage/publications";
 
 /** How long the phone has to hand a grant to share-web. */
 export const PHONE_APP_GRANT_MS = 30_000;
@@ -139,8 +139,8 @@ export function createPhoneApps(options: {
   }
 
   // Active, not taken down, its share still current, not under a hidden path, and over one transactional
-  // Collection or nothing in the workspace. An Owner Publication reaches only a phone, and once replaced only
-  // the launch still running it.
+  // Collection or nothing in the workspace. An Owner Publication reaches only a phone, once current, and once
+  // replaced only the launch still running it.
   function publication(
     userId: string,
     workspaceId: string,
@@ -165,7 +165,8 @@ export function createPhoneApps(options: {
       !row.active ||
       row.operatorTakedown ||
       hiddenFile(row.candidate.appRoot) ||
-      (row.replaced && !running) ||
+      row.ownerState === "pending" ||
+      (row.ownerState === "replaced" && !running) ||
       row.candidate.capabilities.some((capability) => capability.kind !== "dataset") ||
       !publicationLinkIsCurrent(storage as StorageContext, row.owner) ||
       !servable(userId, workspaceId, id, phone)
@@ -358,11 +359,13 @@ export function createPhoneApps(options: {
         if (!options.limits) return { apps: [], nextCursor: null };
         const listed = (row: {
           publicationId: string;
+          audience: "link" | "workspace" | "owner";
           authorityRevision: number;
           appRoot: string;
           sourceRevision: string;
         }) => ({
           publicationId: row.publicationId,
+          audience: row.audience,
           authorityRevision: row.authorityRevision,
           appRoot: row.appRoot,
           sourceRevision: row.sourceRevision,
@@ -382,7 +385,13 @@ export function createPhoneApps(options: {
                   publicationId,
                 );
                 const { appRoot, sourceRevision } = candidate;
-                return [listed({ publicationId, authorityRevision, appRoot, sourceRevision })];
+                return [listed({
+                    publicationId,
+                    audience: "workspace",
+                    authorityRevision,
+                    appRoot,
+                    sourceRevision,
+                  })];
               } catch (error) {
                 if (error instanceof RelayError) return [];
                 throw error;
@@ -447,6 +456,7 @@ export function createPhoneApps(options: {
         const provenance = "member" in row ? undefined : row.approvalProvenance;
         return {
           publicationId: id,
+          audience: "member" in row ? ("workspace" as const) : publicationAudience(row.owner),
           authorityRevision: row.authorityRevision,
           createdAtMs: row.createdAtMs,
           appRoot: candidate.appRoot,
