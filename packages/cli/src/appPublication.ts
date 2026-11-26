@@ -12,13 +12,11 @@ import {
 
 const id = z.string().min(1).max(200);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-export const PublicationAgent = z
-  .object({
-    kind: z.literal("agent"),
-    label: z.string().min(1).max(160).nullable(),
-    labelSource: z.literal("agent-declared"),
-  })
-  .strict();
+export const PublicationAgent = z.object({
+  kind: z.literal("agent"),
+  label: z.string().min(1).max(160).nullable(),
+  labelSource: z.literal("agent-declared"),
+});
 const selector = z
   .object({ paths: z.array(z.string().min(1).max(1024)).min(1).max(100), versionId: z.null() })
   .strict();
@@ -105,7 +103,6 @@ const publication = {
       disabledAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       reason: z.string().min(1).max(1024),
     })
-    .strict()
     .optional(),
   approvalProvenance: z
     .object({
@@ -116,7 +113,6 @@ const publication = {
       sourceRevision: hash,
       capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
     })
-    .strict()
     .optional(),
   publicationId: hash,
   authorityRevision: z.number().int().positive(),
@@ -134,15 +130,13 @@ const publication = {
   ]),
 };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
-  z
-    .object({
-      ...publication,
-      manifestUnavailable: z.literal(false),
-      appRoot: z.string().min(1).max(1024),
-      sourceRevision: hash,
-    })
-    .strict(),
-  z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
+  z.object({
+    ...publication,
+    manifestUnavailable: z.literal(false),
+    appRoot: z.string().min(1).max(1024),
+    sourceRevision: hash,
+  }),
+  z.object({ ...publication, manifestUnavailable: z.literal(true) }),
 ]);
 const StagedAppCollectionSummary = z
   .object({
@@ -585,13 +579,11 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
     })
     .strict(),
-  z
-    .object({
-      kind: z.literal("listed"),
-      publications: z.array(OwnerAppPublicationListRow).max(25),
-      nextCursor: hash.nullable(),
-    })
-    .strict(),
+  z.object({
+    kind: z.literal("listed"),
+    publications: z.array(OwnerAppPublicationListRow).max(25),
+    nextCursor: hash.nullable(),
+  }),
   z.object({ kind: z.literal("listUnavailable") }).strict(),
   z
     .object({
