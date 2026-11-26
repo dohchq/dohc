@@ -1,11 +1,4 @@
 import * as Y from "yjs";
-import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  CONTAINER_ID,
-} from "./bodySequenceGrammar.js";
-import { holdsBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 import {
   LIVE_NOTE_CAPACITY,
@@ -19,6 +12,13 @@ import {
   type OrderedLiveUpdateCutRefusalReason,
   type OrderedLiveUpdateCutUsage,
 } from "./orderedLiveUpdateCut.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  CONTAINER_ID,
+  holdsBodySequence,
+} from "./bodySequenceStore.js";
 
 export interface BodySequenceIntakeRules {
   readonly policy: OrderedLiveUpdateCutPolicy;

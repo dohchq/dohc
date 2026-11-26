@@ -4,14 +4,15 @@ import { expect, it } from "vitest";
 import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { recordsOfContainer } from "./bodySequenceGrammar.js";
+import { readBodySequence } from "./bodySequenceYjs.js";
+import { getDohcProseMirrorSchema, yDocToMarkdown } from "./import-export.js";
 import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
-  recordsOfContainer,
-} from "./bodySequenceGrammar.js";
-import { readBodySequence, storedValue } from "./bodySequenceYjs.js";
-import { getDohcProseMirrorSchema, yDocToMarkdown } from "./import-export.js";
+  storedValue,
+} from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const FILE = fileURLToPath(new URL("./fixtures/body-sequence.json", import.meta.url));

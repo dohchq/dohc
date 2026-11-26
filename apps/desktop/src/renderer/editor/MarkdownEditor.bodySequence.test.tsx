@@ -124,6 +124,9 @@ describe("MarkdownEditor on a format-2 note", () => {
     expect(yDocToMarkdown(ydoc)).toBe("# Plan\n\nPack\n");
     key(editor, { key: "Z", keyCode: 90, shiftKey: true });
     expect(yDocToMarkdown(ydoc)).toBe("# Plan\n\nPack bags\n");
+    key(editor, { key: "z", keyCode: 90 });
+    key(editor, { key: "y", keyCode: 89 });
+    expect(yDocToMarkdown(ydoc)).toBe("# Plan\n\nPack bags\n");
 
     input(editor, "historyUndo");
     expect(editor.state.doc.textContent).toBe("PlanPack");

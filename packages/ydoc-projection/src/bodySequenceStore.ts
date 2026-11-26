@@ -92,16 +92,25 @@ const asText = (_key: string, value: unknown) =>
  */
 export function bodySequenceReading(doc: Y.Doc): string {
   const records = doc.share.get(BODY_CONTAINERS_FIELD);
-  const keys = records ? [...records._map.keys()] : [];
+  const keysOf = new Map<string, string[]>();
+  for (const key of records?._map.keys() ?? []) {
+    const dot = key.indexOf(".");
+    if (dot < 0) continue;
+    const id = key.slice(0, dot);
+    const keys = keysOf.get(id);
+    if (keys) keys.push(key);
+    else keysOf.set(id, [key]);
+  }
   const names = new Map<string, number>();
   const containers: unknown[] = [];
   const nameOf = (id: unknown) => {
     if (typeof id !== "string") return id;
     if (!names.has(id)) {
       names.set(id, names.size);
-      const attributes = keys
-        .filter((key) => key.startsWith(`${id}.`))
-        .map((key): [string, unknown] => [key.slice(id.length + 1), storedValue(records, key)]);
+      const attributes = (keysOf.get(id) ?? []).map((key): [string, unknown] => [
+        key.slice(id.length + 1),
+        storedValue(records, key),
+      ]);
       containers.push([storedValue(records, id), byKey(attributes)]);
     }
     return names.get(id);

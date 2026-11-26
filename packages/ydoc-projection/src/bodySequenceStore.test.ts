@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, parseRichdocMarkdown } from "./import-export.js";
 import { writeNewBody } from "./bodySequenceWriter.js";
@@ -136,5 +136,24 @@ describe("bodySequenceReading", () => {
     markdown.replace("> quote", "quote"),
   ])("reads differently when the body differs: %j", (changed) => {
     expect(bodySequenceReading(note(changed))).not.toBe(bodySequenceReading(note(markdown)));
+  });
+
+  it("does work that grows with the note's length, not with its square", () => {
+    const methods = ["startsWith", "endsWith", "indexOf", "includes", "slice", "split"] as const;
+    const operations = (tasks: number) => {
+      const doc = note(
+        Array.from({ length: tasks }, (_, index) => `- [ ] task ${index}`).join("\n"),
+      );
+      const spies = methods.map((method) => vi.spyOn(String.prototype, method));
+      try {
+        bodySequenceReading(doc);
+        return spies.reduce((sum, spy) => sum + spy.mock.calls.length, 0);
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+    };
+    const small = operations(200);
+    expect(small).toBeGreaterThan(0);
+    expect(operations(2_000)).toBeLessThanOrEqual(11 * small);
   });
 });

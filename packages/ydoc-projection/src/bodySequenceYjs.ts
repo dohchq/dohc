@@ -1,21 +1,16 @@
 import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
   leavesOfSequence,
   readBodyLeaves,
   type SequenceAttrs,
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
-import { storedValue } from "./bodySequenceStore.js";
-
-export {
-  BODY_SEQUENCE_SCHEMA_VERSION,
-  holdsBodySequence,
-  readsBodySequence,
+import {
   storedValue,
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
 } from "./bodySequenceStore.js";
 
 type StoredList = { readonly _start: Y.Item | null };

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   ARRIVALS,
@@ -27,6 +26,7 @@ import {
 } from "./liveDocumentValidation.js";
 import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
 import { validateOrderedLiveUpdateCut } from "./orderedLiveUpdateCut.js";
+import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const PATH = "notes/shared.md";

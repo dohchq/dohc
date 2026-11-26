@@ -12,7 +12,6 @@ import {
 } from "@tiptap/pm/state";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { isBodySequenceChange } from "./bodySequenceEditor.js";
-import { BODY_SEQUENCE_SCHEMA_VERSION } from "./bodySequenceYjs.js";
 import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
 import { LIVE_UPDATE_MAX_BYTES } from "./liveValidationPolicy.js";
 import {
@@ -31,6 +30,7 @@ import {
   random,
   recordRulesBroken,
 } from "./bodySequenceEditorTestSupport.js";
+import { BODY_SEQUENCE_SCHEMA_VERSION } from "./bodySequenceStore.js";
 
 export type Frame = [id: string, type: string, attrs?: Record<string, unknown>];
 export type Row = [path: string[] | null, text: string, attrs?: Record<string, unknown>];

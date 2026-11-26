@@ -8,21 +8,7 @@ import {
   type Schema,
 } from "@tiptap/pm/model";
 
-import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  CONTAINER_ID,
-  MAX_SEQUENCE_DEPTH,
-} from "./bodySequenceStore.js";
-
-export {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  CONTAINER_ID,
-  MAX_SEQUENCE_DEPTH,
-};
+import { CONTAINER_ID, MAX_SEQUENCE_DEPTH } from "./bodySequenceStore.js";
 
 export type SequenceAttrs = Record<string, unknown>;
 export type SequenceFrame = { type: string; id: string; attrs: SequenceAttrs };

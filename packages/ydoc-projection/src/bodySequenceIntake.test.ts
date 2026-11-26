@@ -3,7 +3,6 @@ import * as encoding from "lib0/encoding";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
 import * as Y from "yjs";
-import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import {
   BODY_SEQUENCE_CHANGE_MAX_VALUES,
   bodySequenceChangeRefusal,
@@ -54,6 +53,7 @@ import {
   validateOrderedLiveUpdateCut,
   type OrderedLiveUpdateCutPolicy,
 } from "./orderedLiveUpdateCut.js";
+import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const PATH = "notes/shared.md";

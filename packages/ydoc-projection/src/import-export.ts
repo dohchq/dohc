@@ -39,11 +39,7 @@ import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { DohcMarkdownManager, type InlineTokens } from "./inline-marks.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
-import {
-  BODY_SEQUENCE_SCHEMA_VERSION,
-  readBodySequence,
-  readsBodySequence,
-} from "./bodySequenceYjs.js";
+import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   fitsNewNote,
   WORKER_LIVE_VALIDATION_POLICY,
@@ -65,6 +61,7 @@ import {
   writeFrontmatterMap,
   writtenFrontmatterKeys,
 } from "./frontmatter-map.js";
+import { BODY_SEQUENCE_SCHEMA_VERSION, readsBodySequence } from "./bodySequenceStore.js";
 
 const PLAIN_TEXT_FIELD = "plainText";
 const FRONTMATTER_FIELD = "frontmatter";

@@ -37,13 +37,6 @@ export const BodySequence = Extension.create<Partial<BodySequenceOptions>>({
       throw new Error("BodySequence needs the note's sequence and containers.");
     return [bodySequencePlugin({ ...this.options, sequence, containers })];
   },
-  addKeyboardShortcuts() {
-    return {
-      "Mod-z": () => this.editor.commands.undo(),
-      "Mod-y": () => this.editor.commands.redo(),
-      "Shift-Mod-z": () => this.editor.commands.redo(),
-    };
-  },
   addCommands() {
     const fromHistory =
       (command: Command): RawCommands["undo"] =>
