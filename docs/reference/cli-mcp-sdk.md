@@ -33,7 +33,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | Category | Tools |
 | --- | --- |
 | **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices), [`dohc_inbox_list`](#dohc_inbox_list), [`dohc_inbox_add`](#dohc_inbox_add), [`dohc_inbox_archive`](#dohc_inbox_archive), [`dohc_inbox_move`](#dohc_inbox_move) |
-| **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
+| **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_connections`](#dohc_links_connections), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_update_version`](#dohc_update_version), [`dohc_archive_version`](#dohc_archive_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
@@ -389,6 +389,16 @@ Changes the workspace, so a shared view does not offer it.
 - `path`: `string`
 
 Returns `{ kind, reference, link }`.
+
+### `dohc_links_connections`
+
+Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share returns scope share-omitted with nothing listed.
+
+Changes the workspace, so a shared view does not offer it.
+
+No arguments.
+
+Returns `{ scope, nodes: ({ kind: "document-collection", id, path, objectId, title, recordCount } | { kind: "dataset", id, path, datasetId, title, firstTableId, tableCount } | { kind: "app", id, path, title, entryPath } | { kind: "automation", id, path, automationId, title, enabled, ownerKind } | { kind: "group", id, channelId, title })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
 
 ### `dohc_links_edges`
 
@@ -1116,6 +1126,16 @@ Read a bounded page of file links.
 - `--cursor <cursor>`: Continue the previous page.
 
 With `--json`, prints `{ schemaVersion, versionId, files: { objectId, path, title }[], entries: { kind, source, target, ordinal }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }`.
+
+#### `dohc links connections`
+
+```sh
+dohc links connections [options]
+```
+
+Read how Collections, apps, and automations connect.
+
+With `--json`, prints `{ schemaVersion, scope, nodes: ({ kind: "document-collection", id, path, objectId, title, recordCount } | { kind: "dataset", id, path, datasetId, title, firstTableId, tableCount } | { kind: "app", id, path, title, entryPath } | { kind: "automation", id, path, automationId, title, enabled, ownerKind } | { kind: "group", id, channelId, title })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
 
 #### `dohc links in`
 

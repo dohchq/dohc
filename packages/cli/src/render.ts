@@ -908,6 +908,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       }
       return lines.join("\n");
     }
+    case "linksConnections": {
+      const graph = result as CliResultByVerb["linksConnections"];
+      if (graph.scope === "share-omitted")
+        return "Connections are kept only in the original workspace. Open it to continue.";
+      const names = new Map(graph.nodes.map((node) => [node.id, lineSafe(node.title)]));
+      const lines = graph.edges.map(
+        (edge) =>
+          `${names.get(edge.source) ?? lineSafe(edge.source)} → ${names.get(edge.target) ?? lineSafe(edge.target)} · ${edge.kind}${edge.approval ? ` · ${edge.approval}` : ""}`,
+      );
+      if (!graph.complete) lines.push("More connections exist than fit in one answer.");
+      return lines.join("\n") || "No connections in this workspace.";
+    }
     case "memberAppsList": {
       const list = result as CliResultByVerb["memberAppsList"];
       const lines = list.apps.map((app) =>

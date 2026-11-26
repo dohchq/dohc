@@ -101,3 +101,84 @@ export const LinksEdgesResult = z
   });
 export type LinksEdgesInput = z.infer<typeof LinksEdgesInput>;
 export type LinksEdgesResult = z.infer<typeof LinksEdgesResult>;
+
+export const LINKS_CONNECTIONS_MAX_BYTES = 64 * 1024;
+const id = z.string().min(1).max(4200);
+const title = z.string().max(640);
+const ConnectionNode = z.discriminatedUnion("kind", [
+  z
+    .object({
+      id,
+      kind: z.literal("document-collection"),
+      path,
+      objectId: z.string().min(1).max(500),
+      title,
+      recordCount: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      id,
+      kind: z.literal("dataset"),
+      path,
+      datasetId: z.string().max(64).nullable(),
+      title,
+      firstTableId: z.string().max(64).nullable(),
+      tableCount: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z.object({ id, kind: z.literal("app"), path, title, entryPath: path.nullable() }).strict(),
+  z
+    .object({
+      id,
+      kind: z.literal("automation"),
+      path,
+      automationId: z.string().min(1).max(4200),
+      title,
+      enabled: z.boolean(),
+      ownerKind: z.enum(["document", "dataset"]),
+    })
+    .strict(),
+  z.object({ id, kind: z.literal("group"), channelId: z.string().min(1).max(500), title }).strict(),
+]);
+const ConnectionEdge = z
+  .object({
+    source: id,
+    target: id,
+    kind: z.enum([
+      "relation",
+      "app-uses-data",
+      "automation-trigger",
+      "automation-action",
+      "automation-runs-file",
+    ]),
+    approval: z.enum(["approved", "requested"]).optional(),
+  })
+  .strict();
+export const LinksConnectionsInput = z.object({}).strict();
+export const LinksConnectionsResult = z
+  .object({
+    scope: z.enum(["workspace", "share-omitted"]),
+    nodes: z.array(ConnectionNode),
+    edges: z.array(ConnectionEdge),
+    records: z.array(z.object({ collection: id, paths: z.array(path) }).strict()),
+    complete: z.boolean(),
+    mountsCovered: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, ctx) => {
+    if (new TextEncoder().encode(JSON.stringify(result)).byteLength > LINKS_CONNECTIONS_MAX_BYTES)
+      ctx.addIssue({ code: "custom", message: "Connections exceed 64 KiB." });
+  });
+export type LinksConnectionsInput = z.infer<typeof LinksConnectionsInput>;
+export type LinksConnectionsResult = z.infer<typeof LinksConnectionsResult>;
+export type LinksConnectionNode = LinksConnectionsResult["nodes"][number];
+export type LinksConnectionEdge = LinksConnectionsResult["edges"][number];
+export const SHARE_OMITTED_CONNECTIONS: LinksConnectionsResult = {
+  scope: "share-omitted",
+  nodes: [],
+  edges: [],
+  records: [],
+  complete: true,
+  mountsCovered: false,
+};

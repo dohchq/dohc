@@ -52,6 +52,7 @@
     "keepOutsideChange",
     "keptCopies",
     "link",
+    "linksConnections",
     "linksEdges",
     "linksIn",
     "linksResolve",
@@ -164,6 +165,7 @@
     "inboxMove",
     "keepOutsideChange",
     "link",
+    "linksConnections",
     "linksEdges",
     "linksIn",
     "linksResolve",
@@ -231,6 +233,7 @@
   ],
   "publicVerbs": [
     "links edges",
+    "links connections",
     "links in",
     "links resolve",
     "notices list",
@@ -390,7 +393,7 @@
       "commands": [
         {
           "group": "links",
-          "block": "  links         Read and resolve document links.\n                edges, in, resolve\n"
+          "block": "  links         Read and resolve document links.\n                edges, connections, in, resolve\n"
         },
         {
           "group": "notices",
@@ -463,10 +466,11 @@
       ],
       "suffix": "\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
     },
-    "links": "Usage: dohc links <verb> [arguments] [options]\n\nRead and resolve document links.\n\nVerbs:\n  edges     Read a bounded page of file links.\n  in        Read documents that link to a file.\n  resolve   Resolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc links <verb> --help to see its arguments and options.\n",
+    "links": "Usage: dohc links <verb> [arguments] [options]\n\nRead and resolve document links.\n\nVerbs:\n  edges         Read a bounded page of file links.\n  connections   Read how Collections, apps, and automations connect.\n  in            Read documents that link to a file.\n  resolve       Resolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc links <verb> --help to see its arguments and options.\n",
     "links edges": "Usage: dohc links edges [options]\n\nRead a bounded page of file links.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --agent-id <id>     Work as this agent you run, by its id in Settings ›\n                      Agents. Implies --as-agent.\n  --workspace <id>    Work in this workspace, by its id, instead of the one this\n                      folder is in. Relative paths then start at the workspace's\n                      folder.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
     "links in": "Usage: dohc links in <subject-json> [options]\n\nRead documents that link to a file.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --agent-id <id>     Work as this agent you run, by its id in Settings ›\n                      Agents. Implies --as-agent.\n  --workspace <id>    Work in this workspace, by its id, instead of the one this\n                      folder is in. Relative paths then start at the workspace's\n                      folder.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
     "links resolve": "Usage: dohc links resolve <source> <literals-json> [options]\n\nResolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "links connections": "Usage: dohc links connections [options]\n\nRead how Collections, apps, and automations connect.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
     "notices": "Usage: dohc notices <verb> [arguments] [options]\n\nRead this workspace's Notices.\n\nVerbs:\n  list   List this workspace's Notices, newest first: each row's title, text,\n         sender, time, whether you have read it, and where it opens.\n\nRun dohc inside a workspace folder while the dohc app is open.\nListing does not change whether rows are read.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc notices <verb> --help to see its arguments and options.\n",
     "notices list": "Usage: dohc notices list [options]\n\nList this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.\n\nRun dohc inside a workspace folder while the dohc app is open.\nListing does not change whether rows are read.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
     "sync": "Usage: dohc sync <verb> [arguments] [options]\n\nStop syncing this workspace on this computer.\n\nVerbs:\n  stop   Stop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nGroups you joined and received-share mounts keep syncing.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc sync <verb> --help to see its arguments and options.\n",

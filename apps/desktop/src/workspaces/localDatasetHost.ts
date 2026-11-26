@@ -2318,6 +2318,42 @@ export async function localDatasetStoreId(workspaceRoot: string): Promise<string
 }
 
 /**
+ * Each app root's active approval on this computer and the Collection path or
+ * dataset id it reaches. Opens the store read-only and creates none.
+ */
+export async function readLocalAppApprovals(
+  workspaceRoot: string,
+): Promise<Array<{ appRoot: string; kind: string; resourceId: string }>> {
+  return withStoreHere(await realpath(workspaceRoot), async (path) => {
+    if (path === null) return [];
+    const db = openStore(path, true);
+    try {
+      const tables = new Set(
+        (
+          db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+            name: string;
+          }[]
+        ).map((row) => row.name),
+      );
+      const reaches = [
+        ["collection", "local_collection_apps", "collection_path"],
+        ["dataset", "local_dataset_apps", "dataset_id"],
+      ].filter(([, table]) => tables.has(table!) && tables.has("local_app_roots"));
+      return reaches.flatMap(
+        ([kind, table, column]) =>
+          db
+            .prepare(
+              `SELECT r.app_root AS appRoot, ? AS kind, p.${column} AS resourceId FROM local_app_roots r JOIN ${table} p ON p.publication_id=r.active_publication_id AND p.active=1 AND p.authority_revision=r.revision WHERE r.active_kind=? ORDER BY r.app_root`,
+            )
+            .all(kind!, kind!) as Array<{ appRoot: string; kind: string; resourceId: string }>,
+      );
+    } finally {
+      db.close();
+    }
+  });
+}
+
+/**
  * Writes `storeId` into the workspace's existing store, so a record can
  * name it: the one in .dohc/local, or else one not yet moved from
  * .dohc/datasets, which the holder moves when it next opens. Refuses a store

@@ -65,7 +65,7 @@ it("refuses a declared input that names an envelope field", async () => {
 it("loads the declarations as they are", async () => {
   vi.resetModules();
   const { CLI_COMMANDS } = await import("./args");
-  expect(Object.keys(CLI_COMMANDS.links!.verbs)).toEqual(["edges", "in", "resolve"]);
+  expect(Object.keys(CLI_COMMANDS.links!.verbs)).toEqual(["edges", "connections", "in", "resolve"]);
   expect(Object.keys(CLI_COMMANDS.chat!.verbs).slice(-2)).toEqual(["links", "file-mentions"]);
 });
 

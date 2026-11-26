@@ -742,6 +742,7 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_move_path",
       "dohc_delete_path",
       "dohc_link",
+      "dohc_links_connections",
       "dohc_links_edges",
       "dohc_links_in",
       "dohc_links_resolve",

@@ -1,4 +1,6 @@
 import {
+  LinksConnectionsInput,
+  LinksConnectionsResult,
   LinksEdgesInput,
   LinksEdgesResult,
   LinksInInput,
@@ -34,6 +36,30 @@ export const LINKS_DECLARATIONS = {
       levels: EVERY_MCP_LEVEL,
       description:
         "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+    },
+  },
+  linksConnections: {
+    access: "read",
+    capabilityId: "links.connections",
+    input: LinksConnectionsInput,
+    result: LinksConnectionsResult,
+    ipc: {
+      channel: "desktop:links-connections",
+      inactiveMessage: "Graph read stopped because this window changed workspaces.",
+    },
+    cli: {
+      verb: "linksConnections",
+      command: ["links", "connections"],
+      summary: "Read how Collections, apps, and automations connect.",
+      operands: "",
+      unavailable,
+      example: [],
+    },
+    mcp: {
+      tool: "dohc_links_connections",
+      levels: ["owner"],
+      description:
+        "Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share returns scope share-omitted with nothing listed.",
     },
   },
   linksIn: {

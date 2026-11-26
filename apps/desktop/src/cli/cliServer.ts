@@ -107,6 +107,7 @@ import { versionNameRefusal } from "../ipc/errorWords";
 import { nextStepWords } from "../ipc/bridgeContract";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
+import { SHARE_OMITTED_CONNECTIONS } from "@dohc/workspace-contracts/links";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
   CollectionAutomationRun,
@@ -2541,6 +2542,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   workspaceSearch: "owner",
   memberAppsList: "anywhere",
   memberAppInspect: "anywhere",
+  linksConnections: { answer: SHARE_OMITTED_CONNECTIONS },
   linksEdges: "anywhere",
   linksIn: "anywhere",
   linksResolve: "anywhere",

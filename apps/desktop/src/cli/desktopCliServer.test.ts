@@ -10,6 +10,7 @@ import {
   stopLiveEditing,
   workspaceStatus,
 } from "@dohc/mcp/tools";
+import { SHARE_OMITTED_CONNECTIONS } from "@dohc/workspace-contracts/links";
 import { type OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { stopNamedOwnerLiveDocument } from "../ipc/relaySharesIpc";
@@ -327,6 +328,7 @@ function fixture(
       })),
       linksIn: vi.fn(async () => null),
       linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
+      linksConnections: vi.fn(async () => SHARE_OMITTED_CONNECTIONS),
     },
     automations: () => ({
       automationIdAt: vi.fn(),

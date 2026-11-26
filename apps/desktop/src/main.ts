@@ -4,6 +4,7 @@ import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { createWorkspaceGraphConnections } from "./workspaces/workspaceGraphConnections";
 import { createWorkspaceRetrievalReader } from "./workspaces/workspaceRetrieval";
 import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
@@ -178,6 +179,7 @@ import {
   createLocalDatasetHost,
   localDatasetStoreExists,
   localDatasetStoreId,
+  readLocalAppApprovals,
   reconcileExistingLocalCollectionApps,
   type LocalDatasetAgent,
   type LocalDatasetHost,
@@ -4477,6 +4479,18 @@ async function withEngineAdapter<T>(
 }
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
+const workspaceConnections = createWorkspaceGraphConnections<RegistryEntry>({
+  withAdapter: withEngineAdapter,
+  apps: (workspace) =>
+    withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+      ownedSiteCatalog.list(operation.workspace),
+    ),
+  approvals: (workspace) => readLocalAppApprovals(workspace.rootPath),
+  groups: async (workspace) =>
+    (await linkedChatStoreFor(workspace).listChannels({ workspaceId: workspace.workspaceId })).map(
+      ({ id, kind, name, slug }) => ({ id, kind, name, slug }),
+    ),
+});
 const workspaceRetrieval = createWorkspaceRetrievalReader({
   withAdapter: withEngineAdapter,
   syncWorkspaceSharedChannels,
@@ -8476,6 +8490,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   reads: {
     chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
     chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
+    linksConnections: (workspace) => workspaceConnections.connections(workspace),
     linksEdges: (workspace, input) => workspaceLinks.edges(workspace, input),
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
@@ -10446,6 +10461,8 @@ function registerIpcHandlers(): void {
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
   });
   registerOperations(operationBoundary, linksOperations, {
+    linksConnections: (_input, { operation }) =>
+      workspaceConnections.connections(operation.workspace),
     linksEdges: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
       workspaceLinks.edges(operation.workspace, input),
     linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) =>

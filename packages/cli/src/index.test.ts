@@ -625,6 +625,48 @@ describe("executeCli", () => {
     );
   });
 
+  it("prints each connection by name, and says when a received share keeps none", async () => {
+    const run = (result: unknown) =>
+      executeCli({
+        argv: ["links", "connections"],
+        cwd: "/workspace",
+        env: {},
+        request: async () => result,
+      });
+    const graph = {
+      scope: "workspace",
+      nodes: [
+        { id: "app:apps/board", kind: "app", path: "apps/board", title: "Board", entryPath: null },
+        {
+          id: "collection:Tasks",
+          kind: "document-collection",
+          path: "Tasks",
+          objectId: "t",
+          title: "Tasks",
+          recordCount: 0,
+        },
+      ],
+      edges: [
+        {
+          source: "app:apps/board",
+          target: "collection:Tasks",
+          kind: "app-uses-data",
+          approval: "requested",
+        },
+      ],
+      records: [],
+      complete: false,
+      mountsCovered: true,
+    };
+    expect((await run(graph)).stdout).toBe(
+      "Board → Tasks · app-uses-data · requested\nMore connections exist than fit in one answer.\n",
+    );
+    expect(
+      (await run({ ...graph, scope: "share-omitted", nodes: [], edges: [], complete: true }))
+        .stdout,
+    ).toBe("Connections are kept only in the original workspace. Open it to continue.\n");
+  });
+
   it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {
     const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => ({
       threadId: "th_1",

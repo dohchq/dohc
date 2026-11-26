@@ -16,7 +16,12 @@ import {
   MemberAppsListInput,
   MemberAppWithdrawInput,
 } from "@dohc/workspace-contracts/member-apps";
-import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import {
+  LinksConnectionsInput,
+  LinksEdgesInput,
+  LinksInInput,
+  LinksResolveInput,
+} from "@dohc/workspace-contracts/links";
 import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
 import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
@@ -2158,6 +2163,10 @@ const DECLARED_PARSERS: {
     command: string,
   ) => DeclaredRequestInput<Verb>;
 } = {
+  linksConnections: (input, command) => {
+    noExtraArgs(input.operands, command);
+    return LinksConnectionsInput.parse({});
+  },
   linksEdges: (input, command) => {
     noExtraArgs(input.operands, command);
     return LinksEdgesInput.parse({ cursor: lastValue(input, "--cursor") });
