@@ -32,6 +32,8 @@ const SYNC_CODE_SECRET: CopySecret = {
   again: "Copy it again from Settings.",
 };
 const PASSPHRASE_TOO_SHORT = `Enter at least ${MIN_SECRET_PASSPHRASE_LENGTH} characters to protect synced secrets.`;
+export const REPLACES_PASSPHRASE =
+  "A new passphrase replaces any earlier one, and the earlier one stops working.";
 // What turning sync off leaves alone. Groups and received shares sync on
 // their own, so a pause here does not reach them.
 export const SYNC_OFF_KEEPS =
@@ -553,6 +555,8 @@ export function ProtectedFilesRow(props: {
           <span data-testid="cloud-sync-hint" role="alert" className="text-warning">
             {hint}
           </span>
+        ) : props.purpose === "protect" ? (
+          <span data-testid="cloud-sync-replace-warning">{REPLACES_PASSPHRASE}</span>
         ) : undefined
       }
     >

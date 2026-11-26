@@ -125,6 +125,11 @@ test("@protected-files a computer without the key keeps syncing, then unlocks th
     await page
       .getByTestId("settings-row-protected-files")
       .screenshot({ path: test.info().outputPath("unlocked.png") });
+    await page.getByTestId("cloud-protect-secrets").click();
+    await expect(page.getByTestId("cloud-sync-replace-warning")).toBeVisible();
+    await page
+      .getByTestId("settings-row-protected-files")
+      .screenshot({ path: test.info().outputPath("replace-warning.png") });
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(toast).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();

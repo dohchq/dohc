@@ -11,7 +11,12 @@ import {
   SYNC_UNCONFIRMED_ACCOUNT,
 } from "../cloudSyncWords";
 import { palette } from "../tokens";
-import { CloudSyncSettings, SYNC_ON_NEEDS_SERVER, type CloudSettings } from "./CloudSyncSettings";
+import {
+  CloudSyncSettings,
+  REPLACES_PASSPHRASE,
+  SYNC_ON_NEEDS_SERVER,
+  type CloudSettings,
+} from "./CloudSyncSettings";
 import { NO_PASSPHRASE_YET, OTHER_KEY_PROTECTS } from "@dohc/security-contract/secret-passphrase";
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
@@ -489,6 +494,18 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
     expect(screen.getByTestId("cloud-protect-secrets")).toBeTruthy();
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+  });
+
+  it("warns that a new passphrase replaces the old one before Protect", () => {
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+
+    expect(screen.getByTestId("cloud-sync-replace-warning").textContent).toBe(REPLACES_PASSPHRASE);
   });
 
   it("ignores an unlock that answers after sign-out", async () => {
