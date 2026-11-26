@@ -369,8 +369,10 @@ export function registerCloudIpcHandlers<
           operation.assertCurrent();
           await activity.enableCloud(workspace);
           operation.assertCurrent();
-          await activity.protectedFilesUnlocked(workspace);
-          operation.assertCurrent();
+          if (dataKey !== "missing" || input.passphrase !== undefined) {
+            await activity.protectedFilesUnlocked(workspace);
+            operation.assertCurrent();
+          }
           return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
         }),
     );

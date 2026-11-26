@@ -1169,6 +1169,17 @@ it("says where to set a passphrase when protected files arrived and none protect
   expect(h.unlocked).not.toHaveBeenCalled();
 });
 
+it("resumes sync with protected files still locked when no passphrase is given", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.readDataKey.mockResolvedValue("missing");
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+  expect(h.steps).toContain("enable");
+  expect(h.downloadKeyEnvelope).not.toHaveBeenCalled();
+  expect(h.unlocked).not.toHaveBeenCalled();
+});
+
 it("keeps resume pinned to the original paused owner", async () => {
   const h = await harness();
   h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: "someone-else" };
