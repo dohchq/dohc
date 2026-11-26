@@ -1141,6 +1141,30 @@ mod tests {
     }
 
     #[test]
+    fn an_engine_that_does_not_read_format_two_bootstraps_nothing_from_a_format_two_baseline() {
+        let note = crate::ydoc::format_two_note_for_test("A note.\n");
+        let vector = Vector {
+            name: "format-two".into(),
+            bytes: note.encode_full_state(),
+            markdown: String::new(),
+            registration_accepted: false,
+            kept_frontmatter: None,
+            projection_refused: false,
+        };
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        let refused = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Application(ApplicationError::Collab(error)))
+                    if error.code() == "ydoc-note-uses-a-newer-body-format"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(counts(&store), (0, 0, 0, 0));
+    }
+
+    #[test]
     fn existing_domain_object_and_retired_registration_cannot_be_bootstrapped() {
         let vector = vectors().remove(1);
         let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);

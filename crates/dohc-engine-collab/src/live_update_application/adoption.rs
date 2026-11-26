@@ -112,7 +112,13 @@ mod tests {
                 )
                 .unwrap();
             let key = DocKey::new("workspace", "main", "object").unwrap();
-            durable::claim_base(&mut store, &key, ContentKind::Richdoc, &bytes, &NoFaults, 2)
+            let stored = Ydoc::wire();
+            stored.apply(&bytes).unwrap();
+            let base = durable::IncomingBase::stored(&bytes, stored);
+            store
+                .write_with(&NoFaults, |tx| {
+                    durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &base, 2)
+                })
                 .unwrap();
             let source = OwnerSeedSource {
                 moment_id: "original".into(),
@@ -335,6 +341,45 @@ mod tests {
             .iter()
             .map(|t| self.store.table_row_count(t).unwrap())
             .collect()
+        }
+    }
+
+    fn rich_note_deleting_units_of_its_emoji(units: u8) -> (String, Vec<u8>) {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let writer = Ydoc::with_client_id(5);
+        writer.richdoc_append_paragraph("\u{1f600}X");
+        let letters_end = writer.encode_state_vector()[2];
+        let version = writer.missing_schema_version_update(&key).unwrap();
+        writer.apply(&version.unwrap()).unwrap();
+        let delete = vec![0, 1, 5, 1, letters_end - 3, units];
+        let bytes = crate::merge_updates(&[writer.encode_full_state(), delete]).unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&bytes).unwrap();
+        (doc.project(ContentKind::Richdoc).unwrap().content, bytes)
+    }
+
+    #[test]
+    fn an_adoption_whose_baseline_splits_an_emoji_writes_nothing() {
+        let (text, bytes) = rich_note_deleting_units_of_its_emoji(2);
+        Fixture::with_source(text, bytes)
+            .adopt()
+            .expect("a baseline that deletes a whole emoji adopts");
+        let (text, bytes) = rich_note_deleting_units_of_its_emoji(1);
+        let mut f = Fixture::with_source(text, bytes);
+        let before = f.counts();
+        let refused = f.adopt();
+        assert!(
+            matches!(
+                refused,
+                Err(ApplicationError::Collab(
+                    CollabError::ReplayParityViolation { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(f.counts(), before);
+        for table in ["live_owner_adoptions", "live_accepted_checkpoints"] {
+            assert_eq!(f.store.table_row_count(table).unwrap(), 0, "{table}");
         }
     }
 

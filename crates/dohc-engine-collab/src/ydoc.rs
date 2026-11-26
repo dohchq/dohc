@@ -185,6 +185,29 @@ pub fn writing_new_notes_in_format_two_here<R>(run: impl FnOnce() -> R) -> R {
     ran
 }
 
+/// A format-2 rich document holding `markdown`, read by an engine that reads
+/// format 2.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn format_two_note_for_test(markdown: &str) -> Ydoc {
+    reading_body_sequence_here(|| {
+        let marked = Doc::new();
+        let meta = marked.get_or_insert_map(ROOT_META);
+        meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+        let doc = Ydoc::wire();
+        doc.apply(
+            &marked
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
+        )
+        .expect("mark format 2");
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+            .expect("write format 2");
+        assert_eq!(doc.note_schema_version(), 2);
+        doc
+    })
+}
+
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
 /// failure the spike found.

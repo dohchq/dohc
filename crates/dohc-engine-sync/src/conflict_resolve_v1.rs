@@ -7517,17 +7517,17 @@ mod tests {
         projected
     }
 
-    fn refuses_the_split_successor(store: &mut EngineStore, key: &DocKey, value: Value) {
+    fn refuses_the_successor(store: &mut EngineStore, key: &DocKey, value: Value, reason: &str) {
         let before = active_claim(store, key);
         let parent = imported_envelope(0, "conflict.resolve", value);
         let leases = crate::NoLiveLeases;
         let outcome = crate::apply_conflict_envelope(store, &parent, &NoFaults, &leases);
         let outcome = outcome.expect("the pull goes on");
-        let reason = match outcome.primary {
+        let refused = match outcome.primary {
             crate::ApplyDisposition::Refused(refusal) => refusal.reason.message().to_owned(),
-            _ => panic!("the successor was not refused"),
+            other => panic!("the successor was not refused: {other:?}"),
         };
-        assert_eq!(reason, "ydoc-resolution-not-representable");
+        assert_eq!(refused, reason);
         assert_eq!(active_claim(store, key), before);
         let notices = crate::list_refusal_notices(store, "ws").expect("notices");
         let named = notices.iter().any(|notice| {
@@ -7539,10 +7539,91 @@ mod tests {
         assert!(named, "{notices:?}");
     }
 
+    const NOT_REPRESENTABLE: &str = "ydoc-resolution-not-representable";
+    const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
+
+    fn format_two_successor_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_shaped(false, ContentKind::Richdoc, |mut successor| {
+            use yrs::updates::decoder::Decode;
+            use yrs::{Map, ReadTxn, Transact};
+            let raw = yrs::Doc::with_client_id(9);
+            let meta = raw.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META);
+            raw.transact_mut()
+                .apply_update(yrs::Update::decode_v1(&successor.update).expect("decode"))
+                .expect("load successor");
+            meta.insert(&mut raw.transact_mut(), "schemaVersion", 2.0);
+            let marked = raw
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default());
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&marked).expect("the successor applies");
+            assert_eq!(doc.note_schema_version(), 2);
+            successor.state_vector = doc.encode_state_vector();
+            successor.lineage_claim_id = dohc_engine_storage::hex_sha256(&marked);
+            successor.update = marked;
+            successor
+        })
+    }
+
+    fn diverge(store: &mut EngineStore) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "local newer".to_owned(),
+                    moment_id: "moment-local-newer".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("advance local head");
+    }
+
+    fn divergence_state(store: &EngineStore) -> (i64, i64) {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND disposition='conflicting-successor'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("divergence state")
+    }
+
+    #[test]
+    fn an_engine_that_does_not_read_format_two_refuses_a_format_two_successor() {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+    }
+
+    #[test]
+    fn a_diverged_note_refuses_a_format_two_successor_on_an_engine_that_does_not_read_it() {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        diverge(&mut store);
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        assert_eq!(divergence_state(&store), (0, 0));
+    }
+
     #[test]
     fn a_successor_that_splits_an_emoji_is_refused_and_the_pull_goes_on() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
-        refuses_the_split_successor(&mut store, &key, built.value);
+        refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);
         let other = dohc_engine_collab::Ydoc::wire();
         other.plaintext_insert(0, "other");
         let claim = store
@@ -7573,43 +7654,9 @@ mod tests {
     #[test]
     fn a_diverged_note_refuses_a_successor_that_splits_an_emoji() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
-        VersionedTextStore::new(&mut store)
-            .write_text(
-                &WriteText {
-                    workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
-                    object_id: "object-a".to_owned(),
-                    path: "doc.md".to_owned(),
-                    text: "local newer".to_owned(),
-                    moment_id: "moment-local-newer".to_owned(),
-                    metadata_origin: "api".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 20,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .expect("advance local head");
-        refuses_the_split_successor(&mut store, &key, built.value);
-        let (open, inactive): (i64, i64) = store
-            .read_with(|conn| {
-                Ok::<_, rusqlite::Error>((
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND disposition='conflicting-successor'",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                ))
-            })
-            .expect("divergence state");
-        assert_eq!((open, inactive), (0, 0));
+        diverge(&mut store);
+        refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);
+        assert_eq!(divergence_state(&store), (0, 0));
     }
 
     #[test]

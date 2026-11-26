@@ -4149,6 +4149,84 @@ fn a_base_whose_delete_splits_an_emoji_is_refused_when_it_arrives() {
 }
 
 #[test]
+fn a_format_two_base_on_an_engine_that_does_not_read_format_two_is_refused_for_its_note_only() {
+    let (_scratch, mut store) = test_store();
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let base = note.encode_full_state();
+    let claim = store.put_binary_blob(&base).unwrap();
+    let delta = note.richdoc_append_paragraph("Later");
+    let delta_sha = store.put_binary_blob(&delta).unwrap();
+    let other = Ydoc::wire();
+    other.plaintext_insert(0, "other");
+    let other = store.put_binary_blob(&other.encode_full_state()).unwrap();
+    let arrivals = [
+        (
+            "peer",
+            0,
+            json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"richdoc","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+        ),
+        (
+            "peer",
+            1,
+            json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"richdoc","updateBlobSha256":delta_sha,"lineageClaimId":claim,"isBaseState":false}),
+        ),
+        (
+            "other",
+            0,
+            json!({"versionId":"main","objectId":"other","path":"other.md","contentKind":"plaintext","updateBlobSha256":other,"lineageClaimId":other,"isBaseState":true}),
+        ),
+    ];
+    let mut outcomes = Vec::new();
+    for (relay_seq, (origin, origin_seq, payload)) in (1..).zip(arrivals) {
+        let mut arriving = envelope(origin, origin_seq, "ws", payload);
+        arriving.op_kind = "ydoc.update".into();
+        arriving.relay_seq = Some(relay_seq);
+        outcomes.push(
+            apply_ydoc_envelope(
+                &mut store,
+                &mut Default::default(),
+                &arriving,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap()
+            .primary,
+        );
+    }
+    match &outcomes[0] {
+        ApplyDisposition::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { reason },
+            ..
+        }) => assert_eq!(reason, "ydoc-note-uses-a-newer-body-format"),
+        refused => panic!("the base was not refused: {refused:?}"),
+    }
+    assert!(
+        matches!(outcomes[2], ApplyDisposition::Applied(_)),
+        "{:?}",
+        outcomes[2]
+    );
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    assert!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .is_none()
+    );
+    assert!(snapshot(&store, "object").is_none());
+    let (jobs, kept): (i64, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM materialization_jobs WHERE target_path='head.md'),
+                        (SELECT update_sha256 FROM replication_refused_ydoc_blobs
+                          WHERE origin_id='peer' AND origin_seq=0)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((jobs, kept), (0, claim));
+}
+
+#[test]
 fn a_losing_base_that_splits_an_emoji_raises_no_notice() {
     let (_scratch, mut store) = test_store();
     let kept = dohc_engine_collab::Ydoc::wire();

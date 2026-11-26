@@ -128,13 +128,11 @@ fn a_successor_with_a_container_that_holds_no_line_is_written_in_format_one() {
 #[test]
 fn an_engine_that_does_not_read_format_two_refuses_to_write_its_successor() {
     let error = fresh_successor_base(&identity("text\n", 2), "text\n").expect_err("refused");
-    assert!(matches!(
-        error,
-        CollabError::InvalidSuccessorBase {
-            constraint: "format-2 successor",
-            ..
-        }
-    ));
+    assert_eq!(
+        error.code(),
+        "ydoc-note-uses-a-newer-body-format",
+        "{error:?}"
+    );
 }
 
 #[test]

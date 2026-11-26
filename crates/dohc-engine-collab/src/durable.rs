@@ -3856,23 +3856,17 @@ mod successor_validation_tests {
             .expect("format-2 successor")
     }
 
-    fn refused_as_a_format_two_base(error: CollabError) -> bool {
-        matches!(
-            error,
-            CollabError::InvalidSuccessorBase {
-                constraint: "format-2 successor base",
-                ..
-            }
-        )
-    }
-
     #[test]
     fn an_engine_that_does_not_read_format_two_refuses_a_format_two_successor_base() {
         let base = format_two_successor("A note.\n");
         crate::ydoc::reading_body_sequence_here(|| validate_successor_base(&base, None))
             .expect("an engine that reads format 2 takes the base");
         let error = validate_successor_base(&base, None).expect_err("refused");
-        assert!(refused_as_a_format_two_base(error));
+        assert_eq!(
+            error.code(),
+            "ydoc-note-uses-a-newer-body-format",
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -3906,7 +3900,10 @@ mod successor_validation_tests {
             validate_successor_base(&tampered, None)
         })
         .expect_err("refused");
-        assert!(refused_as_a_format_two_base(error));
+        assert!(
+            matches!(error, CollabError::MalformedUpdate { .. }),
+            "{error:?}"
+        );
     }
 
     fn successor_merged_with(update: Vec<u8>) -> SuccessorBase {
