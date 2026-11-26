@@ -36,6 +36,7 @@ import {
   Code,
   Highlighter,
   Italic,
+  MessageSquarePlus,
   RemoveFormatting,
   Strikethrough,
   Underline as UnderlineIcon,
@@ -143,6 +144,14 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { RedoKeys } from "./redoKeys";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
+import { findQuote, quoteForSelection } from "./commentAnchors";
+import { makeCommentHighlightPlugin, setCommentAnchors } from "./commentHighlights";
+import {
+  requestFileComment,
+  useFileCommentReveal,
+  useFileComments,
+  type CommentAnchor,
+} from "../workbench/fileComments";
 import {
   CollaborationHistoryInput,
   createCollaborationHistoryHandle,
@@ -201,6 +210,9 @@ export type MarkdownEditorProps = {
   onFocus?: () => void;
   workspaceId: string;
   path: string;
+  // The document's own body, which takes comments on its passages. A
+  // Collection record's body does not.
+  comments?: boolean;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
   onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
@@ -339,7 +351,11 @@ function BubbleButton(props: {
 // transaction, so the toolbar reads the block and marks under the selection
 // from the editor's state; a render-time read showed the previous
 // selection's. selectionFormat keeps that read cheap on every keystroke.
-function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuState) => void }) {
+function SelectionToolbar(props: {
+  editor: Editor;
+  onOpenLink: (state: LinkMenuState) => void;
+  onComment?: () => void;
+}) {
   const { editor } = props;
   const active = useEditorState({
     editor,
@@ -404,9 +420,19 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       >
         <RemoveFormatting size={14} aria-hidden />
       </BubbleButton>
+      {props.onComment ? (
+        <>
+          <span className="dohc-bubble-menu__divider" aria-hidden="true" />
+          <BubbleButton label="Comment" onClick={props.onComment}>
+            <MessageSquarePlus size={14} aria-hidden />
+          </BubbleButton>
+        </>
+      ) : null}
     </>
   );
 }
+
+const NO_ANCHORS: readonly CommentAnchor[] = [];
 
 /** Reveal the block `target` names, clamped to the last block — the caller's
  *  index comes from Markdown that can have drifted from the live document,
@@ -495,9 +521,17 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       collaborationExtensions,
       workspaceId,
       path,
+      comments,
     },
     ref,
   ) {
+    // This document's comments on passages, which About reads and publishes.
+    const fileComments = useFileComments(workspaceId, comments ? path : null);
+    const anchors = fileComments?.anchors ?? NO_ANCHORS;
+    const anchorsRef = useRef(anchors);
+    anchorsRef.current = anchors;
+    const commentFileRef = useRef({ workspaceId, path });
+    commentFileRef.current = { workspaceId, path };
     const [acState, setAcState] = useState<AutocompleteState>({ active: false });
     const [mentionState, setMentionState] = useState<AutocompleteState>({
       active: false,
@@ -688,6 +722,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeEmojiPlugin((state) => setEmojiState(state)),
               wikilinkClickPlugin,
               makeHeadingFlashPlugin(),
+              makeCommentHighlightPlugin({
+                anchors: () => anchorsRef.current,
+                onOpen: (threadId) => {
+                  const file = commentFileRef.current;
+                  requestFileComment(file.workspaceId, file.path, { kind: "open", threadId });
+                },
+              }),
               makeLinkMenuPlugin({
                 stateRef: linkMenuStateRef,
                 setState: setLinkMenuState,
@@ -1096,6 +1137,36 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       };
     }, [editor, blockTarget?.index, blockTarget?.nonce, onBlockTargetConsumed]);
 
+    // Paint the comments' passages whenever the list changes.
+    useEffect(() => {
+      if (editor && !editor.isDestroyed)
+        editor.view.dispatch(setCommentAnchors(editor.state, anchors));
+    }, [editor, anchors]);
+
+    // Show the passage of the comment About opened. A reveal from before this
+    // editor mounted is not shown again.
+    const reveal = useFileCommentReveal(workspaceId, path);
+    const shownReveal = useRef(reveal?.token);
+    useEffect(() => {
+      if (!editor || !reveal || !comments || shownReveal.current === reveal.token) return;
+      shownReveal.current = reveal.token;
+      const range = findQuote(editor.state.doc, reveal.quote);
+      if (!range) return;
+      revealDocPosition(editor, range, () =>
+        editor.view.dom.querySelector<HTMLElement>(`.${FLASH_CLASS}`),
+      );
+    }, [comments, editor, reveal]);
+
+    const commentOnSelection = useCallback(() => {
+      if (!editor) return;
+      const { from, to } = editor.state.selection;
+      const picked = quoteForSelection(editor.state.doc, from, to);
+      if (!picked) return;
+      // The comment's composer takes over, so the toolbar closes.
+      editor.commands.setTextSelection(to);
+      requestFileComment(workspaceId, path, { kind: "comment", quote: picked.quote });
+    }, [editor, path, workspaceId]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -1220,7 +1291,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               !linkMenuStateRef.current.open && hasFormattableSelection(instance.state.selection)
             }
           >
-            <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
+            <SelectionToolbar
+              editor={editor}
+              onOpenLink={setLinkMenuState}
+              {...(fileComments?.canComment ? { onComment: commentOnSelection } : {})}
+            />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (

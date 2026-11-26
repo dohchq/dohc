@@ -27,6 +27,7 @@ use dohc_engine_domain::ChatProjectionFileAccess;
 use dohc_engine_domain::ChatThread;
 use dohc_engine_domain::ChatThreadLane;
 use dohc_engine_domain::CreateFileThread;
+use dohc_engine_domain::FileChatThread;
 use dohc_engine_domain::LocalAttachmentInput;
 use dohc_engine_domain::StartChannelThread;
 use dohc_engine_protocol::error::ErrorCode;
@@ -241,6 +242,15 @@ impl<'a> From<&'a ChatThread> for ThreadB2Wire<'a> {
 
 pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
     json!(ThreadB2Wire::from(thread))
+}
+
+/// A file's comment, with the passage its opening message quotes.
+fn file_thread_json(row: &FileChatThread) -> Value {
+    let mut value = thread_b2_json(&row.thread);
+    if let (Some(quote), Some(object)) = (&row.quote, value.as_object_mut()) {
+        object.insert("quote".to_owned(), json!(quote));
+    }
+    value
 }
 
 #[derive(Serialize)]
@@ -481,14 +491,15 @@ impl EngineService {
         let values: Vec<Value> = rows
             .iter()
             .take(page_limit as usize)
-            .map(thread_b2_json)
+            .map(file_thread_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
         let has_more = rows.len() > included;
         let next_cursor = if has_more {
-            let last = rows
+            let last = &rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?
+                .thread;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,

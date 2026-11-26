@@ -539,7 +539,7 @@ fn list_threads_for_file_is_workspace_object_scoped_and_stably_ordered() {
         .expect("list");
     assert_eq!(
         rows.iter()
-            .map(|row| row.thread_id.as_str())
+            .map(|row| row.thread.thread_id.as_str())
             .collect::<Vec<_>>(),
         ["a", "b"],
         "match path/foreign rows or omit the id tie-break -> ids differ.",

@@ -13,6 +13,7 @@ import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile } from "./About";
 import type { AccessContext } from "./accessReason";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
+import { requestFileComment, useFileCommentReveal, useFileComments } from "./fileComments";
 
 function stubAnimationFrames() {
   let nextId = 0;
@@ -1131,6 +1132,133 @@ describe("LinkedChatsPanel comment on the file", () => {
     fireEvent.keyDown(screen.getByTestId("linked-chat-new-composer"), { key: "Escape" });
     expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+});
+
+describe("LinkedChatsPanel comment on a passage", () => {
+  const anchored: ChatThreadRecord = {
+    id: "thread-quoted",
+    title: "Why Monday?",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    quote: "Ship *the* plan @ada on Monday",
+  };
+
+  function Probe() {
+    const comments = useFileComments("workspace-1", "docs/plan.md");
+    const reveal = useFileCommentReveal("workspace-1", "docs/plan.md");
+    return (
+      <>
+        <output data-testid="probe-comments">{JSON.stringify(comments ?? null)}</output>
+        <output data-testid="probe-reveal">{reveal?.quote ?? ""}</output>
+      </>
+    );
+  }
+
+  function renderPanel(props: Partial<PanelProps> = {}) {
+    render(
+      <>
+        <LinkedChatsPanel
+          workspaceId="workspace-1"
+          filePath="docs/plan.md"
+          onError={vi.fn()}
+          {...props}
+        />
+        <Probe />
+      </>,
+    );
+  }
+
+  const published = () => JSON.parse(screen.getByTestId("probe-comments").textContent!);
+
+  it("shows the editor the passages, opens the composer on a passage, and posts the passage as a quote", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [searchThread, anchored],
+    });
+    bridgeMock.createFileChat.mockResolvedValue({
+      thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 },
+    });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1" } });
+    renderPanel();
+    await waitFor(() =>
+      expect(published()).toEqual({
+        anchors: [{ threadId: "thread-quoted", quote: anchored.quote }],
+        canComment: true,
+      }),
+    );
+    expect(screen.getAllByTestId("linked-chat-quote").map((row) => row.textContent)).toEqual([
+      anchored.quote,
+    ]);
+
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", {
+        kind: "comment",
+        quote: "the *launch* plan",
+      }),
+    );
+    expect((await screen.findByTestId("linked-chat-new-quote")).textContent).toBe(
+      "the *launch* plan",
+    );
+    const composer = screen.getByTestId("linked-chat-new-composer");
+    expect(document.activeElement).toBe(composer);
+    fireEvent.change(composer, { target: { value: "Too soon?" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-1",
+        threadId: "thread-new",
+        body: "> the \\*launch\\* plan\n\nToo soon?",
+      }),
+    );
+    // Opening the new comment reads the list again, which now holds it.
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [
+        searchThread,
+        anchored,
+        {
+          id: "thread-new",
+          title: "Too soon?",
+          createdAtMs: 2,
+          updatedAtMs: 2,
+          quote: "the *launch* plan",
+        },
+      ],
+    });
+    act(() => {
+      for (const listener of activity) listener({ workspaceId: "workspace-1" });
+    });
+    await waitFor(() =>
+      expect(published().anchors).toContainEqual({
+        threadId: "thread-new",
+        quote: "the *launch* plan",
+      }),
+    );
+  });
+
+  it("opens the comment a passage's highlight names, and shows the editor its passage", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
+    renderPanel();
+    await screen.findByTestId("linked-chat-quote");
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", {
+        kind: "open",
+        threadId: "thread-quoted",
+      }),
+    );
+    expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Why Monday?");
+    expect(screen.getByTestId("probe-reveal").textContent).toBe(anchored.quote);
+  });
+
+  it("tells the editor a passage takes no comment where this person cannot comment", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
+    renderPanel({ shared: true, readOnly: "Comments are read-only." });
+    await waitFor(() => expect(published()?.canComment).toBe(false));
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", { kind: "comment", quote: "plan" }),
+    );
+    expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
   });
 });
 

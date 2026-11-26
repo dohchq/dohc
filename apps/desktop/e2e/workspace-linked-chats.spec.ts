@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { desktopPins } from "../src/testPins";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -9,6 +11,7 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
+  trustOpenWorkspace,
   waitForFileObjectId,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -102,6 +105,96 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
       },
       { id: workspace.workspaceId },
     );
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("comment on a selected passage, see it highlighted, and open the comment from it", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = async (name: string) => {
+    for (const theme of ["light", "dark"] as const) {
+      await desktop!.page.evaluate(async (value) => {
+        document.documentElement.setAttribute("data-theme", value);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }, theme);
+      await desktop!.page.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+    await desktop!.page.evaluate(() =>
+      document.documentElement.setAttribute("data-theme", "light"),
+    );
+  };
+
+  try {
+    desktop = await launchDesktopApp({ workspace: temp });
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    await writeWorkspaceFiles(temp, [
+      {
+        path: "notes/plan.md",
+        contents: "# Plan\n\nShip the launch plan on Monday.\n\nBudget is tight this quarter.\n",
+      },
+    ]);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await waitForFileObjectId(page, workspace.workspaceId, "notes/plan.md");
+    await revealExplorerPath(page, "notes/plan.md");
+    await explorerRow(page, "notes/plan.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toContainText("Ship the launch plan on Monday.");
+
+    // Comment from the selection toolbar. About opens on the passage.
+    await editor
+      .getByText("Ship the launch plan on Monday.")
+      .dblclick({ position: { x: 70, y: 8 } });
+    const toolbar = page.locator(".dohc-bubble-menu");
+    await expect(toolbar).toBeVisible();
+    await toolbar.getByRole("button", { name: "Comment", exact: true }).click();
+    const quote = page.getByTestId("linked-chat-new-quote");
+    await expect(quote).toBeVisible();
+    const passage = (await quote.textContent())!;
+    expect("Ship the launch plan on Monday.").toContain(passage);
+    await shot("passage-composer");
+    const composer = page.getByTestId("linked-chat-new-composer");
+    await expect(composer).toBeFocused();
+    await composer.fill("Is Monday realistic?");
+    await composer.press("Enter");
+    await expect(page.getByTestId("linked-chat-title")).toHaveText("Is Monday realistic?");
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText(passage);
+
+    // The passage is highlighted in the document.
+    const highlight = editor.locator("[data-comment-thread]");
+    await expect(highlight).toHaveText(passage);
+
+    // An agent comments on a passage with an ordinary Markdown quote.
+    await trustOpenWorkspace(desktop);
+    await waitForCliEndpoint(temp.homeDir);
+    await runDohcCli(temp, [
+      "document",
+      "comment",
+      "notes/plan.md",
+      "--title",
+      "Travel budget",
+      "--text",
+      "> Budget is tight\n\nCan we move money from travel?",
+      "--as-agent",
+      "--json",
+    ]);
+    await expect(highlight).toHaveCount(2);
+    await expect(highlight.nth(1)).toHaveText("Budget is tight");
+
+    // Back in the list, each comment shows its passage.
+    await page.getByTestId("linked-chat-back").click();
+    await expect(page.getByTestId("linked-chat-quote")).toHaveText([passage, "Budget is tight"]);
+    await shot("passage-comments");
+
+    // A click on a highlight opens its comment, with About hidden first.
+    await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
+    await expect(page.getByTestId(desktopPins.aboutRail)).toBeHidden();
+    await expect(highlight).toHaveCount(2);
+    await highlight.nth(1).click();
+    await expect(page.getByTestId("linked-chat-title")).toHaveText("Travel budget");
+    await shot("passage-opened");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

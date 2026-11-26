@@ -704,7 +704,11 @@ const DOCUMENT_VERBS = {
         text: "Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.",
       },
     ],
-    notes: [stdinNote, "The first message allows at most 64 KiB of UTF-8."],
+    notes: [
+      stdinNote,
+      "The first message allows at most 64 KiB of UTF-8.",
+      "Start the first message with a Markdown quote of a passage, as in > the passage, to comment on that passage. The file's editor highlights it.",
+    ],
     parse: (input) => {
       const [path, body, ...extra] = input.operands;
       if (!path) fail("document requires a path");

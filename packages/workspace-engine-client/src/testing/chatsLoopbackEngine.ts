@@ -589,6 +589,22 @@ function bookmarkId(
   return `bookmark_${base32LowercaseNoPadding(digest)}`;
 }
 
+// The engine's `opening_comment_quote`: the leading `>` lines, unescaped and
+// with whitespace collapsed.
+function openingQuote(body: string): string | undefined {
+  const lines: string[] = [];
+  for (const line of body.split("\n")) {
+    if (!line.startsWith(">")) break;
+    lines.push(line.slice(line.startsWith("> ") ? 2 : 1));
+  }
+  const quote = lines
+    .join(" ")
+    .replace(/\\([!-/:-@[-`{-~])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return quote ? quote.slice(0, 1000) : undefined;
+}
+
 function threadMessages(state: WorkspaceState, threadId: string): ChatMessage[] {
   return (state.threadMessages.get(threadId) ?? [])
     .map((messageId) => state.messages.get(messageId))
@@ -2250,9 +2266,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .filter(
         (thread) => thread.workspaceId === workspace && thread.linkedFile?.objectId === objectId,
       )
-      .sort(
-        (left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id),
-      );
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
+      .map((thread) => {
+        const quote = openingQuote(threadMessages(state, thread.id)[0]?.body ?? "");
+        return quote === undefined ? thread : { ...thread, quote };
+      });
     const result = page(rows, params, `${workspace}\0threadsForFile\0${objectId}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }

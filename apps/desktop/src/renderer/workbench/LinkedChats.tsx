@@ -1,6 +1,6 @@
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { ArrowLeft, Info, Lock, Plus } from "lucide-react";
+import { ArrowLeft, Info, Lock, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
@@ -30,6 +30,14 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
+import { quotedCommentBody } from "../editor/commentAnchors";
+import {
+  anchorsOf,
+  publishFileComments,
+  revealFileComment,
+  takeFileCommentRequest,
+  useFileCommentRequest,
+} from "./fileComments";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
@@ -152,6 +160,8 @@ export function LinkedChatsPanel(props: {
     focusMessageId?: string;
   } | null>(null);
   const [commenting, setCommenting] = useState<string | null>(null);
+  // The passage the new comment is on, or null for the whole file.
+  const [commentQuote, setCommentQuote] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   // Thread requests and this file's Chats read each own a token, so opening,
@@ -293,6 +303,7 @@ export function LinkedChatsPanel(props: {
     setMessages([]);
     setComposer("");
     setCommenting(null);
+    setCommentQuote(null);
     if (!filePath) {
       setThreadsState({ status: "loading" });
       return;
@@ -309,6 +320,7 @@ export function LinkedChatsPanel(props: {
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       const read = ++messageReads.current.started;
+      if (thread.quote && filePath) revealFileComment(workspaceId, filePath, thread.quote);
       setActiveThread(thread);
       setMessages([]);
       setMessagesLoading(true);
@@ -349,7 +361,7 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props.onError, props.onThreadRead, reactions, readMessages, workspaceId],
+    [filePath, props.onError, props.onThreadRead, reactions, readMessages, workspaceId],
   );
 
   // The chat this panel shows, and none once it unmounts.
@@ -421,20 +433,25 @@ export function LinkedChatsPanel(props: {
     props.onInitialThreadConsumed?.();
   }, [openThread, props.initialFocusMessageId, props.initialThread, props.onInitialThreadConsumed]);
 
-  // A comment on the whole file starts its chat, then posts as its first
-  // message. A post that fails leaves the chat open with the words in its
-  // composer, so nothing written is lost.
+  // A comment starts its chat, then posts as its first message. A comment on
+  // a passage opens that message with the passage as a quote. A post that
+  // fails leaves the chat open with the words in its composer, so nothing
+  // written is lost.
   const commentOnFile = useCallback(
-    async (body: string) => {
+    async (words: string) => {
       if (!filePath) return;
-      const trimmed = body.trim();
+      const trimmed = words.trim();
       if (trimmed.length === 0 || sending) return;
+      const quote = commentQuote;
+      const body = quote === null ? trimmed : quotedCommentBody(quote, trimmed);
       const token = ++liveToken.current;
       setSending(true);
       try {
-        const { thread } = await bridge().createFileChat({ workspaceId, path: filePath });
+        const created = await bridge().createFileChat({ workspaceId, path: filePath });
         if (token !== liveToken.current) return;
+        const thread = quote === null ? created.thread : { ...created.thread, quote };
         setCommenting(null);
+        setCommentQuote(null);
         setThreadsState((current) =>
           current.status === "ready"
             ? { ...current, threads: [...current.threads, thread] }
@@ -444,7 +461,7 @@ export function LinkedChatsPanel(props: {
           const result = await bridge().sendChatMessage({
             workspaceId,
             threadId: thread.id,
-            body: trimmed,
+            body,
           });
           if (token !== liveToken.current) return;
           // The comment saved, so its words stay out of the composer. Opening the chat shows it.
@@ -457,7 +474,7 @@ export function LinkedChatsPanel(props: {
           else if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         } catch (error) {
           if (token !== liveToken.current) return;
-          setComposer(trimmed);
+          setComposer(body);
           props.onError(ipcErrorMessage(error, "dohc could not post that comment."), error);
         }
         void openThread(thread);
@@ -469,6 +486,7 @@ export function LinkedChatsPanel(props: {
       }
     },
     [
+      commentQuote,
       filePath,
       openThread,
       props.onAgentWaitsForTrust,
@@ -479,11 +497,46 @@ export function LinkedChatsPanel(props: {
     ],
   );
 
-  // The composer that opens takes focus, as the + that opened it asked.
+  // The composer that opens takes focus, as the + or the passage that opened
+  // it asked.
   const composing = commenting !== null;
   useEffect(() => {
     if (composing) document.getElementById(NEW_COMMENT_COMPOSER)?.focus();
-  }, [composing]);
+  }, [composing, commentQuote]);
+
+  // The editor shows this file's comments on passages, and whether a passage
+  // can take one, from this read of them.
+  const listed =
+    threadsState.status === "ready" && threadsState.key === threadsKey ? threadsState : null;
+  const canComment = listed !== null && !readOnly && listed.fileObjectId !== null;
+  const listedThreads = listed?.threads;
+  useEffect(() => {
+    if (!filePath || listedThreads === undefined) return;
+    publishFileComments(workspaceId, filePath, {
+      anchors: anchorsOf(listedThreads),
+      canComment,
+    });
+  }, [canComment, filePath, listedThreads, workspaceId]);
+
+  // The editor asks to comment on a passage or to open a comment. Each ask is
+  // taken once this file's comments are read.
+  const request = useFileCommentRequest(workspaceId, filePath);
+  useEffect(() => {
+    if (!request || !filePath || listedThreads === undefined) return;
+    takeFileCommentRequest(workspaceId, filePath, request);
+    if (request.kind === "open") {
+      const thread = listedThreads.find((listedThread) => listedThread.id === request.threadId);
+      if (thread && shownThreadId.current !== thread.id) void openThread(thread);
+      return;
+    }
+    if (!canComment) return;
+    liveToken.current += 1;
+    setActiveThread(null);
+    setMessages([]);
+    setSectionsOpen((current) => ({ ...current, chats: true }));
+    setCommentQuote(request.quote);
+    setCommenting((current) => current ?? "");
+  }, [canComment, filePath, listedThreads, openThread, request, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     const thread = activeThread;
@@ -745,7 +798,6 @@ export function LinkedChatsPanel(props: {
   // takes no comments: the section says why instead of offering one.
   const ready = threads?.status === "ready" ? threads : null;
   const untracked = ready !== null && ready.fileObjectId === null;
-  const canComment = ready !== null && !readOnly && !untracked;
   const startComment = () => {
     setSectionsOpen((current) => ({ ...current, chats: true }));
     setCommenting((current) => current ?? "");
@@ -794,16 +846,38 @@ export function LinkedChatsPanel(props: {
             <div data-testid="linked-chats-panel">
               {commenting !== null ? (
                 <div className="-mx-1">
+                  {commentQuote !== null ? (
+                    <div
+                      data-testid="linked-chat-new-quote"
+                      className="mx-3 mt-1 flex items-start gap-1 border-l-2 border-accent/60 pl-2 text-[12px] text-subtle"
+                    >
+                      <span className="line-clamp-3 min-w-0 flex-1">{commentQuote}</span>
+                      <button
+                        type="button"
+                        aria-label="Comment on the whole file"
+                        title="Comment on the whole file"
+                        onClick={() => setCommentQuote(null)}
+                        className="grid size-5 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+                      >
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  ) : null}
                   <ChatComposer
                     testIdPrefix="linked-chat-new"
                     composerId={NEW_COMMENT_COMPOSER}
                     value={commenting}
                     sending={sending}
-                    placeholder="Comment on this file…"
+                    placeholder={
+                      commentQuote !== null ? "Comment on this passage…" : "Comment on this file…"
+                    }
                     sendLabel="Comment"
                     onChange={setCommenting}
                     onSend={() => void commentOnFile(commenting)}
-                    onEscape={() => setCommenting(null)}
+                    onEscape={() => {
+                      setCommenting(null);
+                      setCommentQuote(null);
+                    }}
                   />
                 </div>
               ) : null}

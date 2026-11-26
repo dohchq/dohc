@@ -369,6 +369,62 @@ pub struct ChatThread {
     pub linked_at_ms: Option<i64>,
 }
 
+/// A file's comment as its file lists it. A comment that opens with a Markdown
+/// quote of the file is about that passage: `quote` holds it, and the title is
+/// the words after it, so the list reads as the comment rather than the quote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChatThread {
+    pub thread: ChatThread,
+    pub quote: Option<String>,
+}
+
+/// The longest passage a comment's quote keeps, in characters.
+pub const COMMENT_QUOTE_MAX_CHARS: usize = 1_000;
+
+/// The passage a comment's opening Markdown quote names, and the words after
+/// it. Each `>` line gives up its marker and one space, backslash escapes of
+/// ASCII punctuation are undone (the desktop escapes them so a quote renders
+/// as written and never mentions anyone), and whitespace collapses to single
+/// spaces. None when the body does not open with a quote that has text.
+pub fn opening_comment_quote(body: &str) -> Option<(String, &str)> {
+    let mut raw = String::new();
+    let mut rest = body;
+    while let Some(quoted) = rest.strip_prefix('>') {
+        let (line, after) = quoted.split_once('\n').unwrap_or((quoted, ""));
+        raw.push_str(line.strip_prefix(' ').unwrap_or(line));
+        raw.push('\n');
+        rest = after;
+    }
+    let mut quote = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut in_ws = false;
+    while let Some(mut ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(&escaped) = chars.peek().filter(|next| next.is_ascii_punctuation()) {
+                chars.next();
+                ch = escaped;
+            }
+        }
+        if ch.is_whitespace() {
+            in_ws = true;
+            continue;
+        }
+        if in_ws && !quote.is_empty() {
+            quote.push(' ');
+        }
+        in_ws = false;
+        quote.push(ch);
+    }
+    if quote.is_empty() {
+        return None;
+    }
+    if let Some((cut, _)) = quote.char_indices().nth(COMMENT_QUOTE_MAX_CHARS) {
+        quote.truncate(cut);
+        quote.truncate(quote.trim_end().len());
+    }
+    Some((quote, rest.trim_start()))
+}
+
 /// Which automation wrote a message on this computer, and the chain depth of
 /// that write. It never leaves this computer: a message another computer's
 /// automation wrote arrives without it.
@@ -4776,7 +4832,7 @@ impl<'a> LinkedChatStore<'a> {
         object_id: &str,
         after: Option<(i64, String)>,
         limit: i64,
-    ) -> Result<Vec<ChatThread>, DomainError> {
+    ) -> Result<Vec<FileChatThread>, DomainError> {
         let object_id = object_id.trim_matches(is_js_trim_ws);
         if object_id.is_empty() || object_id.encode_utf16().count() > 200 {
             return Err(DomainError::chat(
@@ -4816,7 +4872,7 @@ impl<'a> LinkedChatStore<'a> {
                         after_thread_id,
                         limit
                     ],
-                    map_thread_row,
+                    map_file_thread_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
@@ -9427,6 +9483,23 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread
         linked_object_id,
         linked_path_hint,
         linked_at_ms,
+    }))
+}
+
+fn map_file_thread_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<FileChatThread, DomainError>> {
+    let stored_title: String = row.get(2)?;
+    let first_body: Option<String> = row.get(10)?;
+    Ok(map_thread_row(row)?.map(|mut thread| {
+        let opening = first_body.as_deref().and_then(opening_comment_quote);
+        if let Some((_, words)) = opening.as_ref().filter(|(_, words)| !words.is_empty()) {
+            thread.title = chat_thread_display_title(&stored_title, Some(words));
+        }
+        FileChatThread {
+            thread,
+            quote: opening.map(|(quote, _)| quote),
+        }
     }))
 }
 

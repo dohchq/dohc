@@ -885,6 +885,13 @@ export interface ChatThread {
   channelId?: ChatChannelId;
 }
 
+// A comment on a file. A comment whose opening message starts with a Markdown
+// quote is on that passage: `quote` holds its text, unescaped, and `title`
+// comes from the words after it.
+export interface FileChatThread extends ChatThread {
+  quote?: string;
+}
+
 export interface ChannelThreadSummary {
   thread: ChatThread;
   messageCount: number;
@@ -1360,7 +1367,7 @@ export interface LinkedChatStore {
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
     objectId: WorkspaceObjectId;
-  }): Promise<ChatThread[]>;
+  }): Promise<FileChatThread[]>;
   // Single-user alpha read-state rule: a HUMAN-authored send advances the
   // thread's read cursor to include the sent message (your own message is
   // never unread); agent-authored sends never touch the cursor — they are

@@ -501,7 +501,7 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_start_file_chat`
 
-Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.
+Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat. To comment on a passage of a Markdown file, start `body` with a Markdown quote of the passage (`> the passage`), then a blank line, then the comment: the file's editor highlights that passage and opens the comment from it.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1510,7 +1510,7 @@ dohc document comment <path> [-] [options]
 
 Start a chat linked to a file with its first message.
 
-Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8.
+Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8. Start the first message with a Markdown quote of a passage, as in > the passage, to comment on that passage. The file's editor highlights it.
 
 - `--title <title>`: Set the chat title. Use 1 to 200 characters that are not all whitespace.
 - `--text <markdown>`: Set the first message as Markdown. The message must contain text that is not all whitespace.
