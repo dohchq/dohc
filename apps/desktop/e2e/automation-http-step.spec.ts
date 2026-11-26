@@ -1,3 +1,4 @@
+import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -472,7 +473,7 @@ test("holds a GET fetch with plain copy, holds it again after an edit, and keeps
     await builder.getByLabel("Step 2, method", { exact: true }).selectOption("GET");
     await expect(builder.getByLabel("Step 2, body type", { exact: true })).toHaveCount(0);
     await builder.getByLabel("Step 2, webhook URL").fill("https://httpbin.org/bearer");
-    await builder.getByRole("button", { name: "Add secret header", exact: true }).click();
+    await builder.getByRole("button", { name: "Add API key header", exact: true }).click();
     await builder.getByLabel("Step 2, save the answer as", { exact: true }).fill("check");
     await expect(builder).toContainText("Fetch data");
     await shoot(desktop.page, builder, "fetch-builder");

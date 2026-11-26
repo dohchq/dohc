@@ -505,14 +505,14 @@ and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceS
 ### Automation `http` steps
 
 An automation's `http` step sends `POST` (the default) or `GET` to a static HTTPS URL or an
-`http-url` secret, with optional `http-header` secrets. It runs only in a private Collection
-that no one else can edit. The owner must Allow it in Desktop. That approval is a digest of
+`http-url` secret, with optional `http-header` secrets. It runs only while no one else can
+edit the Collection. The owner must Allow it in Desktop. That approval is a digest of
 the Collection, the step's place, its URL target, method, header names, secret names and
 prefixes, the whole automation definition, and the hash of each code file it runs. Any edit
 to the automation or its code files holds the step until the owner allows it again. A
 synced workspace sends through the relay. The relay reads the method and the destination
 from the committed definition, never from the request, and checks the committed definition,
-the approval, and that the Collection is private again right before it sends.
+the approval, and that no one else can edit the Collection again right before it sends.
 
 Without `as`, the step reads only the status, and the response cap is 64 KiB. With
 `as: name`, the step fetches data: it reads up to 192 KiB of uncompressed, strict UTF-8
