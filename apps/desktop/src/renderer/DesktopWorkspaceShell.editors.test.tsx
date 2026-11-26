@@ -866,8 +866,6 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
-    // Keep Chats closed; the listing, both live editors, and the shown
-    // document's comments, read while About is hidden, subscribe to activity.
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),

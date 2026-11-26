@@ -369,23 +369,14 @@ pub struct ChatThread {
     pub linked_at_ms: Option<i64>,
 }
 
-/// A file's comment as its file lists it. A comment that opens with a Markdown
-/// quote of the file is about that passage: `quote` holds it, and the title is
-/// the words after it, so the list reads as the comment rather than the quote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChatThread {
     pub thread: ChatThread,
     pub quote: Option<String>,
 }
 
-/// The longest passage a comment's quote keeps, in characters.
 pub const COMMENT_QUOTE_MAX_CHARS: usize = 1_000;
 
-/// The passage a comment's opening Markdown quote names, and the words after
-/// it. Each `>` line gives up its marker and one space, backslash escapes of
-/// ASCII punctuation are undone (the desktop escapes them so a quote renders
-/// as written and never mentions anyone), and whitespace collapses to single
-/// spaces. None when the body does not open with a quote that has text.
 pub fn opening_comment_quote(body: &str) -> Option<(String, &str)> {
     let mut raw = String::new();
     let mut rest = body;

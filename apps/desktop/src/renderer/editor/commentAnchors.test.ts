@@ -33,7 +33,6 @@ describe("quoteForSelection", () => {
 
   it("widens a repeated word until the quote reads once, and the quote finds that passage", () => {
     const d = doc(paragraph("the plan is late"), paragraph("but the plan is good"));
-    // The second paragraph's text starts at 19.
     const from = 19 + "but the ".length;
     const picked = quoteForSelection(d, from, from + 4)!;
     expect(picked.quote).toBe("but the plan is good");
@@ -43,7 +42,6 @@ describe("quoteForSelection", () => {
 
   it("widens no further than the selection's block", () => {
     const d = doc(paragraph("plan"), paragraph("plan"));
-    // The second paragraph's text starts at 7.
     expect(quoteForSelection(d, 7, 11)).toEqual({ quote: "plan", from: 7, to: 11 });
   });
 

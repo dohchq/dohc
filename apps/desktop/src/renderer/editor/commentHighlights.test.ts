@@ -60,10 +60,8 @@ describe("comment highlights", () => {
         { threadId: "b", quote: "plan on" },
       ]),
     );
-    // The painted spans: "the " is the first passage's, "plan" both, " on" the second's.
     const spans = [...view.dom.querySelectorAll("[data-comment-thread]")];
     expect(spans.map((span) => span.textContent)).toEqual(["the ", "plan", " on"]);
-    // Where the caret lands within a span does not change whose comments open.
     for (const [span, pos] of [
       [0, 6],
       [1, 14],

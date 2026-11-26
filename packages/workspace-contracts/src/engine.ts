@@ -885,9 +885,6 @@ export interface ChatThread {
   channelId?: ChatChannelId;
 }
 
-// A comment on a file. A comment whose opening message starts with a Markdown
-// quote is on that passage: `quote` holds its text, unescaped, and `title`
-// comes from the words after it.
 interface FileChatThread extends ChatThread {
   quote?: string;
 }

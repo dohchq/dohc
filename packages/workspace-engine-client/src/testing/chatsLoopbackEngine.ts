@@ -589,8 +589,6 @@ function bookmarkId(
   return `bookmark_${base32LowercaseNoPadding(digest)}`;
 }
 
-// The engine's `opening_comment_quote`: the leading `>` lines, unescaped and
-// with whitespace collapsed.
 function openingQuote(body: string): string | undefined {
   const lines: string[] = [];
   for (const line of body.split("\n")) {

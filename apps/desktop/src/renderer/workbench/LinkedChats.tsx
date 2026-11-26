@@ -160,7 +160,6 @@ export function LinkedChatsPanel(props: {
     focusMessageId?: string;
   } | null>(null);
   const [commenting, setCommenting] = useState<string | null>(null);
-  // The passage the new comment is on, or null for the whole file.
   const [commentQuote, setCommentQuote] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -433,10 +432,6 @@ export function LinkedChatsPanel(props: {
     props.onInitialThreadConsumed?.();
   }, [openThread, props.initialFocusMessageId, props.initialThread, props.onInitialThreadConsumed]);
 
-  // A comment starts its chat, then posts as its first message. A comment on
-  // a passage opens that message with the passage as a quote. A post that
-  // fails leaves the chat open with the words in its composer, so nothing
-  // written is lost.
   const commentOnFile = useCallback(
     async (words: string) => {
       if (!filePath) return;
@@ -450,14 +445,11 @@ export function LinkedChatsPanel(props: {
       try {
         const created = await bridge().createFileChat({ workspaceId, path: filePath });
         const thread = quote === null ? created.thread : { ...created.thread, quote };
-        // The chat exists, so its comment posts even if this person has opened
-        // another comment meanwhile. The file's list holds it either way.
         setThreadsState((current) =>
           current.status === "ready" && current.key === key
             ? { ...current, threads: [...current.threads, thread] }
             : current,
         );
-        // The draft is spent, whatever this person has opened meanwhile.
         setCommenting(null);
         setCommentQuote(null);
         try {
@@ -501,15 +493,11 @@ export function LinkedChatsPanel(props: {
     ],
   );
 
-  // The composer that opens takes focus, as the + or the passage that opened
-  // it asked.
   const composing = commenting !== null;
   useEffect(() => {
     if (composing) document.getElementById(NEW_COMMENT_COMPOSER)?.focus();
   }, [composing, commentQuote]);
 
-  // The editor shows this file's comments on passages, and whether a passage
-  // can take one, from this read of them.
   const listed =
     threadsState.status === "ready" && threadsState.key === threadsKey ? threadsState : null;
   const canComment = listed !== null && !readOnly && listed.fileObjectId !== null;
@@ -522,9 +510,6 @@ export function LinkedChatsPanel(props: {
     });
   }, [canComment, filePath, listedThreads, workspaceId]);
 
-  // The editor asks to comment on a passage or to open a comment. Each ask is
-  // taken once this file's comments are read, and an ask to comment once the
-  // last comment has posted, so the new draft starts after the spent one.
   const request = useFileCommentRequest(workspaceId, filePath);
   useEffect(() => {
     if (!request || !filePath || listedThreads === undefined) return;
@@ -539,7 +524,6 @@ export function LinkedChatsPanel(props: {
         return;
       }
       if (threads.length === 0) return;
-      // Overlapping passages: the list shows each comment with its passage.
       liveToken.current += 1;
       setActiveThread(null);
       setMessages([]);

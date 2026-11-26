@@ -356,7 +356,6 @@ export function AboutChatRow(props: {
   onOpen: () => void;
 }) {
   const when = formatChatTime(props.thread.updatedAtMs);
-  // A comment on a passage shows the passage under its words.
   const { quote } = props.thread;
   return (
     <button

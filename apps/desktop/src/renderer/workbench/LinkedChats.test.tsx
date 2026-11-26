@@ -1211,7 +1211,6 @@ describe("LinkedChatsPanel comment on a passage", () => {
         body: "> the \\*launch\\* plan\n\nToo soon?",
       }),
     );
-    // Opening the new comment reads the list again, which now holds it.
     bridgeMock.listFileChats.mockResolvedValue({
       fileObjectId: "object-1",
       threads: [
@@ -1253,7 +1252,6 @@ describe("LinkedChatsPanel comment on a passage", () => {
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Why Monday?");
     expect(screen.getByTestId("probe-reveal").textContent).toBe(anchored.quote);
 
-    // Overlapping passages open the list, where each comment shows its passage.
     act(() =>
       requestFileComment("workspace-1", "docs/plan.md", {
         kind: "open",
@@ -1278,7 +1276,6 @@ describe("LinkedChatsPanel comment on a passage", () => {
     const composer = await screen.findByTestId("linked-chat-new-composer");
     fireEvent.change(composer, { target: { value: "Too soon?" } });
     fireEvent.keyDown(composer, { key: "Enter" });
-    // Another passage, asked for before the first comment's chat exists.
     ask("launch");
     await act(async () =>
       created({ thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 } }),
@@ -1322,7 +1319,6 @@ describe("LinkedChatsPanel comment on a passage", () => {
     );
     expect(screen.getByTestId("linked-chat-title").textContent).toBe("Why Monday?");
 
-    // Back in the list, the posted comment is there and its draft is gone.
     fireEvent.click(screen.getByTestId("linked-chat-back"));
     expect(await screen.findAllByTestId("linked-chat-open")).toHaveLength(2);
     expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();

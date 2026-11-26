@@ -2619,8 +2619,6 @@ export const ChatThreadRecord = z.object({
   title: z.string().min(1).max(200),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
-  // A file's comment on a passage: the passage it quotes. Set by
-  // listFileChats only.
   quote: z.string().min(1).optional(),
 });
 export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;

@@ -143,7 +143,6 @@ test("comment on a selected passage, see it highlighted, and open the comment fr
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toContainText("Ship the launch plan on Monday.");
 
-    // Comment from the selection toolbar. About opens on the passage.
     await editor
       .getByText("Ship the launch plan on Monday.")
       .dblclick({ position: { x: 70, y: 8 } });
@@ -162,11 +161,9 @@ test("comment on a selected passage, see it highlighted, and open the comment fr
     await expect(page.getByTestId("linked-chat-title")).toHaveText("Is Monday realistic?");
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(passage);
 
-    // The passage is highlighted in the document.
     const highlight = editor.locator("[data-comment-thread]");
     await expect(highlight).toHaveText(passage);
 
-    // An agent comments on a passage with an ordinary Markdown quote.
     await trustOpenWorkspace(desktop);
     await waitForCliEndpoint(temp.homeDir);
     await runDohcCli(temp, [
@@ -183,12 +180,10 @@ test("comment on a selected passage, see it highlighted, and open the comment fr
     await expect(highlight).toHaveCount(2);
     await expect(highlight.nth(1)).toHaveText("Budget is tight");
 
-    // Back in the list, each comment shows its passage.
     await page.getByTestId("linked-chat-back").click();
     await expect(page.getByTestId("linked-chat-quote")).toHaveText([passage, "Budget is tight"]);
     await shot("passage-comments");
 
-    // A click on a highlight opens its comment, with About hidden first.
     await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
     await expect(page.getByTestId(desktopPins.aboutRail)).toBeHidden();
     await expect(highlight).toHaveCount(2);

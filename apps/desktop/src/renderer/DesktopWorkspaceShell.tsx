@@ -5148,8 +5148,6 @@ function WorkspaceShell(props: {
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
-  // A document asks to comment on a passage or open a comment: About takes
-  // the ask, so it shows.
   useEffect(
     () =>
       onFileCommentRequest((requestWorkspaceId) => {

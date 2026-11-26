@@ -4,14 +4,7 @@ import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { anchorsOf, publishFileComments } from "./fileComments";
 
-// While About is hidden, reads the focused document's comments so its editor
-// still shows their passages. About reads them itself while it shows.
-export function FileCommentsReader(props: {
-  workspaceId: string;
-  path: string;
-  // This person cannot comment here.
-  closed: boolean;
-}) {
+export function FileCommentsReader(props: { workspaceId: string; path: string; closed: boolean }) {
   const { workspaceId, path, closed } = props;
   const { value, retry } = useWorkspaceQuery(useWorkspaceSession(), {
     key: JSON.stringify([workspaceId, path]),

@@ -244,7 +244,6 @@ pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
     json!(ThreadB2Wire::from(thread))
 }
 
-/// A file's comment, with the passage its opening message quotes.
 fn file_thread_json(row: &FileChatThread) -> Value {
     let mut value = thread_b2_json(&row.thread);
     if let (Some(quote), Some(object)) = (&row.quote, value.as_object_mut()) {

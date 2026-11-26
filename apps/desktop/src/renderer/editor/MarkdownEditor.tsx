@@ -210,8 +210,6 @@ export type MarkdownEditorProps = {
   onFocus?: () => void;
   workspaceId: string;
   path: string;
-  // The document's own body, which takes comments on its passages. A
-  // Collection record's body does not.
   comments?: boolean;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
@@ -525,7 +523,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     },
     ref,
   ) {
-    // This document's comments on passages, which About reads and publishes.
     const fileComments = useFileComments(workspaceId, comments ? path : null);
     const anchors = fileComments?.anchors ?? NO_ANCHORS;
     const anchorsRef = useRef(anchors);
@@ -1137,14 +1134,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       };
     }, [editor, blockTarget?.index, blockTarget?.nonce, onBlockTargetConsumed]);
 
-    // Paint the comments' passages whenever the list changes.
     useEffect(() => {
       if (editor && !editor.isDestroyed)
         editor.view.dispatch(setCommentAnchors(editor.state, anchors));
     }, [editor, anchors]);
 
-    // Show the passage of the comment About opened. A reveal from before this
-    // editor mounted is not shown again.
     const reveal = useFileCommentReveal(workspaceId, path);
     const shownReveal = useRef(reveal?.token);
     useEffect(() => {
@@ -1162,7 +1156,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       const { from, to } = editor.state.selection;
       const picked = quoteForSelection(editor.state.doc, from, to);
       if (!picked) return;
-      // The comment's composer takes over, so the toolbar closes.
       editor.commands.setTextSelection(to);
       requestFileComment(workspaceId, path, { kind: "comment", quote: picked.quote });
     }, [editor, path, workspaceId]);
