@@ -866,6 +866,8 @@ function WorkspaceShell(props: {
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [personalAppsOpen, setPersonalAppsOpen] = useState(false);
   const [workspaceAppsOpen, setWorkspaceAppsOpen] = useState(false);
+  // The folder a Member app was just promoted into: its app page opens Review app for Workspace members.
+  const [promotedApp, setPromotedApp] = useState<string | null>(null);
   // The New collection dialog: null = closed, otherwise the folder to
   // create inside ("" = workspace root).
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(null);
@@ -10074,6 +10076,8 @@ function WorkspaceShell(props: {
                                         access={appAccess}
                                         version={versionPreview}
                                         versionPending={versionPending}
+                                        reviewForMembers={promotedApp === siteRoot}
+                                        onReviewForMembersOpened={() => setPromotedApp(null)}
                                       />
                                     </Suspense>
                                   </ErrorBoundary>
@@ -10501,6 +10505,20 @@ function WorkspaceShell(props: {
                           <WorkspaceAppsDialog
                             workspaceId={props.workspace.workspaceId}
                             canCopy={!!shareView?.membership}
+                            canPromote={
+                              !shareView &&
+                              workspaceSynced &&
+                              workspaceVersions.onMain &&
+                              !versionPending
+                            }
+                            pathTaken={(path) =>
+                              folders.includes(path) || fileIndex.presentPaths.has(path)
+                            }
+                            onPromoted={(folder) => {
+                              setWorkspaceAppsOpen(false);
+                              setPromotedApp(folder);
+                              openAppTab(folder);
+                            }}
                             onClose={() => setWorkspaceAppsOpen(false)}
                             reportError={reportShellError}
                           />

@@ -389,20 +389,60 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     );
     expect(consent.status).toBe(403);
 
-    // --- The owner withdraws Ana's app --------------------------------------
-    const ownerApps = await openWorkspaceApps(page);
-    const ownerRow = ownerApps.getByTestId("workspace-app-row").filter({ hasText: "trip-board" });
-    await expect(ownerRow).toBeVisible();
-    for (const theme of ["Light", "Dark"] as const) {
-      await page.evaluate(
-        (value) => document.documentElement.setAttribute("data-theme", value),
-        theme.toLowerCase(),
-      );
-      await ownerApps.screenshot({ path: shot(`owner-apps-${theme.toLowerCase()}`) });
-    }
-    await ownerRow.getByRole("button", { name: "Withdraw" }).click();
-    await ownerApps.getByRole("alertdialog").getByRole("button", { name: "Withdraw" }).click();
-    await expect(ownerRow).toHaveCount(0);
+    // --- The owner reads its source, promotes it, and publishes it for members --
+    const themed = async (name: string, target: typeof apps) => {
+      for (const theme of ["Light", "Dark"] as const) {
+        await page.evaluate(
+          (value) => document.documentElement.setAttribute("data-theme", value),
+          theme.toLowerCase(),
+        );
+        await target.screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+      }
+    };
+    let ownerApps = await openWorkspaceApps(page);
+    const memberRow = ownerApps
+      .getByTestId("workspace-app-row")
+      .filter({ hasText: "trip-board" })
+      .filter({ hasText: "Shared by" });
+    await expect(memberRow).toBeVisible();
+    await themed("owner-apps", ownerApps);
+    await memberRow.getByRole("button", { name: "Review" }).click();
+    await ownerApps
+      .getByTestId("workspace-app-source")
+      .getByRole("button", { name: /main\.ts/ })
+      .click();
+    const sourceText = ownerApps.getByTestId("workspace-app-source-text");
+    await expect(sourceText).toBeVisible({ timeout: 60_000 });
+    expect(await sourceText.textContent()).toBe(appSource(read.name));
+    await expect(ownerApps.getByLabel("Workspace folder")).toHaveValue("apps/trip-board");
+    await themed("owner-review", ownerApps);
+    await ownerApps.getByRole("button", { name: "Promote app" }).click();
+    await expect(ownerApps).toHaveCount(0, { timeout: 60_000 });
+    expect(await readFile(join(ownerTemp.rootPath, "apps", "trip-board", "main.ts"), "utf8")).toBe(
+      appSource(read.name),
+    );
+    const publication = page.getByTestId("app-publication-dialog");
+    const publish = publication.getByTestId("app-publication-approve");
+    await expect(publish).toBeEnabled({ timeout: 60_000 });
+    await themed("owner-publish", publication);
+    await publish.click();
+    await expect(publish).toHaveCount(0, { timeout: 60_000 });
+    await page.keyboard.press("Escape");
+    await expect(publication).toHaveCount(0);
+
+    // --- The official copy stays when the owner withdraws Ana's app ---------
+    ownerApps = await openWorkspaceApps(page);
+    await expect(
+      ownerApps.getByRole("region", { name: "Official apps" }).getByText("trip-board"),
+    ).toBeVisible({ timeout: 60_000 });
+    await memberRow.getByRole("button", { name: "Withdraw" }).click();
+    const withdrawal = page.getByTestId("workspace-app-withdraw-confirm");
+    await themed("owner-withdraw", withdrawal);
+    await withdrawal.getByTestId("workspace-app-withdraw-action").click();
+    await expect(memberRow).toHaveCount(0);
+    await expect(ownerApps.getByRole("region", { name: "Official apps" })).toContainText(
+      "trip-board",
+    );
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(

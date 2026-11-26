@@ -167,11 +167,13 @@ const More = ({ children }: { children: ReactNode }) => (
 // onLocalChange runs after anything that may change this device's approvals, so other views read them again.
 // localApproval says how an app approved here opens: in its tab, in the browser, or not at all when it has no app.publish.json.
 // access: the shell's workspace server connection, and that server's address, so a signed-out Publish box can say so.
+// forMembers prepares the app for Workspace members as soon as it can, as after Promote.
 type PublicationProps = {
   workspaceId: string;
   appRoot: string;
   title?: string;
   localApproval?: "tab" | "browser" | null;
+  forMembers?: boolean;
   reportError?: ReportPermissionError;
   onLocalChange?: () => void;
   onCollectionsChange?: () => void;
@@ -445,6 +447,7 @@ function PublicationDialog(
   // Links and publications need this workspace synced; approval for this device does not. A failed check counts as
   // synced, so the link loaders still report their own errors.
   const [synced, setSynced] = useState<boolean | null>(null);
+  const membersPrepared = useRef(!props.forMembers);
   const alive = useRef(true);
   const request = useRef(0);
   const preparing = useRef(0);
@@ -1379,6 +1382,11 @@ function PublicationDialog(
     if (stored) return void reviewReactivation(stored, replaces);
     void prepareWith({ ...base, audience: "workspace" }, MEMBERS_LABEL, replaces);
   };
+  useEffect(() => {
+    if (membersPrepared.current || synced !== true || busy || publicationsLoading) return;
+    membersPrepared.current = true;
+    if (!filesCollection && live(true).length === 0) publishForMembers([]);
+  });
   const manage = () => {
     setError(null);
     setNotice(null);
