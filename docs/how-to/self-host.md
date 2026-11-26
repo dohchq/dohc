@@ -2,7 +2,7 @@
 
 Use this guide to run sync and sharing for your own devices and collaborators.
 Local work in dohc does not need a server or account.
-dohc Drive, the managed service at `https://drive.dohc.computer`, is in invite-only beta.
+dohc Drive, the managed service at `https://drive.dohc.computer`, is in invite-only alpha.
 
 The sections through [Check before inviting other people](#check-before-inviting-other-people) set up a working server.
 The sections after it cover optional configuration and maintenance.

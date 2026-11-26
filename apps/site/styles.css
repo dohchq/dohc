@@ -306,7 +306,7 @@ body {
 }
 
 .download-other:hover { color: var(--ink); }
-/* Every build is an alpha. Drawn like Drive's "Invite-only beta", one size down. */
+/* Every build is an alpha. Drawn like Drive's "Invite-only alpha", one size down. */
 .nav-start { display: flex; align-items: center; gap: 12px; }
 .alpha-tag { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, var(--bg)); color: var(--ink); font: 600 11px/1.4 var(--font-sans); }
 

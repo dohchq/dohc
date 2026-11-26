@@ -130,7 +130,7 @@ describe("CloudLogin", () => {
   it("connects to dohc Drive in one click and keeps the address in view", async () => {
     render(<CloudLogin />);
     await screen.findByTestId("cloud-server-url");
-    expect(screen.getByTestId("cloud-drive").textContent).toContain("Invite-only beta");
+    expect(screen.getByTestId("cloud-drive").textContent).toContain("Invite-only alpha");
 
     fireEvent.click(screen.getByTestId("cloud-drive-connect"));
 
