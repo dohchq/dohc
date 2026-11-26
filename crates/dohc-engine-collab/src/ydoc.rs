@@ -2216,6 +2216,9 @@ impl Ydoc {
             return self
                 .rewrite_content_to_markdown(content_kind, &point.project(content_kind)?.content);
         }
+        if point.note_schema_version() > self.note_schema_version() {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
         let before = self.doc.transact().state_vector();
         let staged = Ydoc::wire();
         let max_bytes = crate::limits::MAX_YDOC_UPDATE_BYTES;
