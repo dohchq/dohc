@@ -1996,3 +1996,133 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
     assert_eq!(stored_paths, ["app/.env", "config/prod.env"]);
     assert_eq!(pending_assemblies, 0);
 }
+
+#[test]
+fn an_env_template_secret_op_from_an_older_build_is_skipped_not_refused() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"older build template bytes";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let put = envelope(
+        "older-template-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "config/.ENV.Example",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+    let delete = envelope(
+        "older-template-peer",
+        1,
+        "secret.file.delete",
+        json!({
+            "versionId": "main",
+            "path": ".env.sample",
+            "metadata": {"origin": "sync"}
+        }),
+    );
+
+    for operation in [&put, &delete] {
+        assert!(matches!(
+            apply_replication_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                operation,
+                &NoFaults,
+                &NoLiveLeases,
+            ),
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { ref materialization_changes, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if materialization_changes.is_empty() && outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
+    }
+    let secret_rows: i64 = engine
+        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM secret_files", [], |row| row.get(0)))
+        .expect("secret rows");
+    assert_eq!(secret_rows, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "older-template-peer").expect("ack"),
+        1
+    );
+}
+
+#[test]
+fn a_secret_fork_drops_env_template_rows_and_keeps_the_rest() {
+    let (_scratch, _path, mut engine) = open_store();
+    let ciphertext = b"sealed source bytes";
+    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO secret_files \
+                 (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
+                 SELECT workspace_id,version_id,'.env.example',iv_base64,auth_tag_base64,ciphertext_base64,byte_length,2,'local-template-tip' \
+                 FROM secret_files WHERE workspace_id='ws' AND version_id='feature' AND path='stale.env'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed a template row an older build kept");
+    let row = |path: &str| {
+        json!({
+            "path": path,
+            "ivBase64": iv,
+            "authTagBase64": tag,
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len(),
+            "updatedAtMs": 100
+        })
+    };
+    let fork = envelope(
+        "template-fork-peer",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
+            "rows": [row("app/.env"), row("apps/web/.env.template")]
+        }),
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &fork,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
+    let destination: Vec<String> = engine
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("destination secrets");
+    assert_eq!(destination, [".env.example", "app/.env"]);
+}

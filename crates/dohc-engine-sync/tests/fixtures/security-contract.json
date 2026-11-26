@@ -176,6 +176,36 @@
       "read": "tracked"
     },
     {
+      "path": ".env.example",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "config/.ENV.Sample",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": ".env.template.",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": ".env.example.local",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "apps/site/.env/.env.example",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
       "path": "notes/env/config.md",
       "rustClaimed": true,
       "write": "tracked",

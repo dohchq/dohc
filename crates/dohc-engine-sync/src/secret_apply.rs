@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
+use dohc_engine_files::policy::names_env_template;
 use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -198,6 +199,9 @@ fn apply_put(
     op: &ReplicationEnvelope,
     p: SecretPut,
 ) -> Result<SecretApplyResult, SyncError> {
+    if names_env_template(&p.path) {
+        return Ok(SecretApplyResult::default());
+    }
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     let iv = STANDARD
         .decode(&p.iv_base64)
@@ -239,6 +243,9 @@ fn apply_delete(
     op: &ReplicationEnvelope,
     p: SecretDelete,
 ) -> Result<SecretApplyResult, SyncError> {
+    if names_env_template(&p.path) {
+        return Ok(SecretApplyResult::default());
+    }
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     insert_moment(tx, op, &p.version_id, &p.path, &p.metadata, None)
 }
@@ -519,12 +526,14 @@ fn finalize_fork(
     op: &ReplicationEnvelope,
     mut assembly: SecretForkAssembly,
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    assembly.rows.retain(|row| !names_env_template(&row.path));
     assembly
         .rows
         .sort_by(|left, right| left.path.cmp(&right.path));
     let previous = assembly
         .previous_tips
         .into_iter()
+        .filter(|tip| !names_env_template(&tip.path))
         .map(|tip| (tip.path, tip.latest_moment_id))
         .collect::<BTreeMap<_, _>>();
     let mut current = read_secret_tips(tx, &op.workspace_id, &assembly.to_version_id)?
@@ -655,7 +664,9 @@ fn require_version(
 }
 
 fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
-    validate_canonical_secret_path(&row.path)?;
+    if !names_env_template(&row.path) {
+        validate_canonical_secret_path(&row.path)?;
+    }
     validate_base64(&row.iv_base64, SECRET_IV_BYTES, "secret fork iv is invalid")?;
     validate_base64(
         &row.auth_tag_base64,

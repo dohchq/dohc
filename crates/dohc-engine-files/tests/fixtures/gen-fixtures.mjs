@@ -336,6 +336,11 @@ const pathFloorInputs = [
   ".envrc",
   "notes/envelope.md",
   "notes/env/config.md",
+  ".env.example",
+  "apps/web/.ENV.Template",
+  "config/.env.sample ",
+  ".env.example.local",
+  ".env/.env.sample",
 ];
 
 const fixture = {
