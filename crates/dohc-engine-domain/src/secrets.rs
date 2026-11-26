@@ -828,14 +828,12 @@ pub(crate) fn fork_version_in_tx(
         })
         .map_err(DomainError::sql_corrupt)?;
     for path in paths.iter().filter(|path| names_env_template(path)) {
-        for table in ["secret_files", "secret_fork_bases"] {
-            tx.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3"
-                ),
-                params![workspace_id, to_version_id, path],
-            )
-            .map_err(DomainError::sql_persist)?;
+        for sql in [
+            "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            "DELETE FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+        ] {
+            tx.execute(sql, params![workspace_id, to_version_id, path])
+                .map_err(DomainError::sql_persist)?;
         }
     }
     Ok(())
