@@ -12,8 +12,9 @@ import {
   type SavedView,
 } from "./cacheRows";
 import { createServerClient } from "./client";
-import { CACHE_FORMAT } from "./keptStore";
+import { CACHE_FORMAT, openNow } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
+import { pendingSignOuts } from "./pushRegistration";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
 import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
@@ -181,6 +182,48 @@ describe("saving views", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("writes an unchanged view's JSON once, and again when its value, cursor or flags change", async () => {
+    const disk = keptDisk();
+    const { files } = launch(disk);
+    let walks = 0;
+    const page = Object.defineProperty({}, "text", {
+      enumerable: true,
+      get: () => (walks++, "Packing list"),
+    });
+    const rowOf = () => String(disk.cache.sql("SELECT value FROM views")[0]?.value);
+    const saveAs = async (...views: SavedView[]) => {
+      files.write(SCOPE_A, () => views);
+      await files.flush();
+      return rowOf();
+    };
+    const list = { rows: ["a"] };
+    const first = await saveAs(saved("files", list), saved("page:p-1", page));
+    const once = walks;
+    expect(once).toBeGreaterThan(0);
+
+    expect(await saveAs(saved("files", { rows: ["a", "b"] }), saved("page:p-1", page))).toBe(
+      JSON.stringify([
+        saved("files", { rows: ["a", "b"] }),
+        saved("page:p-1", { text: "Packing list" }),
+      ]),
+    );
+    expect(walks).toBe(once);
+    expect(await saveAs(saved("files", list), saved("page:p-1", page))).toBe(first);
+    expect(walks).toBe(once);
+
+    await saveAs(saved("files", list), saved("page:p-1", page, "0.5.3"));
+    await saveAs(saved("files", list), saved("page:p-1", page, "0.5.3", true));
+    await saveAs(saved("files", list), {
+      ...saved("page:p-1", page, "0.5.3", true),
+      prefetched: true,
+    });
+    expect(walks).toBe(once * 4);
+    expect(JSON.parse(rowOf())[1]).toEqual({
+      ...saved("page:p-1", { text: "Packing list" }, "0.5.3", true),
+      prefetched: true,
+    });
   });
 
   it("saves a scope at most once every 30 s in the foreground, and at once when the app goes to the background", async () => {
@@ -397,6 +440,40 @@ describe("a relaunch", () => {
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" });
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
+  });
+
+  it("marks a value from the cache on the state that shows it, which a later server answer leaves as it was", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const data = open(server, launch(disk).cache);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
+    const rendered = data.state(views.files);
+    expect(rendered.fromCache).toBe(true);
+    await data.refresh(views.files);
+    expect(rendered.fromCache).toBe(true);
+    expect(data.state(views.files).fromCache).toBeFalsy();
+    data.stop();
+  });
+
+  it("drops the cache mark with the value when a feed replace drops a view no screen has open", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const feed = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => feed.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const data = open(server, launch(disk).cache);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md"))).toMatchObject({ fromCache: true }),
+    );
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
+    feed.resolve({ status: 200, body: { ok: true, cursor: "1.0.0", replace: true } });
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toBeNull());
+    expect(data.state(views.page("a.md")).fromCache).toBeFalsy();
+    data.stop();
   });
 
   it("shows no text after a relaunch for a page only prefetched that a change touched", async () => {
@@ -1046,6 +1123,23 @@ describe("the saved workspace list", () => {
     return { list, workspace, choice };
   }
 
+  it("reads the choice saved last as the open workspace is made, before any screen subscribes", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", held);
+    const { cache } = launch(disk);
+    const signIn = signInTo(server);
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    await vi.waitFor(() =>
+      expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-b", choosing: false }),
+    );
+    workspace.subscribe(() => {});
+    expect(workspace.state().currentWorkspaceId).toBe("ws-b");
+    workspace.stop();
+  });
+
   it("shows no reason for an empty phone while the choice saved last is read after the list", async () => {
     const server = serverWithA();
     const { list, workspace, choice } = await slowChoice(server, keptDisk());
@@ -1109,5 +1203,125 @@ describe("the saved workspace list", () => {
     await vi.waitFor(() => expect(emptied.workspace.state().currentWorkspaceId).toBe("ws-a"));
     expect(emptied.opened).toEqual(["ws-a"]);
     emptied.workspace.stop();
+  });
+});
+
+describe("a launch", () => {
+  const SAVED: StoredSignIn = {
+    origin: "https://dohc.example.com",
+    token: "tok-1",
+    userId: "u-1",
+    email: "ice@example.com",
+  };
+  const entry = (workspaceId: string) => ({
+    workspaceId,
+    name: workspaceId,
+    canOpen: true,
+    showOnPhone: true,
+  });
+
+  async function relaunch(signingOut: boolean) {
+    const disk = keptDisk();
+    const seeded = launch(disk).files;
+    await seeded.writeList(JSON.stringify([SAVED.origin, SAVED.userId]), [
+      entry("ws-a"),
+      entry("ws-b"),
+    ]);
+    await seeded.writeList(JSON.stringify([SAVED.origin, SAVED.userId, "chosen"]), "ws-b");
+    disk.cache.crash();
+
+    const kept = disk.launch();
+    const cacheFile = disk.cache.launch();
+    const files = createCacheRows(cacheFile);
+    made.push(files);
+    const reads: string[] = [];
+    const cache = createReadCache({
+      ...files,
+      readList: (scope) => (reads.push(scope), files.readList(scope)),
+    });
+    const keychain = memoryStore(SAVED);
+    const answerKeychain = keychain.holdLoads();
+    const check = deferred<boolean>();
+    const account = createAccount({
+      store: keychain.store,
+      fetch: testServer().fetch,
+      pendingSignOuts: { ...pendingSignOuts(kept), isPending: () => check.promise },
+      onSaved: (saved) => cache.preload(saved),
+    });
+    cache.follow(account);
+    const opened = openNow([kept, cacheFile]);
+    void account.restore();
+    expect(await opened).toBe(true);
+    expect(existsSync(disk.path)).toBe(true);
+    expect(account.state().status).toBe("loading");
+
+    answerKeychain();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    expect(account.state().status).toBe("loading");
+    check.resolve(signingOut);
+    await vi.waitFor(() => expect(account.state().status).not.toBe("loading"));
+    return { disk, files, cache, account, reads };
+  }
+
+  it("opens both files while the keychain is read, and reads the saved list and choice before the Sign out check answers", async () => {
+    const { cache, account, reads } = await relaunch(false);
+    const state = account.state();
+    if (state.status !== "signed-in") throw new Error("expected signed-in");
+    const signIn = state.signIn;
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    await vi.waitFor(() =>
+      expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-b", choosing: false }),
+    );
+    expect(list.state()).toMatchObject({ workspaces: [entry("ws-a"), entry("ws-b")] });
+    expect(reads).toHaveLength(2);
+    workspace.stop();
+  });
+
+  it("stays signed out, and deletes the cache.db it read early, when a Sign out waits to finish", async () => {
+    const { disk, files, account } = await relaunch(true);
+    expect(account.state().status).toBe("signed-out");
+    await files.flush();
+    expect(existsSync(disk.cache.path)).toBe(false);
+  });
+
+  it("answers that the files didn't open while the phone is locked, and that they did once it opens", async () => {
+    const disk = keptDisk();
+    const kept = disk.launch();
+    const cacheFile = disk.cache.launch();
+    disk.locked = true;
+    expect(await openNow([kept, cacheFile])).toBe(false);
+    disk.locked = false;
+    expect(await openNow([kept, cacheFile])).toBe(true);
+  });
+
+  it("deletes cache.db when Try again finds a Sign out waiting, after the first check couldn't read kept.db", async () => {
+    const disk = keptDisk();
+    await launch(disk).files.writeList(JSON.stringify([SAVED.origin, SAVED.userId]), [
+      entry("ws-a"),
+    ]);
+    disk.cache.crash();
+    const { files, cache } = launch(disk);
+    let checks = 0;
+    const account = createAccount({
+      store: memoryStore(SAVED).store,
+      fetch: testServer().fetch,
+      pendingSignOuts: {
+        ...pendingSignOuts(disk.launch()),
+        isPending: async () => {
+          checks += 1;
+          if (checks === 1) throw new Error("kept.db couldn't be read");
+          return true;
+        },
+      },
+      onSaved: (saved) => cache.preload(saved),
+    });
+    cache.follow(account);
+    await account.restore();
+    expect(account.state().status).toBe("unreadable");
+    await account.restore();
+    expect(account.state().status).toBe("signed-out");
+    await files.flush();
+    expect(existsSync(disk.cache.path)).toBe(false);
   });
 });

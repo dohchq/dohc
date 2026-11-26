@@ -57,6 +57,17 @@ export interface WorkspaceListStore {
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
 
+const unchanged = (
+  shown: Extract<WorkspaceList, { status: "ready" }>,
+  workspaces: readonly AccountWorkspace[],
+  problem: ServerProblemKind | null,
+  pending: ReadonlySet<string>,
+) =>
+  shown.problem === problem &&
+  shown.pending.size === pending.size &&
+  [...pending].every((workspaceId) => shown.pending.has(workspaceId)) &&
+  JSON.stringify(shown.workspaces) === JSON.stringify(workspaces);
+
 export function createWorkspaceList(
   signIn: Pick<SignIn, "client" | "isCurrent">,
   saved?: SavedList | null,
@@ -76,6 +87,7 @@ export function createWorkspaceList(
   function settle(workspaces: readonly AccountWorkspace[], problem: ServerProblemKind | null) {
     if (!signIn.isCurrent()) return;
     saved?.listed(workspaces);
+    if (state.status === "ready" && unchanged(state, workspaces, problem, pending)) return;
     set({ status: "ready", workspaces, problem, pending: new Set(pending) });
   }
 

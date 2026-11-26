@@ -106,6 +106,11 @@ export async function deleteAccountRows(sql: Sql, account: { origin: string; use
     ]);
 }
 
+export async function openNow(stores: readonly Pick<KeptStore, "read">[]): Promise<boolean> {
+  const opened = await Promise.allSettled(stores.map((store) => store.read("SELECT 1", [])));
+  return opened.every((open) => open.status === "fulfilled");
+}
+
 type Setting = readonly [name: string, value: string, readBack: string | number];
 
 /** Each setting, the value it's set to, and what reading it back must give. */

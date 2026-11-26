@@ -133,3 +133,24 @@ describe("Show on phone", () => {
     );
   });
 });
+
+describe("a read again", () => {
+  it("keeps the list and tells no one when the server answers the same list, and updates on a change", async () => {
+    const server = testServer();
+    server.on("GET", "/sync/account/workspaces", listed(A, B));
+    const list = await ready(server);
+    const before = list.state();
+    const told = vi.fn();
+    list.subscribe(told);
+    list.reload();
+    await vi.waitFor(() => expect(server.paths()).toHaveLength(2));
+    await settled();
+    expect(list.state()).toBe(before);
+    expect(told).not.toHaveBeenCalled();
+
+    server.on("GET", "/sync/account/workspaces", listed(A, { ...B, name: "Costs" }));
+    list.reload();
+    await vi.waitFor(() => expect(told).toHaveBeenCalledOnce());
+    expect(list.state()).toMatchObject({ workspaces: [A, { ...B, name: "Costs" }] });
+  });
+});
