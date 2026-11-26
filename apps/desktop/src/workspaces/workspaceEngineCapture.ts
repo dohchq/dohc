@@ -438,7 +438,7 @@ export interface AuthoredPathChanges {
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
   // Whether History holds exactly `bytes` as the protected file at `path`,
   // so Restore could bring them back. Never throws.
-  keepsProtectedBytes(path: string, bytes: Buffer): Promise<boolean>;
+  keepsProtectedBytes?(path: string, bytes: Buffer): Promise<boolean>;
   orderFilePaths?(paths: string[], deleting: boolean): Promise<string[]>;
   readDuplicate(operationId: string, path: string): Promise<{ path: string } | null>;
   hasPath(path: string): Promise<boolean>;
@@ -8772,13 +8772,10 @@ export function createWorkspaceEngineCapture(
               value: await work({
                 policy,
                 keepsProtectedBytes: async (path, bytes) => {
-                  const text = bytes.toString("utf8");
-                  if (
-                    bytes.length > MAX_PROTECTED_HISTORY_BYTES ||
-                    !Buffer.from(text, "utf8").equals(bytes)
-                  )
-                    return false;
                   try {
+                    if (bytes.length > MAX_PROTECTED_HISTORY_BYTES) return false;
+                    const text = bytes.toString("utf8");
+                    if (!Buffer.from(text, "utf8").equals(bytes)) return false;
                     return await secretStoreFor().secretTextRecorded({ workspaceId, path, text });
                   } catch {
                     return false;

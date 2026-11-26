@@ -817,7 +817,6 @@ describe("agent move and delete admission", () => {
       duplicateFile: async () => {
         throw new Error("unexpected Duplicate");
       },
-      keepsProtectedBytes: async () => false,
       recordDisk: vi.fn(async () => []),
       moveFile: vi.fn(async () => false),
       rename: vi.fn(async () => {
@@ -1076,6 +1075,42 @@ describe("a person's delete of a protected file", () => {
       expect(await readFile(join(f.rootPath, ".env"), "utf8")).toBe("TOKEN=held\n");
       expect(await f.workspaceTrash()).toEqual([]);
     } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("keeps every held one in a folder out of the trash, past excluded and unreadable folders", async () => {
+    const f = await fixture({
+      beforeRequest: (request) => {
+        if (request.method === "capture.hold")
+          faults.readdir = (path) => path.endsWith(`${sep}build`);
+      },
+    });
+    await write(
+      f.rootPath,
+      ".dohc/files.toml",
+      '[[rule]]\npath = "tasks/build/**"\ntracked = false\n\n[[rule]]\npath = "tasks/out/**"\ntracked = false\n',
+    );
+    await write(f.rootPath, "tasks/build/x.js", "built");
+    await write(f.rootPath, "tasks/out/.env", "SECRET=out\n");
+    await write(f.rootPath, "tasks/z/.env", "SECRET=z\n");
+    await write(f.rootPath, "tasks/z/note.md", "# Note\n");
+    await f.start();
+    try {
+      expect(await f.removeByHand("tasks")).toMatchObject({
+        trashed: true,
+        undo: {
+          reason: expect.stringContaining(
+            "tasks/out/.env, tasks/z/.env skipped the trash because they hold secrets.",
+          ),
+        },
+      });
+      expect(await readFile(join(f.systemTrash, "tasks", "build", "x.js"), "utf8")).toBe("built");
+      expect(existsSync(join(f.systemTrash, "tasks", "out", ".env"))).toBe(false);
+      expect(existsSync(join(f.systemTrash, "tasks", "z", ".env"))).toBe(false);
+      expect(await f.workspaceTrash()).toEqual([]);
+    } finally {
+      delete faults.readdir;
       await f.engine().stop();
     }
   });

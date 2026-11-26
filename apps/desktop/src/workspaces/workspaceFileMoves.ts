@@ -82,6 +82,7 @@ import {
 import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 import { ICloudCheckRefusal } from "./workspaceICloudOnly";
 import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
+import { MAX_PROTECTED_HISTORY_BYTES } from "./protectedWriteCopies";
 
 // The workspace's id and attachment name the engine open whose `.dohc/local`
 // holds the workspace trash.
@@ -1527,46 +1528,43 @@ async function restoreUnrecorded(
   return kept;
 }
 
-type ProtectedFileKeeper = Pick<AuthoredPathChanges, "policy" | "keepsProtectedBytes">;
+type KeepsProtectedBytes = NonNullable<AuthoredPathChanges["keepsProtectedBytes"]>;
 
-// Moves each protected file at or under `endpoint` into the workspace trash
-// and answers those whose staged bytes History holds; the rest go back. Never
-// follows a link or enters a folder History excludes. Never throws.
 async function stageKeptProtectedFiles(
   workspace: PathChangeWorkspace,
   endpoint: string,
-  keeper: ProtectedFileKeeper,
+  keeps: KeepsProtectedBytes,
 ): Promise<{ path: string; staged: string }[]> {
   const rootPath = workspace.rootPath;
   const kept: { path: string; staged: string }[] = [];
+  const small = (size: number) => size <= MAX_PROTECTED_HISTORY_BYTES;
   const walk = async (path: string): Promise<void> => {
     const absolute = join(rootPath, path);
-    const info = await lstat(absolute);
-    if (info.isDirectory()) {
-      if (
-        classifyEngineFilePath(path).kind === "ignored" ||
-        historyExcludesSubtree(keeper.policy, path)
-      )
-        return;
-      for (const name of (await readdir(absolute)).sort()) await walk(`${path}/${name}`);
+    const info = await lstat(absolute).catch(() => null);
+    if (info?.isDirectory()) {
+      if (classifyEngineFilePath(path).kind === "ignored") return;
+      for (const name of (await readdir(absolute).catch(() => [] as string[])).sort())
+        await walk(`${path}/${name}`);
       return;
     }
     const checked = validateUserMaterializePath(path, { platform: process.platform });
     if (
-      !info.isFile() ||
+      !info?.isFile() ||
+      !small(info.size) ||
       classifyEngineFilePath(path).kind !== "secret" ||
       !checked.ok ||
       checked.normalized !== path
     )
       return;
-    const staged = await moveIntoWorkspaceTrash(workspace, absolute);
-    const held = await readFile(staged)
-      .then(async (bytes) => await keeper.keepsProtectedBytes(path, bytes))
+    const staged = await moveIntoWorkspaceTrash(workspace, absolute).catch(() => null);
+    if (staged === null) return;
+    const held = await lstat(staged)
+      .then(async (copy) => small(copy.size) && (await keeps(path, await readFile(staged))))
       .catch(() => false);
     if (held) kept.push({ path, staged });
     else await placeBack(rootPath, staged, absolute);
   };
-  await walk(endpoint).catch(() => undefined);
+  await walk(endpoint);
   return kept;
 }
 
@@ -1609,10 +1607,10 @@ export async function deleteWorkspacePathByHand(
       return { trashed: false, refused: undefined };
     }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
-    const trash = async (recorded: readonly string[], keeper?: ProtectedFileKeeper) => {
+    const trash = async (recorded: readonly string[], keeps?: KeepsProtectedBytes) => {
       assertWritable(operation);
       await options.admit?.();
-      const kept = keeper ? await stageKeptProtectedFiles(workspace, endpoint, keeper) : [];
+      const kept = keeps ? await stageKeptProtectedFiles(workspace, endpoint, keeps) : [];
       const removed = kept.map((file) => file.path);
       const discard = async () =>
         await Promise.all(kept.map(async ({ staged }) => await rm(staged, { force: true }))).catch(
@@ -1624,6 +1622,7 @@ export async function deleteWorkspacePathByHand(
         options.markDeleted(endpoint);
         return {
           trashed: false,
+          skippedTrash: true,
           recovery: {
             operationId,
             undo: {
@@ -1697,7 +1696,7 @@ export async function deleteWorkspacePathByHand(
         );
         // Edits capture has not seen yet land as their own rows first.
         const recorded = await engine.recordDisk(endpoint, files);
-        const trashed = await trash(recorded, engine);
+        const trashed = await trash(recorded, engine.keepsProtectedBytes);
         gone = [endpoint];
         for (const file of (await engine.orderFilePaths?.(recorded, true)) ?? recorded) {
           try {
@@ -1718,6 +1717,8 @@ export async function deleteWorkspacePathByHand(
     ? change(options.markChanged)
     : withExclusiveWorkspaceOperation(rootPath, change));
   if (outcome.refused !== undefined) {
+    if ("skippedTrash" in outcome)
+      throw new Error(`${protectedRemovedNote([path])} ${outcome.refused}`);
     const where = outcome.trashed ? "the system trash" : `the workspace trash, ${WORKSPACE_TRASH}`;
     throw new Error(`${path} is in ${where}. ${outcome.refused}`);
   }

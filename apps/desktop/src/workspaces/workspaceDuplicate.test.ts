@@ -66,7 +66,6 @@ async function fixture() {
     policy: await readWorkspaceEnginePolicy(rootPath),
     readDuplicate: vi.fn(async () => null as { path: string } | null),
     hasPath: vi.fn(async () => false),
-    keepsProtectedBytes: async () => false,
     recordDisk: vi.fn(async (path, files) => {
       events.push("record");
       return [...files];

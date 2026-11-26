@@ -386,7 +386,8 @@ export async function finishDeleteRecovery(
     if (!record) throw new Error("Recovery collection failed");
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
     const notes: string[] = [];
-    if (!plan.noUndo && (trashed || removed.length) && record.paths.length) {
+    const refused = plan.noUndo !== undefined;
+    if (!refused && (trashed || removed.length) && record.paths.length) {
       const where = trashed
         ? `in the ${systemTrash}`
         : `in the workspace trash, ${WORKSPACE_TRASH}`;
@@ -397,9 +398,11 @@ export async function finishDeleteRecovery(
     if (removed.length) notes.push(protectedRemovedNote(removed));
     if (notes.length) {
       plan.noUndo = [plan.noUndo ?? "Cannot undo the delete.", ...notes].join(" ");
-      record.noUndo = plan.noUndo;
-      await saveRecoveryRecord(workspace, record).catch(() => undefined);
-      scheduleRecoveryPrune(workspace);
+      if (!refused) {
+        record.noUndo = plan.noUndo;
+        await saveRecoveryRecord(workspace, record).catch(() => undefined);
+        scheduleRecoveryPrune(workspace);
+      }
     }
     if (plan.noUndo) {
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
