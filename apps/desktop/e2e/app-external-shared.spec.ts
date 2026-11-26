@@ -7,7 +7,8 @@ import { activityPin, settingsNavPin, settingsSectionPin } from "../src/testPins
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import {
-  openAppFromFolderLink,
+  copyAppLink,
+  openAppLink,
   sharedDatasetViewerOrigin,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
@@ -176,19 +177,14 @@ test("@app-external-shared a share-link visitor runs the app's approved outside 
     };
     await review();
     const publication = page.getByTestId("app-publication-dialog");
-    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-    await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
-    const share = page.getByTestId("share-dialog");
-    await share.getByRole("button", { name: "Create link", exact: true }).click();
-    await share.getByRole("button", { name: "Link details", exact: true }).click();
-    const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
-    expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await share.getByRole("button", { name: "Close", exact: true }).click();
-    if (!(await publication.isVisible())) await review();
-    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-    const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
-    await shareLink.selectOption({ index: 2 });
-    await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
+    const linkRow = publication.getByTestId("app-publish-link");
+    await linkRow.getByRole("button", { name: "Create link", exact: true }).click();
+    await expect(
+      publication.getByRole("heading", { name: "Publish for anyone with the link", exact: true }),
+    ).toBeVisible();
+    await expect(publication.getByTestId("app-publication-link-note")).toHaveText(
+      "dohc made a view link to stats. Only you have it until you copy it.",
+    );
     const calls = publication.getByTestId("app-publication-external");
     const row = (name: string) =>
       calls.getByTestId("app-access-external").filter({ hasText: name });
@@ -200,10 +196,14 @@ test("@app-external-shared a share-link visitor runs the app's approved outside 
     await themed(page, publication, (theme) =>
       info.outputPath(`shared-outside-call-review-${theme}.png`),
     );
-    await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
+    await publication.getByRole("button", { name: "Publish", exact: true }).click();
     await expect(
-      publication.getByRole("status").filter({ hasText: "App published on the selected link." }),
+      publication
+        .getByRole("status")
+        .filter({ hasText: "App published. Anyone with the link can open it." }),
     ).toBeVisible();
+    await expect(publication.getByTestId("app-publish-link-state")).toHaveText("Published");
+    const appUrl = await copyAppLink(test.info(), desktop.app, linkRow);
     await publication.getByRole("button", { name: "Close", exact: true }).click();
 
     const guest = await shared.browser.newPage();
@@ -214,8 +214,7 @@ test("@app-external-shared a share-link visitor runs the app's approved outside 
         bodies.push(await response.text());
       } catch {}
     });
-    await guest.goto(linkUrl);
-    await openAppFromFolderLink(guest);
+    await openAppLink(guest, appUrl);
     const out = guest.frameLocator("iframe").locator("#out");
     await expect
       .poll(async () => Object.keys(JSON.parse((await out.textContent()) || "{}")).length, {

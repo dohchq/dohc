@@ -1,5 +1,4 @@
 import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
-import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -11,7 +10,8 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   sharedDatasetViewerOrigin,
-  openAppFromFolderLink,
+  copyAppLink,
+  openAppLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import {
@@ -149,38 +149,14 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await approve.click();
     await expect(publication).toBeHidden();
     await page.getByTestId("app-view-review").click();
-    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-    await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
-    const share = page.getByTestId("share-dialog");
-    await expect(share.getByTestId("share-link-create-access")).toHaveText("Can view");
-    await share.getByRole("button", { name: "Create link", exact: true }).click();
-    await share.getByRole("button", { name: "Link details", exact: true }).click();
-    await expect(share.getByTestId("share-link-url")).toBeVisible();
-    const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
-    expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await holdSystemClipboard(test.info(), async (remainingMs) => {
-      await share
-        .getByRole("button", { name: "Copy link", exact: true })
-        .click({ timeout: remainingMs() });
-      await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible({
-        timeout: remainingMs(),
-      });
-    });
-    await share.getByRole("button", { name: "Close", exact: true }).click();
+    const linkRow = publication.getByTestId("app-publish-link");
+    await linkRow.getByRole("button", { name: "Create link", exact: true }).click();
     await expect(
-      page
-        .getByTestId("site-preview-page")
-        .getByRole("button", { name: "Open in browser", exact: true }),
+      publication.getByRole("heading", { name: "Publish for anyone with the link", exact: true }),
     ).toBeVisible();
-    await page.getByTestId("app-view-review").click();
-    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-    const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
-    await expect(shareLink.locator("option")).toHaveCount(3);
-    await shareLink.selectOption({ index: 2 });
-    await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
-    await expect(
-      publication.getByRole("heading", { name: "Review app publication", exact: true }),
-    ).toBeVisible();
+    await expect(publication.getByTestId("app-publication-link-note")).toHaveText(
+      "dohc made a view link to registrations-form. Only you have it until you copy it.",
+    );
     await expect(publication.getByTestId("app-publication-source-paths")).toContainText(
       "registrations-form/frontend.js",
     );
@@ -189,12 +165,14 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(actionRows).toHaveCount(1);
     await expect(actionRows.locator("td")).toHaveText(["Yes", "Yes", "Yes"]);
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
-    await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
-    // The publication list reloads behind the notice, so its loading status can show beside it.
+    await publication.getByRole("button", { name: "Publish", exact: true }).click();
     await expect(
-      publication.getByRole("status").filter({ hasText: "App published on the selected link." }),
+      publication
+        .getByRole("status")
+        .filter({ hasText: "App published. Anyone with the link can open it." }),
     ).toBeVisible();
-    await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
+    await expect(publication.getByTestId("app-publish-link-state")).toHaveText("Published");
+    const appUrl = await copyAppLink(test.info(), desktop.app, linkRow);
     await publication.getByRole("button", { name: "Close", exact: true }).click();
     const listed = await page.evaluate(
       async (workspaceId) => window.dohcDesktop!.dataset({ workspaceId, action: "list" }),
@@ -207,8 +185,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     const guest = await shared.browser.newPage();
     guest.setDefaultTimeout(30_000);
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
-    await guest.goto(linkUrl);
-    await openAppFromFolderLink(guest);
+    await openAppLink(guest, appUrl);
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
     await form.getByLabel("Name", { exact: false }).fill("Shared browser participant");

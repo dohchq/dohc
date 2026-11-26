@@ -182,7 +182,7 @@ async function review() {
     .setup()
     .selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
   await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
-  await screen.findByRole("heading", { name: "Review app publication" });
+  await screen.findByRole("heading", { name: "Publish for anyone with the link" });
 }
 
 describe("owner app publication", () => {
@@ -222,10 +222,10 @@ describe("owner app publication", () => {
     ).toBeTruthy();
     expect(screen.getByTestId("app-publication-digest").textContent).toBe(prepared.candidateDigest);
     expect(document.activeElement).toBe(
-      screen.getByRole("heading", { name: "Review app publication" }),
+      screen.getByRole("heading", { name: "Publish for anyone with the link" }),
     );
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
-    await screen.findByText("App published on the selected link.");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
+    await screen.findByText("App published. Anyone with the link can open it.");
     expect(api.publishOwnerApp).toHaveBeenCalledWith({
       action: "approve",
       workspaceId: "ws-trip",
@@ -246,8 +246,8 @@ describe("owner app publication", () => {
     expect(warning.textContent).toContain("1 file holds a likely secret token");
     expect(warning.textContent).toContain("trip/main.tsx has a GitHub token");
     expect(warning.textContent).not.toContain("trip/style.css");
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
-    await screen.findByText("App published on the selected link.");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
+    await screen.findByText("App published. Anyone with the link can open it.");
   });
 
   it("shows no secret warning when no file holds a likely secret token", async () => {
@@ -280,13 +280,13 @@ describe("owner app publication", () => {
       .setup()
       .selectOptions(screen.getByLabelText("Publication share link"), "Workspace members");
     await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
-    await screen.findByRole("heading", { name: "Review app publication" });
+    await screen.findByRole("heading", { name: "Publish for workspace members" });
     expect(actions("prepare")).toEqual([
       { action: "prepare", workspaceId: "ws-trip", appRoot: "trip", audience: "workspace" },
     ]);
     expect(screen.getByText("Who can open it")).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: /^Let anyone with the link use / })).toBeNull();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
     await screen.findByText("App published for workspace members.");
     expect(actions("approve")).toEqual([
       {
@@ -821,7 +821,7 @@ describe("owner app publication", () => {
         "Unpublishing stops new access through this app. The share link still opens its response files. Copies sent elsewhere stay.",
       ),
     ).toBeTruthy();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
     expect(api.publishOwnerApp).toHaveBeenCalledWith({
       action: "approve",
       workspaceId: "ws-trip",
@@ -847,7 +847,7 @@ describe("owner app publication", () => {
       await screen.findByText(
         "dohc could not verify this app's data access. Prepare the app again.",
       );
-      expect(screen.queryByRole("button", { name: "Publish this revision" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Publish" })).toBeNull();
       expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(
         false,
       );
@@ -908,9 +908,7 @@ describe("owner app publication", () => {
           }
         : answer(request),
     );
-    render(
-      <OwnerAppPublication workspaceId="ws-trip" appRoot="trip" onShareSource={() => undefined} />,
-    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
     for (const button of screen.getAllByRole("button", { name: "Load responses" })) {
       fireEvent.click(button);
@@ -923,13 +921,7 @@ describe("owner app publication", () => {
       fireEvent.click(screen.getByRole("button", { name: "Remove responses" }));
     }
     const blocked = () => {
-      for (const name of [
-        "Close",
-        "Reload publications",
-        "Prepare app",
-        "Share app folder",
-        "Cancel",
-      ])
+      for (const name of ["Close", "Reload publications", "Prepare app", "Cancel"])
         expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
       fireEvent.keyDown(document, { key: "Escape" });
       expect(screen.getByRole("dialog")).toBeTruthy();
@@ -1025,6 +1017,10 @@ describe("owner app publication", () => {
       sourceRevision: "b".repeat(64),
       sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"],
     };
+    type Publication = Extract<
+      OwnerAppPublicationResult,
+      { kind: "listed" }
+    >["publications"][number];
     const secondApproval = "0f6d2c1e-4b8a-4c3e-9d2f-1a2b3c4d5e6f";
     function local(
       rows: LocalRow[] = [],
@@ -1109,8 +1105,10 @@ describe("owner app publication", () => {
       );
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
-      expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
-      expect(screen.getByText("Not on a link")).toBeTruthy();
+      expect(await screen.findByRole("heading", { name: "Publish" })).toBeTruthy();
+      expect(screen.getByTestId("app-publish-link-state").textContent).toBe(
+        "Uses files outside its folder",
+      );
       expect(screen.queryByRole("button", { name: "Remove approval" })).toBeNull();
       expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
       expect(screen.queryByText("That share isn't available anymore.")).toBeNull();
@@ -1388,7 +1386,7 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       await ready();
-      await screen.findByRole("button", { name: "Publish on a link" });
+      await screen.findByRole("button", { name: "Manage publications" });
       const user = userEvent.setup();
       expect(document.activeElement).toBe(
         screen.getByRole("heading", { level: 2, name: "Trip planner" }),
@@ -1398,8 +1396,12 @@ describe("owner app publication", () => {
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "2 files" }));
       await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose a link" }));
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish" }));
+      await user.tab();
       expect(document.activeElement).toBe(
-        screen.getByRole("button", { name: "Publish on a link" }),
+        screen.getByRole("button", { name: "Manage publications" }),
       );
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
@@ -1429,6 +1431,230 @@ describe("owner app publication", () => {
       },
     });
 
+    describe("Publish box", () => {
+      const inFolder = { ...checked, sourcePaths: ["trip/app.publish.json", "trip/main.tsx"] };
+      const created = {
+        shareId: "share-new",
+        grantId: "grant-new",
+        selector: { paths: ["trip"], versionId: null },
+        access: "view" as const,
+        bearerWarning:
+          "This URL is a bearer credential at view access, usable by anyone who holds it.",
+      };
+      const linkPublication = (
+        sourceRevision: string,
+        publicationId = published.publicationId,
+      ) => ({
+        ...datasetRow,
+        publicationId,
+        shareId: created.shareId,
+        grantId: created.grantId,
+        datasetCapabilities: [],
+        sourceRevision,
+      });
+      function publishBox(
+        options: {
+          links?: ListRelayShareLinksResult["links"];
+          listed?: () => Publication[];
+          prepare?: (request: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>;
+        } = {},
+      ) {
+        api.listRelayShareLinks.mockResolvedValue({ ...page, links: options.links ?? [] });
+        const base = local([localRow]);
+        api.publishOwnerApp.mockImplementation(async (request) => {
+          if (request.action === "checkLocal") return inFolder;
+          if (request.action === "list")
+            return { kind: "listed", publications: options.listed?.() ?? [], nextCursor: null };
+          if (request.action === "createLink")
+            return { kind: "linkCreated", ...created, url: "https://share.example.org/s/new#key" };
+          if (request.action === "prepare") return options.prepare?.(request) ?? prepared;
+          if (request.action === "approve") return published;
+          return base(request);
+        });
+      }
+      const linkRow = () => screen.getByTestId("app-publish-link");
+
+      it("makes a view link to the app folder, reviews the app on it, and offers the app link", async () => {
+        let live = false;
+        publishBox({ listed: () => (live ? [linkPublication(checked.sourceRevision)] : []) });
+        renderLocal();
+        await openLocal();
+        const create = await screen.findByRole("button", { name: "Create link" });
+        await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(create);
+        await screen.findByRole("heading", { name: "Publish for anyone with the link" });
+        const [link] = actions("createLink");
+        expect(link).toEqual({
+          action: "createLink",
+          workspaceId: "ws-trip",
+          appRoot: "trip",
+          access: "view",
+          operationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        });
+        expect(actions("prepare")).toEqual([
+          {
+            action: "prepare",
+            workspaceId: "ws-trip",
+            appRoot: "trip",
+            shareId: "share-new",
+            grantId: "grant-new",
+          },
+        ]);
+        expect(screen.getByTestId("app-publication-link-note").textContent).toBe(
+          "dohc made a view link to trip. Only you have it until you copy it.",
+        );
+        live = true;
+        await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
+        await screen.findByText("App published. Anyone with the link can open it.");
+        await waitFor(() =>
+          expect(screen.getByTestId("app-publish-link-state").textContent).toBe("Published"),
+        );
+        expect(within(linkRow()).getByRole("button", { name: "Copy app link" })).toBeTruthy();
+        expect(actions("withdraw")).toEqual([]);
+      });
+
+      it("reuses a view link to exactly the app folder and says anyone who has it can open the app", async () => {
+        publishBox({ links: [row] });
+        renderLocal();
+        await openLocal();
+        const publish = await within(await screen.findByTestId("app-publish-link")).findByRole(
+          "button",
+          { name: "Publish" },
+        );
+        await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(publish);
+        await screen.findByRole("heading", { name: "Publish for anyone with the link" });
+        expect(actions("createLink")).toEqual([]);
+        expect(actions("prepare")[0]).toMatchObject({ shareId: row.shareId, grantId: row.grantId });
+        expect(screen.getByTestId("app-publication-link-note").textContent).toBe(
+          "Uses your existing view link to trip. Anyone who has it can open the app.",
+        );
+      });
+
+      it("brings back a revision the owner unpublished through its stored review", async () => {
+        const stored = {
+          ...linkPublication(checked.sourceRevision),
+          shareId: row.shareId,
+          grantId: row.grantId,
+          active: false,
+          authorityRevision: 2,
+        };
+        publishBox({ links: [row], listed: () => [stored] });
+        renderLocal();
+        await openLocal();
+        const publish = await within(await screen.findByTestId("app-publish-link")).findByRole(
+          "button",
+          { name: "Publish" },
+        );
+        await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(publish);
+        await screen.findByRole("heading", { name: "Republish this revision" });
+        expect(actions("prepare")).toEqual([]);
+        expect(actions("reviewReactivation")).toEqual([
+          {
+            action: "reviewReactivation",
+            workspaceId: "ws-trip",
+            publicationId: stored.publicationId,
+          },
+        ]);
+      });
+
+      it("warns that copied app links stop working when a stored revision replaces the live one", async () => {
+        const link = { shareId: row.shareId, grantId: row.grantId };
+        const live = { ...linkPublication("e".repeat(64), "f".repeat(64)), ...link };
+        const stored = {
+          ...linkPublication(checked.sourceRevision),
+          ...link,
+          active: false,
+          authorityRevision: 2,
+        };
+        publishBox({ links: [row], listed: () => [live, stored] });
+        renderLocal();
+        await openLocal();
+        const update = await within(linkRow()).findByRole("button", { name: "Publish changes" });
+        await waitFor(() => expect((update as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(update);
+        await screen.findByRole("heading", { name: "Republish this revision" });
+        expect(screen.getByTestId("app-publication-link-note").textContent).toContain(
+          "App links copied before stop working",
+        );
+      });
+
+      it("says when the links did not load and reads them again on Try again", async () => {
+        publishBox();
+        api.listRelayShareLinks.mockRejectedValueOnce(new Error("The server is away."));
+        renderLocal();
+        await openLocal();
+        await waitFor(() =>
+          expect(screen.getByTestId("app-publish-link-state").textContent).toBe(
+            "dohc could not load your links",
+          ),
+        );
+        await userEvent.setup().click(within(linkRow()).getByRole("button", { name: "Try again" }));
+        expect(await within(linkRow()).findByRole("button", { name: "Create link" })).toBeTruthy();
+      });
+
+      it("asks the same link request again when Try again follows a failed preparation", async () => {
+        const reportError = vi.fn();
+        let fail = true;
+        publishBox({
+          prepare: async () => {
+            if (fail) {
+              fail = false;
+              throw new Error("The compiler stopped.");
+            }
+            return prepared;
+          },
+        });
+        renderLocal({ reportError });
+        await openLocal();
+        const create = await screen.findByRole("button", { name: "Create link" });
+        await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(create);
+        await waitFor(() => expect(reportError).toHaveBeenCalled());
+        const retry = reportError.mock.calls.at(-1)![2] as () => void;
+        await act(async () => retry());
+        await screen.findByRole("heading", { name: "Publish for anyone with the link" });
+        const [first, second] = actions("createLink");
+        expect(second).toEqual(first);
+      });
+
+      it("says when the source changed since publishing, and Publish changes replaces the old revision", async () => {
+        const old = linkPublication("e".repeat(64), "f".repeat(64));
+        let rows: Publication[] = [old];
+        publishBox({
+          links: [{ ...row, shareId: created.shareId, grantId: created.grantId }],
+          listed: () => rows,
+        });
+        renderLocal();
+        await openLocal();
+        await waitFor(() =>
+          expect(screen.getByTestId("app-publish-link-state").textContent).toBe(
+            "Changes not published",
+          ),
+        );
+        const publish = within(linkRow()).getByRole("button", { name: "Publish changes" });
+        await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(publish);
+        await screen.findByRole("heading", { name: "Publish for anyone with the link" });
+        expect(actions("prepare")[0]).toMatchObject({ shareId: "share-new", grantId: "grant-new" });
+        rows = [linkPublication(checked.sourceRevision)];
+        await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
+        await screen.findByText("Changes published.");
+        expect(actions("withdraw")).toEqual([
+          {
+            action: "withdraw",
+            workspaceId: "ws-trip",
+            publicationId: old.publicationId,
+            expectedAuthorityRevision: old.authorityRevision,
+          },
+        ]);
+        await waitFor(() =>
+          expect(screen.getByTestId("app-publish-link-state").textContent).toBe("Published"),
+        );
+      });
+    });
+
     it("reads the links once the workspace's server connects", async () => {
       api.publishOwnerApp.mockImplementation(local([localRow]));
       const view = renderLocal({ access: accessFor(false) });
@@ -1449,7 +1675,7 @@ describe("owner app publication", () => {
           { action: "list", workspaceId: "ws-trip", appRoot: "trip" },
         ]),
       );
-      expect(await screen.findByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(await screen.findByRole("button", { name: "Manage publications" })).toBeTruthy();
       expect(screen.queryByTestId("app-links-signed-out")).toBeNull();
     });
 
@@ -1484,7 +1710,7 @@ describe("owner app publication", () => {
       const view = render(<Control {...props} />);
       await waitFor(() => expect(actions("list")).toHaveLength(1));
       view.rerender(<Control {...props} {...next} />);
-      expect(await screen.findByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(await screen.findByRole("button", { name: "Manage publications" })).toBeTruthy();
       await act(async () =>
         stale.reject(
           new Error(
@@ -1493,7 +1719,7 @@ describe("owner app publication", () => {
         ),
       );
       expect(screen.queryByText("The server did not return this app's links.")).toBeNull();
-      expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Manage publications" })).toBeTruthy();
       expect(api.getSyncStatus).not.toHaveBeenCalled();
     });
 
@@ -1644,7 +1870,7 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   fireEvent.click(choice);
   expect(choice.checked).toBe(false);
   fireEvent.click(choice);
-  await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+  await userEvent.setup().click(screen.getByRole("button", { name: "Publish" }));
   expect(api.publishOwnerApp).toHaveBeenCalledWith(
     expect.objectContaining({
       action: "approve",
