@@ -45,7 +45,25 @@ export function publishFileComments(
   path: string,
   comments: FileComments,
 ): void {
-  update(workspaceId, path, (entry) => ({ ...entry, comments }));
+  const shown = entries.get(keyOf(workspaceId, path))?.comments;
+  if (!shown || !sameAnchors(shown.anchors, comments.anchors)) {
+    update(workspaceId, path, (entry) => ({ ...entry, comments }));
+  } else if (shown.canComment !== comments.canComment) {
+    update(workspaceId, path, (entry) => ({
+      ...entry,
+      comments: { anchors: shown.anchors, canComment: comments.canComment },
+    }));
+  }
+}
+
+function sameAnchors(shown: readonly CommentAnchor[], next: readonly CommentAnchor[]) {
+  return (
+    shown.length === next.length &&
+    shown.every(
+      (anchor, index) =>
+        anchor.threadId === next[index]!.threadId && anchor.quote === next[index]!.quote,
+    )
+  );
 }
 
 export function useFileComments(workspaceId: string, path: string | null) {
