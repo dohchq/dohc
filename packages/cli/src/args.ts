@@ -1937,6 +1937,8 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     notes: [
       "appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view.",
       "Generate operationId as a UUID for this creation. Reuse operationId for retries.",
+      'createLink, prepare, and approve need a workspace that syncs with a server. Without one, they fail with "Sync this workspace before sharing." The synced field in .dohc/sync-history.json does not show whether the workspace syncs now.',
+      "After approve, link holders' reads and writes run on that server, so the app works while this computer is off.",
       "A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink.",
       agentLabelNote,
     ],
