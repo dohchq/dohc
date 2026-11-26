@@ -326,7 +326,7 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     await allow.click();
     await expect(allow).toBeChecked();
     await share.click();
-    await expect(dialog.getByRole("status")).toContainText("Shared trip-board", {
+    await expect(dialog.getByText("Shared trip-board with the workspace's members.")).toBeVisible({
       timeout: 60_000,
     });
 
@@ -349,7 +349,7 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     }
     await apps.getByTestId("workspace-app-copy-name").fill("trip-copy");
     await apps.getByRole("button", { name: "Copy", exact: true }).click();
-    await expect(apps.getByRole("status")).toContainText("Copied to trip-copy");
+    await expect(apps.getByText("Copied to trip-copy in your Personal apps.")).toBeVisible();
     expect(await readFile(join(folder, "trip-copy", "main.ts"), "utf8")).toBe(appSource(read.name));
     await apps.getByRole("button", { name: "Continue in browser" }).click();
     await expect
