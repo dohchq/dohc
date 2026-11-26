@@ -10088,6 +10088,7 @@ function WorkspaceShell(props: {
                                 workspaceId={workspaceId}
                                 path={activeDocumentPath}
                                 closed={fileCommentsClosed !== undefined}
+                                notices={aboutNotices}
                               />
                             ) : null}
                           </div>
