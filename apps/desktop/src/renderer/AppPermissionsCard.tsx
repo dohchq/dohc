@@ -242,7 +242,7 @@ function ActionCell({ row, changes }: { row: Row; changes: boolean }) {
       >
         <Icon size={12} aria-hidden />
       </span>
-      <div className="min-w-0 break-words">
+      <div className="min-w-0 wrap-anywhere">
         <span className="text-ink">{row.label}</span>
         {row.added ? <NewMark /> : null}
         {row.fields.length || row.name ? (
@@ -486,6 +486,7 @@ function AudienceTable({
       onLink: operation.access === "link" || approvedReads.has(id),
     };
   });
+  const reasonId = useId();
   const choosable = items.filter((item) => item.choosable);
   const blocked = choosable.filter((item) => choice!.shared.has(item.operation.operationId));
   const cell = `${narrow ? "w-8" : "w-14"} py-2 text-center align-top`;
@@ -535,6 +536,9 @@ function AudienceTable({
                       title={`Let anyone with the link use ${operation.name}`}
                       checked={choice!.selected.has(operation.operationId)}
                       disabled={choice!.disabled || choice!.shared.has(operation.operationId)}
+                      {...(choice!.shared.has(operation.operationId)
+                        ? { "aria-describedby": `${reasonId}-${operation.operationId}` }
+                        : {})}
                       onChange={(event) => choice!.onChange(operation, event.target.checked)}
                     />
                   ) : (
@@ -559,9 +563,13 @@ function AudienceTable({
         </p>
       ) : null}
       {blocked.map(({ operation }) => (
-        <p key={operation.operationId} className="m-0 px-3 py-2 text-[12px] text-muted">
+        <p
+          key={operation.operationId}
+          id={`${reasonId}-${operation.operationId}`}
+          className="m-0 px-3 py-2 text-[12px] text-muted"
+        >
           dohc can't open {operation.name} to the link, because another of this app's Collections
-          has an action with the same name.
+          has an action with the same ID.
         </p>
       ))}
     </>

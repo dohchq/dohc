@@ -1603,9 +1603,13 @@ it("refuses a link read on an action two Collections share, and says why", async
     }) as HTMLInputElement[];
     expect(choices).toHaveLength(2);
     expect(choices.every((choice) => choice.disabled)).toBe(true);
+    for (const choice of choices)
+      expect(
+        document.getElementById(choice.getAttribute("aria-describedby") ?? "")?.textContent,
+      ).toContain("the same ID");
     expect(
       screen.getAllByText(
-        "dohc can't open records.list to the link, because another of this app's Collections has an action with the same name.",
+        "dohc can't open records.list to the link, because another of this app's Collections has an action with the same ID.",
       ),
     ).toHaveLength(2);
     expect(screen.queryByText(/^Ticked reads/)).toBeNull();
