@@ -92,7 +92,7 @@ The benchmark in PR #4654 showed two concrete bottlenecks on a single Collection
    - Authenticated Member app publish endpoint requiring publisher-uploaded, hash-verified bundle and source blobs (zero fallback to existing `sync_relay_blobs`), per-member storage cap, and `linkReads` refusal.
    - Discovery, source inspection, withdrawal (author, Admin, Owner), operator takedown holds on `publisher_user_id`, account deletion cleanup, and phone refusal of unconsented Member apps.
    - Double-ceiling enforcement (`declared ∩ author ∩ viewer ∩ consented`, read-only below `Edit`, never `owner` caller) at dispatch and commit.
-   - Server-enforced consent endpoint refusing `auth.agent`, plus server-rendered first-open review and consent page in `share-web`.
+   - Server-enforced consent endpoint that accepts only a browser sign-in, plus server-rendered first-open review and consent page in `share-web`.
 4. **PR B1.3b: Member Apps Desktop UI, CLI/MCP, and Docs** (`feat/member-apps-desktop-ui`, budget ~360 product lines; starts after PR B1.3a or stacked on its contract):
    - Desktop "Share to workspace" publish and update flow, Workspace Apps listing with "Updated, review changes" badge, first-open Review and Consent dialog, one-click Fork to local Personal app, Members settings switch, and Owner/Admin moderation list with Withdraw.
    - CLI and MCP parity (publish, list, inspect, fork, withdraw; no agent consent) with updated operation pins.
