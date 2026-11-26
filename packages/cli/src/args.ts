@@ -2493,7 +2493,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
       invite: {
         capabilityId: "members.invite",
         summary:
-          "Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.",
+          "Invite someone by email. dohc emails them an invitation when the server sends email, and inviting the same address again emails it again. They join when they sign in to dohc with that address.",
         operands: "<email>",
         parse: (input) => {
           const [email, ...extra] = input.operands;

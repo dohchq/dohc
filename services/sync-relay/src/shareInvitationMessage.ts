@@ -68,6 +68,7 @@ export function inviterDisplayName(name: string | null): string | null {
 }
 
 export function shareInvitationMessage(input: {
+  workspace?: boolean;
   recipientEmail: string;
   inviterEmail: string;
   inviterName: string | null;
@@ -85,14 +86,15 @@ export function shareInvitationMessage(input: {
     /["\u201c\u201d\u201e\u201f\u00ab\u00bb]/gu,
     "'",
   );
-  const what = name ? `"${name}"` : "work";
-  const subject = `${inviter} shared ${what} with you`;
+  const what = name ? `"${name}"` : input.workspace ? "a workspace" : "work";
+  const invited = input.workspace ? `invited you to ${what}` : `shared ${what} with you`;
+  const subject = `${inviter} ${invited}`;
   const role = ROLES.get(input.access);
   const browserUrl = input.browserInvitationUrl && webUrl(input.browserInvitationUrl);
   const code = input.shareCode;
 
   const text = [
-    `${inviterWithAddress} shared ${what} with you.${role ? ` ${role.sentence}` : ""}`,
+    `${inviterWithAddress} ${invited}.${role ? ` ${role.sentence}` : ""}`,
     ...(browserUrl
       ? [`Open in browser:\n${browserUrl}\nSign in or create an account with ${recipient}.`]
       : []),
@@ -131,8 +133,8 @@ export function shareInvitationMessage(input: {
       .join(" "),
     card: [
       sender(inviterName, inviterEmail),
-      heading("Shared work with you"),
-      item(name || "Shared work", role?.label ?? null),
+      heading(input.workspace ? "Invited you to a workspace" : "Shared work with you"),
+      item(name || (input.workspace ? "Workspace" : "Shared work"), role?.label ?? null),
       gap(24),
       ...browser,
       subheading(browserUrl ? "Using the dohc app?" : "Open in the dohc app"),

@@ -5,7 +5,7 @@ import {
   MESSAGE_DELETE_REFUSED,
   WORKSPACE_MEMBER_ROUTES,
 } from "@dohc/security-contract/workspace-members";
-import { MembersResult, type MembersRequest } from "@dohc/cli/members";
+import { InvitationEmailAnswer, MembersResult, type MembersRequest } from "@dohc/cli/members";
 import { prepareFolderRulePath } from "@dohc/security-contract/access-rules";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -212,14 +212,16 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           return { status: response.status, data };
         };
 
-        const ready = (data: unknown): MembersResult => {
+        const unreadable = () =>
+          new Error("dohc could not read Members from your server. Try again.");
+        const ready = (data: unknown): Extract<MembersResult, { status: "ready" }> => {
           const parsed = MembersResult.safeParse({ status: "ready", view: data });
           if (
             !parsed.success ||
             parsed.data.status !== "ready" ||
             parsed.data.view.workspaceId !== workspaceId
           ) {
-            throw new Error("dohc could not read Members from your server. Try again.");
+            throw unreadable();
           }
           const { view } = parsed.data;
           // With no membership, as before the first invite or after End
@@ -266,11 +268,31 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         switch (request.action) {
           case "list":
             return list();
-          case "invite":
-            return change(route(WORKSPACE_MEMBER_ROUTES.invite, workspaceId), {
-              email: request.email,
-              workspaceName,
-            });
+          case "invite": {
+            const { status, data } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.invite, workspaceId),
+              {
+                email: request.email,
+                workspaceName,
+              },
+            );
+            changed(status);
+            if (typeof data !== "object" || data === null) throw unreadable();
+            const { invitationEmail, invitationEmailLimit, ...view } = data as Record<
+              string,
+              unknown
+            >;
+            // A relay from before invitation emails answers with the view alone.
+            if (invitationEmail === undefined && invitationEmailLimit === undefined)
+              return ready(view);
+            const invitation = InvitationEmailAnswer.safeParse(
+              invitationEmailLimit === undefined
+                ? { invitationEmail }
+                : { invitationEmail, invitationEmailLimit },
+            );
+            if (!invitation.success) throw unreadable();
+            return { ...ready(view), invitation: invitation.data };
+          }
           case "level":
             // The name lets the relay start the membership when there is none.
             return change(route(WORKSPACE_MEMBER_ROUTES.level, workspaceId), {

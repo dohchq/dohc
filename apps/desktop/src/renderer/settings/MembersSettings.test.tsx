@@ -728,9 +728,10 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "letBackIn", person: "m-dee" });
   });
 
-  it("says dohc sends no email, then names the invited address and how that person gets in", async () => {
+  it("says dohc emails the invite, then names the invited address and how that person gets in", async () => {
     bridge.workspaceMembers.mockImplementation(async ({ request }) => ({
       status: "ready",
+      ...(request.action === "invite" ? { invitation: { invitationEmail: "sent" as const } } : {}),
       view:
         request.action === "invite"
           ? ownerView({
@@ -756,11 +757,11 @@ describe("Members page", () => {
     const sent = await screen.findByTestId("settings-members-invite-sent");
     expect(
       within(screen.getByTestId("settings-members-invite")).getByText(
-        /^dohc doesn't send email\. /u,
+        /^dohc emails them an invitation when your server sends email\. /u,
       ),
     ).toBeTruthy();
     expect(sent.textContent).toContain(
-      "Invited eve@test. Once they sign in with this address, the workspace shows in their Sharing",
+      "Emailed the invitation to eve@test. Once they sign in with this address, the workspace shows in their Sharing",
     );
     expect(sent.textContent).not.toContain("invite link");
     expect(sent.closest('[role="status"]')).not.toBeNull();
@@ -768,6 +769,197 @@ describe("Members page", () => {
     expect(screen.queryByRole("button", { name: "Turn on invite link" })).toBeNull();
     expect(screen.queryByTestId("settings-members-invite-sent-copy")).toBeNull();
     expect(within(row("m-eve")).getByText(/^Joins when they sign in · Invited /u)).toBeTruthy();
+  });
+
+  it.each([
+    [
+      { invitationEmail: "unavailable" as const },
+      "Invited eve@test. This server does not send email. Tell them to sign in to dohc with this address",
+    ],
+    [
+      { invitationEmail: "recent" as const },
+      "eve@test already has an invite. Sent recently. Wait a minute before trying again.",
+    ],
+    [
+      {
+        invitationEmail: "limit" as const,
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      "Invited eve@test. No email sent: 50 of 50 invitation emails used in the last 24 hours. Tell them",
+    ],
+  ])("says what became of the invite's email: %o", async (invitation, words) => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: ownerView(),
+      invitation,
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      words,
+    );
+    expect(props.onError).not.toHaveBeenCalled();
+    // A recent attempt may have failed, so it leaves a failure notice standing.
+    if (invitation.invitationEmail === "recent")
+      expect(props.onClearError).not.toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      );
+    else
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      );
+  });
+
+  const eve = person({ memberId: "m-eve", state: "invited", email: "eve@test", joinedAtMs: null });
+  const withEve = () => ownerView({ people: [owner, ana, bo, cy, dee, eve] });
+
+  it("reports an invite whose email failed, and Try again invites the same address again", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const failed = {
+      status: "ready" as const,
+      view: withEve(),
+      invitation: { invitationEmail: "failed" as const },
+    };
+    bridge.workspaceMembers.mockResolvedValueOnce(failed);
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "Eve@test{Enter}");
+    const shown = await screen.findByTestId("settings-members-invite-email-failed");
+    expect(shown.textContent).toContain(
+      "Invited Eve@test, but dohc could not email them the invitation.",
+    );
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const [message, , retry, , identity] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc could not email Eve@test their invitation.");
+    expect(identity).toBe("settings-members:ws-1:invite-email:eve@test");
+
+    bridge.workspaceMembers.mockResolvedValueOnce(failed);
+    await userEvent.click(within(shown).getByRole("button", { name: "Try again" }));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "Eve@test" });
+
+    // Notices' Try again checks the invite still stands, then invites again.
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      ...failed,
+      invitation: { invitationEmail: "sent" },
+    });
+    await act(async () => retry!());
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "Eve@test" });
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      "Emailed the invitation to Eve@test.",
+    );
+    expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1:invite-email:eve@test");
+  });
+
+  it("keeps a failed email's Try again working after Settings closes", async () => {
+    const { props, view } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(requests().slice(-2)).toEqual([
+      { action: "list" },
+      { action: "invite", email: "eve@test" },
+    ]);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+
+    // When the list can't be read, the notice comes back and nothing is invited.
+    bridge.workspaceMembers.mockRejectedValueOnce(new Error("offline"));
+    await act(async () => onError.mock.calls[1]![2]!());
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(onError).toHaveBeenCalledTimes(3);
+
+    // Once the invite is gone, Try again invites no one.
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await act(async () => onError.mock.calls[2]![2]!());
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a failed email failed when Try again comes too soon", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const shown = await screen.findByTestId("settings-members-invite-email-failed");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "recent" },
+    });
+    await userEvent.click(within(shown).getByRole("button", { name: "Try again" }));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(String(onError.mock.calls[1]![1])).toContain("No email went out.");
+    expect(await screen.findByTestId("settings-members-invite-email-failed")).toBeTruthy();
+    expect(props.onClearError).not.toHaveBeenCalledWith(
+      "settings-members:ws-1:invite-email:eve@test",
+    );
+  });
+
+  it("takes back a failed email's notice and Try again when the invite is removed", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await screen.findByTestId("settings-members-invite-email-failed");
+    expect(props.onClearError).not.toHaveBeenCalledWith(
+      "settings-members:ws-1:invite-email:eve@test",
+    );
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await openMenu("m-eve");
+    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Remove invite" }));
+    await vi.waitFor(() =>
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      ),
+    );
+    expect(screen.queryByTestId("settings-members-invite-email-failed")).toBeNull();
+  });
+
+  it("resends an invite from its row", async () => {
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    expect(await openMenu("m-cy")).toEqual(["Resend invitation", "Remove invite"]);
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: ownerView(),
+      invitation: { invitationEmail: "sent" },
+    });
+    await userEvent.click(
+      screen.getByRole("menuitem", { hidden: true, name: "Resend invitation" }),
+    );
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "cy@test" });
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      "Emailed the invitation to cy@test.",
+    );
   });
 
   it("keeps an address typed while the invite runs", async () => {

@@ -491,13 +491,16 @@ function decoded(value: string): string {
 
 /**
  * The page an emailed link should continue, if Better Auth's link carries one:
- * a device sign-in, or the join page. The invite token never rides in the
- * link; the join page asks for the invite link again when its tab lost it.
+ * a device sign-in, the join page, or the workspaces page an invitation email
+ * opens. The invite token never rides in the link; the join page asks for the
+ * invite link again when its tab lost it.
  */
 export function emailedLinkNextPage(betterAuthUrl: string): string | null {
   const callback = new URL(betterAuthUrl).searchParams.get("callbackURL");
   return callback &&
-    (callback === "/join" || /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback))
+    (callback === "/join" ||
+      callback === "/workspaces" ||
+      /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback))
     ? callback
     : null;
 }

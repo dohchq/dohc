@@ -29,7 +29,7 @@ import {
   type WorkspaceMembersView,
   type WorkspacePerson,
 } from "@dohc/security-contract/workspace-members";
-import type { MembersRequest, MembersResult } from "@dohc/cli/members";
+import type { InvitationEmailAnswer, MembersRequest, MembersResult } from "@dohc/cli/members";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { relativeTime } from "../relativeTime";
@@ -46,11 +46,13 @@ import type { CloudSettings } from "./CloudSyncSettings";
 import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 import { joinedByAnother } from "../../ipc/joinedAccountWords";
 import { FolderAccessSettings } from "./FolderAccessSettings";
+import { invitationResendWords } from "../sharePerson";
 
+// Resolves with the relay's answer, or null when the change didn't go through.
 type RunMembers = (
   request: MembersRequest,
   onFailure?: (message: string) => void,
-) => Promise<boolean>;
+) => Promise<MembersResult | null>;
 
 type ReportError = (
   message: string,
@@ -235,6 +237,8 @@ export function MembersSettings(props: {
   // The owner ended membership here. The page says so above what it lists
   // next, until another change goes through.
   const [ended, setEnded] = useState<string | null>(null);
+  // The last invite and what became of its email, for the scope it ran in.
+  const [invited, setInvited] = useState<{ key: string; invited: Invited } | null>(null);
   const listIdentity = `settings-members:${workspaceId}`;
 
   useEffect(() => {
@@ -272,11 +276,12 @@ export function MembersSettings(props: {
 
   const run = useCallback<RunMembers>(
     async (request, onFailure) => {
-      if (scopeKey === null) return false;
+      if (scopeKey === null) return null;
       const token = scope.current();
-      if (runningIn.current === token) return false;
+      if (runningIn.current === token) return null;
       runningIn.current = token;
       setRunning(request);
+      setInvited(null);
       const identity = `settings-members:${workspaceId}:${keyOf(request)}`;
       const settle = () => {
         if (runningIn.current !== token) return;
@@ -291,7 +296,7 @@ export function MembersSettings(props: {
         const message = ipcErrorMessage(cause, FALLBACK[request.action]);
         if (scope.isCurrent(token) && onFailure) {
           onFailure(message);
-          return false;
+          return null;
         }
         // A failure still reports when closing Settings cut it off; another
         // workspace or account never hears it.
@@ -314,11 +319,82 @@ export function MembersSettings(props: {
             );
           reportFailure();
         }
-        return false;
+        return null;
       }
       settle();
-      if (!scope.isCurrent(token)) return true;
+      const current = scope.isCurrent(token);
+      if (!current && !(closed.current && scope.isCutOff(token))) return result;
+      const emailPrefix = `settings-members:${workspaceId}:invite-email:`;
+      let emailed = result.status === "ready" ? result.invitation : undefined;
+      if (request.action === "invite" && emailed) {
+        // The invite stands either way. A failed email is reported here, and
+        // Try again invites the same address, which emails it again. A recent
+        // attempt sends nothing, so after a failure it is still one.
+        const address = request.email.toLowerCase();
+        const emailIdentity = `${emailPrefix}${address}`;
+        const recent = emailed.invitationEmail === "recent";
+        const failing =
+          emailed.invitationEmail === "failed" || (recent && filed.current.has(emailIdentity));
+        const cause = new Error(
+          recent
+            ? "No email went out. Wait a minute before trying again."
+            : invitationResendWords(emailed),
+        );
+        const reportEmail = (): void =>
+          fileFailure(
+            `dohc could not email ${request.email} their invitation.`,
+            cause,
+            async () => {
+              if (!scope.isCurrent(token) && !closed.current) return;
+              if (runningIn.current !== null) return reportEmail();
+              // Settings may have closed since, so check the invite still stands.
+              const listed = await bridge()
+                .workspaceMembers({ workspaceId, request: { action: "list" } })
+                .catch(() => null);
+              if (listed === null) return reportEmail();
+              if (
+                listed.status !== "ready" ||
+                !listed.view.people.some(
+                  (person) => person.state !== "removed" && person.email?.toLowerCase() === address,
+                )
+              )
+                return;
+              await run(request);
+            },
+            undefined,
+            emailIdentity,
+          );
+        if (failing) {
+          emailed = { invitationEmail: "failed" };
+          reportEmail();
+        } else if (!recent) {
+          filed.current.delete(emailIdentity);
+          report.current.onClearError?.(emailIdentity);
+        }
+      }
+      if (!current) return result;
       report.current.onClearError?.(identity);
+      if (result.status === "ready") {
+        // An email notice goes once its address is no longer invited or in the workspace.
+        const here = new Set(
+          result.view.people.flatMap((person) =>
+            person.state !== "removed" && person.email ? [person.email.toLowerCase()] : [],
+          ),
+        );
+        for (const filedIdentity of filed.current)
+          if (
+            filedIdentity.startsWith(emailPrefix) &&
+            !here.has(filedIdentity.slice(emailPrefix.length))
+          ) {
+            filed.current.delete(filedIdentity);
+            report.current.onClearError?.(filedIdentity);
+          }
+      }
+      if (request.action === "invite" && result.status === "ready")
+        setInvited({
+          key: scopeKey,
+          invited: { email: request.email, answer: emailed ?? null },
+        });
       setEnded(request.action === "end" && result.status === "ready" ? scopeKey : null);
       if (result.status === "ready")
         setLoad({ key: scopeKey, load: { status: "ready", view: result.view } });
@@ -335,7 +411,7 @@ export function MembersSettings(props: {
           },
         }));
       }
-      return true;
+      return result;
     },
     [scopeKey, workspaceId, props.workspaceName],
   );
@@ -356,6 +432,7 @@ export function MembersSettings(props: {
           running={running}
           workspaceName={props.workspaceName}
           ended={ended !== null && ended === scopeKey}
+          invited={invited?.key === scopeKey ? invited.invited : null}
           onRetry={() => setAttempt((count) => count + 1)}
           onOpenSync={props.onOpenSync}
           run={run}
@@ -450,6 +527,7 @@ export function MembersLoadView(props: {
   workspaceName: string;
   // Membership ended from this page, and nothing has changed since.
   ended?: boolean;
+  invited?: Invited | null;
   onRetry: () => void;
   onOpenSync: () => void;
   run: RunMembers;
@@ -510,6 +588,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
           view={load.view}
           running={props.running}
           ended={props.ended}
+          invited={props.invited ?? null}
           run={props.run}
           reload={props.onRetry}
           onMessage={props.onMessage}
@@ -596,6 +675,8 @@ export function MembersPage(props: {
   // The change running now. Every control waits for it.
   running: MembersRequest | null;
   ended?: boolean | undefined;
+  // The address the last invite went to, and what became of its email.
+  invited?: Invited | null;
   run: RunMembers;
   reload: () => void;
   onMessage?: (memberId: string) => void;
@@ -604,6 +685,8 @@ export function MembersPage(props: {
   const role = view.viewer.role;
   const manages = role !== "member";
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const invite = async (email: string): Promise<boolean> =>
+    (await run({ action: "invite", email })) !== null;
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
 
@@ -654,15 +737,21 @@ export function MembersPage(props: {
         : [];
     if (person.role === "owner") return message;
     if (person.state === "invited") {
-      return memberMay(role, "remove", person.role)
-        ? [
-            {
-              label: "Remove invite",
-              danger: true,
-              onSelect: () => void run({ action: "remove", person: person.memberId }),
-            },
-          ]
-        : [];
+      const { email } = person;
+      return [
+        ...(email && memberMay(role, "invite")
+          ? [{ label: "Resend invitation", onSelect: () => void invite(email) }]
+          : []),
+        ...(memberMay(role, "remove", person.role)
+          ? [
+              {
+                label: "Remove invite",
+                danger: true,
+                onSelect: () => void run({ action: "remove", person: person.memberId }),
+              },
+            ]
+          : []),
+      ];
     }
     if (person.state !== "active") return [];
     const items: MoreMenuItem[] = [...message];
@@ -696,7 +785,8 @@ export function MembersPage(props: {
             people={view.people}
             busy={busy("invite")}
             disabled={waiting}
-            onInvite={(email) => run({ action: "invite", email })}
+            invited={props.invited ?? null}
+            onInvite={invite}
           />
           <SettingRow
             title="Invite link"
@@ -1070,17 +1160,59 @@ function displayName(person: WorkspacePerson): string {
   return person.name?.trim() || person.email || "this person";
 }
 
+// No answer is a relay from before invitation emails.
+type Invited = { email: string; answer: InvitationEmailAnswer | null };
+
+const SHOWS_IN_SHARING =
+  "Once they sign in with this address, the workspace shows in their Sharing, under Shared with me.";
+
+// What the last invite did, and how its person gets in when no email went out.
+function InvitedStatus(props: { invited: Invited; disabled: boolean; onResend: () => void }) {
+  const { answer } = props.invited;
+  const who = <span className="break-words font-medium text-ink">{props.invited.email}</span>;
+  if (answer?.invitationEmail === "failed")
+    return (
+      <RetryRow
+        testId="settings-members-invite-email-failed"
+        disabled={props.disabled}
+        onRetry={props.onResend}
+      >
+        Invited {who}, but dohc could not email them the invitation.
+      </RetryRow>
+    );
+  return (
+    <p data-testid="settings-members-invite-sent" className="m-0 text-[12px] text-muted">
+      {answer === null ? (
+        <>
+          Invited {who}. {SHOWS_IN_SHARING}
+        </>
+      ) : answer.invitationEmail === "sent" ? (
+        <>
+          Emailed the invitation to {who}. {SHOWS_IN_SHARING}
+        </>
+      ) : answer.invitationEmail === "recent" ? (
+        <>
+          {who} already has an invite. {invitationResendWords(answer)}
+        </>
+      ) : (
+        <>
+          Invited {who}. {invitationResendWords(answer)} Tell them to sign in to dohc with this
+          address, and the workspace shows in their Sharing, under Shared with me.
+        </>
+      )}
+    </p>
+  );
+}
+
 function InviteRow(props: {
   people: readonly WorkspacePerson[];
   busy: boolean;
   disabled: boolean;
+  invited: Invited | null;
   onInvite: (email: string) => Promise<boolean>;
 }) {
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // The address the last invite went to. dohc sends no email, so the row
-  // says how that person gets in.
-  const [sent, setSent] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const errorId = useId();
   const check = (value: string): string | null => {
@@ -1092,7 +1224,8 @@ function InviteRow(props: {
       (person) => person.email?.toLowerCase() === trimmed.toLowerCase(),
     );
     if (known?.state === "active") return `${trimmed} is already in this workspace.`;
-    if (known?.state === "invited") return `${trimmed} already has an invite.`;
+    if (known?.state === "invited")
+      return `${trimmed} already has an invite. To email it again, choose Resend invitation in their row.`;
     if (known?.state === "removed") return `${trimmed} was removed. Let them back in from Removed.`;
     return null;
   };
@@ -1100,7 +1233,7 @@ function InviteRow(props: {
     <SettingRow
       title="Invite by email"
       testId="settings-members-invite"
-      description="dohc doesn't send email. The person joins when they sign in to dohc with the address you enter."
+      description="dohc emails them an invitation when your server sends email. They join when they sign in to dohc with the address you enter."
       aside={
         <form
           noValidate
@@ -1115,10 +1248,8 @@ function InviteRow(props: {
               return;
             }
             const submitted = email.trim();
-            setSent(null);
             void props.onInvite(submitted).then((done) => {
               if (!done) return;
-              setSent(submitted);
               // An address typed while the invite ran stays.
               setEmail((current) => (current.trim() === submitted ? "" : current));
             });
@@ -1156,11 +1287,14 @@ function InviteRow(props: {
             </FieldError>
           ) : null}
           <div role="status" className="empty:hidden">
-            {sent ? (
-              <p data-testid="settings-members-invite-sent" className="m-0 text-[12px] text-muted">
-                Invited <span className="font-medium text-ink">{sent}</span>. Once they sign in with
-                this address, the workspace shows in their Sharing, under Shared with me.
-              </p>
+            {props.invited ? (
+              <InvitedStatus
+                invited={props.invited}
+                disabled={props.disabled}
+                onResend={() => {
+                  if (props.invited) void props.onInvite(props.invited.email);
+                }}
+              />
             ) : null}
           </div>
         </form>
