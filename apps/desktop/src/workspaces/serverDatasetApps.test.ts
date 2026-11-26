@@ -891,7 +891,6 @@ it("sends a synced workspace's outside call through its server, which adds the s
           )
           .get(publicationId)?.candidate,
     );
-  // The server holds the workspace's secrets, and tells the owner what is missing.
   await expect(call()).rejects.toMatchObject({
     refusal: {
       code: "external_unavailable",
