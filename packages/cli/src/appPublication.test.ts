@@ -143,6 +143,47 @@ describe("owner publication review contract", () => {
       expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
     }
   });
+  it("reads a publication list from a newer server that adds fields, and drops them", () => {
+    const row = {
+      publicationId: "d".repeat(64),
+      authorityRevision: 2,
+      audience: "link",
+      shareId: "s",
+      grantId: "g",
+      active: true,
+      linkCurrent: true,
+      manifestUnavailable: false,
+      appRoot: "app",
+      sourceRevision: "c".repeat(64),
+      collectionCapability: null,
+      datasetCapabilities: [],
+      approvalProvenance: {
+        agent: { kind: "agent", label: "Helper", labelSource: "agent-declared" },
+        selector: null,
+        access: "view",
+        committedCandidateDigest: "e".repeat(64),
+        sourceRevision: "c".repeat(64),
+        capabilities: [],
+      },
+    };
+    const listed = { kind: "listed", publications: [row], nextCursor: null };
+    expect(
+      OwnerAppPublicationResult.parse({
+        ...listed,
+        addedLater: 1,
+        publications: [
+          {
+            ...row,
+            addedLater: 1,
+            approvalProvenance: {
+              ...row.approvalProvenance,
+              agent: { ...row.approvalProvenance.agent, addedLater: 1 },
+            },
+          },
+        ],
+      }),
+    ).toEqual(listed);
+  });
   it("preserves every approved collection field for CLI readers", () => {
     expect(OwnerAppPublicationResult.parse(prepared)).toEqual(prepared);
   });

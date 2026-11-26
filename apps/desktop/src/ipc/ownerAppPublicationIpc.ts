@@ -528,9 +528,15 @@ export function createOwnerAppPublicationHandler<
         if (answer.kind === "unavailable")
           return OwnerAppPublicationResult.parse({ kind: "listUnavailable" });
         const raw = answer.body;
-        if (!raw || typeof raw !== "object" || Array.isArray(raw))
-          throw new Error("dohc could not read app publications.");
-        const result = OwnerAppPublicationResult.parse({ ...raw, kind: "listed" });
+        const parsed =
+          raw && typeof raw === "object" && !Array.isArray(raw)
+            ? OwnerAppPublicationResult.safeParse({ ...raw, kind: "listed" })
+            : null;
+        if (!parsed?.success)
+          throw new Error(
+            "dohc could not read the server's app publications. dohc or the server needs an update.",
+          );
+        const result = parsed.data;
         if (
           result.kind !== "listed" ||
           result.publications.some(

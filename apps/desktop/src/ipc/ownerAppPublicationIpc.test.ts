@@ -925,6 +925,58 @@ describe("owner app publication", () => {
       nextCursor: null,
     });
   });
+  it("lists publications from a newer server that adds fields, and says an unreadable list needs an update", async () => {
+    const h = harness();
+    const row = {
+      publicationId: "a".repeat(64),
+      authorityRevision: 1,
+      audience: "link",
+      shareId: "s",
+      grantId: "g",
+      active: true,
+      linkCurrent: true,
+      collectionCapability: null,
+      datasetCapabilities: [],
+      manifestUnavailable: false,
+      appRoot: "app",
+      sourceRevision: "d".repeat(64),
+      operatorTakedown: { actor: "operator", disabledAtMs: 1, reason: "Spam" },
+      approvalProvenance: {
+        agent: { kind: "agent", label: "Helper", labelSource: "agent-declared" },
+        selector: null,
+        access: "view",
+        committedCandidateDigest: "e".repeat(64),
+        sourceRevision: "d".repeat(64),
+        capabilities: [],
+      },
+    };
+    h.relay.mockResolvedValueOnce({
+      publications: [
+        {
+          ...row,
+          addedLater: 1,
+          operatorTakedown: { ...row.operatorTakedown, addedLater: 1 },
+          approvalProvenance: {
+            ...row.approvalProvenance,
+            addedLater: 1,
+            agent: { ...row.approvalProvenance.agent, addedLater: 1 },
+          },
+        },
+      ],
+      nextCursor: null,
+      addedLater: 1,
+    });
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({
+      kind: "listed",
+      publications: [row],
+      nextCursor: null,
+    });
+    const { linkCurrent: _, ...changed } = row;
+    h.relay.mockResolvedValueOnce({ publications: [changed], nextCursor: null });
+    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).rejects.toThrow(
+      "dohc could not read the server's app publications. dohc or the server needs an update.",
+    );
+  });
   it("counts only the relay's not_found 404 as a list the server does not publish", () => {
     const notFound = { ok: false, error: "Not found.", code: "not_found" };
     expect(publicationListUnavailable(404, notFound)).toBe(true);

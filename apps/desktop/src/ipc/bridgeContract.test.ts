@@ -444,7 +444,7 @@ describe("owner relay share link IPC contract", () => {
       }).success,
     ).toBe(false);
     expect(
-      ListRelayShareLinksResult.safeParse({
+      ListRelayShareLinksResult.parse({
         links: [],
         supportedLinkAccess: ["view", "comment"],
         independentGrants: [
@@ -453,11 +453,12 @@ describe("owner relay share link IPC contract", () => {
             grantId: "independent-1",
             recipientUserId: "user-1",
             recipientEmail: "reader@example.test",
+            access: "view",
             secret: "must-not-cross",
           },
         ],
-      }).success,
-    ).toBe(false);
+      }).independentGrants[0],
+    ).not.toHaveProperty("secret");
   });
 
   it("requires an explicit access level and excludes Edit on pinned versions", () => {

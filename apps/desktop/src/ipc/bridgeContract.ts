@@ -4991,15 +4991,13 @@ export const RelayShareLinkRow = z.union([
 ]);
 export type RelayShareLinkRow = z.infer<typeof RelayShareLinkRow>;
 
-export const RelayShareLinkIndependentGrant = z
-  .object({
-    shareId: OPAQUE_ID,
-    grantId: OPAQUE_ID,
-    recipientUserId: z.string().min(1).max(256).nullable(),
-    recipientEmail: EMAIL_STRING.nullable(),
-    access: SHARE_ACCESS,
-  })
-  .strict();
+export const RelayShareLinkIndependentGrant = z.object({
+  shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  recipientUserId: z.string().min(1).max(256).nullable(),
+  recipientEmail: EMAIL_STRING.nullable(),
+  access: SHARE_ACCESS,
+});
 export type RelayShareLinkIndependentGrant = z.infer<typeof RelayShareLinkIndependentGrant>;
 
 export const ListRelayShareLinksResult = z.object({
