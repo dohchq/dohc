@@ -2484,7 +2484,7 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app stage`
 
@@ -2497,7 +2497,7 @@ Reads app.publish.json and each bound Collection without writing workspace files
 - `migrations`: `{ [key: string]: string }`
 - `agentLabel`: `string`
 
-Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets: { path, prefix }[], collections, capabilities, externalNetwork: true } }`.
+Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets, collections, capabilities, externalNetwork: true } }`.
 
 #### `dohc app listStaged`
 
@@ -2508,7 +2508,7 @@ Pass optional appRoot to filter to one app folder.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`
 
-Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets: { path, prefix }[], collections, capabilities, externalNetwork: true }[] }`.
+Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets, collections, capabilities, externalNetwork: true }[] }`.
 
 #### `dohc app approveStaged`
 
@@ -2569,7 +2569,7 @@ Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `c
 - `shareId`: `string`
 - `grantId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
@@ -2629,7 +2629,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

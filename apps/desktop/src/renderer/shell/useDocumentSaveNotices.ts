@@ -392,7 +392,6 @@ export function useDocumentSaveNotices(input: {
         return;
       }
       if (event.workspaceId !== owner) return;
-      secretSaved(event.path, event.secret);
       if (event.textRemoved) {
         removedText(event.path, event.textRemoved.text);
         return;
@@ -401,6 +400,7 @@ export function useDocumentSaveNotices(input: {
       if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
         return;
       sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
+      secretSaved(event.path, event.secret);
       // An author-capacity refusal has its own notice, including one a Try
       // again ran into, so this document's save notice gives way to it.
       if (event.authorCapacity) forget(event.path, "engine");

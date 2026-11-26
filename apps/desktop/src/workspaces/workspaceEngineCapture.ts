@@ -1332,6 +1332,7 @@ function sha256Bytes(bytes: Uint8Array): string {
 // question. Hashing it anyway would hold a close open over a read as long as
 // the file.
 export const MAX_SETTLED_FILE_BYTES = 16 * 1024 * 1024;
+const SECRET_SCAN_OVERLAP = 64;
 
 type SettledFileDigest =
   // The file's bytes, hashed. Compare it with the settle's sha. `secret` is
@@ -1382,27 +1383,26 @@ async function digestSettledFile(
     if (info.isSymbolicLink() || !info.isFile()) return { kind: "changed" };
     if (info.size > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
     const hash = createHash("sha256");
-    const chunks: Buffer[] = [];
+    const decoder =
+      scan && classifyEngineFilePath(path).kind === "tracked" ? new TextDecoder() : null;
+    let secret: SecretPrefix | null = null;
+    let tail = "";
     let read = 0;
     for await (const chunk of createReadStream(absolute)) {
-      const bytes = chunk as Buffer;
+      const bytes = chunk as Uint8Array;
       read += bytes.byteLength;
       // The file grew past the bound after its size was taken. Same answer,
       // and the read stops here rather than following it.
       if (read > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
       hash.update(bytes);
-      if (scan) chunks.push(bytes);
+      if (decoder && secret === null) {
+        const text = tail + decoder.decode(bytes, { stream: true });
+        secret = likelySecretPrefix(text);
+        tail = text.slice(-SECRET_SCAN_OVERLAP);
+      }
     }
     const sha256 = hash.digest("hex");
-    if (!scan) return { kind: "sha256", sha256 };
-    return {
-      kind: "sha256",
-      sha256,
-      secret:
-        classifyEngineFilePath(path).kind === "tracked"
-          ? likelySecretPrefix(Buffer.concat(chunks).toString("utf8"))
-          : null,
-    };
+    return scan ? { kind: "sha256", sha256, secret } : { kind: "sha256", sha256 };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
