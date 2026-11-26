@@ -127,10 +127,15 @@ function memberMayEdit(
   grant: ActiveWorkspaceShareGrantRow,
   sourcePaths: readonly string[],
 ): boolean {
-  if (grant.pendingMemberInvite) return grant.access === "edit";
-  const userId = grant.principalKind === "user" ? grant.principalUserId : null;
-  if (userId === null || !isShareAccessValue(grant.access)) return true;
-  if (storage.workspaceRoleOf(workspaceId, userId)?.role !== "member") return true;
+  if (!isShareAccessValue(grant.access)) return true;
+  const userId = grant.pendingMemberInvite
+    ? `pending:${grant.grantId}`
+    : grant.principalKind === "user"
+      ? grant.principalUserId
+      : null;
+  if (userId === null) return true;
+  if (!grant.pendingMemberInvite && storage.workspaceRoleOf(workspaceId, userId)?.role !== "member")
+    return true;
   const reach = storage.memberReach(workspaceId, userId, "member", grant.access);
   return sourcePaths.some((path) => reach.levelAt(path) === "edit");
 }

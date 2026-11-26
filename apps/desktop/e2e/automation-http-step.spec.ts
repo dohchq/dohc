@@ -199,7 +199,7 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
     await expect(panel.getByLabel("Step 2, secret header 1 secret", { exact: true })).toHaveValue(
       "RESEND_API_KEY",
     );
-    await expect(panel.getByLabel("Name")).toHaveValue("Notify on new task");
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("Notify on new task");
     await panel.getByLabel("Step 2, body type", { exact: true }).selectOption("json");
     await shoot(page, panel, "pr2-http-builder");
 

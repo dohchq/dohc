@@ -32,6 +32,7 @@ export type ReserveWorkspaceHttpDispatchResult<Refusal = never> =
   | { readonly ok: false; readonly reason: "refused"; readonly refusal: Refusal };
 
 export interface ActiveWorkspaceShareGrantRow {
+  readonly grantId: string;
   readonly selectorJson: string;
   readonly access: string;
   readonly principalKind: string;
@@ -399,7 +400,7 @@ export function listActiveWorkspaceShareGrants(
 ): ActiveWorkspaceShareGrantRow[] {
   const rows = storage.db
     .prepare(
-      `SELECT s.selector_json, g.access, g.principal_kind, g.principal_user_id,
+      `SELECT g.grant_id, s.selector_json, g.access, g.principal_kind, g.principal_user_id,
               EXISTS (SELECT 1 FROM sync_relay_workspace_members m
                        WHERE m.grant_id = g.grant_id AND m.state = 'invited') AS pending_member_invite
          FROM sync_relay_shares s
@@ -408,6 +409,7 @@ export function listActiveWorkspaceShareGrants(
     )
     .all(workspaceId);
   return rows.map((row) => ({
+    grantId: String(row.grant_id),
     selectorJson: String(row.selector_json),
     access: String(row.access),
     principalKind: String(row.principal_kind),

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { folderMarkerText } from "@dohc/security-contract/access-rules";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import {
   parseAutomationsFile,
@@ -530,6 +531,28 @@ describe("outbound webhook relay routes (Model E1)", () => {
     ).toBe(200);
     expect((await dispatchAs("delivery-after-pending-edit-invite")).status).toBe(403);
     expect(sent).toHaveLength(4);
+    const viewRule = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/members/folder-rules`,
+        jsonBody({ folder: COLLECTION, members: "view", people: [] }),
+      ),
+    );
+    expect(viewRule.status, await viewRule.clone().text()).toBe(200);
+    const { folderRules } = (await viewRule.json()) as {
+      folderRules: Array<{ ruleId: string; revision: number; folders: Array<{ path: string }> }>;
+    };
+    const rule = folderRules.find((entry) => entry.folders.some((f) => f.path === COLLECTION))!;
+    await commitFiles(handler, [
+      {
+        objectId: "obj-marker",
+        path: `${COLLECTION}/.dohc-access`,
+        text: folderMarkerText(rule.ruleId, rule.revision),
+      },
+    ]);
+    const afterViewRule = await dispatchAs("delivery-pending-edit-invite-under-view-rule");
+    expect(afterViewRule.status, await afterViewRule.clone().text()).toBe(200);
+    expect(sent).toHaveLength(5);
 
     // Sharing Collection with Edit access immediately stops dispatch authoritatively.
     await createShare(handler, OWNER, WORKSPACE, {
@@ -549,12 +572,12 @@ describe("outbound webhook relay routes (Model E1)", () => {
     );
     expect(afterShare.status).toBe(403);
     expect(await afterShare.json()).toMatchObject({ ok: false, error: "reach_stopped" });
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(5);
 
     // Account deletion cascade purges approvals and dispatches.
     const dbPath = storagePath(storage);
     expect(countRows(dbPath, "sync_relay_http_approvals")).toBe(1);
-    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(5);
+    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(6);
     initializeAccountDeletion(storage, LINK_KEY);
     const fenced = fenceAccount(storage, LINK_KEY, OWNER, "owner@dohc.test");
     expect(fenced.manifest).not.toBeNull();
