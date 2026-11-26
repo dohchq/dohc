@@ -58,16 +58,6 @@ fn kept_row<T: rusqlite::types::FromSql>(
         .map_err(SyncError::corrupt)
 }
 
-fn strings(store: &EngineStore, sql: &str, claim: Option<&str>) -> Result<Vec<String>, SyncError> {
-    store
-        .read_with(|conn| -> rusqlite::Result<Vec<String>> {
-            conn.prepare(sql)?
-                .query_map(rusqlite::params_from_iter(claim), |row| row.get(0))?
-                .collect()
-        })
-        .map_err(SyncError::corrupt)
-}
-
 /// Whether this apply is the open's replay of `envelope`'s kept format-2 row.
 pub(crate) fn kept_candidate(
     conn: &Connection,
@@ -140,24 +130,47 @@ pub(crate) fn refuse_claim_in_tx(
     crate::ydoc_apply::refuse_rows_of_a_kept_base_in_tx(tx, envelope, reason)
 }
 
-/// Replay `claim`'s kept rows, base first, then drain its parked edits, and
+type KeptClaim = (String, Vec<(i64, Option<String>)>);
+
+fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
+    let sql = format!(
+        "SELECT {CLAIM_OF}, k.rowid, CASE WHEN {CANDIDATE} THEN json_object('workspaceId', \
+           k.workspace_id,'originId',k.origin_id,'originSeq',k.origin_seq,'relaySeq',k.relay_seq, \
+           'opKind',l.op_kind,'payload',json(l.payload_json),'recordedAtMs',l.recorded_at_ms) END \
+         {KEPT_ROWS} WHERE k.replayed=1 OR ({CANDIDATE}) \
+         ORDER BY MIN(k.rowid) OVER (PARTITION BY {CLAIM_OF}), NOT {BASE}, k.rowid"
+    );
+    let rows = store
+        .read_with(
+            |conn| -> rusqlite::Result<Vec<(String, i64, Option<String>)>> {
+                conn.prepare(&sql)?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect()
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut claims: Vec<KeptClaim> = Vec::new();
+    for (claim, rowid, envelope) in rows {
+        match claims.last_mut() {
+            Some((last, kept)) if *last == claim => kept.push((rowid, envelope)),
+            _ => claims.push((claim, vec![(rowid, envelope)])),
+        }
+    }
+    Ok(claims)
+}
+
+/// Replay a claim's kept rows, base first, then drain its parked edits, and
 /// forget its rows once none is left to replay.
 fn finish_claim(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     faults: &dyn FaultInjector,
-    claim: &str,
+    (claim, kept): &KeptClaim,
 ) -> Result<usize, SyncError> {
-    let rows = format!(
-        "SELECT json_object('workspaceId',k.workspace_id,'originId',k.origin_id, \
-           'originSeq',k.origin_seq,'relaySeq',k.relay_seq,'opKind',l.op_kind, \
-           'payload',json(l.payload_json),'recordedAtMs',l.recorded_at_ms) {KEPT_ROWS} \
-         WHERE {CLAIM_OF}=?1 AND {CANDIDATE} ORDER BY NOT {BASE}, k.rowid"
-    );
     let mut replayed = 0;
-    for row in strings(store, &rows, Some(claim))? {
+    for row in kept.iter().filter_map(|(_, envelope)| envelope.as_deref()) {
         let envelope: ReplicationEnvelope =
-            serde_json::from_str(&row).map_err(SyncError::corrupt)?;
+            serde_json::from_str(row).map_err(SyncError::corrupt)?;
         if store
             .read_with(|conn| kept_row::<i64>(conn, "1", CANDIDATE, &envelope))?
             .is_none()
@@ -177,13 +190,16 @@ fn finish_claim(
         serde_json::from_str(claim).map_err(SyncError::corrupt)?;
     let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
     crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
+    let rowids = serde_json::to_string(&kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>())
+        .map_err(SyncError::corrupt)?;
     let forget = format!(
-        "DELETE FROM replication_refused_ydoc_blobs WHERE rowid IN \
-           (SELECT k.rowid {KEPT_ROWS} WHERE {CLAIM_OF}=?1 AND k.replayed=1) \
-         AND NOT EXISTS(SELECT 1 {KEPT_ROWS} WHERE {CLAIM_OF}=?1 AND {CANDIDATE})"
+        "DELETE FROM replication_refused_ydoc_blobs WHERE replayed=1 \
+           AND rowid IN (SELECT value FROM json_each(?1)) \
+         AND NOT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs k \
+           WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
     match store.write_with(faults, |tx| {
-        tx.execute(&forget, [claim]).map_err(SyncError::persist)
+        tx.execute(&forget, [rowids]).map_err(SyncError::persist)
     })? {
         TxnOutcome::Committed(_) => Ok(replayed),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
@@ -201,16 +217,12 @@ pub fn replay_kept_format_two(
     if !dohc_engine_collab::ydoc::reads_body_sequence() {
         return Ok(0);
     }
-    let claims = format!(
-        "SELECT {CLAIM_OF} {KEPT_ROWS} WHERE k.replayed=1 OR ({CANDIDATE}) \
-         GROUP BY 1 ORDER BY MIN(k.rowid)"
-    );
     let mut replayed = 0;
-    for claim in strings(store, &claims, None)? {
+    for claim in kept_claims(store)? {
         match finish_claim(store, cache, faults, &claim) {
             Ok(count) => replayed += count,
             Err(SyncError::FaultCrash) => return Err(SyncError::FaultCrash),
-            Err(error) => eprintln!("engine: kept format-2 note {claim} stays kept: {error}"),
+            Err(error) => eprintln!("engine: kept format-2 note {} stays kept: {error}", claim.0),
         }
     }
     Ok(replayed)
