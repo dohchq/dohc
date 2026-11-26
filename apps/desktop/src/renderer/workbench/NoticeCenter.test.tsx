@@ -496,7 +496,6 @@ describe("notice center", () => {
     });
     await user.click(screen.getByTestId("notice-center-toggle"));
 
-    // The first press only asks, and Escape backs out with Notices still open.
     await user.click(screen.getByTestId("notice-center-clear-all"));
     expect(screen.getByTestId("notice-center-clear-confirm").textContent).toBe("Clear 2 Notices");
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-clear-cancel"));
@@ -504,7 +503,6 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center-clear-confirm")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-clear-all"));
     expect(screen.getByTestId("notice-center")).toBeTruthy();
-    // From a row too.
     await user.click(screen.getByTestId("notice-center-clear-all"));
     await user.keyboard("{ArrowDown}{Escape}");
     expect(screen.queryByTestId("notice-center-clear-confirm")).toBeNull();

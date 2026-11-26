@@ -2338,8 +2338,6 @@ export function NoticeCenter(props: {
   const count = unreadLocal + unreadSent;
   const canReadAll =
     unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
-  // Clear all dismisses every row that has its own ×. Set-aside edits and kept
-  // typing stay: dismissing them deletes the only copy of the text.
   const clearableLocal = notices.filter((notice) => notice.onDismiss !== undefined);
   const clearableSent = props.onDismissSentNotices
     ? sentNotices.map(({ notice }) => notice).filter(sentDismissable)
@@ -2349,8 +2347,6 @@ export function NoticeCenter(props: {
   const clearRef = useRef<HTMLButtonElement | null>(null);
   const clearCancelRef = useRef<HTMLButtonElement | null>(null);
   if (confirmingClear && (!open || clearCount === 0)) setConfirmingClear(false);
-  // The control under focus goes as the header swaps, so the panel holds focus
-  // meanwhile: focus that falls to the page would close Notices.
   const confirmClear = (confirming: boolean) => {
     centerRef.current?.focus();
     flushSync(() => setConfirmingClear(confirming));
@@ -2897,7 +2893,6 @@ export function NoticeCenter(props: {
                 if (event.key !== "Escape" || event.defaultPrevented) return;
                 event.preventDefault();
                 event.stopPropagation();
-                // Escape backs out of Clear all's confirm first and keeps Notices open.
                 if (confirmingClear) confirmClear(false);
                 else setOpen(false);
               }}
