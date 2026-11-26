@@ -59,7 +59,7 @@ pub use capture_write::{
     derive_capture_object_id, derive_capture_retire_moment_id, ensure_capture_object_in_tx,
     switch_projection_job_id, validate_write_input, write_history_text_in_tx,
     write_projected_text_in_tx, write_published_history_text_in_tx, write_published_text_in_tx,
-    write_text_in_tx,
+    write_replicated_projected_text_in_tx, write_text_in_tx,
 };
 
 pub(crate) use capture_write::write_revived_text_in_tx;
@@ -1233,7 +1233,7 @@ impl<'a> VersionedTextStore<'a> {
                 let has_open_conflicts: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id = ?1 \
-                         AND status = 'open' AND metadata_origin != 'sync' \
+                         AND status = 'open' \
                          AND (source_version_id = ?2 OR target_version_id = ?2))",
                         params![workspace_id, version_id],
                         |row| row.get(0),

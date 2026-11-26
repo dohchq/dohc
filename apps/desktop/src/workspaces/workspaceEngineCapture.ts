@@ -822,6 +822,7 @@ export interface WorkspaceEngineCapture {
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
+    pair?: { sourceVersionId: string; targetVersionId: string },
   ): Promise<WorkspaceVersionConflictResolveOutcome>;
   // History reads: the active version's moment timeline and one
   // moment's full payload. Reads drain the capture chain first so the
@@ -5272,6 +5273,58 @@ export function createWorkspaceEngineCapture(
     );
   }
 
+  async function readOpenConflictsPage(
+    afterConflictId?: string,
+    pair?: { sourceVersionId: string; targetVersionId: string },
+  ): Promise<WorkspaceVersionConflictPage> {
+    const engine = await engineStore();
+    if (!pair) {
+      return engine.listTextConflicts({
+        workspaceId,
+        status: "open",
+        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+      });
+    }
+    const matchesPair = (conflict: {
+      metadata: { origin: string };
+      sourceVersionId: string;
+      targetVersionId: string;
+    }) =>
+      conflict.metadata.origin !== "sync" &&
+      conflict.sourceVersionId === pair.sourceVersionId &&
+      conflict.targetVersionId === pair.targetVersionId;
+    let cursor = afterConflictId;
+    for (;;) {
+      const page = await engine.listTextConflicts({
+        workspaceId,
+        status: "open",
+        ...(cursor !== undefined ? { afterConflictId: cursor } : {}),
+      });
+      const conflicts = page.conflicts.filter(matchesPair);
+      if (conflicts.length === 0) {
+        if (page.nextAfterConflictId === null) return { conflicts, nextAfterConflictId: null };
+        cursor = page.nextAfterConflictId;
+        continue;
+      }
+      let nextAfterConflictId: string | null = null;
+      let probeCursor = page.nextAfterConflictId;
+      while (probeCursor !== null) {
+        const probe = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          bodies: "withheld",
+          afterConflictId: probeCursor,
+        });
+        if (probe.conflicts.some(matchesPair)) {
+          nextAfterConflictId = probeCursor;
+          break;
+        }
+        probeCursor = probe.nextAfterConflictId;
+      }
+      return { conflicts, nextAfterConflictId };
+    }
+  }
+
   // Wraps one background capture task so its overall outcome (ok / failed)
   // reaches onCaptureOutcome, whether the failure was a thrown task (store
   // unavailable) or per-path errors the task swallowed to keep the batch
@@ -9467,33 +9520,8 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    async listOpenConflictsPage(afterConflictId, pair) {
-      const engine = await engineStore();
-      if (!pair) {
-        return engine.listTextConflicts({
-          workspaceId,
-          status: "open",
-          ...(afterConflictId !== undefined ? { afterConflictId } : {}),
-        });
-      }
-      let cursor = afterConflictId;
-      for (;;) {
-        const page = await engine.listTextConflicts({
-          workspaceId,
-          status: "open",
-          ...(cursor !== undefined ? { afterConflictId: cursor } : {}),
-        });
-        const conflicts = page.conflicts.filter(
-          (conflict) =>
-            conflict.metadata.origin !== "sync" &&
-            conflict.sourceVersionId === pair.sourceVersionId &&
-            conflict.targetVersionId === pair.targetVersionId,
-        );
-        if (conflicts.length > 0 || page.nextAfterConflictId === null) {
-          return { conflicts, nextAfterConflictId: page.nextAfterConflictId };
-        }
-        cursor = page.nextAfterConflictId;
-      }
+    listOpenConflictsPage(afterConflictId, pair) {
+      return readOpenConflictsPage(afterConflictId, pair);
     },
 
     async countOpenConflicts() {
@@ -9660,7 +9688,7 @@ export function createWorkspaceEngineCapture(
       return await (await engineStore()).deleteRetainedCopies(copies);
     },
 
-    resolveConflict(conflictId, resolution) {
+    resolveConflict(conflictId, resolution, pair) {
       return enqueueResult("resolve conflict", async () => {
         const engine = await engineStore();
         // The engine refuses to resolve a file an open document holds, so
@@ -9691,16 +9719,10 @@ export function createWorkspaceEngineCapture(
           );
         }
         await engine.reconcileCapture?.();
-        const remaining = await engine.listTextConflicts({
-          workspaceId,
-          status: "open",
-        });
+        const remaining = await readOpenConflictsPage(undefined, pair);
         return {
           conflict: result.conflict,
-          remaining: {
-            conflicts: remaining.conflicts,
-            nextAfterConflictId: remaining.nextAfterConflictId,
-          },
+          remaining,
         };
       });
     },

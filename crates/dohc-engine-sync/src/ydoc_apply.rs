@@ -11,7 +11,7 @@ use dohc_engine_collab::{
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
-    write_projected_text_in_tx,
+    write_replicated_projected_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
@@ -7059,7 +7059,7 @@ fn write_lineage_head_in_tx(
         .map_or(Preimage::Absent, |snapshot| {
             Preimage::Present(snapshot.blob_sha256.clone())
         });
-    let result = write_projected_text_in_tx(
+    let result = write_replicated_projected_text_in_tx(
         tx,
         &WriteText {
             workspace_id: key.workspace_id.clone(),

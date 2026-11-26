@@ -3718,9 +3718,15 @@ export const MergeWorkspaceVersionResult = z.object({
 });
 export type MergeWorkspaceVersionResult = z.infer<typeof MergeWorkspaceVersionResult>;
 
+const VersionConflictPair = z.object({
+  sourceVersionId: OPAQUE_ID,
+  targetVersionId: OPAQUE_ID,
+});
+
 export const ListWorkspaceVersionConflictsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   afterConflictId: OPAQUE_ID.optional(),
+  pair: VersionConflictPair.optional(),
 });
 export type ListWorkspaceVersionConflictsPayload = z.infer<
   typeof ListWorkspaceVersionConflictsPayload
@@ -3752,6 +3758,7 @@ export const ResolveWorkspaceVersionConflictPayload = z.object({
     z.object({ kind: z.literal("keep-incoming") }),
     z.object({ kind: z.literal("keep-combined"), text: VERSION_TEXT }),
   ]),
+  pair: VersionConflictPair.optional(),
 });
 export type ResolveWorkspaceVersionConflictPayload = z.infer<
   typeof ResolveWorkspaceVersionConflictPayload

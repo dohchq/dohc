@@ -817,10 +817,8 @@ impl VersionedTextStore<'_> {
                     reason: "conflict is not open",
                 });
             }
-            if conflict.metadata.origin != "sync" {
-                require_unarchived_version(tx, &input.workspace_id, &conflict.target_version_id)?;
-                require_unarchived_version(tx, &input.workspace_id, &conflict.source_version_id)?;
-            }
+            require_unarchived_version(tx, &input.workspace_id, &conflict.target_version_id)?;
+            require_unarchived_version(tx, &input.workspace_id, &conflict.source_version_id)?;
             // Before any write. The caller's answer carries this conflict, one
             // control frame has to hold that answer, and withholding removes
             // only bodies — so a conflict whose remaining strings cannot fit

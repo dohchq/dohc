@@ -227,7 +227,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
 
     async listWorkspaceVersionConflicts(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const page = await capture.listOpenConflictsPage(input.afterConflictId);
+      const page = await capture.listOpenConflictsPage(input.afterConflictId, input.pair);
       return {
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
@@ -247,7 +247,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
           : input.resolution.kind === "keep-incoming"
             ? ({ kind: "apply-incoming" } as const)
             : ({ kind: "apply-merged", text: input.resolution.text } as const);
-      const outcome = await capture.resolveConflict(input.conflictId, resolution);
+      const outcome = await capture.resolveConflict(input.conflictId, resolution, input.pair);
       // Push the resolution promptly: "keep mine" changes nothing on disk, so
       // without this nudge the other machine's mirrored conflict would stay
       // open until an unrelated edit happened to trigger a sync.

@@ -206,6 +206,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   private internalRequestId = -1;
 
   private dropHeadAfter: string | null = null;
+  conflictPageSize = Number.POSITIVE_INFINITY;
 
   dropHeadAfterBinaryResolve(path: string): void {
     this.dropHeadAfter = path;
@@ -240,19 +241,16 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         const index = conflicts.findIndex((conflict) => conflict.id === afterConflictId);
         conflicts = index < 0 ? conflicts : conflicts.slice(index + 1);
       }
-      // This desktop conflict ledger is intentionally single-page. Adapter paging is
-      // covered in versionedLiveAdapter.test.ts; the real cursor contract is covered
-      // in crates/dohc-workspace-engine/tests/rpc_conflicts.rs.
+      const page = conflicts.slice(0, this.conflictPageSize);
+      const nextAfterConflictId = conflicts.length > page.length ? (page.at(-1)?.id ?? null) : null;
       return {
         id: request.id,
         result: {
           // The daemon degrades a row past the conflict row frame cap to
           // withheld metadata; modeling that here is what lets these tests
           // prove the adapter hydrates it back.
-          conflicts: conflicts.map(
-            (conflict) => conflictListRowForWire(conflict) as ConflictRecord,
-          ),
-          nextAfterConflictId: null,
+          conflicts: page.map((conflict) => conflictListRowForWire(conflict) as ConflictRecord),
+          nextAfterConflictId,
         },
       };
     }
@@ -1068,6 +1066,75 @@ describe("updateVersionFromMain", () => {
     await engine.flush();
     expect((await engine.mergeVersionIntoMain(draftA)).conflictCount).toBe(0);
     expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("scopes conflict pagination and post-resolution refresh to the version pair without leaking other pairs' cursors", async () => {
+    const root = await createTestScratch("dohc-version-ops-");
+    for (const file of ["a1.md", "a2.md", "a3.md", "b1.md", "b2.md"]) {
+      await write(root, file, "base\n");
+    }
+    const loopback = new ConflictLoopbackEngine();
+    loopback.conflictPageSize = 2;
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+
+    await engine.createVersion("Draft A");
+    const draftA = await versionIdByName(engine, "Draft A");
+    for (const file of ["a1.md", "a2.md", "a3.md"]) await write(root, file, "from A\n");
+    engine.observeFileEvents(
+      ["a1.md", "a2.md", "a3.md"].map((path) => ({ path, operation: "update" as const })),
+    );
+    await engine.flush();
+
+    await engine.switchVersion("main");
+    await engine.createVersion("Draft B");
+    const draftB = await versionIdByName(engine, "Draft B");
+    for (const file of ["b1.md", "b2.md"]) await write(root, file, "from B\n");
+    engine.observeFileEvents(
+      ["b1.md", "b2.md"].map((path) => ({ path, operation: "update" as const })),
+    );
+    await engine.flush();
+
+    await engine.switchVersion("main");
+    for (const file of ["a1.md", "a2.md", "a3.md", "b1.md", "b2.md"]) {
+      await write(root, file, "from Main\n");
+    }
+    engine.observeFileEvents(
+      ["a1.md", "a2.md", "a3.md", "b1.md", "b2.md"].map((path) => ({
+        path,
+        operation: "update" as const,
+      })),
+    );
+    await engine.flush();
+
+    expect((await engine.mergeVersionIntoMain(draftA)).conflictCount).toBe(3);
+    expect((await engine.mergeVersionIntoMain(draftB)).conflictCount).toBe(2);
+
+    const pairB = { sourceVersionId: draftB, targetVersionId: "main" };
+    const page1 = await engine.listOpenConflictsPage(undefined, pairB);
+    expect(page1.conflicts).toHaveLength(1);
+    expect(page1.nextAfterConflictId).not.toBeNull();
+    const page2 = await engine.listOpenConflictsPage(page1.nextAfterConflictId!, pairB);
+    expect(page2.conflicts).toHaveLength(1);
+    expect(page2.nextAfterConflictId).toBeNull();
+
+    const afterFirst = await engine.resolveConflict(
+      page1.conflicts[0]!.id,
+      { kind: "keep-current" },
+      pairB,
+    );
+    expect(afterFirst.remaining.conflicts).toHaveLength(1);
+    expect(afterFirst.remaining.nextAfterConflictId).toBeNull();
+
+    const afterLast = await engine.resolveConflict(
+      afterFirst.remaining.conflicts[0]!.id,
+      { kind: "keep-current" },
+      pairB,
+    );
+    expect(afterLast.remaining.conflicts).toHaveLength(0);
+    expect(afterLast.remaining.nextAfterConflictId).toBeNull();
     await engine.stop();
   });
 });

@@ -539,7 +539,32 @@ describe("registered workspace version handlers", () => {
       conflicts: [{ conflictId: "conflict" }],
       nextAfterConflictId: "next-conflict",
     });
-    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith("previous");
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith(
+      "previous",
+      undefined,
+    );
+  });
+
+  it("forwards the optional pair when listing or resolving conflicts", async () => {
+    const h = harness();
+    const pair = { sourceVersionId: versionId, targetVersionId: "main" };
+    await h.invoke(ops.listWorkspaceVersionConflicts.channel, {
+      workspaceId,
+      afterConflictId: "previous",
+      pair,
+    });
+    expect(h.operations.listOpenConflictsPage).toHaveBeenCalledExactlyOnceWith("previous", pair);
+    await h.invoke(ops.resolveWorkspaceVersionConflict.channel, {
+      workspaceId,
+      conflictId: "conflict",
+      resolution: { kind: "keep-current" },
+      pair,
+    });
+    expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith(
+      "conflict",
+      { kind: "keep-current" },
+      pair,
+    );
   });
 
   it.each([
@@ -560,7 +585,11 @@ describe("registered workspace version handlers", () => {
           resolution,
         }),
       ).resolves.toMatchObject({ nextAfterConflictId: "next-conflict" });
-      expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith("conflict", expected);
+      expect(h.operations.resolveConflict).toHaveBeenCalledExactlyOnceWith(
+        "conflict",
+        expected,
+        undefined,
+      );
       expect(h.queueCloudSync).toHaveBeenCalledExactlyOnceWith(workspaceId);
       expect(h.steps).toEqual(["capture", "resolve", "sync", "notify"]);
     },

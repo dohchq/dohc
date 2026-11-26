@@ -1355,6 +1355,9 @@ impl EngineService {
         if active.version_id == target.version_id {
             return Ok(version_record_json(&target));
         }
+        if target.archived_at_ms.is_some() {
+            return Err(WireError::new(ErrorCode::InvalidParams, "version-archived"));
+        }
 
         let fence = self
             .version_fence()

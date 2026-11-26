@@ -201,7 +201,8 @@ pub use store::{
     switch_projection_job_id, validate_addressable_plaintext_path, validate_delete_input,
     validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
     write_history_text_in_tx, write_projected_text_in_tx, write_published_binary_in_tx,
-    write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
+    write_published_history_text_in_tx, write_published_text_in_tx,
+    write_replicated_projected_text_in_tx, write_text_in_tx,
 };
 pub use store::{
     HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,

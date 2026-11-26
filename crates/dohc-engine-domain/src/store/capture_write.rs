@@ -643,6 +643,7 @@ where
             known_object: resolved.known_object,
         }),
         None,
+        false,
     )?;
     if result.moment.moment_order != next_order {
         return Err(DomainError::StateCorrupt {
@@ -1600,7 +1601,7 @@ pub fn write_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, ObjectReuse::Refuse, None, None, None)
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Refuse, None, None, None, false)
 }
 
 /// Bring a deleted text object back under its own object ID, inside the
@@ -1611,7 +1612,7 @@ pub(crate) fn write_revived_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, ObjectReuse::Dormant, None, None, None)
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Dormant, None, None, None, false)
 }
 
 pub fn write_published_text_in_tx(
@@ -1620,7 +1621,15 @@ pub fn write_published_text_in_tx(
     conditions: &str,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, ObjectReuse::Refuse, None, None, Some(conditions))
+    write_normalized_text_in_tx(
+        tx,
+        input,
+        ObjectReuse::Refuse,
+        None,
+        None,
+        Some(conditions),
+        false,
+    )
 }
 
 /// Copy a stored text preimage forward without changing its object identity.
@@ -1667,6 +1676,7 @@ pub fn write_published_history_text_in_tx(
         Some(&source),
         None,
         conditions,
+        false,
     )?;
     super::clear_capture_recovery_in(tx, &input.workspace_id, restore_before_moment_id)?;
     Ok(result)
@@ -1692,7 +1702,25 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, ObjectReuse::Preallocated, None, None, None)
+    write_normalized_text_in_tx(
+        tx,
+        input,
+        ObjectReuse::Preallocated,
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
+/// Persist a replicated Y.Doc text projection inside the caller's transaction.
+/// Local archive state must not block inbound replication from updating a version's history.
+pub fn write_replicated_projected_text_in_tx<'a>(
+    tx: &Transaction<'_>,
+    input: impl Into<ProjectedWriteText<'a>>,
+) -> Result<WriteResult, DomainError> {
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Preallocated, None, None, None, true)
 }
 
 /// Which existing object ID a write to a path with no alias may bind.
@@ -1713,9 +1741,10 @@ fn write_normalized_text_in_tx(
     history_source: Option<&MomentRecord>,
     prepared: Option<PreparedTextWrite>,
     conditions: Option<&str>,
+    replicated: bool,
 ) -> Result<WriteResult, DomainError> {
     let ws = input.workspace_id;
-    if prepared.is_none() {
+    if prepared.is_none() && !replicated {
         require_writable_version(tx, ws, input.version_id, input.metadata_origin)?;
     }
 

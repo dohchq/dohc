@@ -739,3 +739,113 @@ fn a_merge_between_unrelated_versions_has_no_base() {
         .expect_err("a version does not merge into itself");
     assert!(matches!(error, DomainError::ForkBaseNotFound));
 }
+
+#[test]
+fn archiving_refuses_open_sync_conflicts_and_replicated_ydoc_projection_still_writes() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "base");
+    fork(&mut store);
+    put(&mut store, "feat", "x.md", "feat-1");
+    let snap = VersionedTextStore::new(&mut store)
+        .read_text(WS, "feat", "x.md")
+        .unwrap()
+        .unwrap();
+    let sync_conflict = dohc_engine_domain::TextConflict {
+        conflict_id: id("sync-c"),
+        workspace_id: WS.to_owned(),
+        path: "x.md".to_owned(),
+        target_version_id: "feat".to_owned(),
+        source_version_id: "feat".to_owned(),
+        created_at_ms: 100,
+        updated_at_ms: 100,
+        status: dohc_engine_domain::ConflictStatus::Open,
+        chosen_from: dohc_engine_domain::ConflictChoice::Current,
+        resolution: None,
+        metadata: dohc_engine_domain::ConflictMetadata::origin("sync"),
+        base: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+        current: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+        incoming: dohc_engine_domain::ConflictFileState::text("x.md", Some(snap.clone())),
+    };
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::insert_text_conflict_if_absent(tx, &sync_conflict)
+        })
+        .unwrap();
+
+    let err = VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect_err("open sync conflict must block archiving");
+    assert!(matches!(
+        err,
+        DomainError::InvalidInput {
+            reason: "version-has-open-conflicts"
+        }
+    ));
+
+    resolve(
+        &mut store,
+        &sync_conflict.conflict_id,
+        ResolveConflictKind::KeepCurrent,
+    );
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive after sync conflict resolved");
+
+    let local_err = store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "feat".to_owned(),
+                    object_id: snap.object_id.clone(),
+                    path: "x.md".to_owned(),
+                    text: "local-ydoc".to_owned(),
+                    moment_id: id("m-local"),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1001,
+                    request_id: None,
+                },
+            )
+        })
+        .expect_err("local ydoc projection on archived version must fail");
+    assert!(matches!(
+        local_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_replicated_projected_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "feat".to_owned(),
+                    object_id: snap.object_id.clone(),
+                    path: "x.md".to_owned(),
+                    text: "peer-ydoc".to_owned(),
+                    moment_id: id("m-peer"),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1002,
+                    request_id: None,
+                },
+            )
+        })
+        .expect("replicated ydoc projection must update locally archived version");
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "feat", "x.md")
+            .unwrap()
+            .map(|s| s.text)
+            .as_deref(),
+        Some("peer-ydoc")
+    );
+}

@@ -1073,6 +1073,10 @@ export function VersionMergeDialog(props: {
 
   const fromId = props.update ? "main" : source.id;
   const intoId = props.update ? source.id : "main";
+  const pair = useMemo(
+    () => ({ sourceVersionId: fromId, targetVersionId: intoId }),
+    [fromId, intoId],
+  );
   const forPair = useCallback(
     (conflicts: readonly WorkspaceVersionConflict[]) =>
       conflicts.filter(
@@ -1108,22 +1112,25 @@ export function VersionMergeDialog(props: {
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: stage.nextAfterConflictId,
+      pair,
     });
     if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
     const scoped = forPair(page.conflicts);
-    setStage((current) =>
-      current.stage === "conflicts"
-        ? {
+    setStage((current) => {
+      if (current.stage !== "conflicts") return current;
+      const conflicts = [...current.conflicts, ...scoped];
+      return conflicts.length === 0 && page.nextAfterConflictId === null
+        ? { stage: "resolved-all" }
+        : {
             stage: "conflicts",
-            conflicts: [...current.conflicts, ...scoped],
+            conflicts,
             nextAfterConflictId: page.nextAfterConflictId,
-          }
-        : current,
-    );
-  }, [forPair, stage, workspaceId]);
+          };
+    });
+  }, [forPair, pair, stage, workspaceId]);
 
   // Closing while merging leaves the merge running, and its answer comes as a
   // notice. While conflicts are open, closing is explicit only ("Finish
@@ -1194,6 +1201,7 @@ export function VersionMergeDialog(props: {
                 versionNames.get(conflict.sourceVersionId) ?? from,
                 versionNames.get(conflict.targetVersionId) ?? into,
               ]}
+              pair={pair}
               onResolved={onResolved}
               onError={props.onConflictError}
             />
@@ -1594,6 +1602,7 @@ function ConflictResolver(props: {
   onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
   names: readonly [source: string, target: string];
+  pair?: { sourceVersionId: string; targetVersionId: string };
   expanded: boolean;
   onToggle: () => void;
   onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
@@ -1678,6 +1687,7 @@ function ConflictResolver(props: {
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
+          ...(props.pair ? { pair: props.pair } : {}),
         });
         props.onWorkspaceStateChanged();
         if (!liveToken.isCurrent(token)) return;
@@ -1715,6 +1725,7 @@ function ConflictResolver(props: {
       props.onError,
       props.onResolved,
       props.onWorkspaceStateChanged,
+      props.pair,
       workspaceId,
     ],
   );
@@ -1919,6 +1930,7 @@ function ConflictList(props: {
   hasMore: boolean;
   onLoadMore: () => Promise<void>;
   namesFor: (conflict: WorkspaceVersionConflict) => readonly [source: string, target: string];
+  pair?: { sourceVersionId: string; targetVersionId: string };
   onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
 }) {
   // `undefined` means the user has not chosen yet. `null` means the user
@@ -1965,6 +1977,7 @@ function ConflictList(props: {
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
           names={props.namesFor(conflict)}
+          pair={props.pair}
           expanded={conflict.conflictId === openId}
           onToggle={() => setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)}
           onResolved={props.onResolved}

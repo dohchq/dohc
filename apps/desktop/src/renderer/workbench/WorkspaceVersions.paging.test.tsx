@@ -212,6 +212,9 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
         workspaceId: "ws-1",
         conflictId: "c-1",
         resolution: { kind: "keep-current" },
+        ...(surface === "merge"
+          ? { pair: { sourceVersionId: "v-1", targetVersionId: "main" } }
+          : {}),
       });
       expect(collectionWritesPaused("ws-1")).toBe(true);
       if (unmount) view.unmount();
@@ -592,8 +595,43 @@ describe("VersionMergeDialog conflict paging", () => {
     screen.getByText("2 files have two copies.", { exact: false });
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
     expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
-      [{ workspaceId: "ws-1", afterConflictId: "c-1" }],
+      [
+        {
+          workspaceId: "ws-1",
+          afterConflictId: "c-1",
+          pair: { sourceVersionId: "v-1", targetVersionId: "main" },
+        },
+      ],
     ]);
+  });
+
+  it("transitions to resolved-all when a paged pair load ends with zero remaining conflicts", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 0,
+      unchangedFileCount: 0,
+      conflictCount: 1,
+      replacedProtectedPaths: [],
+      skippedProtectedPaths: [],
+      conflicts: [conflict("c-1")],
+      nextAfterConflictId: "c-1",
+    });
+    bridgeMock.resolveWorkspaceVersionConflict.mockResolvedValue({
+      conflicts: [],
+      nextAfterConflictId: null,
+    });
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await settle();
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    await settle();
+    expect(bridgeMock.resolveWorkspaceVersionConflict).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pair: { sourceVersionId: "v-1", targetVersionId: "main" },
+      }),
+    );
+    expect(screen.getByTestId("version-merge-status").textContent).toContain(
+      "Merged Feature into Main",
+    );
   });
 
   it("a conflicted merge whose conflicts are already resolved reads as resolved", async () => {
