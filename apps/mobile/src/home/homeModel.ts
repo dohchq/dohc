@@ -46,7 +46,6 @@ type Folder = {
   readonly pages: WorkspaceFile[];
 };
 
-/** The pages in `rows` not yet in `passed`, in the order shown, which `passed` then holds. */
 export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): string[] {
   const fresh = rows.flatMap((row) =>
     row.kind === "page" && !passed.has(row.path) ? [row.path] : [],

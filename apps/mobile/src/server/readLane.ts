@@ -1,10 +1,7 @@
 export const PREFETCH_AT_ONCE = 2;
 
-/** One sign-in's reads. No read-ahead starts while a screen's read is on its way. */
 export interface ReadLane {
-  /** A screen's read. One a person started, `byPerson`, also aborts read-ahead on its way. */
   screen<T>(read: () => Promise<T>, byPerson: boolean): Promise<T>;
-  /** Read-ahead, at most `PREFETCH_AT_ONCE` at once, with a signal that `signal` or a screen's read aborts. */
   ahead<T>(signal: AbortSignal, read: (signal: AbortSignal) => Promise<T>): Promise<T>;
   free(): boolean;
   onFree(listener: () => void): () => void;

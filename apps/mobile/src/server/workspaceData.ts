@@ -447,10 +447,6 @@ export interface WorkspaceData {
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
-  /**
-   * Reads these pages ahead, those listed last first. Each page is tried once for this store, unless a person's read
-   * aborts it, and each folder, or `bucket` when given, reads at most `PREFETCH_MAX` pages.
-   */
   prefetchPages(paths: readonly string[], bucket?: string): void;
   retry(view: View<unknown>): void;
   /**
@@ -629,7 +625,6 @@ export function createWorkspaceData(options: {
     if (cached) cache.set(scope, { ...cached, prefetched: undefined });
   }
 
-  /** Resolves to the value this read showed, if it showed one. */
   function read(target: Entry, by: "person" | "feed" | AbortSignal = "person"): Promise<unknown> {
     const request = target.reads.next();
     const from = cursor;

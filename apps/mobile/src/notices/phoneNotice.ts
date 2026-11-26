@@ -143,7 +143,6 @@ export function phoneTarget(record: NoticeRecord, list: WorkspaceList): PhoneTar
   return null;
 }
 
-/** The pages Notices open in `workspaceId`, for reading ahead. */
 export const noticePages = (
   records: readonly NoticeRecord[],
   list: WorkspaceList,
