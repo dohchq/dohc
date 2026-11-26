@@ -360,9 +360,11 @@ pub fn apply_remote_update_in_transaction_with_projection(
         // A dedupe never reached the gate, so it has no gate scratch. Keep the
         // projection on the byte-replay-identical cold base; do not synthesize
         // an owned doc by applying a cached full-state encode.
+        let doc = load_doc_in(tx, key)?;
+        doc.refuse_a_newer_format()?;
         return Ok(RemoteApplyProjection {
             outcome: ReplicationApplyOutcome::Deduped { seq: existing },
-            doc: load_doc_in(tx, key)?,
+            doc,
             content_kind: marker.content_kind,
             introduced_unattributed: false,
             record_facts: None,

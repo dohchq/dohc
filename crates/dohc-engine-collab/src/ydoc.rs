@@ -654,9 +654,11 @@ impl Ydoc {
     /// The rich-document schema version this note is written in: 2 for a
     /// note whose body is one sequence (format 2), otherwise 1.
     pub fn note_schema_version(&self) -> u8 {
-        let meta = self.doc.get_or_insert_map(ROOT_META);
-        let _reading = self.doc.transact();
-        match body_sequence::stored_under(&meta, "schemaVersion") {
+        let reading = self.doc.transact();
+        let marked = reading
+            .get_map(ROOT_META)
+            .and_then(|meta| body_sequence::stored_under(&meta, "schemaVersion"));
+        match marked {
             Some(Any::Number(2.0)) => 2,
             _ => 1,
         }
@@ -671,7 +673,8 @@ impl Ydoc {
         .fits_a_live_note()
     }
 
-    pub(crate) fn refuse_a_newer_format(&self) -> Result<(), CollabError> {
+    /// Refuses a format-2 note on an engine that does not read format 2.
+    pub fn refuse_a_newer_format(&self) -> Result<(), CollabError> {
         if !self.reads_body_sequence && self.note_schema_version() == 2 {
             return Err(CollabError::NewerBodyFormat);
         }
