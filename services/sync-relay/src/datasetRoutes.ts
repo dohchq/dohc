@@ -482,7 +482,9 @@ export function createDatasetRoutes(
       {
         dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]),
         participant: auth.userId,
-        organizer: storage.workspaceIsOwnedBy(route.workspaceId, auth.userId),
+        organizer:
+          storage.workspaceIsOwnedBy(route.workspaceId, auth.userId) ||
+          storage.workspaceRoleOf(route.workspaceId, auth.userId)?.role === "admin",
       },
       route.action,
       options.nowMs(),

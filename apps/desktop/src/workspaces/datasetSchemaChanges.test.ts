@@ -577,10 +577,19 @@ it("changes a joined workspace's Collection rules on its server as an Admin, edi
     return { ...value, workspaceId: "w" };
   };
   const governed = {
-    approvedArtifacts: async (datasetId: string) => f.host.approvedArtifacts(datasetId),
-    prepareMigrationCandidate: (
+    approvedArtifacts: async (datasetId: string) => {
+      const approved = await f.host.approvedArtifacts(datasetId);
+      return { ...approved, cursor: { ...approved.cursor, workspaceId: server } };
+    },
+    prepareMigrationCandidate: async (
       value: Parameters<LocalDatasetHost["prepareMigrationCandidate"]>[0],
-    ) => f.host.prepareMigrationCandidate(onServer(value)),
+    ) => {
+      const candidate = await f.host.prepareMigrationCandidate({
+        ...onServer(value),
+        expected: onServer(value.expected),
+      });
+      return { ...candidate, expected: { ...candidate.expected, workspaceId: server } };
+    },
     approveMigrationCandidate: async (
       value: Parameters<LocalDatasetHost["approveMigrationCandidate"]>[0],
     ) => {
@@ -631,6 +640,10 @@ it("changes a joined workspace's Collection rules on its server as an Admin, edi
     change: { kind: "renameCollection", name: "Guests" },
   });
   if (review.kind !== "migration-prepared") throw new Error("Expected a review");
+  expect(review.expected.workspaceId).toBe("w");
+  expect((review.candidate as { expected: { workspaceId: string } }).expected.workspaceId).toBe(
+    "w",
+  );
   const [paths] = sent;
   expect(paths).toEqual(
     expect.arrayContaining(["people/dataset.json", "people/schema.sql", "people/operations.js"]),

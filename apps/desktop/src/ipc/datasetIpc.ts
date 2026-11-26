@@ -277,6 +277,7 @@ export function createDatasetHandler<
             : operation.signal;
           let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
           const flushSourceCapture = async () => {
+            if (shareViewIsPresent(operation.workspace.shareView)) return;
             sourceCapture = await dependencies.flushSourceCapture(
               operation.workspace,
               operation.signal,
@@ -789,6 +790,11 @@ export function createDatasetHandler<
             kind: "migration-prepared" as const,
             ...DatasetMigrationPreparation.parse({
               ...prepared,
+              expected: { ...prepared.expected, workspaceId: input.workspaceId },
+              candidate: {
+                ...prepared.candidate,
+                expected: { ...prepared.candidate.expected, workspaceId: input.workspaceId },
+              },
               ...(await discoverBoundApps(prepared.revision.datasetId, prepared.revision, {
                 previousRevision: prepared.previousRevision,
               })),

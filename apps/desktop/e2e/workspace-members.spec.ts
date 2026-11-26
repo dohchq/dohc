@@ -2,7 +2,6 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { collectionCommand } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -1420,11 +1419,13 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
   test.setTimeout(600_000);
   const ownerTemp = await createTempWorkspace();
   const adminTemp = await createTempWorkspace();
+  const memberTemp = await createTempWorkspace();
   const workspaceId = "members-rules";
   const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
   let relay: SyncRelayHandle | null = null;
   let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let admin: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const shot = (name: string) => test.info().outputPath(`${name}.png`);
   const openCollection = async (page: Page, name: string) => {
     await openExplorerHome(page);
@@ -1534,7 +1535,18 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     await setRole(kaiId, "admin");
     const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
 
-    // --- Kai, an Admin, renames a field on the Collection's server ---------
+    const samInvite = await relayJson(
+      relay.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/members/invites`,
+      {
+        method: "POST",
+        body: JSON.stringify({ email: MEMBER.email, workspaceName: "Members rules" }),
+      },
+    );
+    expect(samInvite.status, samInvite.body).toBe(200);
+
+    // --- Kai, an Admin, changes the Collection's rules from their desktop ----
     admin = await openMembership(relay, adminTemp, ADMIN, workspaceName, syncEnv);
     const kai = admin.page;
     const joined = JSON.parse(
@@ -1556,47 +1568,132 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
         { timeout: 120_000, intervals: [2_000] },
       )
       .not.toBe("missing");
-    const asKai = async (action: string, body?: unknown) => {
-      const answer = await relayJson(
-        relay!.baseUrl,
-        ADMIN.token,
-        `/sync/${workspaceId}/datasets/${listed!.datasetId}/${action}`,
-        body === undefined ? {} : { method: "POST", body: JSON.stringify(body) },
-      );
-      expect(answer.status, answer.body).toBe(200);
-      return JSON.parse(answer.body);
-    };
-    const approved = await asKai("artifacts");
-    const definition = structuredClone(approved.revision.definition);
-    definition.tables[0].fields.find((field: { name: string }) => field.name === "Name").name =
-      "Guest";
-    const candidate = await asKai("prepare-migration", {
-      revision: describeDatasetRevision({
-        definition,
-        revision: approved.revision.revision + 1,
-        schemaSql: approved.schemaSql,
-        operationSource: approved.operationSource,
+    const described = await dataset({ action: "describe", datasetPath: listed!.datasetPath });
+    if (described.kind !== "description") throw Error(`Expected a description: ${described.kind}`);
+    const renamed = await dataset({
+      action: "prepareSchemaChange",
+      datasetPath: listed!.datasetPath,
+      revision: described.dataset.revision,
+      revisionSha256: described.dataset.revisionSha256,
+      change: { kind: "renameCollection", name: "Guests" },
+    });
+    if (renamed.kind !== "migration-prepared") throw Error(`Expected a review: ${renamed.kind}`);
+    expect(
+      await dataset({
+        action: "approveMigration",
+        preparationId: renamed.preparationId,
+        revisionSha256: renamed.revision.revisionSha256,
+        approvalDigest: renamed.approvalDigest,
       }),
-      schemaSql: approved.schemaSql,
-      operationSource: approved.operationSource,
-      expected: approved.cursor,
-      migrationSql: "SELECT 1;",
+    ).toMatchObject({ kind: "migrated" });
+
+    expect(await dataset({ action: "list" })).toMatchObject({
+      datasets: [{ datasetId: listed!.datasetId, name: "Guests" }],
     });
-    await asKai("approve-migration", {
-      candidateId: candidate.candidateId,
-      checkpointSha256: candidate.checkpointSha256,
-      changeSha256: candidate.changeSha256,
+    const fieldReview = async () => {
+      const guests = await openCollection(kai, "Registrations");
+      await (await collectionCommand(guests, "Fields and names")).click();
+      const fields = kai.getByRole("dialog", { name: "Fields and names" });
+      await fields.getByLabel("Change", { exact: true }).selectOption("renameField");
+      await fields.getByLabel("Field", { exact: true }).selectOption({ label: "Name" });
+      await fields.getByLabel("Name", { exact: true }).fill("Guest");
+      await fields.getByRole("button", { name: "Review change", exact: true }).click();
+      const review = kai.getByRole("dialog", { name: "Review Collection change" });
+      await expect(review.getByRole("region", { name: "Field changes" })).toContainText("Guest", {
+        timeout: 60_000,
+      });
+      return { guests, review };
+    };
+    await expect(async () => {
+      await openCollection(kai, "Registrations");
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await setTheme(kai, "Light");
+    let { guests, review } = await fieldReview();
+    await review.screenshot({ path: shot("admin-field-review-light") });
+    await review.getByRole("button", { name: "Discard review", exact: true }).click();
+    await expect(review).toBeHidden({ timeout: 30_000 });
+    await setTheme(kai, "Dark");
+    ({ guests, review } = await fieldReview());
+    await review.screenshot({ path: shot("admin-field-review-dark") });
+    await review.getByRole("button", { name: "Approve change", exact: true }).focus();
+    await kai.keyboard.press("Enter");
+    await expect(review).toBeHidden({ timeout: 60_000 });
+    await expect(guests.getByRole("columnheader").filter({ hasText: "Guest" })).toBeVisible({
+      timeout: 30_000,
     });
-    expect(await dataset({ action: "approval", datasetPath: listed!.datasetPath })).toMatchObject({
-      kind: "approval",
-      approvedBy: { role: "admin", former: false },
-      needsOwnerConfirmation: false,
-    });
+
+    // --- Kai creates a Collection, which the server approves as theirs -------
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(kai, theme);
+      await kai.keyboard.press("ControlOrMeta+k");
+      await kai
+        .getByTestId("command-palette")
+        .getByRole("option", { name: "New Collection", exact: true })
+        .click();
+      const dialog = kai.getByTestId("new-collection-dialog");
+      await dialog.getByLabel("Collection name").fill("Volunteers");
+      await dialog.screenshot({ path: shot(`admin-create-${theme.toLowerCase()}`) });
+      if (theme === "Light") {
+        await kai.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+      }
+    }
+    await kai.getByTestId("new-collection-create").click();
+    await expect(kai.getByTestId("new-collection-dialog")).toBeHidden({ timeout: 60_000 });
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await admin.close();
     admin = null;
 
+    // --- Sam, a Member, reads the Collection and sees no rule controls -------
+    member = await openMembership(relay, memberTemp, MEMBER, workspaceName, syncEnv);
+    const sam = member.page;
+    await expect(async () => {
+      const region = await openCollection(sam, "Registrations");
+      await expect(region.getByRole("columnheader").filter({ hasText: "Guest" })).toBeVisible({
+        timeout: 5_000,
+      });
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(sam, theme);
+      const region = await openCollection(sam, "Registrations");
+      const manage = region.getByRole("button", { name: "Manage Collection", exact: true });
+      if (await manage.isVisible()) await manage.click();
+      await expect(region.getByRole("menuitem", { name: "Fields and names" })).toHaveCount(0);
+      await expect(region.getByTestId("collection-approved-by")).toHaveCount(0);
+      await sam.screenshot({ path: shot(`member-collection-${theme.toLowerCase()}`) });
+      await sam.keyboard.press("Escape");
+    }
+    const samJoined = JSON.parse(
+      await readFile(join(await joinedRoot(memberTemp), ".dohc", "manifest.json"), "utf8"),
+    ) as { workspaceId: string };
+    const samTried = await sam.evaluate(
+      async (request) =>
+        window.dohcDesktop!.dataset(JSON.parse(request)).then(
+          () => "changed",
+          (error: unknown) => String(error),
+        ),
+      JSON.stringify({
+        workspaceId: samJoined.workspaceId,
+        action: "prepareSchemaChange",
+        datasetPath: listed!.datasetPath,
+        revision: described.dataset.revision + 2,
+        revisionSha256: "a".repeat(64),
+        change: { kind: "renameCollection", name: "Mine" },
+      }),
+    );
+    expect(samTried).toContain("Open the original workspace to manage this Collection.");
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await member.close();
+    member = null;
+
     // --- The owner sees who approved the rules -------------------------------
+    await expect(async () => {
+      const volunteers = await openCollection(page, "Volunteers");
+      await expect(volunteers.getByTestId("collection-approved-by")).toHaveText(
+        "Approved by e2e-members-kai · Admin",
+        { timeout: 5_000 },
+      );
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
     let opened = page.getByRole("region", { name: "Registrations", exact: true });
     await expect(async () => {
       opened = await openCollection(page, "Registrations");
@@ -1638,10 +1735,12 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
       timeout: 30_000,
     });
     await expect(opened.getByTestId("collection-approved-by")).toHaveCount(0);
-    const datasetId = await page.evaluate(async (id) => {
+    const ownerListed = await page.evaluate(async (id) => {
       const result = await window.dohcDesktop!.dataset({ workspaceId: id, action: "list" });
-      return result.kind === "list" ? result.datasets[0]!.datasetId : "";
+      return result.kind === "list" ? result.datasets : [];
     }, workspaceId);
+    expect(ownerListed.map((entry) => entry.name).sort()).toEqual(["Guests", "Volunteers"]);
+    const datasetId = ownerListed.find((entry) => entry.name === "Guests")!.datasetId;
     const approval = await relayJson(
       relay.baseUrl,
       OWNER.token,
@@ -1654,6 +1753,7 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     await relay?.stop();
+    await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
   }
