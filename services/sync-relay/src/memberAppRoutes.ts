@@ -123,7 +123,7 @@ export function createMemberAppRoutes(options: {
       const page = host.memberApps(auth, { workspaceId, ...(cursor ? { cursor } : {}) });
       const authors = new Map(
         await Promise.all(
-          [...new Set(page.apps.flatMap((app) => app.publisherUserId ?? []))].map(
+          [...new Set(page.apps.map((app) => app.publisherUserId))].map(
             async (id) => [id, (await options.authorName?.(id).catch(() => null)) ?? null] as const,
           ),
         ),
@@ -133,7 +133,7 @@ export function createMemberAppRoutes(options: {
         ...page,
         apps: page.apps.map((app) => ({
           ...app,
-          authorName: app.publisherUserId === null ? null : authors.get(app.publisherUserId)!,
+          authorName: authors.get(app.publisherUserId)!,
           url:
             app.reachable && options.shareWebOrigin
               ? `${options.shareWebOrigin}/s/apps/${workspaceId}/${app.publicationId}`

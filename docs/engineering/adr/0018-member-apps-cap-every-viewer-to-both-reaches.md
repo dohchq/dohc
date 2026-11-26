@@ -22,5 +22,5 @@ The server evaluates both the author's and the viewer's membership, folder acces
 
 - A Member app stops working immediately when its author leaves or is removed from the workspace. To keep a critical tool running, the Owner reviews its source and publishes it as an official Workspace Publication.
 - Changing any source file, dependency, or declared capability produces a new immutable revision and requires every viewer to review it again before opening the new version.
-- Consent comes only from a browser sign-in through the viewer, so an agent using the desktop's sign-in cannot approve a Member app on its person's behalf. The author's own app opens for them without review, because their reach already bounds it.
+- Consent comes only from a browser sign-in through the viewer or from the person's paired phone, so an agent using the desktop's sign-in cannot approve a Member app on its person's behalf. The author's own app opens for them without review, because their reach already bounds it.
 - Official Owner-approved Publications remain distinct in `CONTEXT.md` and open for workspace members without a first-open Member app review.

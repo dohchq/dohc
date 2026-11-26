@@ -316,13 +316,18 @@ export function workspaceAppPage(storage: StorageContext, workspaceId: string, c
     rows: rows.slice(0, 25).map((row) => ({
       kind,
       publicationId: String(row.publication_id),
-      publisherUserId: row.publisher_user_id === null ? null : String(row.publisher_user_id),
+      publisherUserId: String(row.publisher_user_id),
       slug: row.slug === null ? null : String(row.slug),
       createdAtMs: Number(row.created_at_ms),
     })),
     nextCursor:
       rows.length > 25 ? prefix + String(rows[24]!.publication_id) : kind === "member" ? null : "m",
   };
+}
+
+export function memberAppPage(storage: StorageContext, workspaceId: string, cursor: string) {
+  const page = workspaceAppPage(storage, workspaceId, `m${cursor}`);
+  return { rows: page.rows, nextCursor: page.nextCursor?.slice(1) ?? null };
 }
 
 /** Stops an author's Member apps, so their bindings go before the account's rows do. */
