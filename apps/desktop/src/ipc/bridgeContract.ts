@@ -4214,7 +4214,7 @@ export const StartSitePreviewPayload = z.object({
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
   holderId: SITE_PREVIEW_HOLDER_ID,
-  versionId: OPAQUE_ID.optional(),
+  versionId: OPAQUE_ID,
   // True when the person asked for this start, which starts the preview
   // again even when it is running. Otherwise the surface shares it.
   restart: z.boolean(),

@@ -852,6 +852,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       const sitePreview = await capture(() =>
         api.startSitePreview({
           workspaceId,
+          versionId: "main",
           siteRoot: "docs",
           mode: "dev",
           holderId: "e2e",

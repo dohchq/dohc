@@ -126,6 +126,7 @@ describe("renderer reload admission", () => {
         { sender: renderer },
         {
           workspaceId: workspace.workspaceId,
+          versionId: "main",
           siteRoot: "site",
           mode: "static",
           holderId: "tab",

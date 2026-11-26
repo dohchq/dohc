@@ -91,38 +91,29 @@ export function createStartSitePreviewHandler<
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
-        const assertVersionActive = async (expected: string) => {
-          if ((await dependencies.activeVersionId(workspace)) !== expected) {
+        const assertVersionActive = async () => {
+          if ((await dependencies.activeVersionId(workspace)) !== payload.versionId) {
             throw new Error("Switch to this version in Versions to preview its apps.");
           }
         };
-        let resolvedVersionId = payload.versionId;
         return StartSitePreviewAnswer.parse(
           await dependencies.lifecycle.acquire({
             holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
-            versionId:
-              payload.versionId ??
-              (async () => {
-                resolvedVersionId = await dependencies.activeVersionId(workspace);
-                return resolvedVersionId;
-              }),
+            versionId: payload.versionId,
             siteRoot: payload.siteRoot,
             mode: payload.mode,
             restart: payload.restart,
             isCurrent,
-            verifyCurrent: async () => {
-              if (resolvedVersionId !== undefined) await assertVersionActive(resolvedVersionId);
-            },
+            verifyCurrent: assertVersionActive,
             // The start's own check, not this window's: a start another
             // window also holds outlives this one.
             prepare: async (startIsCurrent) => {
-              const versionId = resolvedVersionId!;
-              await assertVersionActive(versionId);
-              if (!startIsCurrent()) throw new Error(START_CANCELLED_MESSAGE);
               const sharedView = dependencies.isSharedView(workspace.workspaceId);
               assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
+              await assertVersionActive();
+              if (!startIsCurrent()) throw new Error(START_CANCELLED_MESSAGE);
               const site = requireExactSiteRoot(
                 await dependencies.catalog.get(workspace, payload.siteRoot, payload.mode),
                 payload.siteRoot,
@@ -131,10 +122,9 @@ export function createStartSitePreviewHandler<
               if (previewRunsAppCode(site, payload.mode)) {
                 await dependencies.assertMayRunAppCode(workspace);
               }
-              await assertVersionActive(versionId);
-              return async (signal) => {
-                await assertVersionActive(versionId);
-                return dependencies.execute({
+              await assertVersionActive();
+              return (signal) =>
+                dependencies.execute({
                   workspaceId: workspace.workspaceId,
                   workspaceRoot: workspace.rootPath,
                   site,
@@ -143,7 +133,6 @@ export function createStartSitePreviewHandler<
                   signal,
                   sharedView,
                 });
-              };
             },
           }),
         );

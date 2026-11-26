@@ -3214,6 +3214,7 @@ describe("site IPC contract", () => {
     expect(
       StartSitePreviewPayload.parse({
         workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
         mode: "static",
         holderId: "tab",
@@ -3221,6 +3222,7 @@ describe("site IPC contract", () => {
       }),
     ).toEqual({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: ".",
       mode: "static",
       holderId: "tab",
@@ -3229,6 +3231,16 @@ describe("site IPC contract", () => {
     expect(
       StartSitePreviewPayload.safeParse({
         workspaceId: "ws-sites",
+        siteRoot: ".",
+        mode: "static",
+        holderId: "tab",
+        restart: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      StartSitePreviewPayload.safeParse({
+        workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
         mode: "static",
         restart: false,

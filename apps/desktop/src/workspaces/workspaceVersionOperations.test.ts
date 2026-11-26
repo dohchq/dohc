@@ -656,7 +656,7 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-  it("stops previews via beforeVersionSwitch before switching or creating versions", async () => {
+  it("holds previews via aroundVersionSwitch across switching or creating versions", async () => {
     const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1\n");
     const events: string[] = [];
@@ -672,21 +672,26 @@ describe("switchVersion", () => {
         loopback,
         requests,
       }),
-      beforeVersionSwitch: async () => {
+      aroundVersionSwitch: async (work) => {
         events.push(`before:${requests.filter((r) => r.method === "versions.setActive").length}`);
+        try {
+          return await work();
+        } finally {
+          events.push(`after:${requests.filter((r) => r.method === "versions.setActive").length}`);
+        }
       },
     });
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
-    expect(events).toEqual(["before:0"]);
+    expect(events).toEqual(["before:0", "after:1"]);
     expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
     events.length = 0;
     await expect(engine.switchVersion("unknown-version")).rejects.toThrow();
     expect(events).toEqual([]);
     expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
     await engine.switchVersion("main");
-    expect(events).toEqual(["before:1"]);
+    expect(events).toEqual(["before:1", "after:2"]);
     expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(2);
     await engine.stop();
   });

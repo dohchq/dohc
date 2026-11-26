@@ -56,6 +56,7 @@ export interface ShellSidePanelProps {
   appNotices: SitePreviewPageProps["notices"];
   appAccess: SitePreviewPageProps["access"];
   appVersion: SitePreviewPageProps["version"];
+  appVersionPending?: SitePreviewPageProps["versionPending"];
   onCollectionsChange?: SitePreviewPageProps["onCollectionsChange"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
@@ -76,6 +77,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     appNotices,
     appAccess,
     appVersion,
+    appVersionPending,
     onCollectionsChange,
     setAppPinned,
     setShareTarget,
@@ -136,6 +138,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
               onCollectionsChange={onCollectionsChange}
               access={appAccess}
               version={appVersion}
+              versionPending={appVersionPending}
             />
           </Suspense>
         ) : null}

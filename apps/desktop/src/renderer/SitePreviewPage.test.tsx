@@ -1004,4 +1004,45 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(screen.queryByTestId("app-view-review")).toBeNull();
   });
+
+  it("holds preview and AppView startup while active version is loading", async () => {
+    const appViewBridge = {
+      ...bridgeMock,
+      appView: vi.fn(async (request: { viewId: string }) => ({
+        kind: "unapproved" as const,
+        viewId: request.viewId,
+      })),
+      onAppViewEvent: vi.fn(() => () => undefined),
+      publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
+    };
+    vi.stubGlobal("dohcDesktop", appViewBridge);
+    const view = render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        version={{ id: "main", name: "Main" }}
+        versionPending
+        siteRoot="report"
+      />,
+    );
+    await waitFor(() => expect(appViewBridge.getSitePackage).toHaveBeenCalled());
+    expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
+    expect(appViewBridge.appView).not.toHaveBeenCalled();
+
+    view.rerender(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        version={{ id: "feature", name: "Feature" }}
+        versionPending={false}
+        siteRoot="report"
+      />,
+    );
+    await screen.findByTestId("site-preview-frame");
+    expect(appViewBridge.startSitePreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-sites",
+        versionId: "feature",
+        siteRoot: "report",
+      }),
+    );
+  });
 });

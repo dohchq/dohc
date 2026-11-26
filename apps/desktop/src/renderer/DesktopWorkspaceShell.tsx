@@ -8646,6 +8646,10 @@ function WorkspaceShell(props: {
   // once and a new file that is one gets its mark.
   const activeVersionId = workspaceVersions.onMain ? null : (workspaceVersions.active?.id ?? null);
   const activeVersionName = activeVersionId ? (workspaceVersions.active?.name ?? null) : null;
+  const versionPending =
+    !shareView &&
+    (!captureDecided ||
+      (captureAvailable && workspaceVersions.snapshot === null && !workspaceVersions.loadFailed));
   const versionPreview = useMemo(
     () =>
       activeVersionId && activeVersionName
@@ -9064,6 +9068,7 @@ function WorkspaceShell(props: {
                                 setAppPinned={setAppPinned}
                                 appAccess={appAccess}
                                 appVersion={versionPreview}
+                                appVersionPending={versionPending}
                                 shareView={shareView}
                                 historyTimeline={historyTimeline}
                                 sharing={{
@@ -10030,6 +10035,7 @@ function WorkspaceShell(props: {
                                         }}
                                         access={appAccess}
                                         version={versionPreview}
+                                        versionPending={versionPending}
                                       />
                                     </Suspense>
                                   </ErrorBoundary>

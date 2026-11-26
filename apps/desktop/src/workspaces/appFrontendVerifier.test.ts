@@ -760,7 +760,7 @@ describe("verifyLocalAppFrontend", () => {
 
     const versions: string[] = [];
     const collectionResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form", versionId: "feature" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -808,7 +808,7 @@ describe("verifyLocalAppFrontend", () => {
       },
     );
     expect(collectionResult.ok).toBe(true);
-    expect(new Set(versions)).toEqual(new Set(["feature"]));
+    expect(new Set(versions)).toEqual(new Set(["main"]));
     expect(collectionResult.diagnostics).toEqual([
       expect.objectContaining({
         code: "input_outside_app_root",
@@ -816,6 +816,63 @@ describe("verifyLocalAppFrontend", () => {
         path: "signups/collection.yaml",
       }),
     ]);
+
+    const featureVersions: string[] = [];
+    const featureResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form", versionId: "feature" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files, featureVersions)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+            const created = await backend({
+              id: "c1",
+              op: "collection.create",
+              idempotencyKey: "k1",
+              fields: { Name: "Ada" },
+            });
+            expect(created.status).toBe(404);
+            expect(browserInput.consumeBackendHint("collection.create")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              detail:
+                "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
+            });
+            const listed = await backend({ id: "l1", op: "collection.list", limit: 10 });
+            expect(listed.status).toBe(200);
+            expect(await listed.json()).toMatchObject({
+              records: [],
+              nextPath: null,
+            });
+          } finally {
+            await started.stop();
+          }
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 2 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(featureResult.ok).toBe(true);
+    expect(new Set(featureVersions)).toEqual(new Set(["feature"]));
 
     const unconnectedResult = await verifyLocalAppFrontend(
       { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/static", versionId: "main" },

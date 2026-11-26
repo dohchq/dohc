@@ -149,7 +149,7 @@ function fixture(
   collectionPlace?: () => Promise<DatasetPlace>,
   extra: Pick<
     Parameters<typeof createDatasetHandler>[0],
-    "historyPeople" | "readShareLinkPublication"
+    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock"
   > = {},
 ) {
   const abort = new AbortController();
@@ -1283,6 +1283,31 @@ it("refuses approve and approveMigration after switching away from Main without 
         approvalDigest: migration.approvalDigest,
       }),
     ).resolves.toMatchObject({ kind: "migrated" });
+    const lockCalls: string[] = [];
+    const locked = fixture(undefined, undefined, undefined, async () => localHost, undefined, {
+      withMainVersionLock: async (_workspace, work) => {
+        lockCalls.push("enter");
+        try {
+          return await work();
+        } finally {
+          lockCalls.push("exit");
+        }
+      },
+    });
+    locked.sources.set("data/dataset.json", JSON.stringify(renamed));
+    locked.sources.set("data/schema.sql", generateDatasetSchema(renamed));
+    locked.sources.set("data/operations.js", generateDatasetOperations(renamed));
+    await expect(
+      locked.handler("window", {
+        action: "prepareSchemaChange",
+        workspaceId: "workspace",
+        datasetPath: "data/dataset.json",
+        revision: 2,
+        revisionSha256: migration.revision.revisionSha256,
+        change: { kind: "renameCollection", name: "Locked Rename" },
+      }),
+    ).resolves.toMatchObject({ kind: "migration-prepared" });
+    expect(lockCalls).toEqual(["enter", "exit"]);
   } finally {
     await localHost.close();
     active.mockRestore();

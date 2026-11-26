@@ -602,11 +602,14 @@ function PublicationDialog(
             else props.onReopen();
           });
       }
-      const listed = await api.publishOwnerApp({
-        action: "listStaged",
-        workspaceId: props.workspaceId,
-        appRoot: props.appRoot,
-      });
+      const listed =
+        versionId === "main"
+          ? await api.publishOwnerApp({
+              action: "listStaged",
+              workspaceId: props.workspaceId,
+              appRoot: props.appRoot,
+            })
+          : null;
       const staged: StagedProposal | null =
         listed && listed.kind === "stagedListed"
           ? (listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null)

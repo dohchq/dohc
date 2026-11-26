@@ -982,6 +982,7 @@ export interface WorkspaceEngineCapture {
   // materializer before it commits that page's relay cursor. A failed page
   // remains available to the next pass instead of being skipped forever.
   runRelaySync<T>(task: (materializePage: MaterializeRelayPullPage) => Promise<T>): Promise<T>;
+  withVersionLock<T>(work: () => Promise<T>): Promise<T>;
   // Journaled edits only. Owner-outbox acknowledgements use their live lane.
   onDurableLocalChange(handler: (path: string) => void): () => void;
   readonly shuttingDown: boolean;
@@ -1030,7 +1031,7 @@ export interface WorkspaceEngineCaptureOptions {
   discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
-  beforeVersionSwitch?: () => Promise<void>;
+  aroundVersionSwitch?: <T>(work: () => Promise<T>) => Promise<T>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
   onTypingCheckpointRecovered?: (path: string) => void;
@@ -9011,35 +9012,38 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("create version", async () => {
         const engine = await engineStore();
         const fromVersionId = await activeVersionIdOf(engine);
-        // Create-and-switch makes the new fork active,
-        // so a session still live on the old version would settle a stale
-        // projection into a version it no longer owns. Vacate live sessions
-        // first, exactly as switchVersion does.
-        await settleAndCloseLiveYDocSessions(
-          () => true,
-          "Saved latest edits before creating a version",
-        );
-        // Fork from exactly what's on disk right now — capture the latest
-        // edits first so the new version starts as a faithful copy.
-        await engine.flushCapture?.();
-        const version = await engine.createNamedVersion({
-          workspaceId,
-          name,
-          fromVersionId,
+        const runSwitch = <T>(work: () => Promise<T>) =>
+          options.aroundVersionSwitch ? options.aroundVersionSwitch(work) : work();
+        return runSwitch(async () => {
+          // Create-and-switch makes the new fork active,
+          // so a session still live on the old version would settle a stale
+          // projection into a version it no longer owns. Vacate live sessions
+          // first, exactly as switchVersion does.
+          await settleAndCloseLiveYDocSessions(
+            () => true,
+            "Saved latest edits before creating a version",
+          );
+          // Fork from exactly what's on disk right now — capture the latest
+          // edits first so the new version starts as a faithful copy.
+          await engine.flushCapture?.();
+          const version = await engine.createNamedVersion({
+            workspaceId,
+            name,
+            fromVersionId,
+          });
+          // Secrets follow versions: the fork starts with an identical
+          // encrypted copy of the source version's secret files (ciphertext
+          // copy — no plaintext involved).
+          await secretStoreFor().forkVersion({
+            workspaceId,
+            fromVersionId,
+            toVersionId: version.id,
+          });
+          // Create-and-switch: the fork is content-identical to the disk, so no
+          // materialization is needed.
+          await engine.setActiveVersion({ workspaceId, versionId: version.id });
+          return versionsSnapshot(engine);
         });
-        // Secrets follow versions: the fork starts with an identical
-        // encrypted copy of the source version's secret files (ciphertext
-        // copy — no plaintext involved).
-        await secretStoreFor().forkVersion({
-          workspaceId,
-          fromVersionId,
-          toVersionId: version.id,
-        });
-        // Create-and-switch: the fork is content-identical to the disk, so no
-        // materialization is needed.
-        await options.beforeVersionSwitch?.();
-        await engine.setActiveVersion({ workspaceId, versionId: version.id });
-        return versionsSnapshot(engine);
       });
     },
 
@@ -9052,42 +9056,49 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await listTextFileMetadata(engine, versionId);
-        await options.beforeVersionSwitch?.();
-        // A live Y.Doc session pins its old versionId+
-        // path. Materializing another version into the same folder while it
-        // stays live would let a later settle write a stale projection into the
-        // now-active version (two-canonical / two-lineage corruption). Flush +
-        // release every live session first so the switch starts from a quiesced,
-        // single-canonical folder. A teardown failure fails the switch.
-        await settleAndCloseLiveYDocSessions(
-          () => true,
-          "Saved latest edits before switching versions",
-        );
-        // The daemon watcher owns the source version. Force it to settle
-        // before comparing heads, otherwise both the changed-file count and
-        // the version being left can be based on pre-save state.
-        await engine.flushCapture?.();
-        const [before, after, secretOperations] = await Promise.all([
-          listTextFileMetadata(engine, fromVersionId),
-          listTextFileMetadata(engine, versionId),
-          // The daemon performs the actual materialization after setActive;
-          // this plan is used only to include protected paths in the result.
-          planSecretMaterialization(versionId, fromVersionId),
-        ]);
-        const beforeByPath = new Map(
-          before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
-        );
-        const afterByPath = new Map(
-          after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
-        );
-        const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
-        let changedFileCount = secretOperations.length;
-        for (const path of changedPaths) {
-          if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
-        }
-        await engine.setActiveVersion({ workspaceId, versionId });
-        return { activeVersionId: versionId, changedFileCount };
+        const runSwitch = <T>(work: () => Promise<T>) =>
+          options.aroundVersionSwitch ? options.aroundVersionSwitch(work) : work();
+        return runSwitch(async () => {
+          // A live Y.Doc session pins its old versionId+
+          // path. Materializing another version into the same folder while it
+          // stays live would let a later settle write a stale projection into the
+          // now-active version (two-canonical / two-lineage corruption). Flush +
+          // release every live session first so the switch starts from a quiesced,
+          // single-canonical folder. A teardown failure fails the switch.
+          await settleAndCloseLiveYDocSessions(
+            () => true,
+            "Saved latest edits before switching versions",
+          );
+          // The daemon watcher owns the source version. Force it to settle
+          // before comparing heads, otherwise both the changed-file count and
+          // the version being left can be based on pre-save state.
+          await engine.flushCapture?.();
+          const [before, after, secretOperations] = await Promise.all([
+            listTextFileMetadata(engine, fromVersionId),
+            listTextFileMetadata(engine, versionId),
+            // The daemon performs the actual materialization after setActive;
+            // this plan is used only to include protected paths in the result.
+            planSecretMaterialization(versionId, fromVersionId),
+          ]);
+          const beforeByPath = new Map(
+            before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const afterByPath = new Map(
+            after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+          let changedFileCount = secretOperations.length;
+          for (const path of changedPaths) {
+            if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
+          }
+          await engine.setActiveVersion({ workspaceId, versionId });
+          return { activeVersionId: versionId, changedFileCount };
+        });
       });
+    },
+
+    withVersionLock(work) {
+      return enqueueResult("hold active version", work);
     },
 
     compareVersions(sourceVersionId, compareOptions) {

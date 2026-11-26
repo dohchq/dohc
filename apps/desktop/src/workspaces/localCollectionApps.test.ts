@@ -413,6 +413,14 @@ body`,
     );
     expect(f.engine.state.writes).toEqual([]);
     expect(f.host.apps.list("trip", "main")).toMatchObject([{ active: true }]);
+
+    // Closing while Main has an unsettled create must not let the preview runtime drain Main's queue.
+    f.engine.state.writeDown = true;
+    await expect(f.create({ destination: "Tokyo" }, "pending-main")).rejects.toBeInstanceOf(
+      LocalAppUnavailableError,
+    );
+    f.engine.state.writeDown = false;
+    await f.host.close();
   });
 
   it("reads approved fields from the published projection in UTF-8 byte order", async () => {

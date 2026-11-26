@@ -30,7 +30,7 @@ export function captureForWorkspace(
     | "onTypingCheckpointRecovered"
     | "retireTypingCheckpoint"
     | "waitForTypingRecovery"
-    | "beforeVersionSwitch"
+    | "aroundVersionSwitch"
   > = {},
 ): WorkspaceCaptureDecision {
   // A shared view never gets a recorder: it is fed exclusively by

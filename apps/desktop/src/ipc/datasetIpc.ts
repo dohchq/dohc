@@ -132,6 +132,7 @@ export function createDatasetHandler<
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<SourceCaptureStatus>;
   /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
   withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
+  withMainVersionLock?<T>(workspace: W, work: () => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(
     workspace: W,
@@ -256,6 +257,15 @@ export function createDatasetHandler<
               return {};
             });
             current();
+          };
+          const onMainLocked = <T>(work: () => Promise<T>) => {
+            const guarded = async () => {
+              await requireMain();
+              return work();
+            };
+            return dependencies.withMainVersionLock
+              ? dependencies.withMainVersionLock(operation.workspace, guarded)
+              : guarded();
           };
           let input: ResolvedDatasetRequest;
           if ("datasetPath" in request) {
@@ -756,21 +766,22 @@ export function createDatasetHandler<
                 ...DatasetMigrationPreviewPage.parse(page),
               };
             }
-            if (input.action === "approveMigration") {
-              await requireMain();
-              if (migrations.get(input.preparationId) !== pending)
-                throw new Error("This Collection review expired. Prepare the change again.");
-            }
-            // Consume before any authority read or SQL, including an uncertain remote reply.
-            pending.clear();
             if (input.action === "discardMigration") {
+              // Consume before any authority read or SQL, including an uncertain remote reply.
+              pending.clear();
               await migrationAuthority.discardMigrationCandidate(candidate);
               migrationAuthority.assertCurrent();
               return { kind: "migration-discarded" as const };
             }
-            const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, {
-              ...input,
-              signal: operation.signal,
+            const result = await onMainLocked(async () => {
+              if (migrations.get(input.preparationId) !== pending)
+                throw new Error("This Collection review expired. Prepare the change again.");
+              // Consume before any authority read or SQL, including an uncertain remote reply.
+              pending.clear();
+              return approveLocalDatasetMigration(migrationAuthority, pending.review, {
+                ...input,
+                signal: operation.signal,
+              });
             });
             migrationAuthority.assertCurrent();
             dependencies.collectionRulesChanged?.(input.workspaceId, candidate.datasetId);
@@ -939,10 +950,8 @@ export function createDatasetHandler<
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
             const prepared = await prepareMigration({
@@ -1255,10 +1264,8 @@ export function createDatasetHandler<
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
             const prepared = await prepareMigration({
@@ -1357,16 +1364,16 @@ export function createDatasetHandler<
           }
           const host = await localHost();
           if (input.action === "approve") {
-            await requireMain();
-            const revision = await host.approve({
-              ...input,
-              approvalAgent,
-              signal: operation.signal,
-            });
+            const revision = await onMainLocked(() =>
+              host.approve({
+                ...input,
+                approvalAgent,
+                signal: operation.signal,
+              }),
+            );
             current();
             return { kind: "approved" as const, revision };
           }
-          if (input.action === "create") await requireMain();
           let descriptorPath: string;
           let expectedRevision: string | undefined;
           if (input.action === "create") {
@@ -1380,10 +1387,8 @@ export function createDatasetHandler<
             descriptorPath = Object.keys(generated.files).find(
               (path) => path === "dataset.json" || path.endsWith("/dataset.json"),
             )!;
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
           } else {
@@ -1405,12 +1410,14 @@ export function createDatasetHandler<
             );
           }
           // The creation control approves the generated fields and actions it just displayed.
-          const revision = await host.approve({
-            preparationId: prepared.preparationId,
-            revisionSha256: prepared.revision.revisionSha256,
-            approvalAgent,
-            signal: operation.signal,
-          });
+          const revision = await onMainLocked(() =>
+            host.approve({
+              preparationId: prepared.preparationId,
+              revisionSha256: prepared.revision.revisionSha256,
+              approvalAgent,
+              signal: operation.signal,
+            }),
+          );
           current();
           return { kind: "approved" as const, revision };
         },

@@ -153,7 +153,9 @@ export function SitePreviewPage(props: {
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
   version?: { id: string; name: string } | null;
+  versionPending?: boolean;
 }) {
+  const versionPending = props.versionPending ?? false;
   const versionId = props.version?.id ?? "main";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -274,6 +276,7 @@ export function SitePreviewPage(props: {
   }, [reloadSite]);
 
   useEffect(() => {
+    if (versionPending) return;
     return () => {
       void bridge()
         .stopSitePreview({
@@ -284,7 +287,7 @@ export function SitePreviewPage(props: {
         })
         .catch(() => undefined);
     };
-  }, [holderId, props.workspaceId, props.siteRoot, versionId]);
+  }, [holderId, props.workspaceId, props.siteRoot, versionId, versionPending]);
 
   // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
@@ -569,6 +572,7 @@ export function SitePreviewPage(props: {
 
   useEffect(() => {
     if (
+      versionPending ||
       load.status !== "ready" ||
       load.site.root !== props.siteRoot ||
       preview ||
@@ -610,6 +614,7 @@ export function SitePreviewPage(props: {
     start,
     trust.readFailed,
     trust.trusted,
+    versionPending,
   ]);
 
   // Trusting the workspace runs what Restricted Mode held back. Restricting it
@@ -695,7 +700,7 @@ export function SitePreviewPage(props: {
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
     versionId,
-    enabled: needsPublication,
+    enabled: needsPublication && !versionPending,
     visible: props.visible ?? true,
     focused: props.focused ?? false,
     focusRequest: props.focusRequest ?? 0,

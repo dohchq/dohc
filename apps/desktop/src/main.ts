@@ -3201,6 +3201,11 @@ const sitePreviews: SitePreviewLifecycle = {
       operation.state.sitePreviews.stopWorkspace(workspace.workspaceId),
     ).then(() => undefined);
   },
+  holdVersionSwitch(workspaceId, work) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.sitePreviews.holdVersionSwitch(workspaceId, work),
+    );
+  },
   stopAll() {
     return Promise.all(
       workspaceAuthorities
@@ -3909,11 +3914,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
-        beforeVersionSwitch: () =>
-          sitePreviews.stopWorkspace({
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-          }),
+        aroundVersionSwitch: (work) => sitePreviews.holdVersionSwitch(workspace.workspaceId, work),
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -11306,6 +11307,14 @@ function registerIpcHandlers(): void {
       if (result === null)
         throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return result;
+    },
+    withMainVersionLock: async <T>(
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      work: () => Promise<T>,
+    ) => {
+      await openWorkspaceActivity(workspace);
+      const { capture } = await requireEngineCapture(workspace.workspaceId, "Collections");
+      return capture.withVersionLock(work);
     },
     createSources: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],

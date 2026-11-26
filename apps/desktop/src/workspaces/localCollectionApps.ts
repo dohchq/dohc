@@ -169,6 +169,7 @@ export function localCollectionAppStorage(db: JournalDb): LocalAppStorage {
 export function createLocalCollectionApps(options: {
   db: JournalDb;
   store: LocalAppStore;
+  preview?: boolean;
   workspaceId: string;
   assertCurrent(): void;
   /** Commits while the host closes, so admitted creates record their outcomes. Admission checks the session through the store. */
@@ -257,17 +258,19 @@ export function createLocalCollectionApps(options: {
       )
       .get(publicationId, key) as Create | undefined;
   const pendingKeys = (publicationId?: string) =>
-    (publicationId === undefined
-      ? db
-          .prepare(
-            "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL",
-          )
-          .all()
-      : db
-          .prepare(
-            "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL AND publication_id=?",
-          )
-          .all(publicationId)) as Pick<Create, "publication_id" | "idempotency_key">[];
+    options.preview
+      ? []
+      : ((publicationId === undefined
+          ? db
+              .prepare(
+                "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL",
+              )
+              .all()
+          : db
+              .prepare(
+                "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL AND publication_id=?",
+              )
+              .all(publicationId)) as Pick<Create, "publication_id" | "idempotency_key">[]);
 
   function finish(publicationId: string, key: string, outcome: (row: Create) => Outcome) {
     // After close the reservation stays durable and settles when the store opens again.

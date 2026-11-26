@@ -1492,4 +1492,28 @@ describe("an app preview shown by more than one surface", () => {
     await s.hide("nobody");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
+
+  it("blocks new starts during holdVersionSwitch and aborts the switch if stopping fails", async () => {
+    const s = surfaces();
+    await s.show("tab", { senderId: 1 });
+    const release = deferred();
+    const holding = s.lifecycle.holdVersionSwitch("workspace-1", async () => {
+      await expect(s.show("pin", { senderId: 2 })).rejects.toThrow(
+        "The workspace is switching versions. Try again.",
+      );
+      await release.promise;
+      return "switched";
+    });
+    await expect.poll(() => vi.mocked(s.handles[0]!.stop).mock.calls.length).toBe(1);
+    release.resolve();
+    expect(await holding).toBe("switched");
+
+    await s.show("tab", { senderId: 1 });
+    const failing = s.handles.at(-1)!;
+    vi.mocked(failing.stop).mockRejectedValueOnce(new Error("stop hung"));
+    const work = vi.fn(async () => "never");
+    await expect(s.lifecycle.holdVersionSwitch("workspace-1", work)).rejects.toThrow("stop hung");
+    expect(work).not.toHaveBeenCalled();
+    await s.lifecycle.stopAll();
+  });
 });

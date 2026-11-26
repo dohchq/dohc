@@ -548,7 +548,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     });
     let apps: ReturnType<typeof createLocalDatasetApps>;
     let previews: { datasets: ReturnType<typeof createLocalDatasetApps> };
-    let onServers: Array<{ close(): Promise<void> }> = [];
+    let onServer: { close(): Promise<void> };
     let appStore: LocalAppStore;
     let localApps: ReturnType<typeof createLocalApps>;
     const exportDirectory = () => folderOnce("exports");
@@ -1814,7 +1814,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           // Admitted Collection responses settle within their own deadline and still record their outcomes.
           await localApps.close();
           // A withdrawal not sent by now is not sent, so it cannot undo an approval made after reopening.
-          await Promise.all(onServers.map((server) => server.close()));
+          await onServer.close();
           await Promise.allSettled([...active]);
           await recovery.close();
           try {
@@ -1845,6 +1845,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       const collections = createLocalCollectionApps({
         db,
         store,
+        preview,
         workspaceId,
         assertCurrent,
         transaction: commit,
@@ -1977,7 +1978,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const preview = appsOver(createLocalPreviewStore(assertCurrent), true);
     previews = preview;
     apps = main.datasets;
-    onServers = [main.onServer, preview.onServer];
+    onServer = main.onServer;
     localApps = routeLocalApps(main.apps, preview.apps);
     return { ...local, apps: localApps };
   } catch (error) {
