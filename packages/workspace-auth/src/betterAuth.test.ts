@@ -272,6 +272,7 @@ describeWithPostgres("closed sign-up", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(await accountExists(email)).toBe(true);
     expect(linkIn(lastEmailTo(email)).searchParams.get("next")).toBe("/device?user_code=ABCD-EFGH");
+    expect(emailsTo(email).map((message) => message.subject)).toEqual(["Set your dohc password"]);
 
     const emailsBeforeSignIn = emailsTo(email).length;
     await expect(

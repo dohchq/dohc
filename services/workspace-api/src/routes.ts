@@ -191,6 +191,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
               email: session?.user.email,
               next: samePath(url.searchParams.get("next")) ?? undefined,
               closed,
+              sent: url.searchParams.get("sent") === "1",
             }),
           );
         }

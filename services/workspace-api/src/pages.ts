@@ -106,23 +106,38 @@ ${STATUS}
 }
 
 export function verifyEmailPage(
-  options: { token?: string; email?: string; next?: string; closed?: boolean } = {},
+  options: {
+    token?: string;
+    email?: string;
+    next?: string;
+    closed?: boolean;
+    /** Sign-up just sent the link, so the page offers a new one only on request. */
+    sent?: boolean;
+  } = {},
 ): string {
   const { token, email, next, closed } = options;
-  const heading = closed ? "Choose your password" : "Verify your email";
+  const sent = options.sent === true && !token;
+  const heading = sent ? "Check your email" : closed ? "Choose your password" : "Verify your email";
+  const then = next === "/join" ? " Then open your invite link again to join the workspace." : "";
+  const lead = token
+    ? "dohc is checking your link."
+    : sent
+      ? `dohc sent you a link to ${closed ? "choose your password" : "verify your email"}. It works for one hour.${then}`
+      : `Open the link dohc sent to your email. It works for one hour.${then}`;
+  const resend = `/account/verify-email${next ? `?next=${encodeURIComponent(next)}` : ""}`;
   return shell({
     title: heading,
     page: "verify-email",
     data: { token, next, "sign-up": closed ? CLOSED : undefined },
     main: `<h1>${heading}</h1>
-<p>${token ? "dohc is checking your link." : `Open the link dohc sent to your email. It works for one hour.${next === "/join" ? " Then open your invite link again to join the workspace." : ""}`}</p>
+<p>${lead}</p>
 <p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : next === "/join" ? "Continue joining the workspace" : "Go to your account"}</a></p>
-<form id="form"${token ? " hidden" : ""}>
+<form id="form"${token || sent ? " hidden" : ""}>
 ${field("email", "Email", `type="email" name="email" autocomplete="username" required value="${escapeHtml(email ?? "")}"`)}
 <button type="submit">Send a new link</button>
 </form>
 ${STATUS}
-<p class="links"><a href="/account">Your account</a><a href="/account/sign-in">Sign in</a></p>`,
+<p class="links">${sent ? `<a href="${escapeHtml(resend)}">Send a new link</a>` : ""}<a href="/account">Your account</a><a href="/account/sign-in">Sign in</a></p>`,
   });
 }
 

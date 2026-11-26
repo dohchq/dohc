@@ -419,7 +419,7 @@ if (page === "sign-up") {
       password: byId("password") ? byId("password").value : unusedPassword(),
       callbackURL: samePath(document.body.dataset.next) || "/account",
     }, "POST", joinInviteHeader());
-    location.assign("/account/verify-email?next=" + encodeURIComponent(samePath(document.body.dataset.next) || "/account"));
+    location.assign("/account/verify-email?next=" + encodeURIComponent(samePath(document.body.dataset.next) || "/account") + "&sent=1");
   });
 }
 
