@@ -845,7 +845,10 @@ export function SitePreviewPage(props: {
               aria-label="Share app"
               title="Share app"
               disabled={runningMode !== null || versionPending}
-              onClick={() => site && void prepareShare()}
+              onClick={() => {
+                if (needsPublication) setReviewOpen(true);
+                else void prepareShare();
+              }}
               className="size-7"
             >
               <Share2 size={13} aria-hidden />
