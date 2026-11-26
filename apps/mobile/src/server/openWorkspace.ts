@@ -35,8 +35,9 @@ export function createOpenWorkspace(options: {
   readonly onMessages?: (workspaceId: string, messages: readonly ChatMessage[]) => void;
   /** The open workspace becomes `workspaceId`, before the open store stops (appTeardown). */
   readonly beforeSwitch?: (workspaceId: string | null) => void;
+  readonly onGone?: (workspaceId: string) => void;
 }): OpenWorkspace {
-  const { signIn, list, cache, onMessages, beforeSwitch } = options;
+  const { signIn, list, cache, onMessages, beforeSwitch, onGone } = options;
   const listeners = new Set<() => void>();
   const saved = cache.savedList(signIn);
   let chosen: string | null = null;
@@ -54,7 +55,10 @@ export function createOpenWorkspace(options: {
       signIn,
       workspaceId,
       cache,
-      onGone: () => list.reload(),
+      onGone: () => {
+        onGone?.(workspaceId);
+        list.reload();
+      },
       onMessages: onMessages && ((messages) => onMessages(workspaceId, messages)),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {

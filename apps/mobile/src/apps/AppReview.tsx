@@ -112,8 +112,10 @@ function Review({
       }
     }
   };
-  const launch = async (app: AppReview) => {
-    if (await apps.open({ ...app, name }, leaving.signal)) router.push("/app-run");
+  const launch = (app: AppReview) => {
+    const opening = apps.open({ ...app, name }, leaving.signal);
+    if (!leaving.signal.aborted && apps.isLive()) router.push("/app-run");
+    return opening;
   };
   const approve = () =>
     review?.member

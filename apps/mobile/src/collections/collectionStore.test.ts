@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { appTeardown } from "../apps/appStore";
 import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
+import { cacheScope, createReadCache } from "../server/workspaceData";
 import {
   deferred,
   memoryStore,
@@ -66,10 +67,14 @@ async function sent(server: ReturnType<typeof testServer>, count: number) {
   while (server.calls.length < count) await new Promise((done) => setTimeout(done, 0));
 }
 
-function setup(isCurrent = () => true) {
+function setup(isCurrent = () => true, cache = createReadCache(), stores = createScopedEnds()) {
   const server = testServer();
-  const stores = createScopedEnds();
-  const collections = createWorkspaceCollections(signedIn(server, isCurrent), "ws-1", stores);
+  const collections = createWorkspaceCollections(
+    signedIn(server, isCurrent),
+    "ws-1",
+    stores,
+    cache,
+  );
   server.on("POST", `${OPS}/collection`, description);
   return { server, stores, collections };
 }
@@ -93,7 +98,7 @@ async function signedInStore(
   await account.restore();
   const state = account.state();
   if (state.status !== "signed-in") throw Error("not signed in");
-  collections = createWorkspaceCollections(state.signIn, "ws-1", stores);
+  collections = createWorkspaceCollections(state.signIn, "ws-1", stores, createReadCache());
   server.on("POST", `${OPS}/collection`, description);
   pages(server);
   await collections.open(D);
@@ -144,6 +149,35 @@ describe("the Collections list", () => {
       problem: "server-busy",
       failures: 1,
     });
+  });
+
+  it("empties at a 404 for the workspace, and a read on its way neither shows nor saves", async () => {
+    const cache = createReadCache();
+    const stores = createScopedEnds();
+    const { server, collections } = setup(() => true, cache, stores);
+    const late = deferred<Answer>();
+    server.on("POST", `${OPS}/collections`, () => late.promise);
+    const reading = collections.refresh();
+    const scope = cacheScope(signedIn(server), "ws-1");
+    cache.drop(scope);
+    appTeardown(stores).hide("ws-1");
+    late.resolve(ok({ collections: [{ datasetId: D, name: "Registrations" }], nextCursor: null }));
+    await reading;
+    expect(collections.state().collections).toBeNull();
+    expect(cache.get(scope, "collections")).toBeUndefined();
+  });
+
+  it("shows the list read last at once in the workspace's next store", async () => {
+    const cache = createReadCache();
+    const { server, collections } = setup(() => true, cache);
+    const listed = [{ datasetId: D, name: "Registrations" }];
+    server.on("POST", `${OPS}/collections`, ok({ collections: listed, nextCursor: null }));
+    await collections.refresh();
+    collections.stop();
+    const next = createWorkspaceCollections(signedIn(server), "ws-1", createScopedEnds(), cache);
+    expect(next.state().collections).toEqual(listed);
+    const other = createWorkspaceCollections(signedIn(server), "ws-2", createScopedEnds(), cache);
+    expect(other.state().collections).toBeNull();
   });
 });
 
@@ -260,6 +294,148 @@ describe("a Collection's records", () => {
     await collections.more();
     expect(collections.view()).toMatchObject({ problem: { cause: "offline", more: true } });
     expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+  });
+
+  it("shows a Collection opened again at once while it reads again, and keeps it through a failed read", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.openRecord(collections.view()!.rows[0]!);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    const reopen = collections.open(D);
+    expect(collections.view()).toMatchObject({
+      description: { name: "Registrations" },
+      tableId: "t-people",
+      reading: "first",
+      opened: null,
+    });
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    held.resolve(records(["b0"], null));
+    await reopen;
+    expect(names(collections.view()?.rows)).toEqual(["b0"]);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, "offline");
+    await collections.open(D);
+    expect(collections.view()).toMatchObject({ problem: { cause: "offline", more: false } });
+    expect(names(collections.view()?.rows)).toEqual(["b0"]);
+  });
+
+  it("reads a reopened Collection's tables again when another table is chosen before they answer", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => held.promise, { status: 404 });
+    void collections.open(D);
+    await collections.chooseTable("t-notes");
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(3);
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+    held.resolve(description);
+  });
+
+  it("reads a reopened Collection's tables again for a table chosen before its first page answers", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, describedAs(4));
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, (call: Call) =>
+      (call.body as { tableId: string }).tableId === "t-people"
+        ? held.promise
+        : ok({ status: "refused", reason: "no-read" }),
+    );
+    void collections.open(D);
+    await sent(server, 4);
+    await collections.chooseTable("t-notes");
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(3);
+    expect(collections.view()?.description?.revision).toBe(4);
+    held.resolve(records(["late"], null));
+  });
+
+  it("clears a table's records when its next page refuses them, and keeps none of it on reopen", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    server.on("POST", `${OPS}/collectionRecords`, ok({ status: "refused", reason: "no-read" }));
+    await collections.more();
+    expect(collections.view()).toMatchObject({ refused: true, rows: [], files: {}, next: null });
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, () => new Promise<Answer>(() => {}));
+    void collections.open(D);
+    expect(collections.view()).toMatchObject({ description: null, rows: [] });
+  });
+
+  it("closes a record opened from a reopened Collection whose table or Collection is then refused", async () => {
+    for (const refusal of [ok({ status: "refused", reason: "no-read" }), { status: 404 }]) {
+      const { server, collections } = setup();
+      pages(server);
+      await collections.open(D);
+      collections.close(D);
+      const held = deferred<Answer>();
+      server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+      void collections.open(D);
+      await sent(server, 4);
+      collections.openRecord(collections.view()!.rows[0]!);
+      expect(collections.view()?.opened).not.toBeNull();
+      held.resolve(refusal);
+      await vi.waitFor(() => expect(collections.view()?.reading).toBeNull());
+      expect(collections.view()?.opened).toBeNull();
+    }
+  });
+
+  it("keeps an open record and the rows when a reopened Collection's page is too large", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    void collections.open(D);
+    await sent(server, 4);
+    collections.openRecord(collections.view()!.rows[0]!);
+    held.resolve({ status: 413 });
+    await vi.waitFor(() => expect(collections.view()?.reading).toBeNull());
+    expect(collections.view()?.opened).not.toBeNull();
+    expect(collections.view()?.rows.length).toBeGreaterThan(0);
+  });
+
+  it("clears what a Collection showed when the server refuses its records", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    server.on("POST", `${OPS}/collectionRecords`, { status: 404 });
+    await collections.reload();
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+  });
+
+  it("shows a Collection the server refuses when opened again as on its first open, and forgets it", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, { status: 404 });
+    await collections.open(D);
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, () => new Promise<Answer>(() => {}));
+    void collections.open(D);
+    expect(collections.view()).toMatchObject({ description: null, rows: [], problem: null });
   });
 
   it("leaves the Collection on close, unless another replaced it", async () => {

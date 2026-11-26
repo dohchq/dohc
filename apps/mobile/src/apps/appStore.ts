@@ -1,3 +1,4 @@
+import type { ScopedEnds } from "../pages/pageLive";
 import type { Account, SignIn } from "../server/account";
 import { requestGenerations, shownProblem, type Fetch } from "../server/client";
 import {
@@ -6,7 +7,7 @@ import {
   type AppOperations,
   type PhoneApp,
 } from "../server/phoneApps";
-import type { ReadProblem } from "../server/workspaceData";
+import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
 
 // The app running on the phone, and the open workspace's published apps.
 //
@@ -31,36 +32,51 @@ export interface RunningApp extends AppScope, AppLaunch {
 
 export interface AppRunner {
   state(): RunningApp | null;
+  launching(): LaunchScope | null;
   subscribe(listener: () => void): () => void;
   /** Ends the running app, and any launch on its way, that `match` names, or every one. */
   end(match?: (scope: AppScope) => boolean): void;
-  /** Starts a launch for `scope`, ending the last. Resolves whether it showed. */
-  start(scope: AppScope & { readonly name: string }, launch: Promise<AppLaunch>): Promise<boolean>;
+  /** Starts a launch for `scope`, ending the last. Its signal aborts when the launch ends. Resolves whether it showed. */
+  start(scope: LaunchScope, launch: (ended: AbortSignal) => Promise<AppLaunch>): Promise<boolean>;
   /** Ends the running app because its web process died. Its review says so until the next launch, or until `end` names it. */
   stop(): void;
   /** The app `stop` ended, or null. */
   stopped(): AppScope | null;
 }
 
+type LaunchScope = AppScope & { readonly name: string };
+
 export function createAppRunner(): AppRunner {
   const listeners = new Set<() => void>();
   let running: RunningApp | null = null;
-  let pending: { readonly key: number; readonly scope: AppScope } | null = null;
+  let pending: {
+    readonly key: number;
+    readonly scope: LaunchScope;
+    readonly ended: AbortController;
+  } | null = null;
   let launches = 0;
   let stopped: AppScope | null = null;
-  const set = (next: RunningApp | null) => {
-    running = next;
+  const notify = () => {
     for (const listener of listeners) listener();
   };
+  const set = (next: RunningApp | null) => {
+    running = next;
+    notify();
+  };
   const end: AppRunner["end"] = (match = () => true) => {
-    if (pending && match(pending.scope)) pending = null;
+    const launch = pending !== null && match(pending.scope);
+    if (launch) {
+      pending?.ended.abort();
+      pending = null;
+    }
     const forget = stopped !== null && match(stopped);
     if (forget) stopped = null;
     if (running && match(running)) set(null);
-    else if (forget) set(running);
+    else if (forget || launch) notify();
   };
   return {
     state: () => running,
+    launching: () => pending?.scope ?? null,
     subscribe(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
@@ -70,13 +86,16 @@ export function createAppRunner(): AppRunner {
       stopped = null;
       end();
       const key = ++launches;
-      pending = { key, scope };
+      const ended = new AbortController();
+      pending = { key, scope, ended };
+      notify();
       let answer: AppLaunch;
       try {
-        answer = await launch;
+        answer = await launch(ended.signal);
       } catch (error) {
         if (pending?.key !== key) return false;
         pending = null;
+        notify();
         throw error;
       }
       if (pending?.key !== key) return false;
@@ -121,7 +140,7 @@ export function appTeardown(...runners: readonly Ends[]) {
       }),
     /** The open workspace is now `workspaceId`, by a choice here or a change elsewhere. */
     open: (workspaceId: string | null) => end((scope) => scope.workspaceId !== workspaceId),
-    /** Show on phone off. */
+    /** Show on phone off, or a 404 for the workspace. */
     hide: (workspaceId: string) => end((scope) => scope.workspaceId === workspaceId),
   };
 }
@@ -159,9 +178,11 @@ export interface WorkspaceApps {
 }
 
 export function createWorkspaceApps(options: {
-  readonly signIn: Pick<SignIn, "client" | "isCurrent">;
+  readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
   readonly runner: AppRunner;
+  readonly cache: ReadCache;
+  readonly ends: Pick<ScopedEnds, "add">;
   readonly fetch: Fetch;
   /** This build may run apps (src/apps/canOpenApps.ts). */
   readonly canOpen: boolean;
@@ -172,7 +193,8 @@ export function createWorkspaceApps(options: {
   const operations = appOperations(signIn.client, workspaceId, signal);
   const reads = requestGenerations();
   const listeners = new Set<() => void>();
-  let state: AppsState = { apps: null, problem: null, failures: 0 };
+  const saved = cachedList(options.cache, signIn, workspaceId, views.apps);
+  let state: AppsState = { apps: saved.value(), problem: null, failures: 0 };
   const isLive = () => !signal.aborted && signIn.isCurrent();
   const mine = (publicationId?: string) => (scope: AppScope) =>
     scope.signIn === signIn &&
@@ -182,20 +204,37 @@ export function createWorkspaceApps(options: {
     state = next;
     for (const listener of listeners) listener();
   };
+  void saved.restored.then(() => {
+    const apps = saved.value();
+    if (isLive() && state.apps === null && apps) set({ ...state, apps });
+  });
 
   let reading: Promise<void> | null = null;
+  const remove = options.ends.add(
+    { signIn, workspaceId },
+    {
+      end() {
+        reads.next();
+        reading = null;
+        set({ apps: null, problem: null, failures: 0 });
+      },
+    },
+  );
   // A failed or incomplete read rejects, so only a complete catalog can end the running app.
   const refresh = () => {
     const request = reads.next();
     const lands = () => isLive() && reads.isLatest(request);
-    const read = operations.list().then(
-      (apps) => {
+    const read = Promise.all([operations.list(), saved.restored]).then(
+      ([apps]) => {
         if (!lands()) return;
-        runner.end(
-          (scope) =>
-            mine()(scope) &&
-            !apps.some((app) => app.publicationId === scope.publicationId && app.approved),
-        );
+        saved.save(apps);
+        const running = runner.state();
+        if (
+          running &&
+          mine()(running) &&
+          !apps.some((app) => app.publicationId === running.publicationId && app.approved)
+        )
+          runner.end((scope) => scope === running);
         set({ apps, problem: null, failures: state.failures });
       },
       (error: unknown) => {
@@ -233,21 +272,25 @@ export function createWorkspaceApps(options: {
       if (!options.canOpen || leaving.aborted || !isLive()) return false;
       const both = new AbortController();
       const abort = () => both.abort();
-      for (const source of [signal, leaving]) {
-        if (source.aborted) abort();
-        source.addEventListener("abort", abort);
-      }
+      const sources = [signal, leaving];
       const scope = { signIn, workspaceId, publicationId: app.publicationId, name: app.name };
       try {
-        const shown = await runner.start(scope, operations.launch(options.fetch, app, both.signal));
+        const shown = await runner.start(scope, (ended) => {
+          sources.push(ended);
+          for (const source of sources) {
+            if (source.aborted) abort();
+            source.addEventListener("abort", abort);
+          }
+          return operations.launch(options.fetch, app, both.signal);
+        });
         if (shown && leaving.aborted) runner.end(mine(app.publicationId));
         return shown && !leaving.aborted;
       } finally {
-        signal.removeEventListener("abort", abort);
-        leaving.removeEventListener("abort", abort);
+        for (const source of sources) source.removeEventListener("abort", abort);
       }
     },
     stop() {
+      remove();
       runner.end(mine());
       controller.abort();
     },

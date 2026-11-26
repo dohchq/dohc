@@ -1,5 +1,8 @@
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createAppRunner, createWorkspaceApps } from "../apps/appStore";
+import { createWorkspaceCollections } from "../collections/collectionStore";
+import { createScopedEnds } from "../pages/pageLive";
 import { createAccount, type StoredSignIn } from "./account";
 import {
   createCacheRows,
@@ -15,6 +18,7 @@ import { createServerClient } from "./client";
 import { CACHE_FORMAT, openNow } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
 import { pendingSignOuts } from "./pushRegistration";
+import { A, memberPage, page, version } from "./testApps";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
 import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
@@ -639,6 +643,57 @@ describe("a relaunch", () => {
     expect((await launch(disk).files.read(scope)).find((view) => view.id === "files")?.cursor).toBe(
       "1.0.0",
     );
+  });
+});
+
+describe("the apps and Collections lists", () => {
+  const COLLECTIONS = [{ datasetId: "d-1", name: "Registrations" }];
+  const stores = (server: ReturnType<typeof testServer>, cache: ReadCache) => ({
+    apps: createWorkspaceApps({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      runner: createAppRunner(),
+      fetch: server.fetch,
+      canOpen: true,
+      cache,
+      ends: createScopedEnds(),
+    }),
+    collections: createWorkspaceCollections(signInTo(server), "ws-a", createScopedEnds(), cache),
+  });
+
+  it("show what was read before after a relaunch, and an answer before the row is read keeps its other views", async () => {
+    const server = serverWithA();
+    server.on("POST", "/sync/ws-a/ops/apps", page([version(A, true)]));
+    server.on("POST", "/sync/ws-a/ops/memberApps", memberPage([]));
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/collections",
+      ops({ collections: COLLECTIONS, nextCursor: null }, "0.5.2"),
+    );
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const first = launch(disk);
+    const before = stores(server, first.cache);
+    await Promise.all([before.apps.refresh(), before.collections.refresh()]);
+    await first.files.flush();
+
+    const release = disk.cache.holdCommits();
+    const { cache } = launch(disk);
+    const after = stores(server, cache);
+    expect(after.apps.state().apps).toBeNull();
+    const refreshed = Promise.all([after.apps.refresh(), after.collections.refresh()]);
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/collections")).toBe(2));
+    expect(after.apps.state().apps).toBeNull();
+    release();
+    await vi.waitFor(() => expect(after.apps.state().apps).toEqual([version(A, true)]));
+    expect(after.collections.state().collections).toEqual(COLLECTIONS);
+    await refreshed;
+
+    const reads = count(server, "/sync/ws-a/ops/listFiles");
+    const data = open(server, cache);
+    data.subscribe(views.files, () => {});
+    expect(data.state(views.files).value).toEqual(A_FILES);
+    expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(reads);
   });
 });
 
