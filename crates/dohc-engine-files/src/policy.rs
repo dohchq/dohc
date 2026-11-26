@@ -331,10 +331,19 @@ mod tests {
 
     #[test]
     fn env_templates_are_named_only_outside_the_secret_family() {
-        for path in [".env.example", "apps/site/.ENV.Template", "config/.env.sample "] {
+        for path in [
+            ".env.example",
+            "apps/site/.ENV.Template",
+            "config/.env.sample ",
+        ] {
             assert!(names_env_template(path), "{path}");
         }
-        for path in [".env", ".env.local", ".env/.env.example", "notes/example.md"] {
+        for path in [
+            ".env",
+            ".env.local",
+            ".env/.env.example",
+            "notes/example.md",
+        ] {
             assert!(!names_env_template(path), "{path}");
         }
     }
