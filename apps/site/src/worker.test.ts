@@ -53,11 +53,38 @@ it("loads PostHog's scripts and remote config from its asset host", async () => 
   ]);
 });
 
+it.each([
+  ["GET", "/discord"],
+  ["HEAD", "/discord"],
+  ["GET", "/discord/"],
+  ["HEAD", "/discord/"],
+])("redirects %s %s to Discord without caching", async (method, path) => {
+  const response = await worker.fetch(new Request(`https://dohc.computer${path}`, { method }), {
+    ASSETS: assets,
+  });
+  expect(response.status).toBe(302);
+  expect(response.headers.get("location")).toBe("https://discord.gg/R9MH5TwdSD");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(assets.fetch).not.toHaveBeenCalled();
+  expect(upstream).not.toHaveBeenCalled();
+});
+
+it.each(["/discord", "/discord/"])("rejects unsupported methods on %s", async (path) => {
+  const response = await worker.fetch(
+    new Request(`https://dohc.computer${path}`, { method: "POST" }),
+    { ASSETS: assets },
+  );
+  expect(response.status).toBe(405);
+  expect(response.headers.get("allow")).toBe("GET, HEAD");
+  expect(assets.fetch).not.toHaveBeenCalled();
+});
+
 it("serves every other path from the site's files", async () => {
-  for (const path of ["/", "/privacy.html", "/ingestion", "/ingest"]) {
+  const paths = ["/", "/privacy.html", "/ingestion", "/ingest", "/discord-other", "/discord/extra"];
+  for (const path of paths) {
     await worker.fetch(new Request(`https://dohc.computer${path}`), { ASSETS: assets });
   }
-  expect(assets.fetch).toHaveBeenCalledTimes(4);
+  expect(assets.fetch).toHaveBeenCalledTimes(paths.length);
   expect(upstream).not.toHaveBeenCalled();
 });
 
