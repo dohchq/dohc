@@ -345,8 +345,8 @@ on `deadlineMs` and `PRAGMA max_page_count`.
 On a relay-hosted Collection, the Owner or an active Admin can create it and
 approve its rules and migrations. The dataset host checks a governance authority
 for these actions, separate from the data authority operations run under. An
-Admin's names their member entry, member grant, and grant generation. It is never
-an agent, a phone launch, or an Owner impersonation. The host rechecks it inside
+Admin's names their member entry, member grant, and grant generation, never an
+Owner impersonation. A request marked as an agent's or a phone launch's is refused. The host rechecks it inside
 the commit's transaction, so a demoted Admin's approval fails at commit. Approving
 rules trusts the Admin with the Collection's data, since a migration's SQL and
 preview reach every row. Deletion, raw SQL, recovery, bulk changes, archive, and secret or outside-call approvals stay
