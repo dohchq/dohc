@@ -91,23 +91,27 @@ const publication = {
     .object({
       agent: PublicationAgent.nullable(),
       selector: z.unknown(),
-      access,
+      access: access.nullable(),
       committedCandidateDigest: hash,
       sourceRevision: hash,
-      capabilities: z.array(OwnerAppCapability).max(1),
+      capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
     })
     .strict()
     .optional(),
   publicationId: hash,
   authorityRevision: z.number().int().positive(),
+  audience: z.enum(["link", "workspace"]),
   shareId: id,
-  grantId: id,
+  grantId: id.nullable(),
   active: z.boolean(),
   linkCurrent: z.boolean(),
   collectionCapability: z
     .union([OwnerAppCollectionCapability, z.literal("unavailable")])
     .nullable(),
-  datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable(),
+  datasetCapabilities: z.union([
+    z.array(OwnerAppDatasetCapability).max(APP_DATASET_MAX_BINDINGS),
+    z.literal("unavailable"),
+  ]),
 };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z
@@ -402,9 +406,16 @@ const APP_PUBLICATION_REQUEST_OPTIONS = [
     action: z.literal("prepare"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
-    shareId: id,
-    grantId: id,
-  }),
+    audience: z.literal("workspace").optional(),
+    shareId: id.optional(),
+    grantId: id.optional(),
+  }).refine(
+    (value) =>
+      value.audience === "workspace"
+        ? value.shareId === undefined && value.grantId === undefined
+        : value.shareId !== undefined && value.grantId !== undefined,
+    'Specify "shareId" and "grantId" for a link, or "audience": "workspace" without them.',
+  ),
   appPublicationAction({
     action: z.literal("approve"),
     workspaceId: id,
@@ -539,13 +550,17 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
       versionId: id,
       sourceRevision: hash,
       audience: z
-        .object({
-          shareId: id,
-          grantId: id,
-          selector: z.object({ paths: z.array(z.string()), versionId: id.nullable() }).strict(),
-          access,
-        })
-        .strict()
+        .union([
+          z
+            .object({
+              shareId: id,
+              grantId: id,
+              selector: z.object({ paths: z.array(z.string()), versionId: id.nullable() }).strict(),
+              access,
+            })
+            .strict(),
+          z.literal("workspace"),
+        ])
         .optional(),
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
       capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),

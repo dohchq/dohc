@@ -168,8 +168,40 @@ const DatasetDataGrant = z
     discover: z.boolean(),
   })
   .strict();
+/** The actions each workspace level holds in a Collection by default, chosen under one revision of its rules. */
+const DatasetWorkspaceDefaults = z
+  .object({
+    view: z.array(identity).max(128),
+    comment: z.array(identity).max(128),
+    edit: z.array(identity).max(128),
+    revision: z.number().int().positive(),
+    revisionSha256: sha256,
+  })
+  .strict();
 export const DatasetPermissionsPage = z
   .object({
+    defaults: DatasetWorkspaceDefaults.extend({ generation: z.number().int().positive() })
+      .nullable()
+      .optional(),
+    /** The approved rules that grants and defaults name, with the actions they may hold. */
+    rules: z
+      .object({
+        revision: z.number().int().positive(),
+        revisionSha256: sha256,
+        actions: z
+          .array(
+            z
+              .object({
+                operationId: identity,
+                name: z.string().min(1).max(128),
+                readOnly: z.boolean(),
+              })
+              .strict(),
+          )
+          .max(128),
+      })
+      .strict()
+      .optional(),
     permissions: z
       .array(
         z.discriminatedUnion("kind", [
@@ -426,6 +458,30 @@ function datasetAction<Shape extends z.ZodRawShape>(shape: Shape) {
   });
 }
 
+const DATASET_ADMIN_OPTIONS = [
+  datasetAction({
+    ...selection,
+    action: z.literal("permissions"),
+    after: z.string().min(1).max(1024).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }),
+  datasetAction({
+    ...selection,
+    action: z.literal("setGrant"),
+    grantId: z.string().min(1).max(256),
+    grant: DatasetDataGrant,
+  }),
+  datasetAction({
+    ...selection,
+    action: z.literal("setDefaults"),
+    defaults: DatasetWorkspaceDefaults,
+  }),
+  datasetAction({
+    ...selection,
+    action: z.literal("removeGrant"),
+    principalKey: z.string().min(1).max(256),
+  }),
+] as const;
 const DATASET_REQUEST_OPTIONS = [
   datasetAction({
     ...workspace,
@@ -515,23 +571,7 @@ const DATASET_REQUEST_OPTIONS = [
     reference: sha256,
     acknowledge: z.literal(true),
   }),
-  datasetAction({
-    ...selection,
-    action: z.literal("permissions"),
-    after: z.string().min(1).max(1024).optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-  }),
-  datasetAction({
-    ...selection,
-    action: z.literal("setGrant"),
-    grantId: z.string().min(1).max(256),
-    grant: DatasetDataGrant,
-  }),
-  datasetAction({
-    ...selection,
-    action: z.literal("removeGrant"),
-    principalKey: z.string().min(1).max(256),
-  }),
+  ...DATASET_ADMIN_OPTIONS,
   datasetAction({
     ...selection,
     action: z.literal("export"),
@@ -653,6 +693,11 @@ const DATASET_REQUEST_OPTIONS = [
 ] as const;
 
 const DATASET_ACTIONS = DATASET_REQUEST_OPTIONS.map((option) => option.shape.action.value);
+/** What an Admin does to a Collection in a workspace they joined. The server checks their role. */
+export const DatasetAdminRequest = z.discriminatedUnion("action", DATASET_ADMIN_OPTIONS);
+export const DATASET_ADMIN_ACTIONS: ReadonlySet<string> = new Set(
+  DATASET_ADMIN_OPTIONS.map((option) => option.shape.action.value),
+);
 
 export const DatasetRequest = z.discriminatedUnion("action", DATASET_REQUEST_OPTIONS, {
   error: (issue) =>
@@ -667,7 +712,7 @@ export const DatasetPreparation = z
 export type DatasetPreparation = z.infer<typeof DatasetPreparation>;
 export const DatasetBoundApp = z
   .object({
-    scope: z.enum(["local", "link"]),
+    scope: z.enum(["local", "link", "workspace"]),
     publicationId: sha256,
     authorityRevision: z.number().int().positive(),
     appRoot: z.string().min(1).max(1024),
@@ -1038,6 +1083,7 @@ export const DATASET_CAPABILITIES = {
   cancelAttempt: "dataset.attempt.cancel",
   permissions: "dataset.permissions.read",
   setGrant: "dataset.grant.set",
+  setDefaults: "dataset.defaults.set",
   removeGrant: "dataset.grant.remove",
   export: "dataset.export",
   prepareRecovery: "dataset.recovery.prepare",

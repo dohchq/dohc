@@ -53,10 +53,17 @@ const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc
 // Tools a joined workspace reaches through its share profile. The socket
 // refuses them in any other share view, and the relay decides each one.
 const JOINED_TOOLS = {
-  view: ["dohc_members"],
-  comment: ["dohc_members", "dohc_start_group_chat", "dohc_reply_to_chat", "dohc_start_file_chat"],
+  view: ["dohc_members", "dohc_collection_access"],
+  comment: [
+    "dohc_members",
+    "dohc_collection_access",
+    "dohc_start_group_chat",
+    "dohc_reply_to_chat",
+    "dohc_start_file_chat",
+  ],
   edit: [
     "dohc_members",
+    "dohc_collection_access",
     "dohc_start_group_chat",
     "dohc_reply_to_chat",
     "dohc_start_file_chat",
@@ -395,6 +402,8 @@ describe("share-level tool profiles", () => {
         "dohc_create_document",
         "dohc_create_group",
         "dohc_members",
+        "dohc_collection_access",
+        "dohc_dataset",
       ]) {
         expect(names.includes(tool), tool).toBe(joined.includes(tool));
       }
@@ -405,6 +414,52 @@ describe("share-level tool profiles", () => {
       );
     },
   );
+
+  it("sends an Admin's Collection defaults from a joined workspace to the desktop, and nothing else from the dataset actions", async () => {
+    const sent: Array<{ verb: string; args: unknown }> = [];
+    const { client } = await connectedToolNames({
+      ...base,
+      shareAccess: "view",
+      request: async (request) => {
+        sent.push({ verb: request.verb, args: request.args });
+        return { kind: "grant-updated" };
+      },
+    });
+    const defaults = {
+      view: [],
+      comment: [],
+      edit: ["00000000-0000-4000-8000-000000000001"],
+      revision: 1,
+      revisionSha256: "a".repeat(64),
+    };
+    const set = await client.callTool({
+      name: "dohc_collection_access",
+      arguments: {
+        request: {
+          action: "setDefaults",
+          workspaceId: "ws",
+          datasetPath: "tasks/dataset.json",
+          defaults,
+        },
+      },
+    });
+    expect(set.structuredContent).toEqual({ kind: "grant-updated" });
+    const described = await client.callTool({
+      name: "dohc_collection_access",
+      arguments: {
+        request: { action: "describe", workspaceId: "ws", datasetPath: "tasks/dataset.json" },
+      },
+    });
+    expect(described.isError).toBe(true);
+    expect(sent).toEqual([
+      {
+        verb: "dataset",
+        args: expect.objectContaining({
+          request: expect.objectContaining({ action: "setDefaults", defaults }),
+        }),
+      },
+    ]);
+  });
 
   it("sends a joined workspace's Group post and Members list to the desktop, and returns its refusal as an error", async () => {
     const sent: Array<{ verb: string; args: unknown }> = [];

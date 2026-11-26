@@ -173,6 +173,15 @@ export interface DatasetAuthority {
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
   /**
+   * A host ceiling on the operations an app caller runs: only those its data
+   * grant or workspace defaults hold when `grantedOnly` is set, and only
+   * read-only ones when `readOnlyOnly` is set. Fold its inputs into
+   * `authorityToken`, so a narrower ceiling stops in-flight work.
+   */
+  operationCeiling?: { grantedOnly?: boolean; readOnlyOnly?: boolean };
+  /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
+  defaultOperationIds?: readonly string[];
+  /**
    * The chain depth an automation caller's writes declare, one more than the
    * change that started its run. Required for that caller, refused for any
    * other.
@@ -616,6 +625,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       person: person(result.person, caller),
       authorizeOperation: result.authorizeOperation,
       beforeCommit: result.beforeCommit,
+      operationCeiling: result.operationCeiling,
+      defaultOperationIds: caller.kind === "named" ? result.defaultOperationIds : undefined,
     };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
@@ -737,7 +748,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const binding = JSON.parse(String(row.binding_json)) as AppDatasetBinding;
       const boundRevision = resolveCompatibleDatasetRevision(db, key, binding, approved);
       let dataToken = "",
-        allowedHelperIds = new Set<string>();
+        allowedHelperIds = new Set(verified.defaultOperationIds);
       if (verified.caller.kind === "named") {
         const grant = db
           .prepare(
@@ -748,7 +759,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           const parsed = JSON.parse(String(grant.grant_json)) as StoredGrant;
           try {
             currentGrant(key, parsed, approved);
-            allowedHelperIds = new Set(parsed.operationIds);
+            for (const operationId of parsed.operationIds) allowedHelperIds.add(operationId);
           } catch (error) {
             if (!(error instanceof DatasetHostError) || error.code !== "conflict") throw error;
           }
@@ -764,7 +775,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       ).filter(
         (operation) =>
           verified.caller.kind === "owner" ||
-          operation.access !== "helper" ||
+          (operation.access !== "helper" && !verified.operationCeiling?.grantedOnly) ||
           allowedHelperIds.has(operation.operationId),
       );
       token = JSON.stringify([row.token, dataToken]);
@@ -777,8 +788,15 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?",
         )
         .get(key.workspaceId, key.datasetId, verified.principalKey);
-      if (!row) denied();
-      const grant = currentGrant(key, JSON.parse(String(row.grant_json)), approved);
+      const defaults = verified.defaultOperationIds ?? [];
+      if (!row && !defaults.length) denied();
+      let grant: StoredGrant | undefined;
+      try {
+        grant = row ? currentGrant(key, JSON.parse(String(row.grant_json)), approved) : undefined;
+      } catch (error) {
+        if (!defaults.length || !(error instanceof DatasetHostError) || error.code !== "conflict")
+          throw error;
+      }
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
       const binding = {
@@ -786,12 +804,15 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         datasetId: approved.datasetId,
         revision: approved.revision,
         revisionSha256: approved.revisionSha256,
-        operationIds: grant.operationIds,
+        operationIds: [...new Set([...(grant?.operationIds ?? []), ...defaults])],
       };
       operations = boundOperations(JSON.stringify(binding), binding, approved, verified.caller);
-      token = String(row.token);
-      discover = grant.discover;
+      token = row ? String(row.token) : "";
+      discover = defaults.length > 0 || grant!.discover;
     }
+    const ceiling = verified.operationCeiling;
+    if (ceiling)
+      operations = operations.filter((operation) => !ceiling.readOnlyOnly || operation.readOnly);
     return {
       authority: verified,
       revision: approved,
@@ -2018,25 +2039,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
         throw new Error("Choose a page size from 1 to 100.");
-      // Apply data grants in SQL so inaccessible datasets do not create page gaps or counts.
+      // A named caller reaches a Collection by its own grant or by its level's defaults; permissions decides each.
       const verified = authority(context, { workspaceId }, { kind: "data" });
       const includeArchived = raw.includeArchived === true;
       if (includeArchived && verified.caller.kind !== "owner") denied();
       const page = (from: string) =>
-        verified.caller.kind === "owner"
-          ? db
-              .prepare(
-                `SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`,
-              )
-              .all(workspaceId, from, includeArchived ? 1 : 0, limit + 1)
-          : db
-              .prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
-            ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
-            AND json_extract(g.grant_json,'$.discover')=1
-            AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
-            AND COALESCE((SELECT archived FROM dohc_dataset_lifecycle l WHERE l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id),0)=0
-            AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`)
-              .all(workspaceId, verified.principalKey, from, limit + 1);
+        db
+          .prepare(
+            `SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`,
+          )
+          .all(workspaceId, from, includeArchived ? 1 : 0, limit + 1);
       const datasets: Array<DatasetDescription & { archived: boolean }> = [];
       let bytes = 0,
         more = false,
@@ -2049,14 +2061,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             permitted = permissions(context, key, { kind: "data" }, includeArchived);
           } catch (error) {
             if (
-              verified.caller.kind === "named" &&
+              verified.caller.kind !== "owner" &&
               error instanceof DatasetHostError &&
-              error.code === "not_authorized"
+              (error.code === "not_authorized" || error.code === "conflict")
             )
               continue;
             throw error;
           }
-          if (!permitted.discover) denied();
+          if (!permitted.discover) continue;
           const description = {
               ...describePermission(permitted),
               archived: lifecycle(key).archived,

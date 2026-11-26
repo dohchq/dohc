@@ -1,4 +1,5 @@
 import type { SqliteDb } from "./types";
+import { rebuildTables } from "./rebuildTables";
 
 export function initializeAppPublicationSchema(db: SqliteDb): void {
   db.exec(`
@@ -102,4 +103,56 @@ function initializeMarkedTable(
     migration,
     Date.now(),
   );
+}
+
+const AUDIENCE_MIGRATION = "app-publication-audience-v1";
+const PUBLICATIONS = "sync_relay_app_publications";
+const AUDIENCE_SQL = `CREATE TABLE sync_relay_app_publications (
+  publication_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  grant_id TEXT,
+  grant_generation INTEGER CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+  owner_user_id TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+  active INTEGER NOT NULL CHECK (active IN (0, 1)),
+  authority_revision INTEGER NOT NULL CHECK (authority_revision BETWEEN 1 AND 9007199254740991),
+  audience TEXT NOT NULL DEFAULT 'link' CHECK (audience IN ('link', 'workspace')),
+  CHECK ((audience = 'link') = (grant_id IS NOT NULL AND grant_generation IS NOT NULL)),
+  UNIQUE (publication_id, workspace_id),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (grant_id, share_id) REFERENCES sync_relay_share_grants(grant_id, share_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, manifest_sha256) REFERENCES sync_relay_blobs(workspace_id, sha256)
+) STRICT`;
+
+// A Workspace Publication reaches members through the workspace share, so it holds no link grant.
+// Runs after every table that references publications exists.
+export function initializeAppPublicationAudience(db: SqliteDb): void {
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(AUDIENCE_MIGRATION);
+  if (!marked) {
+    rebuildTables(
+      db,
+      [
+        PUBLICATIONS,
+        "sync_relay_app_publication_approvals",
+        "sync_relay_app_publication_blobs",
+        TAKEDOWN_TABLE,
+        "sync_relay_app_collection_approvals",
+      ],
+      (table, sql) => (table === PUBLICATIONS ? AUDIENCE_SQL : sql),
+    );
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)").run(
+      AUDIENCE_MIGRATION,
+      Date.now(),
+    );
+  }
+  const current = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE name=? AND type='table'")
+    .get(PUBLICATIONS);
+  const normalize = (sql: string) => sql.trim().replace(/\s+/g, " ");
+  if (!current || normalize(String(current.sql)) !== normalize(AUDIENCE_SQL))
+    throw new Error("App publication schema is missing or damaged.");
 }

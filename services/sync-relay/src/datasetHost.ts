@@ -45,13 +45,19 @@ import {
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
-import { requireLinkAppPublication } from "./storage/publications";
+import { publicationIdOf, requireLinkAppPublication } from "./storage/publications";
+import {
+  getWorkspaceMembership,
+  workspaceMemberGrantId,
+  workspaceRoleOf,
+} from "./storage/workspaceMembers";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import {
   effectiveShareSelector,
   isWorkspaceSelector,
+  MAIN_VERSION_ID,
   parseStoredAnyShareSelectorJson,
   targetVersionId,
 } from "./shareFilter";
@@ -102,6 +108,14 @@ export function datasetReferenceReadContainsRecord(
     );
   });
 }
+
+const DEFAULT_LEVELS = ["view", "comment", "edit"] as const;
+/** A Collection's workspace defaults: the operations each folder level holds, chosen under one revision of its rules. */
+export type CollectionWorkspaceDefaults = Record<(typeof DEFAULT_LEVELS)[number], string[]> & {
+  revision: number;
+  revisionSha256: string;
+};
+type Defaults = CollectionWorkspaceDefaults;
 
 /** What an app's row on the server holds besides the app itself, counted as a binding's is. */
 const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
@@ -192,7 +206,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     storage.db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_local_dataset_app_datasets(
       workspace_id TEXT NOT NULL,app_id TEXT NOT NULL,dataset_id TEXT NOT NULL,
       PRIMARY KEY(workspace_id,app_id,dataset_id),
-      FOREIGN KEY(workspace_id,app_id) REFERENCES sync_relay_local_dataset_apps(workspace_id,app_id) ON DELETE CASCADE) STRICT;`),
+      FOREIGN KEY(workspace_id,app_id) REFERENCES sync_relay_local_dataset_apps(workspace_id,app_id) ON DELETE CASCADE) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_workspace_defaults(
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,defaults_json TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation>=1),
+      PRIMARY KEY(workspace_id,dataset_id),
+      FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`),
   );
   // The relay's own private folder, which it keeps at the path it was given.
   await mkdir(options.directory, { recursive: true });
@@ -308,6 +327,26 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         : {}),
     };
   }
+  // Who sets a Collection's grants and defaults: its Owner, or an Admin acting for them on grants alone.
+  // Callers pass the result straight to the host, so the role read here cannot go stale.
+  function grantManager(auth: AppBackendAuth, workspaceId: string): AppBackendAuth {
+    current();
+    if (auth.kind === "named" && auth.workspaceId === workspaceId && !auth.launch) {
+      const role = workspaceRoleOf(storage, workspaceId, auth.userId);
+      const ownerRow = storage.db
+        .prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id=?")
+        .get(workspaceId);
+      if (
+        role?.role === "admin" &&
+        ownerRow &&
+        (auth.grantId === undefined ||
+          auth.grantId === workspaceMemberGrantId(storage, workspaceId, auth.userId))
+      )
+        return { kind: "named", workspaceId, userId: String(ownerRow.owner_user_id) };
+    }
+    owner(auth, workspaceId);
+    return auth;
+  }
   function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
     if (authority.caller.kind !== "link") return;
     const grantId = authority.caller.grantId;
@@ -373,28 +412,110 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       moved = current === null ? null : reach.levelAt(current);
     return approved && moved && lowerAccess(approved, moved);
   }
+  function readWorkspaceDefaults(workspaceId: string, datasetId: string) {
+    const row = storage.db
+      .prepare(
+        "SELECT generation,defaults_json FROM dohc_dataset_workspace_defaults WHERE workspace_id=? AND dataset_id=?",
+      )
+      .get(workspaceId, datasetId);
+    return row
+      ? {
+          generation: Number(row.generation),
+          ...(JSON.parse(String(row.defaults_json)) as Defaults),
+        }
+      : null;
+  }
+  // The operations a member holds by level, while the Collection's rules still match the ones they were chosen under.
+  function workspaceDefaults(workspaceId: string, datasetId: string, level: ShareAccess) {
+    const defaults = readWorkspaceDefaults(workspaceId, datasetId);
+    if (!defaults) return { generation: 0, operationIds: [] as string[] };
+    try {
+      resolveCompatibleDatasetRevision(storage.db, { workspaceId, datasetId }, defaults);
+    } catch (error) {
+      if (error instanceof DatasetHostError)
+        return { generation: defaults.generation, operationIds: [] };
+      throw error;
+    }
+    const levels = DEFAULT_LEVELS.filter((at) => shareAccessRank(at) <= shareAccessRank(level));
+    return {
+      generation: defaults.generation,
+      operationIds: [...new Set(levels.flatMap((at) => defaults[at]))],
+    };
+  }
+  // `publication` names a Workspace Publication's paths, which the member must still reach.
   function named(
     workspaceId: string,
     grantId: string,
     userId: string,
     datasetId?: string,
+    publication?: { paths: readonly string[]; authorityRevision: number },
   ): DatasetAuthority {
     const { result, access, reach } = namedGrant(workspaceId, grantId, userId);
+    if (publication && (!reach || publication.paths.some((path) => !reach.levelAt(path))))
+      throw notFound();
     const level =
       reach && datasetId !== undefined ? collectionLevel(reach, workspaceId, datasetId) : access;
-    if (level === null)
+    if (level === null) {
+      if (publication) throw notFound();
       throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
+    }
+    const effective = lowerAccess(access, level);
+    const defaults =
+      reach && datasetId !== undefined
+        ? workspaceDefaults(workspaceId, datasetId, effective)
+        : null;
     return {
-      caller: {
-        kind: "named",
-        userId,
-        grantId,
-        access: lowerAccess(access, level),
-        helper: false,
-      },
+      caller: { kind: "named", userId, grantId, access: effective, helper: false },
       principalKey: datasetPrincipalKey(workspaceId, grantId, userId),
-      authorityToken: hash(JSON.stringify([result.grant.generation, result.share.selectorJson])),
+      authorityToken: hash(
+        JSON.stringify([
+          result.grant.generation,
+          result.share.selectorJson,
+          effective,
+          defaults?.generation ?? 0,
+          publication?.authorityRevision ?? null,
+        ]),
+      ),
+      ...(defaults?.operationIds.length ? { defaultOperationIds: defaults.operationIds } : {}),
+      ...(publication
+        ? { operationCeiling: { grantedOnly: true, readOnlyOnly: effective !== "edit" } }
+        : {}),
     };
+  }
+  function workspacePublication(
+    auth: Extract<AppBackendAuth, { kind: "named" }>,
+    publicationId: string,
+    row: Record<string, unknown>,
+    candidate: AppPublicationCandidate,
+  ) {
+    const publisher = {
+      workspaceId: auth.workspaceId,
+      shareId: String(row.share_id),
+      ownerUserId: String(row.owner_user_id),
+    };
+    if (
+      getWorkspaceMembership(storage, auth.workspaceId)?.shareId !== publisher.shareId ||
+      storage.getShare(publisher.shareId)?.granterUserId !== publisher.ownerUserId ||
+      candidate.versionId !== MAIN_VERSION_ID ||
+      publicationIdOf(publisher, hash(JSON.stringify(candidate))) !== publicationId
+    )
+      throw notFound();
+    const authorityRevision = Number(row.authority_revision);
+    if (auth.userId === publisher.ownerUserId) {
+      const authority = {
+        ...owner(auth, auth.workspaceId),
+        authorityToken: String(authorityRevision),
+      };
+      return { candidate, authorityRevision, resolveAuthority: () => authority };
+    }
+    const paths = [candidate.appRoot, ...candidate.inputs.map((file) => file.path)];
+    const resolve = (datasetId?: string) => {
+      const grantId = workspaceMemberGrantId(storage, auth.workspaceId, auth.userId);
+      if (!grantId || (auth.grantId !== undefined && auth.grantId !== grantId)) throw notFound();
+      return named(auth.workspaceId, grantId, auth.userId, datasetId, { paths, authorityRevision });
+    };
+    resolve();
+    return { candidate, authorityRevision, resolveAuthority: resolve };
   }
   function namedPublication(
     auth: Extract<AppBackendAuth, { kind: "named" }>,
@@ -418,7 +539,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       JSON.parse(Buffer.from(bytes).toString("utf8")),
       limits,
     );
-    if (candidate.capabilities.length > 1) throw notFound();
+    if (row.audience === "workspace")
+      return workspacePublication(auth, publicationId, row, candidate);
     const currentGrant = readCurrentShareGrant(storage, {
       grantId: String(row.grant_id),
       generation: Number(row.grant_generation),
@@ -448,25 +570,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       generation: grant.generation,
       ownerUserId: String(row.owner_user_id),
     };
-    if (
-      hash(
-        JSON.stringify([
-          "dohc-app-publication-v1",
-          publicationOwner,
-          hash(JSON.stringify(candidate)),
-        ]),
-      ) !== publicationId
-    )
+    if (publicationIdOf(publicationOwner, hash(JSON.stringify(candidate))) !== publicationId)
       throw notFound();
-    if (auth.userId === row.owner_user_id)
-      return {
-        candidate,
-        authorityRevision: Number(row.authority_revision),
-        authority: {
-          ...owner(auth, auth.workspaceId),
-          authorityToken: String(row.authority_revision),
-        },
+    const authorityRevision = Number(row.authority_revision);
+    if (auth.userId === row.owner_user_id) {
+      const authority = {
+        ...owner(auth, auth.workspaceId),
+        authorityToken: String(authorityRevision),
       };
+      return { candidate, authorityRevision, resolveAuthority: () => authority };
+    }
     const authorized = authorizeShareAction({
       storage,
       actorUserId: auth.userId,
@@ -487,14 +600,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       visibleSharePath(namedSelector, candidate.appRoot) !== candidate.appRoot
     )
       throw notFound();
-    return {
-      candidate,
-      authorityRevision: Number(row.authority_revision),
-      authority: {
-        ...authority,
-        authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision])),
-      },
+    const recipient = {
+      ...authority,
+      authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision])),
     };
+    return { candidate, authorityRevision, resolveAuthority: () => recipient };
   }
   // An app the owner approved on their own computer, over a Collection this
   // server holds. It runs as itself here, for the owner alone. Null for an id
@@ -554,11 +664,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       (value) => value.kind === "dataset" && value.datasetId === datasetId,
     );
     if (!requested || requested.kind !== "dataset") throw notFound();
-    return verifyAppDatasetCapability(
-      requested,
-      resolveCompatibleDatasetRevision(storage.db, { workspaceId, datasetId }, requested),
-      generatedRevision,
-    );
+    let revision;
+    try {
+      revision = resolveCompatibleDatasetRevision(
+        storage.db,
+        { workspaceId, datasetId },
+        requested,
+      );
+    } catch (error) {
+      if (error instanceof DatasetHostError && error.code === "not_authorized") throw notFound();
+      throw error;
+    }
+    return verifyAppDatasetCapability(requested, revision, generatedRevision);
   }
   function requireDatasetActiveForApproval(workspaceId: string, datasetId: string): void {
     const head = storage.db
@@ -603,7 +720,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         publicEditRelease,
         nowMs: nowMs(),
       });
-      if (published.candidate.capabilities.length > 1) throw notFound();
       return {
         workspaceId: published.workspaceId,
         candidate: published.candidate,
@@ -634,17 +750,15 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       };
     }
     const own = localApp(auth, publicationId);
-    const local = own !== null;
-    const published = own ?? namedPublication(auth, publicationId);
-    if (!local && published.candidate.capabilities.length > 1) throw notFound();
+    const published = own
+      ? { ...own, resolveAuthority: (_datasetId?: string) => own.authority }
+      : namedPublication(auth, publicationId);
     return {
       workspaceId: auth.workspaceId,
       candidate: published.candidate,
       authorityRevision: published.authorityRevision,
-      local,
-      resolveAuthority(_datasetId: string): DatasetAuthority {
-        return published.authority;
-      },
+      local: own !== null,
+      resolveAuthority: published.resolveAuthority,
     };
   }
   function app(auth: AppBackendAuth, workspaceId: string, datasetId: string, appId: string) {
@@ -654,14 +768,15 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const authority = loaded.resolveAuthority(datasetId);
     const verified = capability(loaded.candidate, workspaceId, datasetId);
     requireCollectionFile(workspaceId, datasetId);
-    if (loaded.local && loaded.candidate.capabilities.length > 1) {
+    if (loaded.candidate.capabilities.length > 1) {
       for (const bound of loaded.candidate.capabilities) {
         if (bound.kind !== "dataset") throw notFound();
         if (bound.datasetId !== datasetId) {
+          loaded.resolveAuthority(bound.datasetId);
           capability(loaded.candidate, workspaceId, bound.datasetId);
           requireCollectionFile(workspaceId, bound.datasetId);
         }
-        requireDatasetLiveAndBound(workspaceId, bound.datasetId, appId);
+        if (loaded.local) requireDatasetLiveAndBound(workspaceId, bound.datasetId, appId);
       }
     }
     return { capability: verified, authority: { ...authority, appId } };
@@ -692,15 +807,14 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       (value): value is AppDatasetCapability => value.kind === "dataset",
     );
     if (requested.length === 0) return null;
-    if (!loaded.local && requested.length > 1) throw notFound();
-    const authority = loaded.resolveAuthority(requested[0]!.datasetId);
+    const authorities: DatasetAuthority[] = [];
     const capabilities: AppDatasetCapability[] = [];
     for (const cap of requested) {
+      authorities.push(loaded.resolveAuthority(cap.datasetId));
       capabilities.push(capability(loaded.candidate, loaded.workspaceId, cap.datasetId));
       requireCollectionFile(loaded.workspaceId, cap.datasetId);
-      if (loaded.local && requested.length > 1) {
+      if (loaded.local && requested.length > 1)
         requireDatasetLiveAndBound(loaded.workspaceId, cap.datasetId, publicationId);
-      }
     }
     return {
       workspaceId: loaded.workspaceId,
@@ -708,7 +822,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       authorityRevision: loaded.authorityRevision,
       capability: capabilities.length === 1 ? capabilities[0]! : null,
       capabilities,
-      authority: { ...authority, appId: publicationId },
+      authority: { ...authorities[0]!, appId: publicationId },
       candidate: loaded.candidate,
       /** An app the owner approved on their own computer. */
       local: loaded.local,
@@ -719,8 +833,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   function servedPublication(auth: AppBackendAuth, publicationId: string) {
     const dataset = publication(auth, publicationId);
     if (dataset || auth.kind !== "named") return dataset;
-    const { candidate, authorityRevision, authority } = namedPublication(auth, publicationId);
+    const { candidate, authorityRevision, resolveAuthority } = namedPublication(
+      auth,
+      publicationId,
+    );
     if (candidate.capabilities.length) return null;
+    const authority = resolveAuthority();
     return {
       workspaceId: auth.workspaceId,
       datasetId: null,
@@ -866,6 +984,36 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         account(allocation.workspaceId, allocation.datasetId, allocation.bytes);
       },
       deleteResources(_auth, key) {
+        const unbindSiblings = (appId: string) => {
+          const siblingBindings = storage.db
+            .prepare(
+              "SELECT dataset_id, binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=? AND dataset_id<>?",
+            )
+            .all(key.workspaceId, appId, key.datasetId) as Array<{
+            dataset_id: string;
+            binding_json: string;
+          }>;
+          for (const sibling of siblingBindings) {
+            storage.db
+              .prepare(
+                "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+              )
+              .run(key.workspaceId, sibling.dataset_id, appId);
+            account(
+              key.workspaceId,
+              sibling.dataset_id,
+              -(Buffer.byteLength(sibling.binding_json) + Buffer.byteLength(appId) + 256),
+            );
+          }
+        };
+        for (const row of storage.db
+          .prepare(
+            `SELECT binding.app_id FROM dohc_dataset_bindings binding JOIN sync_relay_app_publications publication
+             ON publication.workspace_id=binding.workspace_id AND publication.publication_id=binding.app_id
+             WHERE binding.workspace_id=? AND binding.dataset_id=?`,
+          )
+          .all(key.workspaceId, key.datasetId))
+          unbindSiblings(String(row.app_id));
         const multiRows = storage.db
           .prepare(
             `SELECT app.app_id, app.candidate
@@ -887,32 +1035,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           candidate: string;
         }>;
         for (const row of multiRows) {
-          const siblingBindings = storage.db
-            .prepare(
-              "SELECT dataset_id, binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=? AND dataset_id<>?",
-            )
-            .all(key.workspaceId, row.app_id, key.datasetId) as Array<{
-            dataset_id: string;
-            binding_json: string;
-          }>;
-          for (const sibling of siblingBindings) {
-            const previousBytes =
-              Buffer.byteLength(sibling.binding_json) + Buffer.byteLength(row.app_id) + 256;
-            storage.db
-              .prepare(
-                "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
-              )
-              .run(key.workspaceId, sibling.dataset_id, row.app_id);
-            if (
-              storage.db
-                .prepare(
-                  "SELECT 1 FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?",
-                )
-                .get(key.workspaceId, sibling.dataset_id)
-            ) {
-              account(key.workspaceId, sibling.dataset_id, -previousBytes);
-            }
-          }
+          unbindSiblings(row.app_id);
           storage.db
             .prepare(
               "DELETE FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=? AND dataset_id IS NULL",
@@ -966,7 +1089,21 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_revision_actors WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_presses WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_failure_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_workspace_defaults WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
+      END;
+      DROP TRIGGER IF EXISTS sync_relay_app_publication_unbind;
+      CREATE TRIGGER sync_relay_app_publication_unbind
+      AFTER UPDATE OF active ON sync_relay_app_publications WHEN OLD.active=1 AND NEW.active=0 BEGIN
+        UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes-(
+          SELECT length(CAST(b.binding_json AS BLOB))+length(CAST(b.app_id AS BLOB))+256 FROM dohc_dataset_bindings b
+          WHERE b.workspace_id=sync_relay_dataset_usage.workspace_id AND b.dataset_id=sync_relay_dataset_usage.dataset_id AND b.app_id=NEW.publication_id)
+        WHERE workspace_id=NEW.workspace_id AND dataset_id IN (
+          SELECT dataset_id FROM dohc_dataset_bindings WHERE workspace_id=NEW.workspace_id AND app_id=NEW.publication_id);
+        UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-(
+          SELECT coalesce(sum(length(CAST(binding_json AS BLOB))+length(CAST(app_id AS BLOB))+256),0) FROM dohc_dataset_bindings
+          WHERE workspace_id=NEW.workspace_id AND app_id=NEW.publication_id) WHERE workspace_id=NEW.workspace_id;
+        DELETE FROM dohc_dataset_bindings WHERE workspace_id=NEW.workspace_id AND app_id=NEW.publication_id;
       END;`),
     );
     storage.workReferenceDatasetAccess = async (input) => {
@@ -1009,16 +1146,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             .all(key.workspaceId, input.grantId!);
           for (const row of publications) {
             try {
-              const published = publication(auth, String(row.publication_id));
-              if (!published || !published.capability || published.datasetId !== key.datasetId)
-                continue;
-              for (const operation of published.capability.operations.filter(
+              const capability = publication(auth, String(row.publication_id))?.capabilities.find(
+                (capability) => capability.datasetId === key.datasetId,
+              );
+              if (!capability) continue;
+              for (const operation of capability.operations.filter(
                 (operation) => operation.readOnly,
               )) {
                 const candidate = {
                   ...key,
-                  revision: published.capability.revision,
-                  revisionSha256: published.capability.revisionSha256,
+                  revision: capability.revision,
+                  revisionSha256: capability.revisionSha256,
                   operationId: operation.operationId,
                   access: { kind: "app" as const, appId: String(row.publication_id) },
                 };
@@ -1286,6 +1424,21 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           if (reach && level === null) continue;
           digest.update(JSON.stringify(reach ? [row, level] : row));
         }
+        for (const row of reach
+          ? storage.db
+              .prepare(
+                `SELECT d.dataset_id,d.generation,
+                json_extract(c.revision_json,'$.revisionSha256') AS revision,COALESCE(l.generation,0) AS lifecycle
+                FROM dohc_dataset_workspace_defaults d JOIN dohc_dataset_catalog c
+                ON c.workspace_id=d.workspace_id AND c.dataset_id=d.dataset_id
+                LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=d.workspace_id AND l.dataset_id=d.dataset_id
+                WHERE d.workspace_id=? ORDER BY d.dataset_id`,
+              )
+              .all(auth.workspaceId)
+          : []) {
+          const level = collectionLevel(reach!, auth.workspaceId, String(row.dataset_id));
+          if (level !== null) digest.update(JSON.stringify(["defaults", row, level]));
+        }
         return digest.digest("hex");
       },
       activate(auth: AppBackendAuth, input: Parameters<typeof host.activate>[1]) {
@@ -1324,7 +1477,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       describe: host.describe,
       list: host.list,
       approvedArtifacts: host.approvedArtifacts,
-      permissions: host.permissions,
       history: host.history,
       historyRevision: host.historyRevision,
       publication,
@@ -1730,19 +1882,36 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           (result) => files.readAttached({ workspaceId, datasetId }, input.fileId, result),
         );
       },
+      /** Binds every Collection a shared publication names, together, and returns their ids. */
       bindPublication(
         auth: AppBackendAuth,
-        input: { workspaceId: string; datasetId: string; publicationId: string },
-      ): void {
+        input: { workspaceId: string; datasetId?: string; publicationId: string },
+      ): string[] {
         owner(auth, input.workspaceId);
-        const approved = app(
-          auth,
-          input.workspaceId,
-          input.datasetId,
-          input.publicationId,
-        ).capability;
-        const { operations: _operations, name: _name, alias: _alias, ...binding } = approved;
-        host.setBinding(auth, { ...input, appId: input.publicationId, binding });
+        const loaded = loadAppPublication(auth, input.publicationId);
+        if (loaded.local || loaded.workspaceId !== input.workspaceId) throw notFound();
+        const operations = loaded.candidate.capabilities.map((declared) => {
+          if (declared.kind !== "dataset") throw notFound();
+          requireCollectionFile(input.workspaceId, declared.datasetId);
+          const {
+            operations: _operations,
+            name: _name,
+            alias: _alias,
+            ...binding
+          } = capability(loaded.candidate, input.workspaceId, declared.datasetId);
+          return { datasetId: declared.datasetId, appId: input.publicationId, binding };
+        });
+        if (
+          !operations.length ||
+          (input.datasetId !== undefined &&
+            !operations.some((entry) => entry.datasetId === input.datasetId))
+        )
+          throw notFound();
+        host.setBindings(auth, { workspaceId: input.workspaceId, operations }, () => {
+          for (const { datasetId } of operations)
+            requireDatasetActiveForApproval(input.workspaceId, datasetId);
+        });
+        return operations.map((entry) => entry.datasetId);
       },
       unbindPublication(
         auth: AppBackendAuth,
@@ -1897,20 +2066,100 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           grant: DatasetDataGrant | null;
         },
       ): void {
-        owner(auth, input.workspaceId);
+        const manager = grantManager(auth, input.workspaceId);
         const target = storage.getShareGrant(input.grantId);
         if (!target || target.principalKind !== "user" || !target.principalUserId) throw notFound();
         const key =
           input.grant === null
             ? datasetPrincipalKey(input.workspaceId, input.grantId, target.principalUserId)
             : named(input.workspaceId, input.grantId, target.principalUserId).principalKey;
-        host.setDataGrant(auth, { ...input, principalKey: key });
+        host.setDataGrant(manager, { ...input, principalKey: key });
       },
       removeDataGrant(
         auth: AppBackendAuth,
         input: { workspaceId: string; datasetId: string; principalKey: string },
       ): void {
-        host.setDataGrant(auth, { ...input, grant: null });
+        host.setDataGrant(grantManager(auth, input.workspaceId), { ...input, grant: null });
+      },
+      /** A Collection's grants, with its workspace defaults, for its Owner or an Admin. */
+      permissions(
+        auth: AppBackendAuth,
+        input: { workspaceId: string; datasetId: string; after?: string; limit?: number },
+      ) {
+        const manager = grantManager(auth, input.workspaceId);
+        const page = host.permissions(manager, input);
+        const approved = host.approvedRevision(manager, input);
+        return {
+          ...page,
+          defaults: readWorkspaceDefaults(input.workspaceId, input.datasetId),
+          rules: {
+            revision: approved.revision,
+            revisionSha256: approved.revisionSha256,
+            actions: approved.definition.operations
+              .filter((operation) => operation.access !== "owner")
+              .map(({ operationId, name, readOnly }) => ({ operationId, name, readOnly })),
+          },
+        };
+      },
+      /** Sets the operations each folder level holds by default. View and Comment hold only reads; no level holds an `owner` operation. */
+      setWorkspaceDefaults(
+        auth: AppBackendAuth,
+        input: { workspaceId: string; datasetId: string; defaults: Defaults },
+      ): { generation: number } {
+        const manager = grantManager(auth, input.workspaceId);
+        const { workspaceId, datasetId, defaults } = input;
+        return storage.tx(() => {
+          owner(manager, workspaceId);
+          const approved = resolveCompatibleDatasetRevision(
+            storage.db,
+            { workspaceId, datasetId },
+            defaults,
+          );
+          if (
+            approved.revision !== defaults.revision ||
+            approved.revisionSha256 !== defaults.revisionSha256
+          )
+            throw new DatasetHostError(
+              "conflict",
+              "The Collection's rules changed after you chose this access. Choose it again.",
+            );
+          for (const level of DEFAULT_LEVELS)
+            for (const operationId of defaults[level]) {
+              const operation = approved.definition.operations.find(
+                (operation) => operation.operationId === operationId,
+              );
+              if (!operation || operation.access === "owner")
+                throw badRequest("Choose actions this Collection offers to members.");
+              if (level !== "edit" && !operation.readOnly)
+                throw badRequest(
+                  `"${operation.name}" changes data, so only people with Edit access can get it by default.`,
+                );
+            }
+          const json = JSON.stringify({
+            view: defaults.view,
+            comment: defaults.comment,
+            edit: defaults.edit,
+            revision: defaults.revision,
+            revisionSha256: defaults.revisionSha256,
+          });
+          const row = storage.db
+            .prepare(
+              "SELECT generation,defaults_json FROM dohc_dataset_workspace_defaults WHERE workspace_id=? AND dataset_id=?",
+            )
+            .get(workspaceId, datasetId);
+          account(
+            workspaceId,
+            datasetId,
+            Buffer.byteLength(json) - (row ? Buffer.byteLength(String(row.defaults_json)) : -128),
+          );
+          const generation = row ? Number(row.generation) + 1 : 1;
+          storage.db
+            .prepare(
+              "INSERT INTO dohc_dataset_workspace_defaults VALUES(?,?,?,?) ON CONFLICT(workspace_id,dataset_id) DO UPDATE SET defaults_json=excluded.defaults_json,generation=excluded.generation",
+            )
+            .run(workspaceId, datasetId, json, generation);
+          return { generation };
+        });
       },
       async deleteWorkspaces(datasets: readonly { workspaceId: string; datasetId: string }[]) {
         for (const scope of datasets) await host.retireScope(scope);

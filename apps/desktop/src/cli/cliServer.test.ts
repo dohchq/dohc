@@ -2987,6 +2987,37 @@ describe("CLI socket server", () => {
       expect(members).toHaveBeenCalledOnce();
     });
 
+    it("sends an Admin's Collection grants and defaults from a joined workspace, and no other Collection action", async () => {
+      const dataset = vi.fn(async () => ({ kind: "grant-updated" as const }));
+      joinAs("view");
+      context = { ...context, dataset };
+      const target = { workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" };
+      const setDefaults = {
+        ...args(),
+        request: {
+          ...target,
+          action: "setDefaults" as const,
+          defaults: {
+            view: [],
+            comment: [],
+            edit: ["00000000-0000-4000-8000-000000000001"],
+            revision: 1,
+            revisionSha256: "a".repeat(64),
+          },
+        },
+      };
+      await expect(invoke("dataset", setDefaults)).resolves.toEqual({ kind: "grant-updated" });
+      await expect(
+        invoke("dataset", { ...args(), request: { ...target, action: "describe" } }),
+      ).rejects.toThrow("Collections require the owning workspace.");
+      context = { ...context, joined: false };
+      registryWorkspace = { ...registryWorkspace, joined: false };
+      await expect(invoke("dataset", setDefaults)).rejects.toThrow(
+        "Collections require the owning workspace.",
+      );
+      expect(dataset).toHaveBeenCalledOnce();
+    });
+
     // Its links would name this computer's view, which no one else can open.
     it("refuses a link at every level, without calling it read-only", async () => {
       const makeWorkReference = vi.fn(async () => "ref");

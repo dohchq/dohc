@@ -48,6 +48,7 @@ export const USAGE_ACTION_IDS = [
   "dataset.attempt.reconcile",
   "dataset.attempt.cancel",
   "dataset.grant.set",
+  "dataset.defaults.set",
   "dataset.grant.remove",
   "dataset.export",
   "dataset.recovery.prepare",

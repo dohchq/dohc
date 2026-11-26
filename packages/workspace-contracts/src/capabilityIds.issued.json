@@ -115,6 +115,7 @@
   "dataset.attempts.list",
   "dataset.change.ask",
   "dataset.create",
+  "dataset.defaults.set",
   "dataset.delete",
   "dataset.delete.preview",
   "dataset.describe",

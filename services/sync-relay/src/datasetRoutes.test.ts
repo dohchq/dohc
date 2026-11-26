@@ -466,6 +466,32 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
 });
 
+it("sets a Collection's member defaults through the grants route and returns them with its permissions", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const defaults = {
+    view: [id(6)],
+    comment: [],
+    edit: [id(5), id(6)],
+    revision: 1,
+    revisionSha256: revision.revisionSha256,
+  };
+  const set = await f.http(`${f.path}/grants`, { defaults });
+  expect(set.status).toBe(200);
+  expect(await set.json()).toEqual({ generation: 1 });
+  const page = await (await f.http(`${f.path}/permissions`)).json();
+  expect(page.defaults).toEqual({ ...defaults, generation: 1 });
+  expect(
+    (await f.http(`${f.path}/grants`, { defaults: { ...defaults, view: [id(5)] } })).status,
+  ).toBe(400);
+  expect(
+    (await f.http(`${f.path}/grants`, { defaults: { ...defaults, extra: true } })).status,
+  ).toBe(400);
+  expect(
+    (await f.http(`${f.path}/grants`, { defaults }, { authorization: "Bearer helper" })).status,
+  ).toBe(404);
+  expect((await (await f.http(`${f.path}/grants`, { defaults })).json()).generation).toBe(2);
+});
 it("takes the owner's agent on a change it makes, and refuses an agent for anyone else", async () => {
   const f = await httpFixture();
   await f.activate();
@@ -876,7 +902,9 @@ it("creates and manages one dataset through authenticated routes and the public 
     (row: { publicationId: string }) => row.publicationId === publicationId,
   );
   expect(listed).toMatchObject({
-    datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6), id(8)] },
+    datasetCapabilities: [
+      { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6), id(8)] },
+    ],
     collectionCapability: null,
   });
   expect(JSON.stringify(listed)).not.toContain(operationSource);
@@ -1643,7 +1671,7 @@ it("admits a Collection request only once its body has arrived", async () => {
   }
 });
 
-it("supports multi-Collection local apps on the relay, enforces isolation and deletion cleanup, and refuses >1 Collection on shared links", async () => {
+async function multiCollectionFixture() {
   const f = await httpFixture();
   expect((await f.activate()).status).toBe(200);
 
@@ -1694,7 +1722,7 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
         label: "Log",
         tableId: id(102),
         kind: "create",
-        access: "owner",
+        access: "link",
         readOnly: false,
         fieldIds: [id(104)],
       },
@@ -1792,16 +1820,11 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     capabilities: [cap1, cap2],
   };
 
-  expect(
-    (
-      await f.http("w/app-publications", {
-        shareId: basePub.owner.shareId,
-        grantId: basePub.owner.grantId,
-        expectedGrantGeneration: basePub.owner.generation,
-        candidate: multiCandidate,
-      })
-    ).status,
-  ).toBe(400);
+  return { f, multiCandidate, basePub };
+}
+
+it("supports multi-Collection local apps on the relay and enforces isolation and deletion cleanup", async () => {
+  const { f, multiCandidate } = await multiCollectionFixture();
 
   const readWorkspaceUsage = () =>
     Number(
@@ -2090,6 +2113,156 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   expect(readWorkspaceUsage()).toBe(
     workspaceUsageBeforeWithdrawn - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
   );
+});
+
+it("publishes a two-Collection app to the workspace's members, and refuses one that creates Collection files", async () => {
+  const { f, multiCandidate } = await multiCollectionFixture();
+  const publish = (candidate: unknown) =>
+    f.http("w/app-publications", { audience: "workspace", candidate });
+  expect((await publish(multiCandidate)).status).toBe(409);
+  f.storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Team",
+    email: "ana@dohc.test",
+    recipientUserId: "ana",
+    newMemberId: () => "ana-entry",
+    newGrantId: () => "ana-grant",
+    newShareId: () => "members",
+    nowMs: 5,
+  });
+  expect((await publish(multiCandidate)).status).toBe(200);
+  const creates = {
+    ...multiCandidate,
+    capabilities: [
+      {
+        kind: "collection-create",
+        collectionPath: "responses",
+        schemaSha256: "a".repeat(64),
+        allowedFields: ["name"],
+        requiredFields: ["name"],
+        readFields: ["name"],
+      },
+    ],
+  };
+  const refused = await publish(creates);
+  expect(refused.status).toBe(400);
+  expect(await refused.text()).toMatch(/only on a link/);
+});
+
+it("publishes, activates, invokes, withdraws, and deletes a two-Collection link app", async () => {
+  const { f, multiCandidate, basePub } = await multiCollectionFixture();
+  const owner = basePub.owner as { shareId: string; grantId: string; generation: number };
+  const usage = () => ({
+    workspace: Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    ),
+    datasets: Object.fromEntries(
+      f.storage.db
+        .prepare(
+          "SELECT dataset_id, storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id='w'",
+        )
+        .all()
+        .map((row) => [String(row.dataset_id), Number(row.storage_bytes)]),
+    ),
+  });
+  const bindingBytes = (appId: string) =>
+    Object.fromEntries(
+      f.storage.db
+        .prepare(
+          "SELECT dataset_id, sum(length(CAST(binding_json AS BLOB)) + length(CAST(app_id AS BLOB)) + 256) AS bytes FROM dohc_dataset_bindings WHERE workspace_id='w' AND app_id=? GROUP BY dataset_id",
+        )
+        .all(appId)
+        .map((row) => [String(row.dataset_id), Number(row.bytes)]),
+    );
+  const published = await f.http("w/app-publications", {
+    shareId: owner.shareId,
+    grantId: owner.grantId,
+    expectedGrantGeneration: owner.generation,
+    candidate: multiCandidate,
+  });
+  expect(published.status).toBe(200);
+  const app = (await published.json()) as { publicationId: string; authorityRevision: number };
+  let authorityRevision = app.authorityRevision;
+  const invoke = (dataset: string, input: unknown, idempotencyKey: string) =>
+    f.http(
+      `link/app-publications/${app.publicationId}/backend/invoke`,
+      { authorityRevision, dataset, operation: "submit", input, idempotencyKey },
+      f.publicHeaders,
+    );
+  const activate = () =>
+    f.http(`w/app-publications/${app.publicationId}/backend/activate`, { authorityRevision });
+  expect((await invoke("expenses", { name: "Early" }, "early")).status).toBe(404);
+
+  const activated = await activate();
+  expect(activated.status).toBe(200);
+  expect(await activated.json()).toEqual({
+    publicationId: app.publicationId,
+    authorityRevision,
+    datasetIds: [id(1), id(101)],
+  });
+  expect(Object.keys(bindingBytes(app.publicationId)).sort()).toEqual([id(1), id(101)]);
+  expect((await invoke("expenses", { name: "Shared" }, "expense-1")).status).toBe(200);
+  expect((await invoke("workouts", { title: "Run" }, "workout-1")).status).toBe(200);
+  expect((await invoke("other", { title: "Run" }, "other-1")).status).toBe(404);
+  expect(
+    (
+      await f.http(
+        `link/app-publications/${app.publicationId}/backend/events?authorityRevision=${authorityRevision}&since=0&hold=0`,
+        undefined,
+        f.publicHeaders,
+      )
+    ).status,
+  ).toBe(404);
+
+  const beforeWithdraw = usage(),
+    bound = bindingBytes(app.publicationId);
+  const withdrawn = await f.http(`w/app-publications/${app.publicationId}/withdraw`, {
+    expectedAuthorityRevision: authorityRevision,
+  });
+  expect(withdrawn.status).toBe(200);
+  authorityRevision = ((await withdrawn.json()) as { authorityRevision: number }).authorityRevision;
+  expect(bindingBytes(app.publicationId)).toEqual({});
+  expect(usage()).toEqual({
+    workspace: beforeWithdraw.workspace - bound[id(1)]! - bound[id(101)]!,
+    datasets: {
+      [id(1)]: beforeWithdraw.datasets[id(1)]! - bound[id(1)]!,
+      [id(101)]: beforeWithdraw.datasets[id(101)]! - bound[id(101)]!,
+    },
+  });
+  expect((await invoke("expenses", { name: "Late" }, "late")).status).toBe(404);
+
+  const reactivated = await f.http(`w/app-publications/${app.publicationId}/reactivate`, {
+    expectedAuthorityRevision: authorityRevision,
+  });
+  expect(reactivated.status).toBe(200);
+  authorityRevision = ((await reactivated.json()) as { authorityRevision: number })
+    .authorityRevision;
+  const beforeDelete = usage();
+  expect((await activate()).status).toBe(200);
+  expect((await invoke("workouts", { title: "Again" }, "workout-2")).status).toBe(200);
+  expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  const preview = (await (await f.http(`w/datasets/${id(101)}/delete-preview`)).json()) as {
+    cursor: unknown;
+    reviewToken: string;
+  };
+  expect(
+    (
+      await f.http(`w/datasets/${id(101)}/delete`, {
+        expected: preview.cursor,
+        reviewToken: preview.reviewToken,
+        acknowledge: true,
+      })
+    ).status,
+  ).toBe(200);
+  expect(bindingBytes(app.publicationId)).toEqual({});
+  expect(usage()).toEqual({
+    workspace: beforeDelete.workspace - beforeDelete.datasets[id(101)]!,
+    datasets: { [id(1)]: beforeDelete.datasets[id(1)]! },
+  });
+  expect((await invoke("expenses", { name: "Orphan" }, "orphan")).status).toBe(404);
 });
 
 it("surfaces SQL parameter, journal change, migration preview, and worker memory limits over relay HTTP routes", async () => {

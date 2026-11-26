@@ -1997,6 +1997,7 @@ export async function createEverydayDesktop(
             publicationId: p.publicationId,
             authorityRevision: p.authorityRevision,
             manifestUnavailable: false,
+            audience: "link",
             shareId: p.shareId ?? "",
             grantId: p.grantId ?? "",
             appRoot: p.appRoot,
@@ -2004,7 +2005,7 @@ export async function createEverydayDesktop(
             active: p.active,
             linkCurrent: links.has(`${p.shareId}:${p.grantId}`),
             collectionCapability: null,
-            datasetCapability: p.capabilities[0] ?? null,
+            datasetCapabilities: p.capabilities,
           }));
         return { kind: "listed", publications, nextCursor: null };
       }
@@ -2041,11 +2042,6 @@ export async function createEverydayDesktop(
       case "prepare": {
         const manifest = await parseAppManifestForEval(root, req.appRoot);
         const isLocal = req.action === "prepareLocal";
-        if (!isLocal && manifest.datasets.length > 1) {
-          throw new Error(
-            "Shared links support at most one Collection. Use a single Collection or approve this app on your device.",
-          );
-        }
         const capabilities: AppDatasetCapability[] = [];
         for (const { alias, reference } of manifest.datasets) {
           const datasetPath = (await resolveWorkspacePath(root, reference.datasetPath, "read"))

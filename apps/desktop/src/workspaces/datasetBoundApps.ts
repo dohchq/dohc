@@ -16,7 +16,8 @@ export interface ShareLinkPublication {
   operatorTakedown?: boolean;
   authorityRevision: number;
   shareId: string;
-  grantId: string;
+  /** The link grant; absent for a Workspace Publication. */
+  grantId?: string;
   candidate: unknown;
 }
 
@@ -39,9 +40,8 @@ export function parseShareLinkPublication(
     typeof owner.shareId !== "string" ||
     owner.shareId.length < 1 ||
     owner.shareId.length > 200 ||
-    typeof owner.grantId !== "string" ||
-    owner.grantId.length < 1 ||
-    owner.grantId.length > 200
+    (owner.grantId !== undefined &&
+      (typeof owner.grantId !== "string" || owner.grantId.length < 1 || owner.grantId.length > 200))
     ? null
     : {
         publicationId,
@@ -50,7 +50,7 @@ export function parseShareLinkPublication(
         operatorTakedown: Boolean(row.operatorTakedown),
         authorityRevision: row.authorityRevision as number,
         shareId: owner.shareId,
-        grantId: owner.grantId,
+        ...(typeof owner.grantId === "string" ? { grantId: owner.grantId } : {}),
         candidate: row.candidate,
       };
 }
@@ -228,12 +228,12 @@ export async function discoverDatasetBoundApps(input: {
         }
         await add(
           {
-            scope: "link",
+            scope: found.grantId === undefined ? "workspace" : "link",
             publicationId: e.principal,
             authorityRevision: found.authorityRevision,
             appRoot: cand.appRoot,
             shareId: found.shareId,
-            grantId: found.grantId,
+            ...(found.grantId === undefined ? {} : { grantId: found.grantId }),
           },
           cap,
           e.current,

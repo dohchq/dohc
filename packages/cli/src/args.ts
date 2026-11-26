@@ -1776,6 +1776,14 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Add or change an explicit data grant.",
     notes: ["grant names revision, revisionSha256, operationIds, and discover."],
   },
+  setDefaults: {
+    summary: "Set the actions each workspace level gets in a Collection by default.",
+    notes: [
+      "defaults names view, comment, and edit operationIds, with revision and revisionSha256. Read them from permissions rules.",
+      "An Admin runs permissions, setGrant, removeGrant, and setDefaults in a workspace they joined.",
+      "View and Comment get only reads. No level gets an owner-only action.",
+    ],
+  },
   removeGrant: {
     summary: "Remove an explicit data grant.",
     take: [{ field: "principalKey", from: "permissions", path: "permissions[].principal" }],
@@ -1985,13 +1993,14 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     notes: ["listUnavailable means the server does not publish apps for this workspace."],
   },
   prepare: {
-    summary: "Prepare an app for a share link.",
+    summary: "Prepare an app for a share link or for the workspace's members.",
     take: [
       { field: "shareId", from: "createLink", path: "shareId" },
       { field: "grantId", from: "createLink", path: "grantId" },
     ],
     notes: [
       "shareId and grantId name the share and its link grant. Review the result, then approve.",
+      'For members, pass "audience": "workspace" without shareId or grantId. A member opens the app while they can see its folder and every Collection it uses.',
     ],
   },
   approve: {
@@ -2001,7 +2010,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       { field: "candidateDigest", from: "prepare", path: "candidateDigest" },
     ],
     notes: [
-      "Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink.",
+      "Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery.",
       "For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders.",
       agentLabelNote,
     ],

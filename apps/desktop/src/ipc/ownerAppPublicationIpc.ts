@@ -126,7 +126,7 @@ export function createOwnerAppPublicationHandler<
       candidateDigest: string;
       createdAt: number;
       clear(): void;
-      access: "view" | "comment" | "edit";
+      access: "view" | "comment" | "edit" | null;
       reactivation?: { publicationId: string; authorityRevision: number };
     }
   >();
@@ -231,6 +231,20 @@ export function createOwnerAppPublicationHandler<
         if (!grant) throw new Error("This app link is unavailable. Choose an active link.");
         return grant;
       };
+      const publishBody = (
+        selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>,
+        generation: number | undefined,
+        candidate: unknown,
+      ) =>
+        selection.audience === "workspace"
+          ? { audience: "workspace", candidate, agent }
+          : {
+              shareId: selection.shareId,
+              grantId: selection.grantId,
+              expectedGrantGeneration: generation,
+              candidate,
+              agent,
+            };
       clearExpired();
       if (input.action === "createLink") {
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot))
@@ -290,10 +304,13 @@ export function createOwnerAppPublicationHandler<
       const remember = async (
         prepared: Prepared,
         selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>,
-        reactivation?: { publicationId: string; authorityRevision: number },
-        access: "view" | "comment" | "edit" = "view",
-        selector?: { paths: string[]; versionId: string | null },
-        resolvedDataset?: { revision: DatasetRevision; schemaSql?: string },
+        reactivation: { publicationId: string; authorityRevision: number } | undefined,
+        audience:
+          | {
+              access: "view" | "comment" | "edit";
+              selector: { paths: string[]; versionId: string | null } | null;
+            }
+          | "workspace",
       ) => {
         session.assertCurrent();
         operation.signal.throwIfAborted();
@@ -301,14 +318,7 @@ export function createOwnerAppPublicationHandler<
         const capabilities = await Promise.all(
           candidate.capabilities.map(async (capability) => {
             if (capability.kind !== "dataset") return capability;
-            const resolved =
-              resolvedDataset &&
-              resolvedDataset.revision.datasetId === capability.datasetId &&
-              resolvedDataset.revision.revision === capability.revision &&
-              resolvedDataset.revision.revisionSha256 === capability.revisionSha256
-                ? resolvedDataset
-                : await resolveDatasetArtifacts(capability);
-            const { revision, schemaSql } = resolved;
+            const { revision, schemaSql } = await resolveDatasetArtifacts(capability);
             const generatedOperations = hasGeneratedDatasetRevision(revision);
             const generatedSources =
               schemaSql !== undefined && hasGeneratedDatasetSources(revision, schemaSql);
@@ -369,7 +379,7 @@ export function createOwnerAppPublicationHandler<
           createdAt: Date.now(),
           clear,
           reactivation,
-          access,
+          access: audience === "workspace" ? null : audience.access,
         });
         operation.signal.addEventListener("abort", clear, { once: true });
         return OwnerAppPublicationResult.parse({
@@ -382,16 +392,18 @@ export function createOwnerAppPublicationHandler<
           sourcePaths: candidate.inputs.map((file) => file.path),
           capabilities,
           externalNetwork: true,
-          ...(selector
-            ? {
-                audience: {
-                  shareId: selection.shareId,
-                  grantId: selection.grantId,
-                  selector,
-                  access,
-                },
-              }
-            : {}),
+          ...(audience === "workspace"
+            ? { audience }
+            : audience.selector
+              ? {
+                  audience: {
+                    shareId: selection.shareId,
+                    grantId: selection.grantId,
+                    selector: audience.selector,
+                    access: audience.access,
+                  },
+                }
+              : {}),
         });
       };
       if (input.action === "reviewReactivation") {
@@ -426,8 +438,8 @@ export function createOwnerAppPublicationHandler<
           row.owner.ownerUserId !== remote.credentials.userId ||
           !Number.isSafeInteger(row.authorityRevision) ||
           row.authorityRevision! < 1 ||
-          !Number.isSafeInteger(row.owner.generation) ||
-          row.owner.generation! < 1
+          (row.owner.grantId !== undefined &&
+            (!Number.isSafeInteger(row.owner.generation) || row.owner.generation! < 1))
         )
           throw new Error(
             "This app publication cannot be republished. Refresh the publication list.",
@@ -437,21 +449,26 @@ export function createOwnerAppPublicationHandler<
             "The server operator disabled this publication. Contact the server operator.",
           );
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
-        const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
-        const verifiedDatasetArtifacts = dataset
-          ? await resolveDatasetArtifacts(dataset)
-          : undefined;
-        if (dataset && verifiedDatasetArtifacts)
-          verifyAppDatasetCapability(dataset, verifiedDatasetArtifacts.revision);
+        for (const dataset of candidate.capabilities)
+          if (dataset.kind === "dataset")
+            verifyAppDatasetCapability(dataset, (await resolveDatasetArtifacts(dataset)).revision);
+        const reactivation = {
+          publicationId: input.publicationId,
+          authorityRevision: row.authorityRevision!,
+        };
+        const workspace = row.owner.grantId === undefined;
         const selection = OwnerAppPublicationRequest.parse({
           action: "prepare",
           workspaceId: input.workspaceId,
           appRoot: candidate.appRoot,
-          shareId: row.owner.shareId,
-          grantId: row.owner.grantId,
+          ...(workspace
+            ? { audience: "workspace" }
+            : { shareId: row.owner.shareId, grantId: row.owner.grantId }),
         });
         if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
-        const grant = await currentGrant(selection.shareId, selection.grantId);
+        if (workspace)
+          return await remember({ candidate, files: [] }, selection, reactivation, "workspace");
+        const grant = await currentGrant(selection.shareId!, selection.grantId!);
         if (
           grant.generation !== row.owner.generation ||
           !["view", "comment", "edit"].includes(grant.access)
@@ -460,10 +477,8 @@ export function createOwnerAppPublicationHandler<
         return await remember(
           { candidate, files: [], generation: row.owner.generation! },
           selection,
-          { publicationId: input.publicationId, authorityRevision: row.authorityRevision! },
-          grant.access as "view" | "comment" | "edit",
-          grant.selector ?? undefined,
-          verifiedDatasetArtifacts,
+          reactivation,
+          { access: grant.access as "view" | "comment" | "edit", selector: grant.selector },
         );
       }
       if (input.action === "list") {
@@ -580,30 +595,48 @@ export function createOwnerAppPublicationHandler<
         entry.clear();
         const { prepared } = entry;
         const candidate = structuredClone(prepared.candidate);
+        const datasets = candidate.capabilities.filter((value) => value.kind === "dataset");
+        const grants = (dataset: (typeof datasets)[number], operationId: string) =>
+          dataset.operations.some((operation) => operation.operationId === operationId);
         if (input.linkReads !== undefined) {
           if (entry.reactivation)
             throw new Error("Prepare the app again to change its link access.");
-          const capability = candidate.capabilities.find((value) => value.kind === "dataset");
-          if (!capability) throw new Error("This app has no Collection access to approve.");
-          if (input.linkReads.length) capability.linkReads = input.linkReads;
+          if (
+            !datasets.length ||
+            input.linkReads.some(
+              (read) => !datasets.some((dataset) => grants(dataset, read.operationId)),
+            )
+          )
+            throw new Error("This app has no Collection access to approve.");
+          if (
+            input.linkReads.some(
+              (read) => datasets.filter((dataset) => grants(dataset, read.operationId)).length > 1,
+            )
+          )
+            throw new Error(
+              "Two of this app's Collections share an action, so dohc can't tell which one a link read is for. Give people with the link no reads, or use one of those Collections.",
+            );
         }
-        const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
-        if (dataset) {
+        for (const dataset of datasets) {
+          const reads = (input.linkReads ?? []).filter((read) => grants(dataset, read.operationId));
+          if (reads.length) dataset.linkReads = reads;
           const revision = await resolveRemoteDatasetRevision(remoteData, dataset);
           const { operations: _operations, name: _name, ...binding } = dataset;
-          candidate.capabilities[candidate.capabilities.indexOf(dataset)] = input.linkReads?.length
+          candidate.capabilities[candidate.capabilities.indexOf(dataset)] = reads.length
             ? resolveAppDatasetCapability(binding, revision)
             : verifyAppDatasetCapability(dataset, revision);
         }
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const address = (authorityRevision: number) => {
-            const appQuery = `?app=${String(publicationId)}`;
             return OwnerAppPublicationResult.parse({
               ...published,
               authorityRevision,
-              appQuery,
-              access: entry.access,
-              bearerWarning: bearerWarning(entry.access),
+              ...(entry.input.audience === "workspace"
+                ? {}
+                : { appQuery: `?app=${String(publicationId)}` }),
+              ...(entry.access
+                ? { access: entry.access, bearerWarning: bearerWarning(entry.access) }
+                : {}),
             });
           };
           const published = OwnerAppPublicationResult.parse({
@@ -614,7 +647,10 @@ export function createOwnerAppPublicationHandler<
           if (published.kind !== "published") throw new Error("Invalid publication result.");
           const capability = candidate.capabilities[0];
           if (!capability) return address(published.authorityRevision);
-          if (capability.kind === "dataset") {
+          const datasetIds = candidate.capabilities.flatMap((value) =>
+            value.kind === "dataset" ? [value.datasetId] : [],
+          );
+          if (datasetIds.length) {
             try {
               const raw = await session.run(() =>
                 dependencies.relayJson(
@@ -630,13 +666,13 @@ export function createOwnerAppPublicationHandler<
               const activated = raw as {
                 publicationId?: unknown;
                 authorityRevision?: unknown;
-                datasetId?: unknown;
+                datasetIds?: unknown;
               } | null;
               if (
                 !activated ||
                 activated.publicationId !== published.publicationId ||
                 activated.authorityRevision !== published.authorityRevision ||
-                activated.datasetId !== capability.datasetId
+                JSON.stringify(activated.datasetIds) !== JSON.stringify(datasetIds)
               )
                 throw new Error("Collection access could not be confirmed.");
               return address(published.authorityRevision);
@@ -720,9 +756,11 @@ export function createOwnerAppPublicationHandler<
             row.publicationId !== entry.reactivation.publicationId ||
             row.active !== true ||
             row.owner?.workspaceId !== input.workspaceId ||
-            row.owner.shareId !== entry.input.shareId ||
-            row.owner.grantId !== entry.input.grantId ||
-            row.owner.generation !== prepared.generation
+            (entry.input.audience === "workspace"
+              ? row.owner.grantId !== undefined
+              : row.owner.shareId !== entry.input.shareId ||
+                row.owner.grantId !== entry.input.grantId ||
+                row.owner.generation !== prepared.generation)
           )
             throw new Error(
               "dohc could not confirm that this app was republished. Refresh the publication list.",
@@ -747,13 +785,7 @@ export function createOwnerAppPublicationHandler<
             {
               method: "POST",
               signal: operation.signal,
-              body: JSON.stringify({
-                shareId: entry.input.shareId,
-                grantId: entry.input.grantId,
-                expectedGrantGeneration: prepared.generation,
-                candidate,
-                agent,
-              }),
+              body: JSON.stringify(publishBody(entry.input, prepared.generation, candidate)),
             },
           ),
         );
@@ -764,9 +796,11 @@ export function createOwnerAppPublicationHandler<
         if (
           !owner ||
           owner.workspaceId !== input.workspaceId ||
-          owner.shareId !== entry.input.shareId ||
-          owner.grantId !== entry.input.grantId ||
-          owner.generation !== prepared.generation ||
+          (entry.input.audience === "workspace"
+            ? owner.grantId !== undefined
+            : owner.shareId !== entry.input.shareId ||
+              owner.grantId !== entry.input.grantId ||
+              owner.generation !== prepared.generation) ||
           JSON.stringify(row.candidate) !== JSON.stringify(candidate)
         )
           throw new Error("The app publication changed. Review it again.");
@@ -796,11 +830,14 @@ export function createOwnerAppPublicationHandler<
           throw new Error("A newer app preparation replaced this one.");
       };
       try {
-        const grant = await currentGrant(input.shareId, input.grantId);
+        const grant =
+          input.audience === "workspace"
+            ? null
+            : await currentGrant(input.shareId!, input.grantId!);
         const capture = await session.run(() => dependencies.flushCapture(operation.workspace));
         const prepared = await session.run(() =>
           dependencies.withAdapter(operation.workspace, (adapter) =>
-            prepareOwnerAppPublication(input, grant!, {
+            prepareOwnerAppPublication(input, grant, {
               adapter,
               signal: operation.signal,
               assertCurrent: assertPreparing,
@@ -815,13 +852,7 @@ export function createOwnerAppPublicationHandler<
         const { candidate } = prepared;
         assertPreparing();
         const publishEnvelopeBytes = Buffer.byteLength(
-          JSON.stringify({
-            shareId: input.shareId,
-            grantId: input.grantId,
-            expectedGrantGeneration: prepared.generation,
-            candidate,
-            agent,
-          }),
+          JSON.stringify(publishBody(input, prepared.generation, candidate)),
           "utf8",
         );
         if (
@@ -832,15 +863,13 @@ export function createOwnerAppPublicationHandler<
             "This app exceeds the supported publication size. Choose a smaller build.",
           );
         }
+        if (!grant) return await remember(prepared, input, undefined, "workspace");
         if (!["view", "comment", "edit"].includes(grant.access))
           throw new Error("This app link access is unavailable.");
-        return await remember(
-          prepared,
-          input,
-          undefined,
-          grant.access as "view" | "comment" | "edit",
-          grant.selector ?? undefined,
-        );
+        return await remember(prepared, input, undefined, {
+          access: grant.access as "view" | "comment" | "edit",
+          selector: grant.selector,
+        });
       } finally {
         if (preparing.get(callerKey) === preparation) preparing.delete(callerKey);
       }

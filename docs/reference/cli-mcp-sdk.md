@@ -37,7 +37,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
-| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members) |
+| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
 ---
@@ -198,13 +198,13 @@ Returns `{ ok, app, checks: { name, ok, message?, path? }[] }`. `ok` is true whe
 
 ### `dohc_publish_app`
 
-Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
+Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, audience?: "workspace", shareId?: string, grantId?: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
-Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
+Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. An app for members returns no `appQuery`. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
 ### `dohc_import_data`
 
@@ -817,6 +817,16 @@ Do what the Members page does, in a workspace you own or joined: list people, in
 - `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null } | { action: "deleteMessage", threadId: string, messageId: string } | { action: "folder", change: { folder: string, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[], create?: true } | { ruleId: string, revision: integer, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[] } | { folder: string, clear: true } | { ruleId: string, revision: integer, clear: true } } | { action: "folderMarker", folder: string }`. Required.
 
 Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
+
+### `dohc_collection_access`
+
+As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.
+
+Available only in a shared workspace with view or comment or edit access.
+
+- `request`: `{ workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "permissions", after?: string, limit?: integer } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setGrant", grantId: string, grant: { revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setDefaults", defaults: { view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "removeGrant", principalKey: string }`. Required.
+
+Returns what that verb returns, listed under [`dohc dataset`](#dohc-dataset). The relay accepts it from an Admin alone.
 
 ---
 
@@ -1987,7 +1997,7 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host }, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
+Returns `{ kind: "permissions", defaults?: { view, comment, edit, revision, revisionSha256, generation } | null, rules?: { revision, revisionSha256, actions }, permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host }, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset setGrant`
 
@@ -2000,6 +2010,19 @@ grant names revision, revisionSha256, operationIds, and discover.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
+
+Returns `{ kind: "grant-updated" }`.
+
+#### `dohc dataset setDefaults`
+
+Set the actions each workspace level gets in a Collection by default.
+
+defaults names view, comment, and edit operationIds, with revision and revisionSha256. Read them from permissions rules. An Admin runs permissions, setGrant, removeGrant, and setDefaults in a workspace they joined. View and Comment get only reads. No level gets an owner-only action.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `defaults`: `{ view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex }`. Required.
 
 Returns `{ kind: "grant-updated" }`.
 
@@ -2452,7 +2475,7 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app stage`
 
@@ -2523,26 +2546,27 @@ listUnavailable means the server does not publish apps for this workspace.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, audience, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapabilities, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, audience, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapabilities, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
 
 #### `dohc app prepare`
 
-Prepare an app for a share link.
+Prepare an app for a share link or for the workspace's members.
 
-Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `createLink`. shareId and grantId name the share and its link grant. Review the result, then approve.
+Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `createLink`. shareId and grantId name the share and its link grant. Review the result, then approve. For members, pass "audience": "workspace" without shareId or grantId. A member opens the app while they can see its folder and every Collection it uses.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
-- `shareId`: `string`. Required.
-- `grantId`: `string`. Required.
+- `audience`: `"workspace"`
+- `shareId`: `string`
+- `grantId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
 Publish a prepared app.
 
-Set `approvalId` to `approvalId` from `prepare`. Set `candidateDigest` to `candidateDigest` from `prepare`. Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
+Set `approvalId` to `approvalId` from `prepare`. Set `candidateDigest` to `candidateDigest` from `prepare`. Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
@@ -2596,7 +2620,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

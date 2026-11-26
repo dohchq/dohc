@@ -56,8 +56,11 @@ describe("owner publication review contract", () => {
     expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual(
       { kind: "localListed", publications: [local] },
     );
+    const { datasetCapability: _, ...sharedBase } = publication;
     const shared = {
-      ...publication,
+      ...sharedBase,
+      audience: "link",
+      datasetCapabilities: [datasetCapability],
       shareId: "share",
       grantId: "grant",
       linkCurrent: true,
@@ -104,6 +107,7 @@ describe("owner publication review contract", () => {
     const row = {
       publicationId: "d".repeat(64),
       authorityRevision: 2,
+      audience: "link",
       shareId: "s",
       grantId: "g",
       active: true,
@@ -119,7 +123,7 @@ describe("owner publication review contract", () => {
     });
     expect(OwnerAppPublicationResult.safeParse(list(row)).success).toBe(false);
     for (const collectionCapability of [null, capability, "unavailable"]) {
-      const value = list({ ...row, collectionCapability, datasetCapability: null });
+      const value = list({ ...row, collectionCapability, datasetCapabilities: [] });
       expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
     }
   });
@@ -233,13 +237,14 @@ it("preserves the operator record in owner listings and rejects caller-selected 
   const publication = {
     publicationId: "a".repeat(64),
     authorityRevision: 2,
+    audience: "link",
     shareId: "s",
     grantId: "g",
     active: false,
     linkCurrent: true,
     manifestUnavailable: true,
     collectionCapability: null,
-    datasetCapability: null,
+    datasetCapabilities: [],
     operatorTakedown,
   };
   const value = { kind: "listed", publications: [publication], nextCursor: null };

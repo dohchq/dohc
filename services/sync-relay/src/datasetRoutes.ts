@@ -846,6 +846,30 @@ export function createDatasetRoutes(
           else host.unbindPublication(auth, input);
           return { ok: true };
         }
+        if (raw && typeof raw === "object" && Object.hasOwn(raw, "defaults")) {
+          const value = record(record(raw, ["defaults"]).defaults, [
+            "view",
+            "comment",
+            "edit",
+            "revision",
+            "revisionSha256",
+          ]);
+          const operations = (list: unknown) => {
+            if (!Array.isArray(list) || list.length > 128)
+              throw badRequest("Invalid Collection defaults.");
+            return [...new Set(list.map((value) => datasetId(text(value))))];
+          };
+          return host.setWorkspaceDefaults(auth, {
+            ...scope,
+            defaults: {
+              view: operations(value.view),
+              comment: operations(value.comment),
+              edit: operations(value.edit),
+              revision: positive(value.revision),
+              revisionSha256: digest(value.revisionSha256),
+            },
+          });
+        }
         const body = record(raw, ["grant"], ["grantId", "principalKey"]);
         if (Object.hasOwn(body, "principalKey")) {
           if (body.grant !== null || Object.hasOwn(body, "grantId"))
@@ -1091,6 +1115,16 @@ export function createDatasetAppRoutes(
             files: published.candidate.files,
           };
         }
+        if (route.action === "activate") {
+          if (published.local) throw notFound();
+          const body = record(raw, ["authorityRevision"]);
+          if (body.authorityRevision !== authorityRevision) throw notFound();
+          const datasetIds = host.bindPublication(auth, {
+            workspaceId,
+            publicationId: route.publicationId,
+          });
+          return { publicationId: route.publicationId, authorityRevision, datasetIds };
+        }
         if (!targetCapability) throw notFound();
         const targetDatasetId = targetCapability.datasetId;
         if (route.action === "attempt") {
@@ -1145,21 +1179,6 @@ export function createDatasetAppRoutes(
             },
             signal,
           );
-        }
-        if (route.action === "activate") {
-          if (published.local || capabilities.length !== 1) throw notFound();
-          const body = record(raw, ["authorityRevision"]);
-          if (body.authorityRevision !== authorityRevision) throw notFound();
-          host.bindPublication(auth, {
-            workspaceId,
-            datasetId: targetDatasetId,
-            publicationId: route.publicationId,
-          });
-          return {
-            publicationId: route.publicationId,
-            authorityRevision,
-            datasetId: targetDatasetId,
-          };
         }
         if (route.action !== "invoke") throw notFound();
         // The owner's computer names the agent that drives an app the owner approved there.

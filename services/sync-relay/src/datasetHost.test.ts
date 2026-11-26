@@ -196,8 +196,11 @@ async function fixture(
     host.bindPublication(owner, { ...scope, publicationId });
     return publicationId;
   }
-  /** Publishes the fixture's app again, requesting `capabilities`. */
-  function publishWith(capabilities: AppPublicationCandidate["capabilities"]) {
+  /** Publishes the fixture's app again, requesting `capabilities`, to the link or to the workspace's members. */
+  function publishWith(
+    capabilities: AppPublicationCandidate["capabilities"],
+    audience: "link" | "workspace" = "link",
+  ) {
     const previous = base.storage.readAppPublication({
       ...scope,
       publicationId: base.publicationId,
@@ -223,9 +226,9 @@ async function fixture(
     const result = base.storage.publishAppPublication({
       workspaceId: "w",
       ownerUserId: "owner",
-      shareId: "s",
-      grantId: "g",
-      generation: 1,
+      ...(audience === "workspace"
+        ? { shareId: "members" }
+        : { shareId: "s", grantId: "g", generation: 1 }),
       candidate,
       blobs: [],
       limits,
@@ -1081,7 +1084,57 @@ async function memberFixture(dataGrant = true) {
   const read = () => f.invoke(ana, id(6), {}, undefined, `read-${request++}`);
   const listed = (page?: { after?: string; limit?: number }) =>
     f.host.list(ana, { workspaceId: "w", ...page });
-  return { ...f, level, rule, admin, read, listed };
+  const collection = async (datasetId: string, folder: string, ownerOnlyRead = false) => {
+    const other = describeDatasetRevision({
+      definition: {
+        ...definition,
+        datasetId,
+        schemaPath: `${folder}/schema.sql`,
+        operationsPath: `${folder}/operations.js`,
+        operations: definition.operations.map((operation) =>
+          ownerOnlyRead && operation.name === "read"
+            ? { ...operation, access: "owner" as const }
+            : operation,
+        ),
+      },
+      revision: 1,
+      schemaSql,
+      operationSource: memberSource,
+    });
+    await f.host.activate(owner, {
+      workspaceId: "w",
+      revision: other,
+      schemaSql,
+      operationSource: memberSource,
+      capacityBytes: 1024 * 1024,
+    });
+    pushFile(f.storage, `dataset-${folder}`, null, {
+      path: `${folder}/dataset.json`,
+      text: JSON.stringify({ datasetId }),
+    });
+    return other;
+  };
+  const app = (revisions = [memberRevision], audience: "link" | "workspace" = "workspace") => {
+    const publicationId = f.publishWith(
+      revisions.map((value, index) =>
+        resolveAppDatasetCapability(
+          {
+            kind: "dataset",
+            ...(revisions.length > 1 ? { alias: `c${index}` } : {}),
+            datasetId: value.datasetId,
+            revision: 1,
+            revisionSha256: value.revisionSha256,
+            operationIds: [id(5), id(6), id(7)],
+          },
+          value,
+        ),
+      ),
+      audience,
+    );
+    f.host.bindPublication(owner, { workspaceId: "w", publicationId });
+    return publicationId;
+  };
+  return { ...f, level, rule, admin, read, listed, collection, app };
 }
 
 const refused = { code: "not_authorized" };
@@ -1198,15 +1251,223 @@ it("still needs a data grant where a folder rule gives a member Edit", async () 
 it("keeps owner-only Collection actions from a member and an admin", async () => {
   const f = await memberFixture();
   f.rule("edit");
+  expect(() =>
+    f.host.setDataGrant(ana, { ...scope, grantId: "ana-grant", grant: anaGrant() }),
+  ).toThrow(expect.objectContaining({ code: "not_found" }));
   for (const promote of [() => {}, f.admin]) {
     promote();
     expect(() => f.host.archiveDataset(ana, scope)).toThrow(expect.objectContaining(refused));
-    expect(() =>
-      f.host.setDataGrant(ana, { ...scope, grantId: "ana-grant", grant: anaGrant() }),
-    ).toThrow(expect.objectContaining({ code: "not_found" }));
     expect(() => f.host.lifecycle(ana, scope)).toThrow(expect.objectContaining(refused));
   }
   expect(f.host.lifecycle(owner, scope).archived).toBe(false);
+});
+
+it("opens a workspace app to an active member, and never a link-only app", async () => {
+  const f = await memberFixture();
+  const shared = f.app(),
+    linkOnly = f.app([memberRevision], "link");
+  expect((await f.invoke(ana, id(6), {}, shared, "shared")).result).toBe("edit");
+  await expect(f.invoke(ana, id(6), {}, linkOnly, "link-only")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  expect(f.host.servedPublication(ana, shared)?.capabilities).toHaveLength(1);
+  expect(() => f.host.servedPublication(ana, linkOnly)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+});
+
+it("closes a workspace app when a folder rule hides one of its Collections or its source", async () => {
+  const f = await memberFixture();
+  const hidden = await f.collection(id(11), "hidden");
+  f.host.setDataGrant(owner, {
+    workspaceId: "w",
+    datasetId: id(11),
+    grantId: "ana-grant",
+    grant: anaGrant(hidden.revisionSha256),
+  });
+  const shared = f.app([memberRevision, hidden]);
+  const read = (key: string) => f.invoke(ana, id(6), {}, shared, key);
+  expect((await read("both")).result).toBe("edit");
+  const { ruleId, revision } = f.rule(null, "hidden");
+  await expect(read("one-hidden")).rejects.toMatchObject({ code: "not_found" });
+  expect(() => f.host.servedPublication(ana, shared)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+  f.storage.changeFolderRule({
+    workspaceId: "w",
+    actorUserId: "owner",
+    change: { kind: "change", ruleId, revision, rule: { members: "edit", people: new Map() } },
+    nowMs: 9,
+  });
+  expect((await read("shown")).result).toBe("edit");
+  f.rule(null, "app");
+  await expect(read("source-hidden")).rejects.toMatchObject({ code: "not_found" });
+});
+
+it("lets only an Edit member run a write through a workspace app, and only one their grant or defaults hold", async () => {
+  const f = await memberFixture();
+  const shared = f.app();
+  const submit = (key: string) => f.invoke(ana, id(5), { name: "Ana" }, shared, key);
+  const edit = (key: string) => f.invoke(ana, id(7), { id: "x", name: "y" }, shared, key);
+  for (const level of ["view", "comment"] as const) {
+    f.level(level);
+    await expect(submit(`${level}-submit`)).rejects.toMatchObject(refused);
+    await expect(edit(`${level}-edit`)).rejects.toMatchObject(refused);
+    expect((await f.invoke(ana, id(6), {}, shared, `${level}-read`)).result).toBe(level);
+  }
+  f.level("edit");
+  await expect(submit("ungranted-submit")).rejects.toMatchObject(refused);
+  expect((await edit("edit-edit")).result).toBe(true);
+  f.host.setWorkspaceDefaults(owner, {
+    ...scope,
+    defaults: {
+      view: [],
+      comment: [],
+      edit: [id(5)],
+      revision: 1,
+      revisionSha256: memberRevision.revisionSha256,
+    },
+  });
+  expect((await submit("edit-submit")).result).toEqual({ accepted: true });
+});
+
+it("refuses a member's running write through a workspace app when a default or folder rule lowers it before it commits", async () => {
+  const f = await memberFixture(false);
+  const defaults = (edit: string[]) =>
+    f.host.setWorkspaceDefaults(owner, {
+      ...scope,
+      defaults: {
+        view: [],
+        comment: [],
+        edit,
+        revision: 1,
+        revisionSha256: memberRevision.revisionSha256,
+      },
+    });
+  defaults([id(7)]);
+  const shared = f.app();
+  const original = f.storage.memberReach.bind(f.storage);
+  let lower: (() => unknown) | null = null;
+  const dispatched = () => {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = Infinity;
+    const stack = String(new Error().stack);
+    Error.stackTraceLimit = limit;
+    return stack.includes("supervisor.mjs");
+  };
+  vi.spyOn(f.storage, "memberReach").mockImplementation((...args) => {
+    if (lower && dispatched()) {
+      const run = lower;
+      lower = null;
+      setImmediate(run);
+    }
+    return original(...args);
+  });
+  const edit = (key: string) => f.invoke(ana, id(7), { id: "x", name: "y" }, shared, key);
+  const { revision } = await edit("edit-0");
+  lower = () => defaults([]);
+  await expect(edit("edit-1")).rejects.toMatchObject(refused);
+  expect(lower).toBeNull();
+  defaults([id(7)]);
+  expect((await edit("edit-2")).revision).toBe(revision + 1);
+  lower = () => f.rule("view");
+  await expect(edit("edit-3")).rejects.toMatchObject(refused);
+  expect(lower).toBeNull();
+});
+
+it("lets an admin set Collection defaults and grant a member existing actions, but never approve rules or grant owner-only actions", async () => {
+  const f = await memberFixture(false);
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: "w",
+      actorUserId: "owner",
+      workspaceName: "Team",
+      email: "ben@dohc.test",
+      recipientUserId: "ben",
+      newMemberId: () => "ben-entry",
+      newGrantId: () => "ben-grant",
+      newShareId: () => "members",
+      nowMs: 8,
+    }),
+  ).toMatchObject({ ok: true });
+  const ben: AppBackendAuth = {
+    kind: "named",
+    workspaceId: "w",
+    userId: "ben",
+    grantId: "ben-grant",
+  };
+  f.admin();
+  const ledger = await f.collection(id(21), "ledger", true);
+  const grant = (datasetId: string, revisionSha256: string, operationIds: string[]) =>
+    f.host.setDataGrant(ana, {
+      workspaceId: "w",
+      datasetId,
+      grantId: "ben-grant",
+      grant: { operationIds, discover: true, revision: 1, revisionSha256 },
+    });
+  const defaults = (datasetId: string, revisionSha256: string, view: string[]) =>
+    f.host.setWorkspaceDefaults(ana, {
+      workspaceId: "w",
+      datasetId,
+      defaults: { view, comment: [], edit: [], revision: 1, revisionSha256 },
+    });
+  await expect(f.invoke(ben, id(6), {}, undefined, "before")).rejects.toMatchObject(refused);
+  grant(id(1), memberRevision.revisionSha256, [id(6)]);
+  expect((await f.invoke(ben, id(6), {}, undefined, "granted")).result).toBe("edit");
+  expect(() => grant(id(21), ledger.revisionSha256, [id(6)])).toThrow(
+    "Owner-only Collection actions cannot be granted to anyone else.",
+  );
+  expect(() => defaults(id(21), ledger.revisionSha256, [id(6)])).toThrow(
+    expect.objectContaining({ code: "bad_request" }),
+  );
+  expect(() => defaults(id(1), memberRevision.revisionSha256, [id(7)])).toThrow(
+    expect.objectContaining({ code: "bad_request" }),
+  );
+  expect(defaults(id(1), memberRevision.revisionSha256, [id(6)])).toEqual({ generation: 1 });
+  expect(f.host.permissions(ana, scope).rules).toMatchObject({
+    revision: 1,
+    revisionSha256: memberRevision.revisionSha256,
+    actions: expect.arrayContaining([{ operationId: id(6), name: "read", readOnly: true }]),
+  });
+  expect(
+    f.host.permissions(ana, { workspaceId: "w", datasetId: id(21) }).rules.actions,
+  ).not.toContainEqual(expect.objectContaining({ operationId: id(6) }));
+  await expect(
+    (async () =>
+      f.host.activate(ana, {
+        workspaceId: "w",
+        revision: memberRevision,
+        schemaSql,
+        operationSource: memberSource,
+        capacityBytes: 1024 * 1024,
+      }))(),
+  ).rejects.toMatchObject(refused);
+});
+
+it("lists a Collection a member reaches only by its defaults, and changes their offline copy's access when the defaults change or the Collection is archived", async () => {
+  const f = await memberFixture(false);
+  expect(f.listed().datasets).toEqual([]);
+  const defaults = (view: string[]) =>
+    f.host.setWorkspaceDefaults(owner, {
+      ...scope,
+      defaults: {
+        view,
+        comment: [],
+        edit: [],
+        revision: 1,
+        revisionSha256: memberRevision.revisionSha256,
+      },
+    });
+  defaults([id(6)]);
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  defaults([]);
+  expect(f.listed().datasets).toEqual([]);
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+  defaults([id(6)]);
+  const restored = f.host.offlineAccessFingerprint(ana);
+  f.host.archiveDataset(owner, scope);
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(restored);
 });
 
 it("pages a member's Collections past ones they can't reach, without naming them", async () => {

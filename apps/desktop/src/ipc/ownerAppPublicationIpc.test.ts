@@ -315,7 +315,7 @@ function withDataset(h: ReturnType<typeof harness>, includeRead = false, customS
   h.relay.mockImplementation(async (...args) => {
     if (args[1].endsWith("/artifacts")) return approved;
     if (args[1].endsWith("/backend/activate"))
-      return { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(1) };
+      return { publicationId: "a".repeat(64), authorityRevision: 1, datasetIds: [id(1)] };
     return original(...args);
   });
   return { ...h, approved };
@@ -367,13 +367,50 @@ describe("owner app publication", () => {
     expect(h.upload).not.toHaveBeenCalled();
     expect(h.relay.mock.calls.some((call) => call[1].endsWith("/app-publications"))).toBe(false);
   });
+  it("publishes an app to the workspace's members without a link", async () => {
+    const h = harness();
+    const original = h.relay.getMockImplementation()!;
+    const bodies: Record<string, unknown>[] = [];
+    h.relay.mockImplementation(async (credentials, path, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (body?.audience !== "workspace") return original(credentials, path, init);
+      bodies.push(body);
+      return {
+        publicationId: "a".repeat(64),
+        candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS),
+        active: true,
+        authorityRevision: 1,
+        owner: { workspaceId: "w", shareId: "members", ownerUserId: "owner" },
+      };
+    });
+    const workspace = {
+      action: "prepare",
+      workspaceId: "w",
+      appRoot: "app",
+      audience: "workspace",
+    };
+    await expect(h.invoke({ ...workspace, shareId: "s", grantId: "g" })).rejects.toThrow(
+      /for a link, or/,
+    );
+    const prepared = await h.invoke(workspace);
+    if (prepared.kind !== "prepared") throw new Error("not prepared");
+    expect(prepared.audience).toBe("workspace");
+    expect(await h.approve(prepared)).toMatchObject({
+      kind: "published",
+      publicationId: "a".repeat(64),
+    });
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ audience: "workspace" });
+    expect(bodies[0]).not.toHaveProperty("grantId");
+    expect(h.relay.mock.calls.some((call) => call[1].endsWith("/shares/links"))).toBe(false);
+  });
   it("reports an app published without confirmed Collection access", async () => {
     const h = withDataset(harness()),
       prepared = await h.prepare();
     const original = h.relay.getMockImplementation()!;
     h.relay.mockImplementation(async (...args) =>
       args[1].endsWith("/backend/activate")
-        ? { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(99) }
+        ? { publicationId: "a".repeat(64), authorityRevision: 1, datasetIds: [id(99)] }
         : original(...args),
     );
     await expect(h.approve(prepared)).rejects.toThrow(/app is published.*Collection access/);
@@ -815,7 +852,8 @@ describe("owner app publication", () => {
           appRoot: "another",
           sourceRevision: "d".repeat(64),
           active: true,
-          datasetCapability: null,
+          audience: "link",
+          datasetCapabilities: [],
           collectionCapability: null,
           linkCurrent: true,
           manifestUnavailable: false,
@@ -832,7 +870,8 @@ describe("owner app publication", () => {
       shareId: "s",
       grantId: "g",
       active: true,
-      datasetCapability: null,
+      audience: "link",
+      datasetCapabilities: "unavailable",
       collectionCapability: null,
       linkCurrent: true,
       manifestUnavailable: true,
@@ -978,7 +1017,8 @@ it("adds verified display metadata on dataset reactivation review and publicatio
             appRoot: "app",
             sourceRevision: candidate.sourceRevision,
             active: true,
-            datasetCapability: storedCapability,
+            audience: "link",
+            datasetCapabilities: [storedCapability],
             collectionCapability: null,
             linkCurrent: true,
             manifestUnavailable: false,
@@ -1013,7 +1053,7 @@ it("adds verified display metadata on dataset reactivation review and publicatio
   const listed = await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" });
   expect(listed).toMatchObject({
     kind: "listed",
-    publications: [{ datasetCapability: storedCapability }],
+    publications: [{ datasetCapabilities: [storedCapability] }],
   });
   expect(h.relay.mock.calls.filter((call) => call[1].endsWith("/artifacts"))).toHaveLength(
     artifactsBeforeList,
@@ -1259,4 +1299,70 @@ it("allows withdrawal while paused without publishing paused sources", async () 
   await expect(h.prepare()).rejects.toThrow("Sync this workspace");
   h.remote.mockRejectedValueOnce(new Error("wrong account"));
   await expect(h.invoke(input)).rejects.toThrow("wrong account");
+});
+
+it("refuses a link read for an action two of the app's Collections share", async () => {
+  const h = withDataset(harness(), true);
+  const definition = JSON.parse(Buffer.from(h.source.get("private/dataset.json")!).toString());
+  const copy = {
+    ...definition,
+    datasetId: id(11),
+    schemaPath: "copy/schema.sql",
+    operationsPath: "copy/actions.js",
+  };
+  const schemaSql = generateDatasetSchema(copy),
+    operationSource = generateDatasetOperations(copy),
+    revision = describeDatasetRevision({
+      definition: copy,
+      revision: 1,
+      schemaSql,
+      operationSource,
+    });
+  h.source.set("copy/dataset.json", Buffer.from(JSON.stringify(copy)));
+  const { dataset, ...manifest } = JSON.parse(
+    Buffer.from(h.source.get("app/app.publish.json")!).toString(),
+  );
+  h.source.set(
+    "app/app.publish.json",
+    Buffer.from(
+      JSON.stringify({
+        ...manifest,
+        datasets: {
+          responses: dataset,
+          copy: {
+            ...dataset,
+            datasetPath: "copy/dataset.json",
+            revisionSha256: revision.revisionSha256,
+          },
+        },
+      }),
+    ),
+  );
+  const previous = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) =>
+    args[1].includes(id(11)) && args[1].endsWith("/artifacts")
+      ? {
+          ...h.approved,
+          revision,
+          schemaSql,
+          operationSource,
+          cursor: {
+            ...h.approved.cursor,
+            datasetId: id(11),
+            approvedRevisionHash: revision.revisionSha256,
+          },
+        }
+      : previous(...args),
+  );
+  const prepared = await h.prepare();
+  await expect(
+    h.invoke({
+      action: "approve",
+      workspaceId: "w",
+      approvalId: prepared.approvalId,
+      candidateDigest: prepared.candidateDigest,
+      linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }],
+    }),
+  ).rejects.toThrow("Two of this app's Collections share an action");
+  expect(h.upload).not.toHaveBeenCalled();
 });

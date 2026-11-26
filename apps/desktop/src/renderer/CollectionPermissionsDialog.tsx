@@ -9,7 +9,7 @@ import {
   withErrorWords,
 } from "../ipc/errorWords";
 import { bridge } from "./bridge";
-import { boundAppStatusLabel } from "./CollectionMigrationReviewDialog";
+import { BOUND_APP_SCOPE_LABEL, boundAppStatusLabel } from "./CollectionMigrationReviewDialog";
 import { Overlay } from "./Overlay";
 import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -356,7 +356,7 @@ function Permissions({
                       <span>
                         {permission.kind === "app"
                           ? app
-                            ? `App · ${app.scope === "link" ? "Share link" : "Local"}`
+                            ? `App · ${BOUND_APP_SCOPE_LABEL[app.scope]}`
                             : "App"
                           : "Person"}
                         {statusText}

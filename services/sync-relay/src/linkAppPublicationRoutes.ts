@@ -140,8 +140,8 @@ export function createLinkAppPublicationRoutes(options: {
       nowMs: options.nowMs(),
     });
     // A link visitor's app stops before it loads, as a signed-in person's does.
-    if (admitted.datasetId !== null)
-      options.requireCollectionFile?.(admitted.workspaceId, admitted.datasetId);
+    for (const datasetId of admitted.datasetIds)
+      options.requireCollectionFile?.(admitted.workspaceId, datasetId);
     const pinned = { ...input, expectedAuthorityRevision: admitted.descriptor.authorityRevision };
     const file = route.sha256
       ? admitted.descriptor.files.find((file) => file.sha256 === route.sha256)

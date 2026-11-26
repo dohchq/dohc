@@ -94,9 +94,11 @@ function discoverAppInputs(
 export interface OwnerPublicationSelection {
   workspaceId: string;
   appRoot: string;
-  shareId: string;
-  grantId: string;
+  audience?: "link" | "workspace";
+  shareId?: string;
+  grantId?: string;
 }
+const localAllowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
 export interface OwnerPublicationGrant {
   shareId: string;
   grantId: string;
@@ -321,16 +323,17 @@ function staticDeclaration(
   };
 }
 
-/** Source capture grants no publication authority. The relay repeats the grant check at commit. */
+/** Source capture grants no publication authority. The relay repeats the grant check at commit. A null grant prepares the app for the workspace's members, from main. */
 export async function prepareOwnerAppPublication(
   input: OwnerPublicationSelection,
-  grant: OwnerPublicationGrant,
+  grant: OwnerPublicationGrant | null,
   dependencies: AppPublicationPreparationDependencies,
 ): Promise<{
   candidate: AppPublicationCandidate;
   files: ClosedAppBuild["files"];
-  generation: number;
+  generation?: number;
 }> {
+  if (!grant) return prepareAppSources(input, "main", localAllowed, dependencies);
   const selector = grant.selector;
   if (
     grant.shareId !== input.shareId ||
@@ -357,8 +360,6 @@ export async function prepareOwnerAppPublication(
   };
 }
 
-const localAllowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
-
 /**
  * Local approval captures the same immutable source without creating a share grant. It needs app.publish.json:
  * dohc shows a folder without one as a site, which offers no review to see or remove an approval.
@@ -367,7 +368,7 @@ export async function prepareLocalAppPublication(
   input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
   dependencies: AppPublicationPreparationDependencies,
 ): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
-  return prepareAppSources(input, "main", localAllowed, dependencies, true, true);
+  return prepareAppSources(input, "main", localAllowed, dependencies, true);
 }
 
 /** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
@@ -594,7 +595,6 @@ async function prepareAppSources(
   allowed: (path: string) => boolean,
   dependencies: AppPublicationPreparationDependencies,
   requireManifest = false,
-  allowMultiDataset = false,
 ): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
   const { adapter, signal, assertCurrent } = dependencies;
   const { declared, schemaPath, metadata } = await selectAppSources(
@@ -610,11 +610,6 @@ async function prepareAppSources(
   const datasetBindings: ReadonlyArray<{ alias?: string; reference: AppDatasetReference }> =
     declared.datasets ?? (declared.dataset ? [{ reference: declared.dataset }] : []);
   if (datasetBindings.length > 0) {
-    if (!allowMultiDataset && datasetBindings.length > 1) {
-      throw new Error(
-        "Shared links support at most one Collection. Use a single Collection or approve this app on your device.",
-      );
-    }
     if (!dependencies.resolveDatasetRevision)
       throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
     assertSourcePathsNotDeferred(

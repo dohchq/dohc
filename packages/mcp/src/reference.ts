@@ -62,6 +62,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   prepareHistoryRestore: ["migration-prepared"],
   permissions: ["permissions"],
   setGrant: ["grant-updated"],
+  setDefaults: ["grant-updated"],
   removeGrant: ["grant-updated"],
   lifecycle: ["lifecycle"],
   archive: ["lifecycle-updated"],
@@ -377,8 +378,10 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_list_link_agents: { cli: "shareAgents" },
     dohc_disconnect_link_agent: { cli: "shareDisconnect" },
     dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
+    dohc_collection_access:
+      "what that verb returns, listed under [`dohc dataset`](#dohc-dataset). The relay accepts it from an Admin alone.",
     dohc_publish_app:
-      "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
+      "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. An app for members returns no `appQuery`. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
     dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
     dohc_stop_workspace_sync: { cli: "stopSync" },
     dohc_workspace_status:
@@ -802,6 +805,7 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_list_link_agents",
       "dohc_disconnect_link_agent",
       "dohc_members",
+      "dohc_collection_access",
     ],
   },
   {

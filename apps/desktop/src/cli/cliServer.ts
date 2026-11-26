@@ -18,6 +18,7 @@ import type {
   InboxSource,
 } from "@dohc/workspace-contracts/inbox";
 import { creationPartialMessage } from "@dohc/cli/creation";
+import { DATASET_ADMIN_ACTIONS } from "@dohc/cli/dataset";
 import type { AgentNotice } from "../notices/agentNotices";
 import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
@@ -3429,7 +3430,11 @@ async function dispatchWorkspace(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath)
         throw new CliCommandError("Collection export requires an explicit savePath.");
-      if (context.readOnly || !context.dataset)
+      if (
+        !context.dataset ||
+        (context.readOnly &&
+          !(context.joined && DATASET_ADMIN_ACTIONS.has(request.args.request.action)))
+      )
         throw new CliCommandError("Collections require the owning workspace.");
       if (request.args.request.workspaceId !== context.workspaceId)
         throw new CliCommandError(

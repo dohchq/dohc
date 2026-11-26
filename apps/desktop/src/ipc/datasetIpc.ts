@@ -39,6 +39,7 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import type { NamedDatasetData } from "../workspaces/namedDataset";
 import {
   approveLocalDatasetMigration,
   createLocalDatasetMigrations,
@@ -112,12 +113,7 @@ export function createDatasetHandler<
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
-  namedDataForWorkspace?(
-    workspace: W,
-    signal: AbortSignal,
-  ): Promise<
-    Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">
-  >;
+  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<NamedDatasetData>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(
     workspace: W,
@@ -335,7 +331,17 @@ export function createDatasetHandler<
           if (shareViewIsPresent(operation.workspace.shareView)) {
             if (
               !dependencies.namedDataForWorkspace ||
-              !["list", "describe", "invoke", "upload", "file"].includes(input.action)
+              ![
+                "list",
+                "describe",
+                "invoke",
+                "upload",
+                "file",
+                "permissions",
+                "setGrant",
+                "removeGrant",
+                "setDefaults",
+              ].includes(input.action)
             )
               throw datasetOwnerOnlyError();
             const data = await dependencies.namedDataForWorkspace(
@@ -343,6 +349,21 @@ export function createDatasetHandler<
               operation.signal,
             );
             current();
+            if (input.action === "permissions") {
+              const result = await data.permissions(input);
+              current();
+              return { kind: "permissions" as const, ...result };
+            }
+            if (input.action === "setDefaults") {
+              await data.setDefaults(input);
+              current();
+              return { kind: "grant-updated" as const };
+            }
+            if (input.action === "setGrant" || input.action === "removeGrant") {
+              await data.setGrant(input);
+              current();
+              return { kind: "grant-updated" as const };
+            }
             if (input.action === "list") {
               if (input.includeArchived)
                 throw new Error("Open the original workspace to restore Collections.");
@@ -518,6 +539,7 @@ export function createDatasetHandler<
             "prepareHistoryRestore",
             "permissions",
             "setGrant",
+            "setDefaults",
             "removeGrant",
             "lifecycle",
             "archive",
@@ -982,9 +1004,13 @@ export function createDatasetHandler<
               ...bound,
             };
           }
-          if (input.action === "setGrant" || input.action === "removeGrant") {
+          if (
+            input.action === "setGrant" ||
+            input.action === "removeGrant" ||
+            input.action === "setDefaults"
+          ) {
             // A person reaches a Collection through the workspace's server.
-            if (input.action === "setGrant") {
+            if (input.action !== "removeGrant") {
               const place = await dependencies.collectionPlace?.(
                 operation.workspace,
                 input.datasetId,
@@ -994,9 +1020,15 @@ export function createDatasetHandler<
               if (place?.kind === "here")
                 throw new Error("Sync this workspace with a server before giving a person access.");
             }
-            if (!("setGrant" in data) || !data.setGrant)
-              throw new Error("Collection access is unavailable on this computer.");
-            await data.setGrant(input);
+            if (input.action === "setDefaults") {
+              if (!("setDefaults" in data) || !data.setDefaults)
+                throw new Error("Collection access is unavailable on this computer.");
+              await data.setDefaults(input);
+            } else {
+              if (!("setGrant" in data) || !data.setGrant)
+                throw new Error("Collection access is unavailable on this computer.");
+              await data.setGrant(input);
+            }
             current();
             return { kind: "grant-updated" as const };
           }

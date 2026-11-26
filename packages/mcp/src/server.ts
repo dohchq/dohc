@@ -19,7 +19,7 @@ import {
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { AgentMembersRequest } from "@dohc/cli/members";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DatasetAdminRequest, DatasetRequest } from "@dohc/cli/dataset";
 import {
   chatWorkReportSchema,
   chatWatchInputSchema,
@@ -310,7 +310,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_publish_app",
     {
       description:
-        "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
+        "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
       inputSchema: { request: OwnerAppPublicationRequest },
     },
     async ({ request }) => text(await publishApp(ctx, request)),
@@ -339,6 +339,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         'Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.',
       inputSchema: { request: DatasetRequest },
+    },
+    async ({ request }) => text(await dataset(ctx, request)),
+  );
+
+  register(
+    "dohc_collection_access",
+    {
+      description:
+        "As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.",
+      inputSchema: { request: DatasetAdminRequest },
     },
     async ({ request }) => text(await dataset(ctx, request)),
   );

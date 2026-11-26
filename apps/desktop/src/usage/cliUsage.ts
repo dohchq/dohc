@@ -76,6 +76,7 @@ const DATASET_WRITE_ACTIONS: Readonly<Record<DatasetRequest["action"], boolean>>
   cancelAttempt: true,
   permissions: false,
   setGrant: true,
+  setDefaults: true,
   removeGrant: true,
   export: true,
   prepareRecovery: true,

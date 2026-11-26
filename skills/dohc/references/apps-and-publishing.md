@@ -25,7 +25,7 @@ Rules:
 - `packageMap` is optional and defaults to `{}`.
 - `dataset.datasetPath` is relative to the workspace root and ends in `dataset.json`.
 - Use either `operations: ["opName", ...]` (recommended) or `operationIds: ["<UUID>", ...]`, never both. Omit `revision` and `revisionSha256` so `prepareLocal`, `prepare`, and `stage` pin the latest approved Collection revision automatically.
-- Local owner apps can bind up to 16 Collections using `datasets` instead of `dataset`: an object map `"datasets": { "<alias>": { "kind": "dataset", "datasetPath": "...", "operations": [...] } }` (call `backend.invoke` with `dataset: "<alias>"`). Share-link apps support at most one Collection (`dataset`).
+- An app can bind up to 16 Collections using `datasets` instead of `dataset`: an object map `"datasets": { "<alias>": { "kind": "dataset", "datasetPath": "...", "operations": [...] } }` (call `backend.invoke` with `dataset: "<alias>"`). Apps with more than one Collection get no live updates on a share link.
 - Only one of `dataset`, `datasets`, or `collection` may appear.
 - For typed rows, run `dohc dataset types '{"workspaceId":"...","datasetPath":"..."}'`. It writes `.dohc/types/<name>-<datasetId>.d.ts` from the approved revision and returns the exact `path`. Import it with `import type { FieldIds, Row, Operations } from "<relative path>/.dohc/types/<name>-<datasetId>"` and run it again after each approved change. Give a custom `action` a `contract` in `dataset.json` to type it with `Input<"name">` and `Output<"name">`. A contract is `{ "input": type, "output": type }`. A type is `"string"`, `"number"`, `"boolean"`, `"unknown"`, `{ "enum": [...] }`, `{ "array": type }`, `{ "nullable": type }`, or `{ "object": { "key": type }, "optional": ["key"] }`. dohc does not check values against it, so the action still checks its input.
 - For public share-link apps, list only `access: "link"` operations. Never include owner-only reads in a public app manifest.
@@ -153,6 +153,12 @@ Pass `{ request: { action, ... } }` to `dohc_publish_app`:
 2. **Prepare**: `{ action: "prepare", workspaceId, appRoot, shareId, grantId }` -> returns `approvalId`, `candidateDigest`.
 3. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId` and `appQuery` (`?app=<publicationId>`).
 4. Append `appQuery` before the `#` fragment of the share link URL. Keep the share link secret out of workspace files and dohc requests.
+
+## Publishing to workspace members (`dohc_publish_app`)
+
+1. **Prepare**: `{ action: "prepare", workspaceId, appRoot, audience: "workspace" }` -> returns `approvalId`, `candidateDigest`. Omit `shareId` and `grantId`.
+2. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId`.
+3. A member opens the app only while they can see the app folder and every bound Collection. Below Edit, they run only read-only actions. Each member gets the actions their own grant gives, plus the defaults for their level, set with `dohc_dataset` `{ action: "setDefaults", workspaceId, datasetPath, defaults: { view, comment, edit, revision, revisionSha256 } }`. Defaults never include owner-only actions, and `view` and `comment` defaults are read-only. Take `revision`, `revisionSha256`, and the actions to choose from out of `permissions` `rules`. An Admin of a workspace they joined does the same with `dohc_collection_access`.
 
 ## Re-approving apps after a standalone Collection migration
 
