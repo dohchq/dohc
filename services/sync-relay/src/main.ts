@@ -151,7 +151,7 @@ import {
 } from "./personalLiveDocumentRoutes";
 import { createServiceHostReplication } from "./serviceHostReplication";
 import { authorizeServiceHostReplication } from "./serviceHostCredential";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { loopbackDeclaredHttpsTransport, TokenBucketLimiter } from "@dohc/service-http";
 import {
   NOTICE_POST_BUCKET_CAPACITY,
   NOTICE_POST_MAX_SENDERS,
@@ -803,6 +803,13 @@ const relayApplication = createSyncRelayHandler({
   presence,
   linkKey,
   secretKeyring,
+  ...(nodeEnv === "test" && process.env.DOHC_TEST_APP_EXTERNAL_ORIGIN
+    ? {
+        appExternalTransport: loopbackDeclaredHttpsTransport(
+          process.env.DOHC_TEST_APP_EXTERNAL_ORIGIN,
+        ),
+      }
+    : {}),
   shareWebOrigin,
   relayExchangeKey,
   // The relay has already ended these launches, so every later call share-web makes for them is refused.

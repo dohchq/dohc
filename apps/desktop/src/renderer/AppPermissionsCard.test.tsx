@@ -3,7 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
-import { AppAccessSummary } from "./AppPermissionsCard";
+import { AppAccessSummary, ExternalCallsCard } from "./AppPermissionsCard";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
@@ -217,5 +217,12 @@ describe("AppAccessSummary outside calls", () => {
     const [post, get] = screen.getAllByTestId("app-access-external");
     expect(post!.textContent).toContain("Changed");
     expect(get!.textContent).toContain("New");
+  });
+
+  it("says a shared call runs on the server, and who can start it", () => {
+    render(<ExternalCallsCard operations={[{ ...usage!, access: "viewers" }]} />);
+    const row = screen.getByTestId("app-access-external");
+    expect(row.textContent).toContain("Anyone who can open the app");
+    expect(row.textContent).toContain("Your dohc server");
   });
 });

@@ -594,14 +594,30 @@ so.
 
 Only the owner approves outside calls, and only in the desktop window. The CLI and MCP
 doors, staged approval, and Personal apps refuse them, because an agent could otherwise
-approve an app that spends a secret. The desktop runs approved operations for local-only
-workspaces, at most 8 at a time per workspace. Synced workspaces and published apps refuse
-them until the relay runs them with its own secret vault. Publishing never copies a local
-secret to the server.
+approve an app that spends a secret. Member apps refuse them too. The desktop runs
+approved operations for local-only workspaces, at most 8 at a time per workspace. Synced
+workspaces refuse them for now.
+
+The relay runs a published app's operations with its own sealed secret vault. Publishing
+never copies a local secret to the server. The relay accepts publishing or reactivating such
+an app only from the owner's desktop session. When the owner publishes, the relay records each
+secret's identity (usage, allowed hosts, and creation time) with the approval, and refuses
+to publish if the secret is missing or doesn't fit. Before each send it checks that the
+secret still has that identity, so a rotated value keeps working and a recreated or
+widened secret needs a new approval. The secret's AAD binds it to the workspace and its
+owner. An `owner` operation runs only for the owner. A `viewers` operation runs for any
+caller the publication serves, so a share-link visitor spends the owner's secret. The
+relay limits that: per workspace 120 calls in a row then 1/s, per link grant 30 then
+1 every 2 s, and 8 in flight per workspace with 2 kept for the owner. It runs these calls
+outside Collection admission, and rechecks the caller and the authority revision right
+before sending. Visitors get a fixed "isn't available" text; only the owner sees setup
+detail. A hosted relay sends these requests from its own network, so the outbound HTTPS
+checks above are the only egress boundary.
 
 See the [declaration tests](../../packages/security-contract/src/appExternal.test.ts),
-[declared HTTPS tests](../../packages/service-http/src/declaredHttps.test.ts), and
-[desktop executor tests](../../apps/desktop/src/workspaces/localAppExternal.test.ts).
+[declared HTTPS tests](../../packages/service-http/src/declaredHttps.test.ts),
+[desktop executor tests](../../apps/desktop/src/workspaces/localAppExternal.test.ts), and
+[relay executor tests](../../services/sync-relay/src/appExternalCalls.test.ts).
 
 ## Incoming webhooks
 

@@ -1,3 +1,4 @@
+import { createAppExternalCalls } from "./appExternalCalls";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { parseRoute } from "./relayRoute";
 import { RELAY_ROUTE_PATTERNS, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
@@ -36,7 +37,7 @@ import { createPushDeviceRoutes } from "./pushDeviceRoutes";
 import { PUSH_DEVICES_PATH } from "@dohc/workspace-contracts/push-subscriptions";
 import type { ApnsConfig } from "./pushConfig";
 import { createNamedRecipientDocuments } from "./namedRecipientDocuments";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { TokenBucketLimiter, type DeclaredHttpsTransport } from "@dohc/service-http";
 import {
   createCollectionWriteRateLimiter,
   createCollectionWriteRoutes,
@@ -291,6 +292,7 @@ export interface CreateSyncRelayHandlerOptions {
   resolveOutboundDestination?: OutboundWebhookExecutionDependencies["resolveDestination"];
   sendOutboundRequest?: OutboundWebhookExecutionDependencies["sendRequest"];
   readOutboundRequest?: OutboundWebhookExecutionDependencies["readRequest"];
+  appExternalTransport?: DeclaredHttpsTransport;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
@@ -427,6 +429,7 @@ export function createSyncRelayHandler({
   resolveOutboundDestination,
   sendOutboundRequest,
   readOutboundRequest,
+  appExternalTransport,
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -521,6 +524,12 @@ export function createSyncRelayHandler({
         shareSenderLabel,
         publications: appPublicationLimits !== undefined,
         events: appEventWaits,
+        external: createAppExternalCalls({
+          storage,
+          keyring: secretKeyring,
+          nowMs,
+          ...(appExternalTransport ? { transport: appExternalTransport } : {}),
+        }),
       })
     : undefined;
   if (
@@ -1697,7 +1706,17 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         if (route.route === "owner-app-responses")
           return readOwnerAppResponses(request, route, actor.userId, storage);
-        const answer = await respondToOwnerAppPublication(request, route, actor.userId);
+        const answer = await respondToOwnerAppPublication(
+          request,
+          route,
+          actor.userId,
+          async () => {
+            const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+            if (!sessionResolver) return false;
+            const session = await bearerAccountSession(storage, sessionResolver, request);
+            return session.clientKind === "desktop" && session.userId === actor.userId;
+          },
+        );
         // Withdrawing, reactivating, and changing Collection approval each move the authority revision.
         if (answer.ok && "publicationId" in route && route.action !== "read")
           phoneApps.end({

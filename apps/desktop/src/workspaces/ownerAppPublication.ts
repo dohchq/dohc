@@ -304,11 +304,6 @@ export function parseAppPublicationDeclaration(
   if (Object.hasOwn(row, "external")) {
     try {
       external = sortAppExternalOperations(parseAppExternalDeclaration(row.external));
-      const shared = external.find((operation) => operation.access !== "owner");
-      if (shared)
-        throw new Error(
-          `Operation "${shared.name}" can run only for you for now. Set its access to "owner".`,
-        );
     } catch (error) {
       throw new Error(
         `${manifestPath} external: ${error instanceof Error ? error.message : String(error)}`,
@@ -649,10 +644,8 @@ async function prepareAppSources(
     throw new Error(
       "Personal apps can't call outside services. Only the workspace's owner can approve that.",
     );
-  if (declared.external && !requireManifest)
-    throw new Error(
-      "Apps that call outside services run only on this computer for now. Approve it here instead of publishing.",
-    );
+  if (declared.external && declared.collection && !requireManifest)
+    throw new Error("Apps that create Collection files can't call outside services when shared.");
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
   const decoder = new TextDecoder();

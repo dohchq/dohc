@@ -26,6 +26,7 @@ import {
   AppAccessSummary,
   CollectionPermissionCard,
   DatasetPermissionCard,
+  ExternalCallsCard,
   ExternalNetworkCard,
   type AppCapability,
   type LinkReadChoice,
@@ -1669,7 +1670,7 @@ function PublicationDialog(
                   ))}
                 </ul>
               </div>
-              <div className="space-y-3 text-[13px] text-muted">
+              <div className="flex flex-col gap-3 text-[13px] text-muted">
                 <h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
                 {prepared.capabilities.length === 0 ? (
                   <p className="m-0 rounded-lg border border-line bg-bg px-3 py-2 text-[13px] text-muted">
@@ -1693,6 +1694,7 @@ function PublicationDialog(
                     ),
                   )
                 )}
+                {prepared.external ? <ExternalCallsCard operations={prepared.external} /> : null}
                 <ExternalNetworkCard
                   sharedCollectionFiles={prepared.capabilities.some(
                     (capability) => capability.kind === "collection-create",

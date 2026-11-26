@@ -57,7 +57,19 @@ export function createOwnerAppPublicationRoutes(options: {
   ) {
     throw new Error("Invalid app publication limits.");
   }
-  return async (request: Request, route: OwnerAppPublicationRoute, ownerUserId: string) => {
+  const desktopOnly = async (fromDesktop: () => Promise<boolean>) => {
+    if (!(await fromDesktop()))
+      throw relayError(
+        "conflict",
+        "Share an app that calls outside services from the dohc desktop app.",
+      );
+  };
+  return async (
+    request: Request,
+    route: OwnerAppPublicationRoute,
+    ownerUserId: string,
+    fromDesktop: () => Promise<boolean>,
+  ) => {
     const { storage } = options;
     if (!limits || !storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (route.action === "publish" && request.method === "GET") {
@@ -161,6 +173,8 @@ export function createOwnerAppPublicationRoutes(options: {
       } catch {
         throw badRequest("Invalid publication agent.");
       }
+      if (route.action === "reactivate" && storage.readAppPublication(lookup!).candidate.external)
+        await desktopOnly(fromDesktop);
       return response(
         route.action === "withdraw"
           ? storage.withdrawAppPublication({
@@ -223,12 +237,13 @@ export function createOwnerAppPublicationRoutes(options: {
     } catch {
       throw badRequest("Invalid publication candidate.");
     }
-    if (candidate.external)
-      throw badRequest("Apps that call outside services run only on the owner's computer for now.");
-    if (
-      workspace &&
-      candidate.capabilities.some((capability) => capability.kind === "collection-create")
-    )
+    const creates = candidate.capabilities.some(
+      (capability) => capability.kind === "collection-create",
+    );
+    if (creates && candidate.external)
+      throw badRequest("Apps that create Collection files can't call outside services.");
+    if (candidate.external) await desktopOnly(fromDesktop);
+    if (workspace && creates)
       throw badRequest("Apps that create Collection files share only on a link.");
     let agent;
     try {

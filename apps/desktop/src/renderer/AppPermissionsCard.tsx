@@ -320,9 +320,11 @@ const kilobytes = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
 function ExternalRows({
   operation,
   approved,
+  shared = false,
 }: {
   operation: AppExternalOperation;
   approved: readonly AppExternalOperation[] | null;
+  shared?: boolean;
 }) {
   const before = approved?.find((value) => value.name === operation.name);
   const mark =
@@ -405,12 +407,14 @@ function ExternalRows({
           <User size={12} aria-hidden />
           Who
         </dt>
-        <dd className="m-0 min-w-0 text-ink">Only you</dd>
+        <dd className="m-0 min-w-0 text-ink">
+          {operation.access === "owner" ? "Only you" : "Anyone who can open the app"}
+        </dd>
         <dt className="flex items-center gap-2 self-start text-muted">
           <Monitor size={12} aria-hidden />
           Runs on
         </dt>
-        <dd className="m-0 min-w-0 text-ink">This computer</dd>
+        <dd className="m-0 min-w-0 text-ink">{shared ? "Your dohc server" : "This computer"}</dd>
       </dl>
       {operation.method === "POST" ? (
         <p className="col-start-2 m-0 mt-1 flex items-start gap-2 text-[12px] text-warning">
@@ -418,6 +422,20 @@ function ExternalRows({
           <span className="min-w-0">It can change your data on {operation.host}.</span>
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/** The outside calls a shared app makes from the server, as the owner reviews them before sharing. */
+export function ExternalCallsCard({ operations }: { operations: readonly AppExternalOperation[] }) {
+  return (
+    <div
+      data-testid="app-publication-external"
+      className="flex flex-col gap-4 rounded-lg border border-line bg-bg py-3"
+    >
+      {operations.map((operation) => (
+        <ExternalRows key={operation.name} operation={operation} approved={null} shared />
+      ))}
     </div>
   );
 }

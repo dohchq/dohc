@@ -1,6 +1,7 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { readBoundedBytes } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import type { createAppExternalCalls } from "./appExternalCalls";
 import { JournalError, type DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import {
   DatasetHostError,
@@ -950,6 +951,7 @@ export function createDatasetAppRoutes(
     /** Without app publishing, only an app the owner approved on their own computer runs here. */
     publications: boolean;
     events?: AppEventWaits;
+    external?: ReturnType<typeof createAppExternalCalls>;
   },
 ) {
   const admit = createAppBackendAdmission(options.limits);
@@ -980,6 +982,32 @@ export function createDatasetAppRoutes(
           );
         await options.events.wait({ ...current, since, holdMs, signal });
       }
+    }
+    if (route.action === "external") {
+      if (!options.external || !options.publications) throw notFound();
+      if (request.method !== "POST") throw relayError("method_not_allowed");
+      if (new URL(request.url).search) throw badRequest("App operations do not accept a query.");
+      const served = {
+        publicationId: route.publicationId,
+        ...host.externalPublication(auth, route.publicationId),
+      };
+      const signal = AbortSignal.any([
+        request.signal,
+        storage.unavailable,
+        AbortSignal.timeout(30_000),
+      ]);
+      const { raw } = await json(request, signal, APP_BACKEND_REQUEST_BYTES);
+      const stillServed = async () => {
+        if (auth.kind === "named") await auth.launch?.recheck();
+        if (
+          host.externalPublication(auth, route.publicationId).authorityRevision !==
+          served.authorityRevision
+        )
+          throw notFound();
+      };
+      await stillServed();
+      const call = options.external;
+      return response(() => call(served, raw, stillServed, signal));
     }
     const reviewing =
       route.action === "summary" || route.action === "consent" || route.action === "blob";

@@ -1077,11 +1077,34 @@ describe("outside calls in app.publish.json", () => {
     });
   });
 
-  it("refuses to publish an app that calls outside services, before capturing it", async () => {
+  it("shares the declared calls for the server to run", async () => {
     const h = harness();
     h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, external });
-    await expect(h.prepare()).rejects.toThrow(
-      "Apps that call outside services run only on this computer for now.",
+    const prepared = await h.prepare();
+    expect(prepared.candidate.external?.map((operation) => operation.name)).toEqual([
+      "events",
+      "usage",
+    ]);
+  });
+
+  it("refuses to share an app that also creates Collection files, before capturing it", async () => {
+    const h = harness();
+    h.setDeclaration({
+      entryPath: "main.ts",
+      inputs: ["main.ts"],
+      packageMap: {},
+      external,
+      collection: {
+        kind: "collection-create",
+        collectionPath: "../Signups",
+        allowedFields: ["name"],
+        requiredFields: ["name"],
+        readFields: [],
+      },
+    });
+    h.sources.set("Signups/collection.yaml", "name: Signups");
+    await expect(h.prepare("app", ["app", "Signups"])).rejects.toThrow(
+      "Apps that create Collection files can't call outside services when shared.",
     );
     expect(h.compile).not.toHaveBeenCalled();
   });
@@ -1099,7 +1122,7 @@ describe("outside calls in app.publish.json", () => {
     );
   });
 
-  it("refuses a call shared with viewers until shared calls can run", async () => {
+  it("keeps a call open to everyone who can open the app", async () => {
     const h = harness();
     h.setDeclaration({
       entryPath: "main.ts",
@@ -1107,6 +1130,6 @@ describe("outside calls in app.publish.json", () => {
       packageMap: {},
       external: { usage: { ...external.usage, access: "viewers" } },
     });
-    await expect(local(h)).rejects.toThrow('Operation "usage" can run only for you for now.');
+    expect((await local(h)).candidate.external?.[0]?.access).toBe("viewers");
   });
 });

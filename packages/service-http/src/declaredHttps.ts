@@ -1,4 +1,5 @@
 import {
+  parseSafeOutboundHttpsUrl,
   parseSafeOutboundJson,
   readSafeOutboundHttps,
   resolveSafeOutboundDestination,
@@ -145,4 +146,40 @@ export async function sendDeclaredHttps(options: {
       "The service's answer repeated the secret, so dohc withheld it.",
     );
   return { status: response.status, data };
+}
+
+/** Sends to a loopback fixture in end-to-end tests, after the same host check. Never used in a release. */
+export function loopbackDeclaredHttpsTransport(origin: string): DeclaredHttpsTransport {
+  return {
+    async resolve(url, allowedHosts) {
+      const parsed = parseSafeOutboundHttpsUrl(url);
+      if (!parsed || !allowedHosts.has(parsed.hostname)) throw new Error("Host not allowed.");
+      return {
+        href: parsed.href,
+        url: parsed,
+        canonicalHost: parsed.hostname,
+        address: "127.0.0.1",
+        family: 4,
+      };
+    },
+    async read(request, signal) {
+      const url = request.destination.url;
+      const response = await fetch(`${origin}${url.pathname}${url.search}`, {
+        method: request.method ?? "POST",
+        headers: { ...request.headers, "x-dohc-test-host": url.hostname },
+        ...(request.body ? { body: new Uint8Array(request.body) } : {}),
+        redirect: "manual",
+        ...(signal ? { signal } : {}),
+      });
+      const body = Buffer.from(await response.arrayBuffer());
+      if (body.byteLength > (request.maxResponseBytes ?? 0))
+        throw new SafeOutboundError("response_too_large", "too large");
+      return {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        contentEncoding: response.headers.get("content-encoding"),
+        body,
+      };
+    },
+  };
 }

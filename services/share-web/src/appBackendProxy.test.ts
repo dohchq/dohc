@@ -174,6 +174,12 @@ it("forwards to fixed backend routes with launch authority and no browser creden
       },
       { file, bytesBase64: "JVBERg==" },
     ],
+    [
+      { id: "one", op: "backend.external", operation: "count", input: { day: "2026-11-26" } },
+      "external",
+      { authorityRevision: 7, operation: "count", input: { day: "2026-11-26" } },
+      { status: 404, data: { detail: "Not found" } },
+    ],
   ] as const) {
     const response = await forward(body, async (request) => {
       expect(request.url).toBe(
@@ -562,4 +568,18 @@ it("maps upload body read timeouts to 408 and reports limit details on named 413
   expect(oversizedNamed.status).toBe(413);
   const body413 = (await oversizedNamed.json()) as { error: string };
   expect(body413.error).toContain(`${APP_BACKEND_UPLOAD_BYTES} bytes`);
+});
+
+it("passes on an outside call's answer only as a status and its JSON", async () => {
+  const call = { id: "one", op: "backend.external", operation: "count", input: {} };
+  for (const reply of [
+    { status: 99, data: 1 },
+    { status: 200 },
+    { status: 200, data: 1, secret: "x" },
+  ])
+    expect((await forward(call, async () => Response.json(reply))).status).not.toBe(200);
+  for (const extra of [{ dataset: "a" }, { idempotencyKey: "x" }])
+    expect((await forward({ ...call, ...extra }, async () => Response.json({}))).status).not.toBe(
+      200,
+    );
 });

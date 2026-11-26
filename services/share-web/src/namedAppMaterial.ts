@@ -78,7 +78,7 @@ function relayFetcher(
       path = target + "/consent";
     } else if (
       request.method === "POST" &&
-      ["invoke", "upload", "file", "attempt"].some(
+      ["invoke", "upload", "file", "attempt", "external"].some(
         (action) => url.pathname === prefix + "/backend/" + action,
       ) &&
       !url.search

@@ -8,6 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
+import { sealWorkspaceSecret, workspaceSecretKeyring } from "./workspaceSecretCrypto";
 import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendAction } from "./appBackendRoutes";
@@ -214,6 +216,7 @@ async function fixture(
   function publishWith(
     capabilities: AppPublicationCandidate["capabilities"],
     audience: "link" | "workspace" = "link",
+    external?: AppPublicationCandidate["external"],
   ) {
     const previous = base.storage.readAppPublication({
       ...scope,
@@ -225,6 +228,7 @@ async function fixture(
       ...previous.candidate,
       capabilities,
       files: previous.candidate.files.filter((file) => file.path === "bundle.js"),
+      ...(external ? { external } : {}),
     };
     const digest = (domain: string, value: unknown) =>
       createHash("sha256")
@@ -906,6 +910,60 @@ const collectionFile = (path = "registrations/dataset.json") => ({
   text: JSON.stringify({ datasetId: id(1) }),
 });
 const collectionMissing = { code: "app_collection_missing", statusCode: 410 };
+
+it("refuses a shared app's outside calls once its Collection is gone, as it refuses opening the app", async () => {
+  const f = await fixture();
+  await f.activate();
+  const keyring = workspaceSecretKeyring({ linkKey: "dataset-host-test-key" })!;
+  const secret = {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    name: "KEY",
+    usage: "http-header" as const,
+  };
+  f.storage.upsertWorkspaceSecret({
+    ...secret,
+    mode: "create",
+    allowedHosts: ["api.example.com"],
+    keyId: keyring.activeId,
+    seal: (generation) =>
+      sealWorkspaceSecret({
+        ...secret,
+        keyring,
+        keyId: keyring.activeId,
+        allowedHosts: ["api.example.com"],
+        generation,
+        plaintext: "value",
+      }),
+    nowMs: 10,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5)],
+    },
+    revision,
+  );
+  const external = parseAppExternalDeclaration({
+    count: {
+      method: "GET",
+      url: "https://api.example.com/count",
+      secret: { name: "KEY", header: "X-Key" },
+      access: "viewers",
+    },
+  });
+  const publicationId = f.publishWith([capability], "link", external);
+  f.host.bindPublication(owner, { ...scope, publicationId });
+  const link = f.link("friend");
+  expect(f.host.externalPublication(link, publicationId).caller).toMatchObject({ kind: "link" });
+  f.advance(120_000);
+  expect(() => f.host.externalPublication(link, publicationId)).toThrow(
+    expect.objectContaining(collectionMissing),
+  );
+});
 
 it("keeps an app working while the Collection's folder holds a dataset.json that names no Collection", async () => {
   const f = await fixture();

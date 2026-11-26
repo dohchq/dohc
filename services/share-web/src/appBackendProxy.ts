@@ -93,7 +93,7 @@ export async function forwardAppBackend(input: {
     input.fileRoute !== (body.op === "backend.file")
   )
     return error(400);
-  let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;
+  let action: "invoke" | "upload" | "file" | "attempt" | "external", payload: unknown;
   try {
     const datasetField = Object.hasOwn(body, "dataset") ? { dataset: body.dataset } : {};
     if (isBinaryUpload) {
@@ -136,6 +136,15 @@ export async function forwardAppBackend(input: {
         ...datasetField,
       });
       payload = body.readOnly === true ? { ...parsed, readOnly: true } : parsed;
+    } else if (body.op === "backend.external") {
+      if (!exact(body, ["id", "op", "operation", "input"]) || typeof body.operation !== "string")
+        return error(400);
+      action = "external";
+      payload = {
+        authorityRevision: input.authorityRevision,
+        operation: body.operation,
+        input: body.input,
+      };
     } else if (body.op === "backend.attempt") {
       if (!exact(body, ["id", "op", "operation", "request"], ["dataset"])) return error(400);
       action = "attempt";
@@ -251,6 +260,15 @@ export async function forwardAppBackend(input: {
         revision: value.revision,
         replayed: value.replayed,
       };
+    } else if (action === "external") {
+      if (
+        !exact(value, ["status", "data"]) ||
+        !Number.isSafeInteger(value.status) ||
+        (value.status as number) < 100 ||
+        (value.status as number) > 599
+      )
+        return error(503);
+      result = { status: value.status, data: value.data };
     } else if (action === "attempt") {
       result = parseDatasetAttemptResult(value);
     } else if (action === "upload") {

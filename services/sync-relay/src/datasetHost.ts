@@ -954,7 +954,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         candidate: published.candidate,
         authorityRevision: published.result.descriptor.authorityRevision,
         local: false,
-        resolveAuthority(datasetId: string): DatasetAuthority {
+        resolveAuthority(datasetId?: string): DatasetAuthority {
           const enrollment = readLinkEnrollment(storage, auth, nowMs());
           if (!enrollment || linkWriteRefusal(enrollment)) throw notFound();
           return {
@@ -1057,6 +1057,19 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       /** An app the owner approved on their own computer. */
       local: loaded.local,
       member: loaded.member,
+    };
+  }
+  // A published app that calls outside services, for a caller who can still open it.
+  function externalPublication(auth: AppBackendAuth, publicationId: string) {
+    current();
+    const loaded = loadAppPublication(auth, publicationId);
+    if (loaded.local || loaded.member || !loaded.candidate.external) throw notFound();
+    publication(auth, publicationId);
+    return {
+      workspaceId: loaded.workspaceId,
+      authorityRevision: loaded.authorityRevision,
+      external: loaded.candidate.external,
+      caller: loaded.resolveAuthority().caller,
     };
   }
   // The app whose files a named caller may load: a dataset app, or a publication that requests nothing in the
@@ -1713,6 +1726,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       historyRevision: host.historyRevision,
       publication,
       servedPublication,
+      externalPublication,
       /** The revision of a link app's Collection, only while the link can run one of its reads now. */
       appEventRevision(auth: AppBackendAuth, publicationId: string, authorityRevision: number) {
         const published = auth.kind === "link" ? publication(auth, publicationId) : null;

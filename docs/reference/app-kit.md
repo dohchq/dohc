@@ -280,10 +280,19 @@ const { status, data } = await useApp().external<{ results: unknown[] }>("recent
 - `{{name}}` fills a whole path segment, query value, or body value with a declared input. Inputs are `integer` (`min`, `max`), `enum` (`values`), `boolean`, or `string` (`maxLength`). Every input is required.
 - `headers` are fixed text. `secret.header` names the header that carries the secret, after an optional `prefix`. The secret must be a header secret whose allowed websites include the URL's host.
 - `maxResponseBytes` defaults to 192 KiB, which is also the most it can be. The answer must be uncompressed JSON in UTF-8, nested at most 64 levels deep. Each call times out after 10 seconds.
-- `access` is `"owner"`, the default. For now, only the owner's own app can make the call.
+- `access` is `"owner"`, the default, or `"viewers"`. An `"owner"` call runs only for the owner. A `"viewers"` call runs for anyone who can open the app, including visitors on a share link, and spends the owner's secret.
 - `status` is the service's HTTP status, so check it. A refused call throws an `AppBackendError` whose `refusal.code` is one such as `external_input`, `external_secret`, or `secret_echoed`.
 
-The owner approves these calls in the dohc window. The CLI, MCP, and `dohc app stage` refuse them. Any change to `external` needs a new approval. For now, these calls run only for approved apps in workspaces that aren't synced.
+The owner approves these calls in the dohc window, when approving the app or sharing it. The CLI, MCP, and `dohc app stage` refuse them. Any change to `external` needs a new approval.
+
+Where the calls run:
+
+- An app approved on this computer, in a workspace that isn't synced, runs them on this computer with the secret in Settings > Secrets.
+- A shared app runs them on your dohc server, with the server's copy of the secret. This covers share links, the people the app is shared with, and the phone, which opens shared apps only. Sharing is refused until the secret is on the server as a header secret for the call's host. Sharing binds the secret as it is then: you can replace its value, but if you delete the secret and add it again, or change its usage or websites, stop sharing the app and share it again.
+- A shared app that creates Collection files can't declare `external`.
+- Synced workspaces refuse calls from apps approved on this computer for now.
+
+The server allows each workspace 120 calls in a row, then 1 each second, and each share link 30 in a row, then 1 every 2 seconds. A workspace runs at most 8 calls at once, and 2 of those are kept for the owner. A busy or rate-limit refusal names the limit, for visitors too. For any other refusal, visitors see only that the service isn't available, and the owner sees what to fix.
 
 ## Sandbox limits, clipboard, printing, and fullscreen
 

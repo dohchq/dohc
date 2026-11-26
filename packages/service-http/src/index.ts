@@ -51,6 +51,7 @@ export function jsonResponse(
 export {
   DECLARED_HTTPS_USER_AGENT,
   DeclaredHttpsError,
+  loopbackDeclaredHttpsTransport,
   safeDeclaredHttpsTransport,
   sendDeclaredHttps,
   type DeclaredHttpsErrorCode,
