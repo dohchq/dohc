@@ -38,12 +38,14 @@ import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyButton } from "./ui/CopyButton";
-import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { GhostButton, IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
+type OwnPublication = Extract<Publication, { manifestUnavailable: false }>;
+type PrepareInput = Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
 type StagedProposal = Extract<OwnerAppPublicationResult, { kind: "staged" }>["stage"];
 const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
@@ -164,13 +166,12 @@ const More = ({ children }: { children: ReactNode }) => (
 
 // onLocalChange runs after anything that may change this device's approvals, so other views read them again.
 // localApproval says how an app approved here opens: in its tab, in the browser, or not at all when it has no app.publish.json.
-// access: the shell's workspace server connection, and that server's address, so a signed-out Share links box can say so.
+// access: the shell's workspace server connection, and that server's address, so a signed-out Publish box can say so.
 type PublicationProps = {
   workspaceId: string;
   appRoot: string;
   title?: string;
   localApproval?: "tab" | "browser" | null;
-  onShareSource?: () => void;
   reportError?: ReportPermissionError;
   onLocalChange?: () => void;
   onCollectionsChange?: () => void;
@@ -347,6 +348,37 @@ function StagedCollectionsBox({ collections }: { collections: StagedProposal["co
   );
 }
 
+type RowState = { status: { text: string; published: boolean | null }; actions: ReactNode };
+
+/** One audience on the Publish box: who can open the app, whether it is live for them, and what to do next. */
+function AudienceRow(props: RowState & { icon: LucideIcon; testId: string; label: string }) {
+  const Icon = props.icon;
+  const { text, published } = props.status;
+  const Mark = published === true ? CircleCheck : published === false ? TriangleAlert : null;
+  return (
+    <li data-testid={props.testId} className="flex items-center gap-2 px-3 py-2 text-[13px]">
+      <Icon size={14} aria-hidden className="shrink-0 text-muted" />
+      <div className="min-w-0 flex-1">
+        <p className="m-0 truncate text-ink">{props.label}</p>
+        <p
+          data-testid={`${props.testId}-state`}
+          className={`m-0 flex items-center gap-1 text-[12px] ${published === false ? "text-warning" : "text-muted"}`}
+        >
+          {Mark ? (
+            <Mark
+              size={12}
+              aria-hidden
+              className={`shrink-0 ${published ? "text-success" : "text-warning"}`}
+            />
+          ) : null}
+          <span className="truncate">{text}</span>
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">{props.actions}</div>
+    </li>
+  );
+}
+
 type LocalReview =
   | { status: "loading" }
   | { status: "failed" }
@@ -380,7 +412,13 @@ function PublicationDialog(
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [publications, setPublications] = useState<Publication[]>([]);
-  const [pendingWithdraw, setPendingWithdraw] = useState<Publication | null>(null);
+  // One publication from the full list, or every live one an audience row ends.
+  const [pendingWithdraw, setPendingWithdraw] = useState<Publication[] | null>(null);
+  // Publish changes replaces these once the new revision is live, so a link never serves two revisions.
+  const [supersedes, setSupersedes] = useState<Publication[]>([]);
+  // A link made here, with its URL from createLink, until the link list reads it back.
+  const [createdLink, setCreatedLink] = useState<{ grantId: string; url: string } | null>(null);
+  const [preparedNote, setPreparedNote] = useState<string | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<Publication | null>(null);
   const [publicationsLoading, setPublicationsLoading] = useState(true);
   const [responseRequests, setResponseRequests] = useState<ReadonlySet<string>>(new Set());
@@ -726,7 +764,14 @@ function PublicationDialog(
     }
   };
   useEffect(() => {
-    if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy)
+    if (
+      view === "local" &&
+      !prepared &&
+      needsCandidate &&
+      !localCandidate &&
+      candidateState === "idle" &&
+      !busy
+    )
       void prepareLocalCandidate();
   });
   // A retry waits in this effect for any running action, so it never takes over an approval or a removal.
@@ -862,9 +907,12 @@ function PublicationDialog(
     }
   };
 
+  // A function input makes the link first. Its Try again calls the same function, so a retry keeps that link's operationId.
   const prepareWith = async (
-    input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>,
+    input: PrepareInput | (() => Promise<PrepareInput>),
     link: string,
+    replaces: Publication[] = [],
+    note: string | null = null,
   ) => {
     if (busy || responsesBusy) return;
     const mine = ++request.current;
@@ -872,7 +920,9 @@ function PublicationDialog(
     setError(null);
     setNotice(null);
     try {
-      const result = await api.publishOwnerApp(input);
+      const selection = typeof input === "function" ? await input() : input;
+      if (!alive.current || mine !== request.current) return;
+      const result = await api.publishOwnerApp(selection);
       if (!alive.current || mine !== request.current) {
         if (result.kind === "prepared") cancel(result);
         return;
@@ -887,7 +937,9 @@ function PublicationDialog(
       setReactivating(false);
       setLinkReads([]);
       setPreparedLink(link);
-      setPreparedForMembers(input.audience === "workspace");
+      setPreparedNote(note);
+      setSupersedes(replaces);
+      setPreparedForMembers(selection.audience === "workspace");
     } catch (cause) {
       if (alive.current && mine === request.current) {
         cancel(candidate.current);
@@ -897,7 +949,7 @@ function PublicationDialog(
           "dohc could not prepare this app.",
           new Error(ipcErrorMessage(cause, "")),
           () => {
-            if (alive.current) void prepareWith(input, link);
+            if (alive.current) void prepareWith(input, link, replaces, note);
             else props.onReopen();
           },
         );
@@ -962,6 +1014,8 @@ function PublicationDialog(
       const verified = verifiedPrepared(result);
       setPrepared(verified);
       setReactivating(true);
+      setSupersedes([]);
+      setPreparedNote(null);
       setPreparedForMembers(publication.audience === "workspace");
       setPreparedLink(
         publication.audience === "workspace" ? MEMBERS_LABEL : `Link ${publication.grantId}`,
@@ -1003,14 +1057,35 @@ function PublicationDialog(
         throw new Error("dohc could not confirm this publication.");
       candidate.current = null;
       localChanged();
+      // The new revision is live. Withdraw the ones it replaces, so the link opens only this one.
+      let replaced = true;
+      for (const old of supersedes) {
+        if (old.publicationId === result.publicationId) continue;
+        const ended = await api
+          .publishOwnerApp({
+            action: "withdraw",
+            workspaceId: props.workspaceId,
+            publicationId: old.publicationId,
+            expectedAuthorityRevision: old.authorityRevision,
+          })
+          .catch(() => null);
+        if (ended?.kind !== "withdrawn") replaced = false;
+      }
+      if (!alive.current || mine !== request.current) return;
       setPublicationsReload((value) => value + 1);
       setPrepared(null);
+      if (!replaced)
+        setError(
+          "Published. dohc could not unpublish the earlier version. Unpublish it in Manage publications.",
+        );
       setNotice(
         reactivating
           ? "App republished."
-          : preparedForMembers
-            ? "App published for workspace members."
-            : "App published on the selected link.",
+          : supersedes.length > 0
+            ? "Changes published."
+            : preparedForMembers
+              ? "App published for workspace members."
+              : "App published. Anyone with the link can open it.",
       );
     } catch (cause) {
       if (alive.current && mine === request.current) {
@@ -1026,8 +1101,12 @@ function PublicationDialog(
     }
   };
 
-  const withdraw = async (publication: Publication | LocalPublication, local = false) => {
-    if (busy || responsesBusy) return;
+  // True once the publication has ended.
+  const withdraw = async (
+    publication: Publication | LocalPublication,
+    local = false,
+  ): Promise<boolean> => {
+    if (busy || responsesBusy) return false;
     const mine = ++request.current;
     setBusy("withdraw");
     setBusyPublicationId(publication.publicationId);
@@ -1042,7 +1121,7 @@ function PublicationDialog(
         publicationId: publication.publicationId,
         expectedAuthorityRevision: publication.authorityRevision,
       });
-      if (!alive.current || mine !== request.current) return;
+      if (!alive.current || mine !== request.current) return false;
       if (
         local &&
         result.kind === "withdrawalUnconfirmed" &&
@@ -1054,7 +1133,7 @@ function PublicationDialog(
           if (alive.current)
             void withdraw({ ...publication, authorityRevision: result.authorityRevision }, true);
         });
-        return;
+        return false;
       }
       if (result.kind !== "withdrawn")
         throw new Error("dohc could not confirm that this publication ended. Try again.");
@@ -1068,12 +1147,14 @@ function PublicationDialog(
             : "App unpublished. The share link still works for its other shared content.",
         );
       }
+      return true;
     } catch (cause) {
       if (alive.current && mine === request.current) {
         setError(ipcErrorMessage(cause, "dohc could not end app access. Try again."));
         if (local) localChanged();
         else setPublicationsReload((value) => value + 1);
       }
+      return false;
     } finally {
       if (alive.current && mine === request.current) {
         setBusy(null);
@@ -1124,8 +1205,38 @@ function PublicationDialog(
     cancel(candidate.current);
     candidate.current = null;
     setPrepared(null);
+    setSupersedes([]);
     setError(null);
   };
+
+  // createLink with an operationId made once per click, so that click's Try again gets the same link back.
+  const newAppLink = () => {
+    const operationId = crypto.randomUUID();
+    return async (): Promise<PrepareInput> => {
+      const result = await api.publishOwnerApp({
+        action: "createLink",
+        workspaceId: props.workspaceId,
+        appRoot: props.appRoot,
+        access: "view",
+        operationId,
+      });
+      if (result.kind !== "linkCreated" && result.kind !== "urlUnavailable")
+        throw new Error("dohc could not confirm the new link.");
+      if (alive.current) {
+        if (result.kind === "linkCreated")
+          setCreatedLink({ grantId: result.grantId, url: result.url });
+        setReload((value) => value + 1);
+      }
+      return {
+        action: "prepare",
+        workspaceId: props.workspaceId,
+        appRoot: props.appRoot,
+        shareId: result.shareId,
+        grantId: result.grantId,
+      };
+    };
+  };
+  const firstWithdraw = pendingWithdraw?.[0];
   const closeWithdrawal = () => {
     setPendingWithdraw(null);
     heading.current?.focus();
@@ -1196,13 +1307,199 @@ function PublicationDialog(
     const match = links.find(
       (link) => link.shareId === publication.shareId && link.grantId === publication.grantId,
     );
-    return appLinkUrl(match?.url, publication.publicationId);
+    const created = createdLink?.grantId === publication.grantId ? createdLink.url : null;
+    return appLinkUrl(match?.url ?? created, publication.publicationId);
   };
-  const linkRows = publications.filter(
-    (publication) => publication.active || publication.operatorTakedown,
-  );
   const showLinks =
     !!review && synced === true && !linksHidden && (!publicationsLoading || linksFailed);
+  // The two audiences on the first screen. A row reads this app's live publications for its audience.
+  const own = publications.filter(
+    (publication): publication is OwnPublication =>
+      !publication.manifestUnavailable && publication.appRoot === props.appRoot,
+  );
+  const live = (members: boolean) =>
+    own.filter(
+      (publication) =>
+        publication.active &&
+        publication.linkCurrent &&
+        !publication.operatorTakedown &&
+        (publication.audience === "workspace") === members,
+    );
+  const sourceRevision = review?.source?.sourceRevision ?? null;
+  // Unknown source counts as current, so a failed check never claims changes.
+  const current = (rows: OwnPublication[]) =>
+    sourceRevision === null || rows.some((row) => row.sourceRevision === sourceRevision);
+  const folderLabel = props.appRoot.split("/").pop() || props.appRoot;
+  const newLinkNote = `dohc made a view link to ${folderLabel}. Only you have it until you copy it.`;
+  // A link made for this folder alone. The quick path reuses it instead of making another.
+  const folderLink =
+    links
+      .filter(
+        (link) =>
+          link.access === "view" &&
+          link.selector.versionId === null &&
+          link.selector.paths.length === 1 &&
+          link.selector.paths[0] === props.appRoot,
+      )
+      .sort((a, b) => Number(!a.url) - Number(!b.url))[0] ?? null;
+  // A link to the app folder alone cannot carry files outside it, so those apps choose a wider link.
+  const outsideFolder = !!review?.source?.sourcePaths.some(
+    (path) => !path.startsWith(`${props.appRoot}/`),
+  );
+  const filesCollection = !!boxCapabilities?.some(
+    (capability) => capability.kind === "collection-create",
+  );
+  const rowBusy = !!busy || responsesBusy || candidateState === "loading";
+  const base = {
+    action: "prepare",
+    workspaceId: props.workspaceId,
+    appRoot: props.appRoot,
+  } as const;
+  const publishOnLink = (replaces: Publication[]) => {
+    const old = replaces[0] ?? folderLink;
+    if (!old?.shareId || !old.grantId)
+      return void prepareWith(newAppLink(), `New view link to ${folderLabel}`, [], newLinkNote);
+    void prepareWith(
+      { ...base, shareId: old.shareId, grantId: old.grantId },
+      `Link ${old.grantId.slice(0, 8)}`,
+      replaces,
+      replaces.length > 0
+        ? "People who have this link get the new version."
+        : `Uses your existing view link to ${folderLabel}. Anyone who has it can open the app.`,
+    );
+  };
+  const publishForMembers = (replaces: Publication[]) =>
+    void prepareWith({ ...base, audience: "workspace" }, MEMBERS_LABEL, replaces);
+  const manage = () => {
+    setError(null);
+    setNotice(null);
+    setView("links");
+  };
+  const publishedActions = (
+    rows: OwnPublication[],
+    audience: string,
+    copyUrl: string | null,
+    publishChanges: () => void,
+  ) => (
+    <>
+      {copyUrl ? (
+        <CopyButton
+          key={copyUrl}
+          size="row"
+          label="Copy app link"
+          sensitive={APP_LINK_SECRET}
+          disabled={rowBusy}
+          getText={() => copyUrl}
+        />
+      ) : null}
+      {current(rows) ? null : (
+        <SecondaryButton size="row" disabled={rowBusy} onClick={publishChanges}>
+          Publish changes
+        </SecondaryButton>
+      )}
+      <SecondaryButton
+        size="row"
+        disabled={rowBusy}
+        aria-label={`Unpublish for ${audience}`}
+        onClick={() => setPendingWithdraw(rows)}
+      >
+        Unpublish
+      </SecondaryButton>
+    </>
+  );
+  const publishedStatus = (rows: OwnPublication[]) =>
+    current(rows)
+      ? { text: "Published", published: true }
+      : { text: "Changes not published", published: false };
+  // A publication the operator disabled, or whose link changed, stays visible until the owner handles it.
+  const stopped = (members: boolean): RowState | null => {
+    const row = own.find(
+      (publication) =>
+        (publication.audience === "workspace") === members &&
+        (publication.operatorTakedown || (publication.active && !publication.linkCurrent)),
+    );
+    if (!row) return null;
+    return {
+      status: {
+        text: row.operatorTakedown ? "Disabled by server operator" : "Link changed",
+        published: false,
+      },
+      actions: (
+        <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
+          Manage
+        </SecondaryButton>
+      ),
+    };
+  };
+  const linkRowState = (): RowState => {
+    const rows = live(false);
+    const grants = new Set(rows.map((row) => row.grantId));
+    if (grants.size > 1)
+      return {
+        status: { text: `Published on ${grants.size} links`, published: true },
+        actions: (
+          <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
+            Manage
+          </SecondaryButton>
+        ),
+      };
+    if (rows.length > 0) {
+      const shown = rows.find((row) => row.sourceRevision === sourceRevision) ?? rows[0]!;
+      return {
+        status: publishedStatus(rows),
+        actions: publishedActions(rows, "anyone with the link", publicationAppUrl(shown), () =>
+          publishOnLink(rows),
+        ),
+      };
+    }
+    const problem = stopped(false);
+    if (problem) return problem;
+    if (outsideFolder)
+      return {
+        status: { text: "Uses files outside its folder", published: null },
+        actions: (
+          <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
+            Choose a link
+          </SecondaryButton>
+        ),
+      };
+    return {
+      status: { text: "Not published", published: null },
+      actions: (
+        <SecondaryButton
+          size="row"
+          disabled={rowBusy || loading || !!loadError}
+          title={folderLink ? undefined : `Make a view link to ${folderLabel}, then review the app`}
+          onClick={() => publishOnLink([])}
+        >
+          {folderLink ? "Publish" : "Create link"}
+        </SecondaryButton>
+      ),
+    };
+  };
+  const membersRowState = (): RowState => {
+    const rows = live(true);
+    if (rows.length > 0)
+      return {
+        status: publishedStatus(rows),
+        actions: publishedActions(rows, "workspace members", null, () => publishForMembers(rows)),
+      };
+    const problem = stopped(true);
+    if (problem) return problem;
+    if (filesCollection)
+      return {
+        status: { text: "Only on a link, since it saves files", published: null },
+        actions: null,
+      };
+    return {
+      status: { text: "Not published", published: null },
+      actions: (
+        <SecondaryButton size="row" disabled={rowBusy} onClick={() => publishForMembers([])}>
+          Publish
+        </SecondaryButton>
+      ),
+    };
+  };
   const connect = props.access?.context.connect;
   const server = props.access?.server ?? null;
   const status = (
@@ -1431,7 +1728,7 @@ function PublicationDialog(
               {showLinks ? (
                 <section aria-labelledby="app-links-title">
                   <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">
-                    Share links
+                    Publish
                   </h3>
                   {linksSignedOut && connect ? (
                     <div
@@ -1485,85 +1782,43 @@ function PublicationDialog(
                       </SecondaryButton>
                     </div>
                   ) : (
-                    <ul className="m-0 list-none divide-y divide-line rounded-lg border border-line bg-bg p-0">
-                      {linkRows.map((publication) => {
-                        const directAppUrl = publicationAppUrl(publication);
-                        return (
-                          <li
-                            key={publication.publicationId}
-                            className="flex items-center gap-2 px-3 py-2 text-[13px]"
-                          >
-                            {publication.audience === "workspace" ? (
-                              <Users size={12} aria-hidden className="shrink-0 text-muted" />
-                            ) : (
-                              <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
-                            )}
-                            <span
-                              className={`min-w-0 flex-1 truncate ${publication.operatorTakedown || !publication.linkCurrent ? "text-warning" : "text-ink"}`}
-                            >
-                              {publication.operatorTakedown
-                                ? "Disabled by server operator"
-                                : !publication.linkCurrent
-                                  ? "Link changed"
-                                  : publication.audience === "workspace"
-                                    ? "Published for workspace members"
-                                    : "Published on a share link"}
-                            </span>
-                            <span className="shrink-0 text-[12px] text-muted">
-                              {publication.grantId
-                                ? `Link ${publication.grantId.slice(0, 8)}`
-                                : MEMBERS_LABEL}
-                            </span>
-                            {directAppUrl ? (
-                              <CopyButton
-                                key={directAppUrl}
-                                size="row"
-                                label="Copy app link"
-                                sensitive={APP_LINK_SECRET}
-                                disabled={!!busy || responsesBusy}
-                                getText={() => directAppUrl}
-                              />
-                            ) : null}
-                            {publication.active && !publication.operatorTakedown ? (
-                              <SecondaryButton
-                                size="row"
-                                disabled={!!busy || responsesBusy}
-                                aria-label={`Unpublish ${publication.publicationId}`}
-                                onClick={() => setPendingWithdraw(publication)}
-                              >
-                                {busy === "withdraw" &&
-                                busyPublicationId === publication.publicationId
-                                  ? "Unpublishing…"
-                                  : "Unpublish"}
-                              </SecondaryButton>
-                            ) : null}
-                          </li>
-                        );
-                      })}
-                      <li className="flex items-center gap-2 px-3 py-2 text-[13px]">
-                        {linkRows.length === 0 ? (
-                          <>
-                            <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
-                            <span className="flex-1 text-muted">Not on a link</span>
-                          </>
-                        ) : (
-                          <span className="flex-1" />
-                        )}
-                        <SecondaryButton
-                          size="row"
-                          disabled={!!busy || responsesBusy}
-                          onClick={() => {
-                            setError(null);
-                            setNotice(null);
-                            setView("links");
-                          }}
-                        >
-                          Publish on a link
-                        </SecondaryButton>
+                    <ul
+                      data-testid="app-publish-rows"
+                      className="m-0 list-none divide-y divide-line rounded-lg border border-line bg-bg p-0"
+                    >
+                      {props.version ? null : (
+                        <>
+                          <AudienceRow
+                            icon={LinkIcon}
+                            testId="app-publish-link"
+                            label="Anyone with the link"
+                            {...linkRowState()}
+                          />
+                          <AudienceRow
+                            icon={Users}
+                            testId="app-publish-members"
+                            label={MEMBERS_LABEL}
+                            {...membersRowState()}
+                          />
+                        </>
+                      )}
+                      <li className="flex items-center justify-end px-1.5 py-1">
+                        <GhostButton disabled={rowBusy} onClick={manage}>
+                          Manage publications
+                        </GhostButton>
                       </li>
                     </ul>
                   )}
                 </section>
+              ) : null}
+              {busy === "prepare" ? (
+                <p role="status" className="m-0 text-[13px] text-muted">
+                  Preparing app…
+                </p>
+              ) : review && synced === false && !props.version ? (
+                <p data-testid="app-publish-unsynced" className="m-0 text-[12px] text-muted">
+                  Sync this workspace to publish it.
+                </p>
               ) : null}
               {status}
               {/* A failed action shows right above the button that retries it, so the two stay one part. */}
@@ -1641,18 +1896,27 @@ function PublicationDialog(
                 tabIndex={-1}
                 className="m-0 text-[13px] font-medium text-ink"
               >
-                Review app publication
+                {reactivating
+                  ? "Republish this revision"
+                  : preparedForMembers
+                    ? "Publish for workspace members"
+                    : "Publish for anyone with the link"}
               </h3>
               <p className="m-0 text-[13px] text-ink">
                 {reactivating
                   ? "Republish this stored revision. It does not include later source edits."
-                  : "Publish this captured app. Later source edits need a new publication."}
+                  : "Publishes the app as it is now. Later edits wait until you publish changes."}
               </p>
               <div className="text-[12px] text-muted">
                 <span className="font-medium text-ink">
                   {preparedForMembers ? "Who can open it" : "Link"}
                 </span>
                 <p className="m-0 break-words">{preparedLink}</p>
+                {preparedNote ? (
+                  <p data-testid="app-publication-link-note" className="m-0 mt-1 text-ink">
+                    {preparedNote}
+                  </p>
+                ) : null}
               </div>
               <div>
                 <h3 className="m-0 text-[13px] font-medium text-ink">Files included</h3>
@@ -1733,7 +1997,7 @@ function PublicationDialog(
                     ? "Publishing…"
                     : reactivating
                       ? "Republish this revision"
-                      : "Publish this revision"}
+                      : "Publish"}
                 </PrimaryButton>
               </footer>
             </>
@@ -1878,7 +2142,7 @@ function PublicationDialog(
                                 <SecondaryButton
                                   disabled={!!busy || responsesBusy}
                                   aria-label={`Unpublish ${publication.publicationId}`}
-                                  onClick={() => setPendingWithdraw(publication)}
+                                  onClick={() => setPendingWithdraw([publication])}
                                 >
                                   {busy === "withdraw" &&
                                   busyPublicationId === publication.publicationId
@@ -1977,22 +2241,26 @@ function PublicationDialog(
                   ) : null}
                 </>
               )}
-              {props.onShareSource ? (
+              {synced === false || folderLink ? null : (
                 <div className="flex items-center justify-between gap-3">
                   <p className="m-0 text-[12px] text-muted">
-                    Create a link that includes this app's source files.
+                    Make a view link to {folderLabel} and review the app on it.
                   </p>
                   <SecondaryButton
-                    disabled={!!busy || responsesBusy}
-                    onClick={() => {
-                      props.onClose();
-                      props.onShareSource?.();
-                    }}
+                    disabled={!!busy || responsesBusy || loading || !!loadError}
+                    onClick={() =>
+                      void prepareWith(
+                        newAppLink(),
+                        `New view link to ${folderLabel}`,
+                        [],
+                        newLinkNote,
+                      )
+                    }
                   >
-                    Share app folder
+                    Create view link
                   </SecondaryButton>
                 </div>
-              ) : null}
+              )}
               {synced === false ? null : (
                 <p className="m-0 text-[13px] text-muted">
                   Review this app's source and data access before publishing.
@@ -2061,7 +2329,7 @@ function PublicationDialog(
           <p className="break-all font-mono text-[12px]">{pendingRevoke.publicationId}</p>
         </ConfirmDialog>
       ) : null}
-      {pendingWithdraw ? (
+      {pendingWithdraw && firstWithdraw ? (
         <ConfirmDialog
           intent="danger"
           icon={EyeOff}
@@ -2074,23 +2342,25 @@ function PublicationDialog(
           onConfirm={() => {
             const value = pendingWithdraw;
             closeWithdrawal();
-            void withdraw(value);
+            void (async () => {
+              for (const publication of value) if (!(await withdraw(publication))) break;
+            })();
           }}
         >
           <p>This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
           <p>
-            {!pendingWithdraw.linkCurrent
+            {!firstWithdraw.linkCurrent
               ? "This publication belongs to a changed link. Choose a current link to publish the app again."
-              : pendingWithdraw.manifestUnavailable
+              : firstWithdraw.manifestUnavailable
                 ? "Source details are unavailable. This publication may belong to another app and cannot be republished."
                 : "You can review this stored revision and publish it again."}
           </p>
           <p
-            className={`break-all text-[12px] ${pendingWithdraw.manifestUnavailable ? "font-mono" : ""}`}
+            className={`break-all text-[12px] ${firstWithdraw.manifestUnavailable ? "font-mono" : ""}`}
           >
-            {pendingWithdraw.manifestUnavailable
-              ? pendingWithdraw.publicationId
-              : pendingWithdraw.appRoot}
+            {firstWithdraw.manifestUnavailable
+              ? firstWithdraw.publicationId
+              : firstWithdraw.appRoot}
           </p>
         </ConfirmDialog>
       ) : null}

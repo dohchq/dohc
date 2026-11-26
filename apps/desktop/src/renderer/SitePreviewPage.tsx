@@ -871,11 +871,6 @@ export function SitePreviewPage(props: {
               }}
               onLocalChange={localApprovalChanged}
               onCollectionsChange={props.onCollectionsChange}
-              onShareSource={
-                props.onShareSite
-                  ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title })
-                  : undefined
-              }
             />
           ) : null}
           {isOwnerLocalApp ? (

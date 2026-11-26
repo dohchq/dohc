@@ -412,16 +412,15 @@ This check uses the form that the desktop creates for a Collection.
    A synced workspace creates the Collection on Drive, so any of your computers can run this check.
 2. **Operator:** In the Collection's toolbar, choose **Manage Collection**, then **Create form**. Keep the Name field and choose **Create form**.
 3. **Operator:** Choose **Review and open app**. Review its files and the access it requests, then choose **Approve and open**.
-4. **Operator:** Open the app's review and choose **Publish on a link**, then **Share app folder**.
-   Under **Anyone with the link**, choose **View**, then **Create link**. Copy the link, and close sharing.
-5. **Operator:** Open the app's review again and choose **Publish on a link**. Select the new link and choose **Prepare app**.
-   In **Review app publication**, check that the table lists only the form's Adds records action, with a check under Link, Helpers, and You.
-   Then choose **Publish this revision**.
-6. **Operator:** Open the link in a private browser window that is not signed in to Drive, and choose **Open app**.
+4. **Operator:** Open the app's review. Under **Publish**, choose **Create link** beside **Anyone with the link**.
+   Check that the review says dohc made a view link to the app's folder, and that the table lists only the form's Adds records action, with a check under Link, Helpers, and You.
+   Then choose **Publish**.
+5. **Operator:** Choose **Copy app link** beside **Anyone with the link**, and close the review.
+6. **Operator:** Open the link in a private browser window that is not signed in to Drive. The form opens.
    Enter `drive-entry-check-<UTC time>` as the Name, and choose **Submit**.
 7. **Operator:** On the desktop, open the Collection. Choose **Manage Collection**, then **Refresh**. Close the Collection and open it again.
-8. **Operator:** Open the app's review and choose **Publish on a link**. Choose **Unpublish**, then **Unpublish app**.
-   Choose **Share app folder**, then **End link**, and **End link** again.
+8. **Operator:** Open the app's review and choose **Unpublish** beside **Anyone with the link**, then **Unpublish app**.
+   Close the review. Choose **Share app** in the app's toolbar, then **End link**, and **End link** again.
    In the Collection's toolbar, choose **Manage Collection**, then **Archive**, then **Archive Collection**. Archiving keeps the test record and its history.
    Open the old link again. It must no longer open the app.
 

@@ -4,14 +4,38 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, expect, type Page } from "@playwright/test";
+import {
+  chromium,
+  expect,
+  type ElectronApplication,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
 import { createLiveBufferBudget } from "@dohc/live-session-contract/live-connection";
 import { createLiveGateway } from "../../../../services/share-web/src/liveGateway";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
 import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHostLiveProfile";
 import { desktopRoot } from "./desktopApp";
+import { holdSystemClipboard } from "./systemClipboard";
 
 export const sharedDatasetViewerOrigin = "https://viewer.example.com";
+
+/** Copies the app link from the owner's Publish box row, as a person would. */
+export async function copyAppLink(testInfo: TestInfo, app: ElectronApplication, row: Locator) {
+  const url = await holdSystemClipboard(testInfo, async (remainingMs) => {
+    await app.evaluate(({ clipboard }) => clipboard.writeText(""));
+    await row
+      .getByRole("button", { name: "Copy app link", exact: true })
+      .click({ timeout: remainingMs() });
+    await expect
+      .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
+      .toContain("?app=");
+    return app.evaluate(({ clipboard }) => clipboard.readText());
+  });
+  expect(new URL(url).origin).toBe(sharedDatasetViewerOrigin);
+  return url;
+}
 
 export async function openAppFromFolderLink(page: Page) {
   const apps = page.getByRole("button", { name: "Apps", exact: true });

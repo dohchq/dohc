@@ -6,7 +6,7 @@ import path from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   sharedDatasetViewerOrigin,
-  openAppFromFolderLink,
+  copyAppLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -258,35 +258,25 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
         .toBe("Trip poll");
       const review = page.getByTestId("app-view-review").filter({ visible: true });
       await review.click();
-      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-      await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
-      const share = page.getByTestId("share-dialog");
-      await expect(share.getByTestId("share-link-create-access")).toHaveText("Can view");
-      await share.getByRole("button", { name: "Create link", exact: true }).click();
-      await share.getByRole("button", { name: "Link details", exact: true }).click();
-      const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
-      await share.getByRole("button", { name: "Close", exact: true }).click();
-      await review.click();
-      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
-      await publication
-        .getByRole("combobox", { name: "Publication share link" })
-        .selectOption({ index: 2 });
-      await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
+      const linkRow = publication.getByTestId("app-publish-link");
+      await linkRow.getByRole("button", { name: "Create link", exact: true }).click();
       await expect(
-        publication.getByRole("heading", { name: "Review app publication", exact: true }),
+        publication.getByRole("heading", { name: "Publish for anyone with the link", exact: true }),
       ).toBeVisible();
       await expect(publication.getByTestId("app-publication-source-paths")).toContainText(
         `${root}/main.ts`,
       );
-      await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
+      await publication.getByRole("button", { name: "Publish", exact: true }).click();
       await expect(
-        publication.getByRole("status").filter({ hasText: "App published on the selected link." }),
+        publication
+          .getByRole("status")
+          .filter({ hasText: "App published. Anyone with the link can open it." }),
       ).toBeVisible();
+      const appUrl = await copyAppLink(info, electronApp, linkRow);
       await publication.getByRole("button", { name: "Close", exact: true }).click();
       const guest = await shared!.browser.newPage();
       guest.on("pageerror", (error) => shared!.failures.push(error.message));
-      await guest.goto(linkUrl);
-      await openAppFromFolderLink(guest);
+      await guest.goto(appUrl);
       const heading = guest
         .frameLocator("iframe")
         .getByRole("heading", { name: "Trip poll", exact: true });
@@ -436,22 +426,9 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await expect(page.getByTestId("site-preview-page")).toBeVisible();
     await page.getByTestId("site-preview-review").click();
     const publication = page.getByTestId("app-publication-dialog");
-    await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
-    const share = page.getByTestId("share-dialog");
-    await expect(share.getByTestId("share-link-create-access")).toHaveText("Can view");
-    await share.getByRole("button", { name: "Create link", exact: true }).click();
-    await share.getByRole("button", { name: "Link details", exact: true }).click();
-    const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
-    expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await share.getByRole("button", { name: "Close", exact: true }).click();
-
-    await page.getByTestId("site-preview-review").click();
-    await publication
-      .getByRole("combobox", { name: "Publication share link" })
-      .selectOption({ index: 2 });
-    await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
+    await publication.getByRole("button", { name: "Create view link", exact: true }).click();
     await expect(
-      publication.getByRole("heading", { name: "Review app publication", exact: true }),
+      publication.getByRole("heading", { name: "Publish for anyone with the link", exact: true }),
     ).toBeVisible();
     const sources = publication.getByTestId("app-publication-source-paths");
     for (const file of [
@@ -465,16 +442,18 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     ])
       await expect(sources).toContainText(`reading-list/${file}`);
     await page.screenshot({ path: info.outputPath("static-app-review.png") });
-    await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
+    await publication.getByRole("button", { name: "Publish", exact: true }).click();
     await expect(
-      publication.getByRole("status").filter({ hasText: "App published on the selected link." }),
+      publication
+        .getByRole("status")
+        .filter({ hasText: "App published. Anyone with the link can open it." }),
     ).toBeVisible();
+    const appUrl = await copyAppLink(info, desktop.app, publication);
     await publication.getByRole("button", { name: "Close", exact: true }).click();
 
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
-    await guest.goto(linkUrl);
-    await openAppFromFolderLink(guest);
+    await guest.goto(appUrl);
     const app = guest.frameLocator("iframe");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toBeVisible();
     await expect(app.getByRole("listitem")).toHaveText([
