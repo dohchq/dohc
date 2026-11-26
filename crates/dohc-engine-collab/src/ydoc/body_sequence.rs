@@ -620,7 +620,6 @@ pub(super) struct Trace {
     generation: Option<u64>,
 }
 
-#[cfg(test)]
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum KeptAt {
     Line(yrs::ClientID, u32, &'static str),
@@ -628,7 +627,6 @@ pub(super) enum KeptAt {
 }
 
 impl Trace {
-    #[cfg(test)]
     pub(super) fn kept_content(&self) -> BTreeSet<(KeptAt, String)> {
         let mut kept = BTreeSet::new();
         for line in &self.lines {
