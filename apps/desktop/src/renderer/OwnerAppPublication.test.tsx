@@ -1559,6 +1559,41 @@ describe("owner app publication", () => {
         ]);
       });
 
+      it("warns that copied app links stop working when a stored revision replaces the live one", async () => {
+        const link = { shareId: row.shareId, grantId: row.grantId };
+        const live = { ...linkPublication("e".repeat(64), "f".repeat(64)), ...link };
+        const stored = {
+          ...linkPublication(checked.sourceRevision),
+          ...link,
+          active: false,
+          authorityRevision: 2,
+        };
+        publishBox({ links: [row], listed: () => [live, stored] });
+        renderLocal();
+        await openLocal();
+        const update = await within(linkRow()).findByRole("button", { name: "Publish changes" });
+        await waitFor(() => expect((update as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(update);
+        await screen.findByRole("heading", { name: "Republish this revision" });
+        expect(screen.getByTestId("app-publication-link-note").textContent).toContain(
+          "App links copied before stop working",
+        );
+      });
+
+      it("says when the links did not load and reads them again on Try again", async () => {
+        publishBox();
+        api.listRelayShareLinks.mockRejectedValueOnce(new Error("The server is away."));
+        renderLocal();
+        await openLocal();
+        await waitFor(() =>
+          expect(screen.getByTestId("app-publish-link-state").textContent).toBe(
+            "dohc could not load your links",
+          ),
+        );
+        await userEvent.setup().click(within(linkRow()).getByRole("button", { name: "Try again" }));
+        expect(await within(linkRow()).findByRole("button", { name: "Create link" })).toBeTruthy();
+      });
+
       it("asks the same link request again when Try again follows a failed preparation", async () => {
         const reportError = vi.fn();
         let fail = true;
