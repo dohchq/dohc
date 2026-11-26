@@ -2,7 +2,7 @@ import { useRequestSequence } from "./useRequestSequence";
 import { Cloud, ExternalLink, Loader2, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
-import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
+import { canonicalCloudOrigin, DRIVE_SERVER_ORIGIN } from "../workspaces/cloudConfiguration";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { openLinkExternally } from "./linkActivation";
@@ -23,6 +23,7 @@ import {
 import { CopyButton } from "./ui/CopyButton";
 
 const SETUP_GUIDE_URL = "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
+const DRIVE_INVITE_URL = "https://dohc.computer/#drive";
 
 type Phase =
   | { kind: "loading" }
@@ -471,14 +472,33 @@ export function CloudLogin(
             </div>
           </form>
           {props.embedded ? null : (
-            <div data-testid="cloud-drive-coming-soon" className="mt-4 border-t border-line pt-3">
+            <div data-testid="cloud-drive" className="mt-4 border-t border-line pt-3">
               <p className="m-0 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
                 dohc Drive
-                <Pill>Coming soon</Pill>
+                <Pill>Invite-only beta</Pill>
               </p>
               <p className="m-0 mt-1 text-[12px] leading-relaxed text-muted">
                 dohc handles hosting, setup, and maintenance.
               </p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <SecondaryButton
+                  data-testid="cloud-drive-connect"
+                  title={DRIVE_SERVER_ORIGIN}
+                  onClick={() => void connect(DRIVE_SERVER_ORIGIN)}
+                  disabled={connecting}
+                >
+                  Connect to dohc Drive
+                </SecondaryButton>
+                <button
+                  type="button"
+                  data-testid="cloud-drive-request-invite"
+                  onClick={() => void openLinkExternally(DRIVE_INVITE_URL)}
+                  className="flex items-center gap-1 text-[12px] text-muted underline underline-offset-2 transition-colors hover:text-ink"
+                >
+                  <ExternalLink size={12} aria-hidden />
+                  Request an invite
+                </button>
+              </div>
             </div>
           )}
         </>

@@ -55,7 +55,7 @@
 
   <h2>Analytics</h2>
   <p>We use two services to count visits: PostHog and Cloudflare Web Analytics.</p>
-  <p>PostHog shows us which pages people read and what they click. After a page loads, it loads PostHog's script from this website. The script reports each page you open, when you leave it, how long you stayed, the links and buttons you click, which download you choose, and whether a Drive waitlist submission succeeded, failed, or was rate-limited. When you change or submit a form, it reports the action, not what you typed. Click and form reports describe the element you interacted with and the elements that contain it: their type, text, and attributes such as link addresses and class names. The script reports nothing you do inside the desktop and sync demos.</p>
+  <p>PostHog shows us which pages people read and what they click. After a page loads, it loads PostHog's script from this website. The script reports each page you open, when you leave it, how long you stayed, the links and buttons you click, which download you choose, and whether a Drive invite request succeeded, failed, or was rate-limited. When you change or submit a form, it reports the action, not what you typed. Click and form reports describe the element you interacted with and the elements that contain it: their type, text, and attributes such as link addresses and class names. The script reports nothing you do inside the desktop and sync demos.</p>
   <p>Each PostHog report includes the page address and, if your browser shares it, the referring page, both stripped of anything after ? or #. If you arrived from a link carrying a recognized value for <code>utm_source</code>, <code>utm_medium</code>, or <code>utm_campaign</code>, the report includes that tag and drops all other query values. It also includes your browser language, device type, screen and window sizes, time zone, and user agent, which names your browser, operating system, and on some phones your device model. Page-open reports also include the page title.</p>
   <p>The PostHog script sets no cookies and stores nothing in your browser, so it keeps no browser identifier. It sends reports to dohc.computer, which forwards them with your IP address to PostHog in the United States. Each report asks PostHog not to look up your location from your IP address. To count visitors without an identifier, PostHog combines your IP address, user agent, and this website's name with a daily random value, and keeps the result. PostHog removes your IP address before storing a report. We do not record sessions or make heatmaps. Blocking dohc.computer/ingest stops these reports and leaves this website working. <a href="https://posthog.com/privacy">PostHog's privacy policy</a> covers what PostHog does with this data.</p>
   <p>Cloudflare Web Analytics counts visits and page timings. Each page loads a small script from Cloudflare. On load, the script sends Cloudflare the page address stripped of anything after ? or #, load timings, and your browser and operating system versions. When you leave the page or switch tabs, it sends a second report with more timings, including which part of the page you clicked or typed in. Jumping to another section on the page can send both reports again. If your browser shares the referring page, the script reports it.</p>
@@ -65,8 +65,8 @@
   <h2>Downloads</h2>
   <p>When you click a download button, your browser asks GitHub which build is the newest. The file then downloads from GitHub. GitHub sees your IP address for both requests, under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>.</p>
 
-  <h2>The Drive waitlist</h2>
-  <p>When you join the Drive waitlist, your email address goes to Loops, the service that sends our updates about Drive. Each email has an unsubscribe link. You can also write to <a href="mailto:sup@dohc.computer">sup@dohc.computer</a>, and we will remove you. <a href="https://loops.so/privacy">Loops' privacy policy</a> covers how Loops handles your address.</p>
+  <h2>Drive invite requests</h2>
+  <p>When you request a Drive invite, your email address goes to Loops, the service that sends our updates about Drive. Each email has an unsubscribe link. You can also write to <a href="mailto:sup@dohc.computer">sup@dohc.computer</a>, and we will remove you. <a href="https://loops.so/privacy">Loops' privacy policy</a> covers how Loops handles your address.</p>
 
   <h2>The desktop app</h2>
   <p>The desktop app can send usage and error reports to dohc's developers. <a href="https://github.com/dohchq/dohc/blob/main/docs/reference/usage-and-error-reports.md">Usage and error reports</a> lists what each report holds, where it goes, and how to turn it off. A crash report leaves your computer only when you choose to send it.</p>
@@ -74,7 +74,7 @@
   <h2>Questions</h2>
   <p>Write to <a href="mailto:sup@dohc.computer">sup@dohc.computer</a>.</p>
 
-  <p class="privacy-updated">Last changed November 25, 2026.</p>
+  <p class="privacy-updated">Last changed November 26, 2026.</p>
 </main>
 
 <footer class="footer">

@@ -988,7 +988,7 @@ if (agentDemo) {
   }
 }
 
-// Drive waitlist: posts to the Loops form endpoint in the form's action.
+// Drive invite requests: posts to the Loops form endpoint in the form's action.
 const waitlist = document.querySelector("[data-waitlist]");
 
 if (waitlist) {
@@ -1001,14 +1001,14 @@ if (waitlist) {
     if (response.status === 429) {
       return {
         outcome: "rate_limited",
-        message: "Too many signups from this network. Try again in a few minutes.",
+        message: "Too many requests from this network. Try again in a few minutes.",
       };
     }
     const result = await response.json().catch(() => null);
     if (response.status === 200 && result?.success === true) return null;
     return {
       outcome: "failed",
-      message: "Could not join the waitlist. Check the email address and try again.",
+      message: "Could not send your request. Check the email address and try again.",
     };
   };
 
@@ -1022,8 +1022,8 @@ if (waitlist) {
     pending = true;
     waitlist.dataset.state = "pending";
     submit.setAttribute("aria-disabled", "true");
-    submit.textContent = "Joining…";
-    status.textContent = "Joining the waitlist…";
+    submit.textContent = "Sending…";
+    status.textContent = "Sending your request…";
     try {
       const response = await fetch(waitlist.action, {
         method: "POST",
@@ -1035,13 +1035,13 @@ if (waitlist) {
       const focused = waitlist.contains(document.activeElement);
       waitlist.dataset.state = result ? "error" : "joined";
       status.textContent =
-        result?.message ?? "You're on the list. We'll email you when Drive opens.";
+        result?.message ?? "Request received. We'll email you when your invite is ready.";
       notifyWaitlistOutcome(result ? result.outcome : "succeeded");
       // Success hides the field; keep a keyboard user in place without pulling anyone else back.
       if (!result && focused) status.focus();
     } catch {
       waitlist.dataset.state = "error";
-      status.textContent = "Could not reach the waitlist. Check your connection and try again.";
+      status.textContent = "Could not send your request. Check your connection and try again.";
       notifyWaitlistOutcome("failed");
     } finally {
       pending = false;

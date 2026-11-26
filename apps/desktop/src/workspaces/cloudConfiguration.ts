@@ -1,5 +1,7 @@
 const MAX_CLOUD_ORIGIN_LENGTH = 2048;
 
+export const DRIVE_SERVER_ORIGIN = "https://drive.dohc.computer";
+
 // The e2e switch that lets a debug engine sync with a plain http server on
 // this machine. Without it, every server must use https.
 export const INSECURE_LOOPBACK_RELAY_TEST_ENV = "DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY";
