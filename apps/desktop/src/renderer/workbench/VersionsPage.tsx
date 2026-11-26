@@ -331,7 +331,11 @@ export function VersionsPage(props: {
       data-testid="versions-page-new"
       disabled={locked}
       size={onlyMain ? "compact" : "default"}
-      className={onlyMain ? "inline-flex items-center gap-1.5" : undefined}
+      className={
+        onlyMain
+          ? "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap"
+          : "shrink-0 whitespace-nowrap"
+      }
       onClick={versions.openCreate}
     >
       {onlyMain ? <Plus size={12} aria-hidden /> : null}
