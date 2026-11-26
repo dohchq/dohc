@@ -4,8 +4,6 @@ status: accepted
 
 # Personal and Member app source stays off the synced workspace tree
 
-This records a design from [the team apps and Collections plan](../plans/team-apps-and-collections.md).
-
 In [the workspace members plan](../plans/workspace-members.md), Members cannot create folders or edit shared app source directly; changes to shared app source go to the Owner as a change proposal. At the same time, [AGENTS.md](../../../AGENTS.md) commits dohc to real, inspectable web apps whose source people and agents can read and continue.
 
 Personal apps and local forks of Member apps live on disk in a dedicated local folder outside the synced received-workspace tree, with Open folder, Copy path, CLI verbs, and generated Collection types written into that folder. Because the folder sits outside the synced tree, unfinished personal experiments never clash with team files or require special sync-engine ignore rules, and any local coding agent can edit them as ordinary files.

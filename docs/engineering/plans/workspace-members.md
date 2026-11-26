@@ -114,7 +114,7 @@ The dohc CLI and MCP do what the Members page does, in a workspace the person ow
 
 ## Apps
 
-Official apps and Member apps follow [Team apps and Collections](team-apps-and-collections.md). Members open them from Workspace apps in the command palette, and the CLI and MCP list, inspect, share, copy and withdraw them with `dohc member-apps`.
+Official apps, Personal apps, and Member apps follow [ADR 0018](../adr/0018-member-apps-cap-every-viewer-to-both-reaches.md), [ADR 0019](../adr/0019-member-app-source-stays-off-the-synced-tree.md), and [ADR 0020](../adr/0020-collection-workspace-defaults-live-on-the-server.md). Members open them from Workspace apps in the command palette, and the CLI and MCP list, inspect, share, copy, and withdraw them with `dohc member-apps`.
 
 ## Not in this version
 
