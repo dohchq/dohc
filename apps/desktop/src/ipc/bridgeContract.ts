@@ -4257,6 +4257,7 @@ export const StartSitePreviewPayload = z.object({
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
   holderId: SITE_PREVIEW_HOLDER_ID,
+  versionId: OPAQUE_ID,
   // True when the person asked for this start, which starts the preview
   // again even when it is running. Otherwise the surface shares it.
   restart: z.boolean(),
@@ -4332,6 +4333,7 @@ export type StartSitePreviewAnswer = z.infer<typeof StartSitePreviewAnswer>;
 // shows `preview` from now on, or nothing when no preview runs.
 export const SitePreviewReplacedEvent = z.object({
   workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
   siteRoot: SITE_ROOT_STRING,
   holderId: SITE_PREVIEW_HOLDER_ID,
   generation: z.number().int().nonnegative(),
@@ -4351,6 +4353,7 @@ export const AppViewRequest = z.discriminatedUnion("action", [
       ...AppViewTarget,
       action: z.literal("open"),
       appRoot: z.string().min(1).max(4096),
+      versionId: OPAQUE_ID.optional(),
       colorScheme: z.enum(["light", "dark"]),
     })
     .strict(),
@@ -4430,6 +4433,7 @@ export const appViewOperations = {
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
   siteRoot: SITE_ROOT_STRING,
 });
 export type GetSitePreviewLogsPayload = z.infer<typeof GetSitePreviewLogsPayload>;
@@ -4444,6 +4448,7 @@ export type GetSitePreviewLogsResult = z.infer<typeof GetSitePreviewLogsResult>;
 // shows it.
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
   siteRoot: SITE_ROOT_STRING,
   holderId: SITE_PREVIEW_HOLDER_ID,
 });

@@ -48,9 +48,12 @@ import {
 } from "./localAppLaunch";
 import type { LocalAppKind } from "./localAppStore";
 import { selectDatasetCapability } from "./localDatasetApps";
+import { PREVIEW_READ_ONLY } from "./localPreviewStore";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 
-type VerifyFrontendRequest = Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>;
+type VerifyFrontendRequest = Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }> & {
+  versionId: string;
+};
 type VerifyFrontendResult = Extract<OwnerAppPublicationResult, { kind: "frontendVerified" }>;
 
 export interface VerifyLocalAppFrontendDeps {
@@ -250,7 +253,7 @@ export async function verifyLocalAppFrontend(
         const schemaBytes = await deps.withAdapter(async (adapter) => {
           const meta = await adapter.captureSourceMetadata({
             workspaceId: deps.workspaceId,
-            versionId: "main",
+            versionId: candidate.versionId,
             paths: [`${cap.collectionPath}/collection.yaml`],
             bounds: { maxInputFiles: 1, maxInputBytes: APP_COLLECTION_MAX_SCHEMA_BYTES },
             signal: deps.signal,
@@ -273,7 +276,7 @@ export async function verifyLocalAppFrontend(
     try {
       prepared = await deps.withAdapter((adapter) =>
         prepareLocalAppPublication(
-          { workspaceId: deps.workspaceId, appRoot },
+          { workspaceId: deps.workspaceId, appRoot, versionId: input.versionId },
           {
             adapter,
             signal: deps.signal,
@@ -488,14 +491,17 @@ export async function verifyLocalAppFrontend(
         );
       }
       if (datasetCapabilities.length > 0) {
+        const readOnlyPreview = candidate.versionId !== "main";
         if (action === "upload" || action === "attempt") {
           failBackend(
             op,
             rawOpName,
-            "unsupported_in_dry_run",
-            `${op} is unavailable in dry-run verification.`,
-            "Avoid invoking file uploads or pending attempts during dry-run verification.",
-            "Unsupported in dry-run verification.",
+            readOnlyPreview ? "operation_not_approved" : "unsupported_in_dry_run",
+            readOnlyPreview ? PREVIEW_READ_ONLY : `${op} is unavailable in dry-run verification.`,
+            readOnlyPreview
+              ? "Merge this version into Main before testing writes, uploads, or attempts."
+              : "Avoid invoking file uploads or pending attempts during dry-run verification.",
+            readOnlyPreview ? PREVIEW_READ_ONLY : "Unsupported in dry-run verification.",
           );
         }
         if (action !== "invoke" && action !== "query") {
@@ -530,18 +536,23 @@ export async function verifyLocalAppFrontend(
         const operation = selectedCapability.operations.find(
           (item) => item.name === parsed.operation,
         );
-        if (!operation || (action === "query" && !operation.readOnly)) {
+        if (!operation || ((action === "query" || readOnlyPreview) && !operation.readOnly)) {
+          const previewWrite = Boolean(operation && readOnlyPreview && !operation.readOnly);
           failBackend(
             "backend.invoke",
             parsed.operation,
             "operation_not_approved",
-            operation
-              ? `Read-only query attempted write operation "${parsed.operation}".`
-              : `Operation "${parsed.operation}" is not in app.publish.json dataset.operationIds.`,
-            operation
-              ? "Call write operations through useDatasetMutation or client.invoke instead of useDatasetQuery."
-              : "Add the operation's operationId to dataset.operationIds in app.publish.json, or remove the call.",
-            "This action is not approved for the app.",
+            previewWrite
+              ? PREVIEW_READ_ONLY
+              : operation
+                ? `Read-only query attempted write operation "${parsed.operation}".`
+                : `Operation "${parsed.operation}" is not in app.publish.json dataset.operationIds.`,
+            previewWrite
+              ? "Merge this version into Main to run write operations."
+              : operation
+                ? "Call write operations through useDatasetMutation or client.invoke instead of useDatasetQuery."
+                : "Add the operation's operationId to dataset.operationIds in app.publish.json, or remove the call.",
+            previewWrite ? PREVIEW_READ_ONLY : "This action is not approved for the app.",
           );
         }
         const restricted = selectedCapability.createFields?.find(
@@ -684,6 +695,16 @@ export async function verifyLocalAppFrontend(
         );
       }
       if (action === "create") {
+        if (candidate.versionId !== "main") {
+          failBackend(
+            "collection.create",
+            undefined,
+            "operation_not_approved",
+            PREVIEW_READ_ONLY,
+            "Merge this version into Main before testing collection.create.",
+            PREVIEW_READ_ONLY,
+          );
+        }
         const parsed = parseAppCollectionCreateRequest(raw);
         const payloadHash = sha256(
           JSON.stringify(

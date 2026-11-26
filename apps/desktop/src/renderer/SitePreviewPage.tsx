@@ -152,7 +152,11 @@ export function SitePreviewPage(props: {
   onCollectionsChange?: () => void;
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
+  version?: { id: string; name: string } | null;
+  versionPending?: boolean;
 }) {
+  const versionPending = props.versionPending ?? false;
+  const versionId = props.version?.id ?? "main";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
   const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>([]);
@@ -204,7 +208,7 @@ export function SitePreviewPage(props: {
       mountedRef.current = false;
     };
   }, []);
-  const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
+  const siteContext = `${props.workspaceId}\0${versionId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
   // The app whose review is open. Another app or workspace never shows it.
   const [reviewFor, setReviewFor] = useState<string | null>(null);
@@ -272,12 +276,18 @@ export function SitePreviewPage(props: {
   }, [reloadSite]);
 
   useEffect(() => {
+    if (versionPending) return;
     return () => {
       void bridge()
-        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot, holderId })
+        .stopSitePreview({
+          workspaceId: props.workspaceId,
+          versionId,
+          siteRoot: props.siteRoot,
+          holderId,
+        })
         .catch(() => undefined);
     };
-  }, [holderId, props.workspaceId, props.siteRoot]);
+  }, [holderId, props.workspaceId, props.siteRoot, versionId, versionPending]);
 
   // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
@@ -338,6 +348,7 @@ export function SitePreviewPage(props: {
         if (
           event.holderId !== holderId ||
           event.workspaceId !== props.workspaceId ||
+          event.versionId !== versionId ||
           event.siteRoot !== props.siteRoot ||
           event.generation <= generationRef.current
         ) {
@@ -348,7 +359,7 @@ export function SitePreviewPage(props: {
         // A start of this surface that the newer one replaced ends here.
         setRunningMode(null);
       }),
-    [holderId, props.siteRoot, props.workspaceId, showPreview],
+    [holderId, props.siteRoot, props.workspaceId, showPreview, versionId],
   );
 
   // `restart` is a start the person asked for: it runs the preview again
@@ -357,6 +368,7 @@ export function SitePreviewPage(props: {
   // preview Restricted Mode shows in place of Dev or Build is not a choice.
   const start = useCallback(
     async (mode: SitePreviewMode, restart: boolean, remember = true) => {
+      if (versionPending) return null;
       const request = ++previewStartRequestRef.current;
       const requestContext = siteContext;
       const isCurrent = () =>
@@ -375,6 +387,7 @@ export function SitePreviewPage(props: {
       try {
         const result = await bridge().startSitePreview({
           workspaceId: props.workspaceId,
+          versionId,
           siteRoot: props.siteRoot,
           mode,
           holderId,
@@ -412,10 +425,11 @@ export function SitePreviewPage(props: {
         if (isCurrent() && !replaced) setRunningMode(null);
       }
     },
-    [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext],
+    [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext, versionPending],
   );
 
   const prepareShare = useCallback(async () => {
+    if (versionPending) return;
     const request = ++shareRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
@@ -514,6 +528,7 @@ export function SitePreviewPage(props: {
     runningMode,
     siteContext,
     start,
+    versionPending,
   ]);
   const prepareShareRef = useRef(prepareShare);
   prepareShareRef.current = prepareShare;
@@ -526,6 +541,7 @@ export function SitePreviewPage(props: {
     try {
       const result = await bridge().getSitePreviewLogs({
         workspaceId: props.workspaceId,
+        versionId,
         siteRoot: props.siteRoot,
       });
       if (
@@ -559,6 +575,7 @@ export function SitePreviewPage(props: {
 
   useEffect(() => {
     if (
+      versionPending ||
       load.status !== "ready" ||
       load.site.root !== props.siteRoot ||
       preview ||
@@ -579,7 +596,7 @@ export function SitePreviewPage(props: {
     if (runsCode && trust.trusted === null && !trust.readFailed) return;
     const held = runsCode && trust.trusted !== true;
 
-    const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
+    const autoStartKey = `${siteContext}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
     if (!held) {
@@ -596,9 +613,11 @@ export function SitePreviewPage(props: {
     props.sharedView,
     props.siteRoot,
     props.workspaceId,
+    siteContext,
     start,
     trust.readFailed,
     trust.trusted,
+    versionPending,
   ]);
 
   // Trusting the workspace runs what Restricted Mode held back. Restricting it
@@ -647,6 +666,7 @@ export function SitePreviewPage(props: {
     try {
       await bridge().stopSitePreview({
         workspaceId: props.workspaceId,
+        versionId,
         siteRoot: props.siteRoot,
         holderId,
       });
@@ -682,7 +702,8 @@ export function SitePreviewPage(props: {
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
-    enabled: needsPublication,
+    versionId,
+    enabled: needsPublication && !versionPending,
     visible: props.visible ?? true,
     focused: props.focused ?? false,
     focusRequest: props.focusRequest ?? 0,
@@ -706,6 +727,7 @@ export function SitePreviewPage(props: {
     null;
 
   const chooseMode = (mode: SitePreviewMode) => {
+    if (versionPending) return;
     if (trust.trusted !== true && !props.sharedView && site && previewRunsAppCode(site, mode)) {
       setBlocked({ mode, share: false });
       return;
@@ -791,6 +813,20 @@ export function SitePreviewPage(props: {
             Shared
           </span>
         ) : null}
+        {props.version ? (
+          <span
+            data-testid="site-preview-version"
+            className="min-w-0 shrink truncate text-[12px] text-muted"
+            title={props.version.name}
+          >
+            {props.version.name}
+          </span>
+        ) : null}
+        {props.version && needsPublication ? (
+          <span data-testid="site-preview-read-only" className="shrink-0 text-[12px] text-muted">
+            Read-only preview
+          </span>
+        ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {props.onShowSource ? (
             <IconButton
@@ -808,7 +844,7 @@ export function SitePreviewPage(props: {
               data-testid="site-preview-share"
               aria-label="Share app"
               title="Share app"
-              disabled={runningMode !== null}
+              disabled={runningMode !== null || versionPending}
               onClick={() => site && void prepareShare()}
               className="size-7"
             >
@@ -819,13 +855,17 @@ export function SitePreviewPage(props: {
             <OwnerAppPublication
               workspaceId={props.workspaceId}
               appRoot={props.siteRoot}
+              version={props.version ?? null}
               title={site.title}
               reportError={props.reportError}
               access={props.access}
               localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
               testId={needsPublication ? "app-view-review" : "site-preview-review"}
-              open={reviewOpen}
-              onOpenChange={setReviewOpen}
+              disabled={versionPending}
+              open={reviewOpen && !versionPending}
+              onOpenChange={(next) => {
+                if (!versionPending || !next) setReviewOpen(next);
+              }}
               onLocalChange={localApprovalChanged}
               onCollectionsChange={props.onCollectionsChange}
               onShareSource={
@@ -895,7 +935,7 @@ export function SitePreviewPage(props: {
                   id: mode,
                   label: runningMode === mode ? "Starting…" : modeLabel(mode),
                   checked: preview?.mode === mode,
-                  disabled: runningMode !== null,
+                  disabled: runningMode !== null || versionPending,
                   testId: `site-preview-${mode}`,
                   onSelect: () => chooseMode(mode),
                 })),
@@ -1020,7 +1060,12 @@ export function SitePreviewPage(props: {
 
             {needsPublication ? (
               <>
-                <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+                <AppViewBody
+                  view={appView}
+                  onReview={() => {
+                    if (!versionPending) setReviewOpen(true);
+                  }}
+                />
                 {isOwnerLocalApp && inspectorOpen ? (
                   <AppInspectorDrawer
                     workspaceId={props.workspaceId}
@@ -1047,8 +1092,9 @@ export function SitePreviewPage(props: {
                           ? "Preview stopped."
                           : runningMode
                             ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
-                            : // The start waits for main's answer about trust.
-                              !props.sharedView && trust.trusted === null && !trust.readFailed
+                            : // The start waits for main's answer about version and trust.
+                              versionPending ||
+                                (!props.sharedView && trust.trusted === null && !trust.readFailed)
                               ? ""
                               : "This app did not start automatically."
                       : "This app has no previewable entry, dev script, or build output yet."
@@ -1056,6 +1102,7 @@ export function SitePreviewPage(props: {
                 >
                   {restartMode &&
                   !runningMode &&
+                  !versionPending &&
                   (props.sharedView || trust.trusted !== null || trust.readFailed) ? (
                     <PrimaryButton
                       data-testid="site-preview-restart"

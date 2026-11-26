@@ -139,7 +139,7 @@ async function tripWorkspace(name: string) {
     async approve() {
       const host = await open();
       const prepared = await prepareLocalAppPublication(
-        { workspaceId, appRoot: "trip" },
+        { workspaceId, appRoot: "trip", versionId: "main" },
         {
           deferredWrites: [],
           adapter: await running.adapter(),
@@ -190,7 +190,7 @@ it.skipIf(engine.missing)(
         },
       });
       await expect(create("unsent", host)).rejects.toBeInstanceOf(LocalAppUnavailableError);
-      expect(host.apps.list("trip")[0]).toMatchObject({ pendingCreates: 2 });
+      expect(host.apps.list("trip", "main")[0]).toMatchObject({ pendingCreates: 2 });
       w.control.down = true;
       await host.close();
       await w.restartEngine();
@@ -200,7 +200,7 @@ it.skipIf(engine.missing)(
       let reopened: LocalDatasetHost | undefined;
       await reconcileExistingLocalCollectionApps(w.root, async () => (reopened = await w.open()));
       await expect
-        .poll(() => reopened!.apps.list("trip")[0], { timeout: REAL_DAEMON_DEADLINE_MS })
+        .poll(() => reopened!.apps.list("trip", "main")[0], { timeout: REAL_DAEMON_DEADLINE_MS })
         .toMatchObject({ pendingCreates: 0 });
       for (const key of ["committed", "unsent"]) {
         const receipt = await create(key, reopened!);

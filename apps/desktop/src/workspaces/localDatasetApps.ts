@@ -32,6 +32,7 @@ import type {
   LocalAppStorage,
 } from "./localAppStore";
 import type { LocalAppAction } from "./localAppLaunch";
+import { PREVIEW_READ_ONLY } from "./localPreviewStore";
 import type { LocalDatasetAgent, LocalDatasetUpload } from "./localDatasetHost";
 import {
   parseDatasetAttemptRequest,
@@ -116,9 +117,12 @@ export function createLocalDatasetApps(options: {
   ): unknown;
   datasetRevision?(datasetId: string): number;
   subscribeDatasets?(datasetIds: readonly string[], onWake: () => void): () => void;
+  preview?: boolean;
 }) {
   const { db } = options;
   const contexts = new WeakSet<LocalDatasetAppContext>();
+  const access = (appId: string): DatasetAccess =>
+    options.preview ? { kind: "data" } : { kind: "app", appId };
   function verifyCapabilities(value: LocalAppRow): AppDatasetCapability[] {
     const declared = datasetCapabilitiesOf(value.candidate);
     return declared.map((requested) => {
@@ -162,16 +166,27 @@ export function createLocalDatasetApps(options: {
     if (
       !contexts.has(context) ||
       request.workspaceId !== options.workspaceId ||
-      request.access.kind !== "app" ||
-      request.access.appId !== context.publicationId
+      JSON.stringify(request.access) !== JSON.stringify(access(context.publicationId))
     )
       throw new Error("App access is not permitted.");
     const checked = current(context.publicationId, context.authorityRevision);
-    if (
-      !request.datasetId ||
-      !checked.capabilities.some((capability) => capability.datasetId === request.datasetId)
-    )
-      throw new Error("App access is not permitted.");
+    const cap = checked.capabilities.find(
+      (capability) => request.datasetId && capability.datasetId === request.datasetId,
+    );
+    if (!cap) throw new Error("App access is not permitted.");
+    if (options.preview)
+      return {
+        caller: { kind: "owner", userId: options.ownerId },
+        principalKey: options.ownerId,
+        authorityToken: `preview:${context.publicationId}:${context.authorityRevision}`,
+        operationCeiling: {
+          readOnlyOnly: true,
+          operationIds: cap.operations
+            .filter((operation) => operation.readOnly)
+            .map((operation) => operation.operationId),
+        },
+        person: options.localPersonId(),
+      };
     return {
       caller: { kind: "owner", userId: options.ownerId },
       principalKey: `${options.ownerId}:app:${context.publicationId}`,
@@ -301,6 +316,8 @@ export function createLocalDatasetApps(options: {
     ): Promise<unknown> {
       if (action === "list" || action === "create")
         throw new Error("This app is not approved for document Collection access.");
+      if (options.preview && (action === "attempt" || action === "upload"))
+        throw new Error(PREVIEW_READ_ONLY);
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
           throw new Error("Invalid pending submission request.");
@@ -394,6 +411,7 @@ export function createLocalDatasetApps(options: {
               operation.name === input.operation && (action !== "query" || operation.readOnly),
           );
           if (!operation) throw new Error("This action is not approved for the app.");
+          if (options.preview && !operation.readOnly) throw new Error(PREVIEW_READ_ONLY);
           return options.invoke(context, {
             workspaceId: options.workspaceId,
             datasetId: cap.datasetId,
@@ -402,7 +420,7 @@ export function createLocalDatasetApps(options: {
             operationId: operation.operationId,
             idempotencyKey: input.idempotencyKey,
             input: input.input,
-            access: { kind: "app", appId: publicationId },
+            access: access(publicationId),
             signal,
           });
         },
@@ -460,7 +478,7 @@ export function createLocalDatasetApps(options: {
             operationId: operation.operationId,
             idempotencyKey: "file-read",
             input: input.input,
-            access: { kind: "app", appId: publicationId },
+            access: access(publicationId),
             signal,
           },
           raw.fileId,
@@ -468,7 +486,11 @@ export function createLocalDatasetApps(options: {
       });
     },
   };
-  return { ...api, resolveAuthority };
+  return {
+    ...api,
+    resolveAuthority,
+    owns: (context: object) => contexts.has(context as LocalDatasetAppContext),
+  };
 }
 
 export function localDatasetAppStorage(db: JournalDb): LocalAppStorage {

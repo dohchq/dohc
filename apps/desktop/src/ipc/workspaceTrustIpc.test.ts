@@ -122,6 +122,7 @@ function devServer(
     holderId: "tab",
     senderId: 1,
     workspaceId: "trip",
+    versionId: "main",
     siteRoot: "portal",
     mode: "dev",
     restart: false,
@@ -242,12 +243,16 @@ describe("main's workspace trust operations", () => {
     await expect(h.restrict()).rejects.toThrow(STOP_FAILED_MESSAGE);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     expect(h.notified.at(-1)).toEqual(["trip", false]);
-    expect(h.lifecycle.status("trip", "portal").running).toBe(true);
+    expect(
+      h.lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(true);
 
     failStop = false;
     await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
     expect(stop).toHaveBeenCalledTimes(2);
-    expect(h.lifecycle.status("trip", "portal").running).toBe(false);
+    expect(
+      h.lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(false);
   });
 
   it("stops commands even when Restricted Mode cannot be saved, says so, and saves it on Try again", async () => {
@@ -335,18 +340,23 @@ describe("main's workspace trust operations", () => {
       holderId: "tab",
       senderId: 1,
       workspaceId: "trip",
+      versionId: "main",
       siteRoot: "portal",
       mode: "dev",
       restart: false,
       isCurrent: () => true,
       prepare: async () => async () => ({ handle, result: { logs: [] } }),
     });
-    expect(h.lifecycle.status("trip", "portal").running).toBe(true);
+    expect(
+      h.lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(true);
 
     await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
 
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(h.lifecycle.status("trip", "portal").running).toBe(false);
+    expect(
+      h.lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(false);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     expect(h.notified).toEqual([
       ["trip", true],

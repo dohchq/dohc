@@ -56,7 +56,7 @@ test("the owner keeps books: entries with receipts, bank import, invoices, and b
         })
       ).result as any;
     const source = await prepareLocalAppPublication(
-      { workspaceId: "books-workspace", appRoot: "accounting" },
+      { workspaceId: "books-workspace", appRoot: "accounting", versionId: "main" },
       {
         adapter,
         deferredWrites: [],

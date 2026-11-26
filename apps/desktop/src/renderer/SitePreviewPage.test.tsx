@@ -164,6 +164,7 @@ describe("SitePreviewPage", () => {
     const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
     const next = (generation: number, port: number): SitePreviewReplacedEvent => ({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       holderId,
       generation,
@@ -214,6 +215,7 @@ describe("SitePreviewPage", () => {
     expect(frameUrl.searchParams.has("dohcHostOrigin")).toBe(false);
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),
@@ -412,6 +414,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),
@@ -444,6 +447,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),
@@ -999,5 +1003,68 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     expect(screen.queryByTestId("app-view-review")).toBeNull();
+  });
+
+  it("holds preview, AppView, and Review app while active version is unresolved", async () => {
+    const appViewBridge = {
+      ...bridgeMock,
+      getSitePackage: vi.fn(async () => ({
+        ...site,
+        scripts: { dev: "vite" },
+      })),
+      appView: vi.fn(async (request: { viewId: string }) => ({
+        kind: "unapproved" as const,
+        viewId: request.viewId,
+      })),
+      onAppViewEvent: vi.fn(() => () => undefined),
+      publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
+    };
+    vi.stubGlobal("dohcDesktop", appViewBridge);
+    const view = render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        version={{ id: "main", name: "Main" }}
+        versionPending
+        siteRoot="report"
+        onShareSite={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(appViewBridge.getSitePackage).toHaveBeenCalled());
+    expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
+    expect(appViewBridge.appView).not.toHaveBeenCalled();
+    expect(screen.queryByText("This app did not start automatically.")).toBeNull();
+    expect(screen.queryByTestId("site-preview-restart")).toBeNull();
+    const reviewButton = screen.getByTestId("site-preview-review") as HTMLButtonElement;
+    expect(reviewButton.disabled).toBe(true);
+    await userEvent.click(reviewButton);
+    expect(appViewBridge.publishOwnerApp).not.toHaveBeenCalled();
+    expect((screen.getByTestId("site-preview-share") as HTMLButtonElement).disabled).toBe(true);
+
+    await userEvent.click(screen.getByTestId("site-preview-options"));
+    const devItem = await screen.findByTestId("site-preview-dev");
+    const staticItem = screen.getByTestId("site-preview-static");
+    expect(devItem.getAttribute("aria-disabled")).toBe("true");
+    expect(staticItem.getAttribute("aria-disabled")).toBe("true");
+    await userEvent.click(devItem);
+    await userEvent.click(staticItem);
+    expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
+
+    view.rerender(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        version={{ id: "feature", name: "Feature" }}
+        versionPending={false}
+        siteRoot="report"
+      />,
+    );
+    await screen.findByTestId("site-preview-frame");
+    expect((screen.getByTestId("site-preview-review") as HTMLButtonElement).disabled).toBe(false);
+    expect(appViewBridge.startSitePreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-sites",
+        versionId: "feature",
+        siteRoot: "report",
+      }),
+    );
   });
 });

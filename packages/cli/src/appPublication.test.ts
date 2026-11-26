@@ -68,7 +68,7 @@ describe("owner publication review contract", () => {
       active: true,
       datasetCapability,
     };
-    const local = { ...publication, approved: true };
+    const local = { ...publication, approved: true, versionId: "main" };
     expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual(
       { kind: "localListed", publications: [local] },
     );
@@ -146,6 +146,28 @@ describe("owner publication review contract", () => {
   it("preserves every approved collection field for CLI readers", () => {
     expect(OwnerAppPublicationResult.parse(prepared)).toEqual(prepared);
   });
+  it("takes an optional version for local app reads and preparation", () => {
+    for (const action of ["listLocal", "checkLocal", "prepareLocal"] as const) {
+      const request = { action, workspaceId: "w", appRoot: "app" };
+      expect(OwnerAppPublicationRequest.parse({ ...request, versionId: "feature" })).toEqual({
+        ...request,
+        versionId: "feature",
+      });
+      expect(OwnerAppPublicationRequest.parse(request)).toEqual(request);
+      expect(OwnerAppPublicationRequest.safeParse({ ...request, versionId: "" }).success).toBe(
+        false,
+      );
+    }
+    expect(
+      OwnerAppPublicationRequest.parse({
+        action: "verifyFrontend",
+        workspaceId: "w",
+        appRoot: "app",
+        versionId: "feature",
+      }),
+    ).toMatchObject({ versionId: "feature" });
+  });
+
   it("lists local Collection apps with unconfirmed responses and keeps an unconfirmed withdrawal distinct", () => {
     const local = {
       publicationId: "b".repeat(64),
@@ -154,6 +176,7 @@ describe("owner publication review contract", () => {
       sourceRevision: "c".repeat(64),
       approved: false,
       active: false,
+      versionId: "feature",
       collectionCapability: capability,
       pendingCreates: 2,
     };

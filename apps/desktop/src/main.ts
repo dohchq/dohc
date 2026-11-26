@@ -3174,10 +3174,10 @@ const sitePreviews: SitePreviewLifecycle = {
       lease.state.sitePreviews.release(input),
     );
   },
-  status(workspaceId, siteRoot) {
-    const lease = requireWorkspaceAuthority(workspaceId);
+  status(site) {
+    const lease = requireWorkspaceAuthority(site.workspaceId);
     try {
-      return lease.state.sitePreviews.status(workspaceId, siteRoot);
+      return lease.state.sitePreviews.status(site);
     } finally {
       lease.release();
     }
@@ -3203,6 +3203,11 @@ const sitePreviews: SitePreviewLifecycle = {
     return withCurrentWorkspaceAttachmentOperation(workspace, (operation) =>
       operation.state.sitePreviews.stopWorkspace(workspace.workspaceId),
     ).then(() => undefined);
+  },
+  holdVersionSwitch(workspaceId, work) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.sitePreviews.holdVersionSwitch(workspaceId, work),
+    );
   },
   stopAll() {
     return Promise.all(
@@ -3946,6 +3951,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
+        aroundVersionSwitch: (work) => sitePreviews.holdVersionSwitch(workspace.workspaceId, work),
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -11290,6 +11296,7 @@ function registerIpcHandlers(): void {
       DesktopRendererWorkspaceOperation
     >
   >[0];
+  const mainVersionLocks = new Map<string, WorkspaceEngineCapture>();
   const datasetDependencies = {
     hostForWorkspace: localDatasetHostFor,
     collectionRulesChanged: notifyCollectionRulesChanged,
@@ -11453,6 +11460,22 @@ function registerIpcHandlers(): void {
         throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return result;
     },
+    withMainVersionLock: async <T>(
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      work: () => Promise<T>,
+    ) => {
+      const { capture } = await requireEngineCapture(workspace.workspaceId, "Collections");
+      return capture.withVersionLock(async () => {
+        mainVersionLocks.set(workspace.workspaceId, capture);
+        try {
+          return await work();
+        } finally {
+          if (mainVersionLocks.get(workspace.workspaceId) === capture) {
+            mainVersionLocks.delete(workspace.workspaceId);
+          }
+        }
+      });
+    },
     createSources: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       files: Record<string, string>,
@@ -11465,7 +11488,16 @@ function registerIpcHandlers(): void {
         files,
         signal,
         {
-          register: () => openWorkspaceActivity(workspace),
+          register: async () => {
+            const locked = mainVersionLocks.get(workspace.workspaceId);
+            if (locked) {
+              if (activity.engineCaptureFor(workspace.workspaceId) !== locked) {
+                throw new Error(captureRefusal("Collections"));
+              }
+              return;
+            }
+            await openWorkspaceActivity(workspace);
+          },
           capture: async () => {
             const captured = await withEngineAdapter(workspace, async (adapter) => {
               await flushDatasetSourceCapture(adapter, signal, Object.keys(files));
@@ -11873,16 +11905,23 @@ function registerIpcHandlers(): void {
   });
   personalMemberApps = personalPublication;
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
-    activePublication: async (operation, appRoot) => {
+    activePublication: async (operation, appRoot, versionId) => {
       const listed = await localPublication(
-        { action: "listLocal", workspaceId: operation.workspace.workspaceId, appRoot },
+        {
+          action: "listLocal",
+          workspaceId: operation.workspace.workspaceId,
+          appRoot,
+          ...(versionId === undefined ? {} : { versionId }),
+        },
         "app-view",
         operation,
       );
       operation.assertCurrent();
-      return listed?.kind === "localListed"
-        ? (listed.publications.find((publication) => publication.active)?.publicationId ?? null)
-        : null;
+      const active =
+        listed?.kind === "localListed"
+          ? listed.publications.find((publication) => publication.active)
+          : undefined;
+      return active ? { publicationId: active.publicationId, versionId: active.versionId } : null;
     },
     launch: async (operation, publicationId, onNotice) =>
       (await localAppLauncher(operation.workspace, operation.signal)).launchSession(
@@ -12678,6 +12717,12 @@ function registerIpcHandlers(): void {
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
     assertMayRunAppCode: (workspace) => workspaceTrust.assertTrusted(workspace),
     executeAppPreview,
+    activeVersionId: async (workspace) =>
+      (
+        await withEngineAdapter(workspace, (adapter) =>
+          adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
+        )
+      )?.id ?? "main",
   });
 
   registerOperations(operationBoundary, oldWindowOperations, {

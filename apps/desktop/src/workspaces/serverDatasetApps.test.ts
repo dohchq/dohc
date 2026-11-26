@@ -121,17 +121,19 @@ async function computerWithApp(latencyMs = 0) {
     fieldIds: [id(4)],
   });
   for (const [path, source] of Object.entries(generated.files)) files.set(`app/${path}`, source);
-  const app = await prepareLocalAppPublication(
-    { workspaceId: "w", appRoot: "app" },
-    {
-      deferredWrites: [],
-      adapter: sourceCaptureAdapter(files),
-      compile: compileClosedApp,
-      signal: new AbortController().signal,
-      assertCurrent() {},
-      resolveDatasetRevision: async () => revision,
-    },
-  );
+  const prepareApp = (versionId = "main") =>
+    prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app", versionId },
+      {
+        deferredWrites: [],
+        adapter: sourceCaptureAdapter(files),
+        compile: compileClosedApp,
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        resolveDatasetRevision: async () => revision,
+      },
+    );
+  const app = await prepareApp();
   const published = await host.apps.activate(app, new AbortController().signal);
   const submit = (name: string, authorityRevision = published.authorityRevision) => ({
     authorityRevision,
@@ -175,6 +177,8 @@ async function computerWithApp(latencyMs = 0) {
     host,
     open,
     app,
+    files,
+    prepareApp,
     published,
     submit,
     names,
@@ -203,6 +207,40 @@ it("approves an app on this computer over a Collection on the workspace's server
       input: { id: 1, name: "Blake" },
     }),
   ).rejects.toThrow(/^40[04]/);
+  expect(await f.names()).toEqual(["Alex"]);
+}, 60_000);
+
+it("previews a non-Main version's app through the owner's reads, never approving it on the server", async () => {
+  const f = await computerWithApp();
+  await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  const manifest = JSON.parse(f.files.get("app/app.publish.json")!);
+  manifest.dataset.operationIds = [id(5), id(6)];
+  f.files.set("app/app.publish.json", JSON.stringify(manifest));
+  f.trips.length = 0;
+  const preview = await f.host.apps.activate(
+    await f.prepareApp("feature"),
+    new AbortController().signal,
+  );
+  expect(f.host.apps.list("app", "feature")).toMatchObject([{ versionId: "feature" }]);
+  expect(
+    await f.host.apps.request(preview.publicationId, "invoke", {
+      authorityRevision: preview.authorityRevision,
+      operation: "read",
+      idempotencyKey: "read-one",
+      input: {},
+    }),
+  ).toMatchObject({ result: [{ name: "Alex" }] });
+  for (const action of ["invoke", "attempt", "upload"] as const)
+    await expect(
+      f.host.apps.request(
+        preview.publicationId,
+        action,
+        f.submit("Blake", preview.authorityRevision),
+      ),
+    ).rejects.toThrow(
+      "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
+    );
+  expect(f.trips).toEqual(["invoke"]);
   expect(await f.names()).toEqual(["Alex"]);
 }, 60_000);
 
@@ -382,7 +420,7 @@ it("keeps the app approved on the server when this computer approves it again wh
   approval.release();
   await again;
   await Promise.all(f.deliveries);
-  expect(f.host.apps.list("app")).toEqual([
+  expect(f.host.apps.list("app", "main")).toEqual([
     expect.objectContaining({ publicationId: f.published.publicationId, active: true }),
   ]);
   expect(await f.serverRuns()).toBe("ran");
@@ -616,7 +654,7 @@ it("replays, on the server, an app's change this computer made before the Collec
   });
   for (const [path, source] of Object.entries(generated.files)) files.set(`app/${path}`, source);
   const app = await prepareLocalAppPublication(
-    { workspaceId: "w", appRoot: "app" },
+    { workspaceId: "w", appRoot: "app", versionId: "main" },
     {
       deferredWrites: [],
       adapter: sourceCaptureAdapter(files),

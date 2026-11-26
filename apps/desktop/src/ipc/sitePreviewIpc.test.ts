@@ -51,6 +51,7 @@ function harness(
     sharedView?: boolean;
     activeWorkspaceId?: string;
     trusted?: boolean;
+    activeVersionId?: string | (() => Promise<string>);
   } = {},
 ) {
   const workspace: TestWorkspace = {
@@ -87,7 +88,10 @@ function harness(
   const assertMayRunAppCode = vi.fn(async (_workspace: TestWorkspace) => {
     if (!(input.trusted ?? true)) throw new WorkspaceRestrictedError();
   });
+  const activeVersion = input.activeVersionId;
   const dependencies: StartSitePreviewDependencies<TestEvent, TestSender, TestWorkspace> = {
+    activeVersionId:
+      typeof activeVersion === "function" ? activeVersion : async () => activeVersion ?? "main",
     authority: {
       requireTrustedSender(event) {
         if (!event.trusted) throw new Error("Untrusted renderer.");
@@ -137,11 +141,129 @@ function harness(
 }
 
 describe("start site preview IPC", () => {
+  it("previews the active version and refuses another one", async () => {
+    const test = harness({ activeVersionId: "feature" });
+    const start = {
+      workspaceId: "workspace-1",
+      versionId: "feature",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    };
+    await expect(test.handler(test.event, { ...start, versionId: "other" })).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.execute).not.toHaveBeenCalled();
+    await test.handler(test.event, start);
+    const site = { workspaceId: "workspace-1", siteRoot: "site" };
+    expect(test.lifecycle.status({ ...site, versionId: "feature" }).running).toBe(true);
+    expect(test.lifecycle.status({ ...site, versionId: "main" }).running).toBe(false);
+    await test.lifecycle.stopAll();
+  });
+
+  it("cancels startup when the holder releases while version lookup is pending", async () => {
+    let resolveVersion!: (value: string) => void;
+    const versionLookup = new Promise<string>((resolve) => {
+      resolveVersion = resolve;
+    });
+    const test = harness({ activeVersionId: () => versionLookup });
+    const starting = test.handler(test.event, {
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    });
+    await test.lifecycle.release({
+      getActiveWorkspaceId: () => "workspace-1",
+      holderId: "tab",
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+    });
+    resolveVersion("main");
+    await expect(starting).rejects.toThrow(/cancelled/i);
+    expect(test.execute).not.toHaveBeenCalled();
+    expect(
+      test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
+    await test.lifecycle.stopAll();
+  });
+
+  it("refuses registration if the active version switches during discovery or execution", async () => {
+    let activeVersion = "main";
+    let finishDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      finishDiscovery = resolve;
+    });
+    const test = harness({ activeVersionId: async () => activeVersion });
+    test.get.mockImplementationOnce(async () => {
+      await discoveryGate;
+      return site();
+    });
+    const duringDiscovery = test.handler(test.event, {
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    });
+    await vi.waitFor(() => expect(test.get).toHaveBeenCalledTimes(1));
+    activeVersion = "feature";
+    finishDiscovery();
+    await expect(duringDiscovery).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.execute).not.toHaveBeenCalled();
+    expect(
+      test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
+
+    activeVersion = "main";
+    let finishExecute!: () => void;
+    const executeGate = new Promise<void>((resolve) => {
+      finishExecute = resolve;
+    });
+    test.execute.mockImplementationOnce(async (executionInput) => {
+      await executeGate;
+      return {
+        handle: test.handle,
+        result: { siteRoot: executionInput.site.root, mode: executionInput.mode, logs: [] },
+      };
+    });
+    const duringExecute = test.handler(test.event, {
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    });
+    await vi.waitFor(() => expect(test.execute).toHaveBeenCalledTimes(1));
+    activeVersion = "feature";
+    finishExecute();
+    await expect(duringExecute).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.handle.stop).toHaveBeenCalledTimes(1);
+    expect(
+      test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
+    await test.lifecycle.stopAll();
+  });
+
   it("routes an authorized exact site through the lifecycle and execution policy", async () => {
     const test = harness();
 
     const result = await test.handler(test.event, {
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       mode: "static",
       holderId: "tab",
@@ -184,6 +306,7 @@ describe("start site preview IPC", () => {
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "ancestor/stale-child",
         mode: "dev",
         holderId: "tab",
@@ -195,12 +318,14 @@ describe("start site preview IPC", () => {
     expect(test.execute).not.toHaveBeenCalled();
   });
 
-  it("rejects dynamic execution in a shared view before catalog lookup", async () => {
-    const test = harness({ sharedView: true });
+  it("rejects dynamic execution in a shared view before catalog or version lookup", async () => {
+    const lookup = vi.fn(async () => "main");
+    const test = harness({ sharedView: true, activeVersionId: lookup });
 
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         mode: "build",
         holderId: "tab",
@@ -210,6 +335,7 @@ describe("start site preview IPC", () => {
       "Live and built app previews run the app's own code, so they're disabled in a shared view. Use the static preview.",
     );
 
+    expect(lookup).not.toHaveBeenCalled();
     expect(test.get).not.toHaveBeenCalled();
     expect(test.execute).not.toHaveBeenCalled();
   });
@@ -220,6 +346,7 @@ describe("start site preview IPC", () => {
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "shared-with-me/team/site",
         mode: "dev",
         holderId: "tab",
@@ -240,6 +367,7 @@ describe("start site preview IPC", () => {
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: root,
         mode: "static",
         holderId: "tab",
@@ -262,6 +390,7 @@ describe("start site preview IPC", () => {
     }
     const start = (mode: "static" | "dev" | "build", restart = false) => ({
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       mode,
       holderId: "tab",
@@ -319,6 +448,7 @@ describe("start site preview IPC", () => {
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         mode: "static",
         holderId: "tab",
@@ -362,6 +492,7 @@ describe("start site preview IPC", () => {
     });
     const starting = test.handler(test.event, {
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       mode: "static",
       holderId: "tab",
@@ -383,6 +514,7 @@ describe("start site preview IPC", () => {
     await expect(
       test.handler(test.event, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         mode: "static",
         holderId: "tab",

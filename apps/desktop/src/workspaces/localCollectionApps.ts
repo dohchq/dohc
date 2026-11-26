@@ -31,6 +31,7 @@ import type {
   LocalAppStore,
 } from "./localAppStore";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
+import { PREVIEW_READ_ONLY } from "./localPreviewStore";
 
 export const MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION = 1_000;
 export const LOCAL_APP_WITHDRAW_TIMEOUT_MS = 5_000;
@@ -39,7 +40,6 @@ export const LOCAL_APP_WITHDRAW_TIMEOUT_MS = 5_000;
 export class LocalCollectionRefusal extends Error {}
 /** What a local Collection app reaches in the workspace engine. Main binds it to this attachment's capture. */
 export interface LocalCollectionEngine {
-  activeVersionId(): Promise<string>;
   /** Published files after `afterPath`, or from the folder's start, in UTF-8 byte order. */
   listFiles(input: {
     versionId: string;
@@ -169,6 +169,7 @@ export function localCollectionAppStorage(db: JournalDb): LocalAppStorage {
 export function createLocalCollectionApps(options: {
   db: JournalDb;
   store: LocalAppStore;
+  preview?: boolean;
   workspaceId: string;
   assertCurrent(): void;
   /** Commits while the host closes, so admitted creates record their outcomes. Admission checks the session through the store. */
@@ -257,17 +258,19 @@ export function createLocalCollectionApps(options: {
       )
       .get(publicationId, key) as Create | undefined;
   const pendingKeys = (publicationId?: string) =>
-    (publicationId === undefined
-      ? db
-          .prepare(
-            "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL",
-          )
-          .all()
-      : db
-          .prepare(
-            "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL AND publication_id=?",
-          )
-          .all(publicationId)) as Pick<Create, "publication_id" | "idempotency_key">[];
+    options.preview
+      ? []
+      : ((publicationId === undefined
+          ? db
+              .prepare(
+                "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL",
+              )
+              .all()
+          : db
+              .prepare(
+                "SELECT publication_id,idempotency_key FROM local_collection_creates WHERE envelope IS NOT NULL AND publication_id=?",
+              )
+              .all(publicationId)) as Pick<Create, "publication_id" | "idempotency_key">[]);
 
   function finish(publicationId: string, key: string, outcome: (row: Create) => Outcome) {
     // After close the reservation stays durable and settles when the store opens again.
@@ -420,7 +423,9 @@ export function createLocalCollectionApps(options: {
     const input = parseAppCollectionCreateRequest(raw),
       key = input.idempotencyKey;
     if (phase !== "open") throw new LocalAppUnavailableError("This workspace is closing.");
-    const { capability } = current(publicationId, input.authorityRevision);
+    const { row: approval, capability } = current(publicationId, input.authorityRevision);
+    const versionId = approval.candidate.versionId;
+    if (versionId !== "main") throw new Error(PREVIEW_READ_ONLY);
     const payload = sha(
       JSON.stringify([
         "dohc-local-collection-create-v1",
@@ -442,7 +447,6 @@ export function createLocalCollectionApps(options: {
     };
     const prior = stored(publicationId, key);
     if (prior) return answer(prior);
-    const versionId = await call(signal, (engine) => engine.activeVersionId());
     const fields = validateAppCollectionCreateFields(
       input.fields,
       capability,
@@ -517,11 +521,11 @@ export function createLocalCollectionApps(options: {
       throw new Error("Invalid collection page.");
     const limit = raw.limit as number,
       afterPath = raw.afterPath as string | undefined;
-    const { capability } = current(publicationId, raw.authorityRevision);
+    const { row: approval, capability } = current(publicationId, raw.authorityRevision);
     if (!capability.readFields.length) throw new Error("This app cannot read its Collection.");
     if (afterPath !== undefined && !afterPath.startsWith(`${capability.collectionPath}/`))
       throw new Error("Invalid collection page.");
-    const versionId = await call(signal, (engine) => engine.activeVersionId());
+    const versionId = approval.candidate.versionId;
     const approvedSchema = await schema(capability, versionId, signal);
     // Only direct-child Markdown files in the workspace can be records. No other file reaches the page, so no cursor names one.
     const prefix = `${capability.collectionPath}/`,
@@ -591,8 +595,8 @@ export function createLocalCollectionApps(options: {
       authorityRevision: number,
       signal: AbortSignal,
     ) {
-      const { capability } = current(publicationId, authorityRevision);
-      await schema(capability, await call(signal, (engine) => engine.activeVersionId()), signal);
+      const { row, capability } = current(publicationId, authorityRevision);
+      await schema(capability, row.candidate.versionId, signal);
       current(publicationId, authorityRevision);
     },
     async activate(
@@ -609,7 +613,7 @@ export function createLocalCollectionApps(options: {
         throw new Error("Choose an app connected to a Collection.");
       const capability = parseAppCollectionCapability(declared);
       // Local response files have no share-grant disclosure, so write-only fields need no read approval.
-      await schema(capability, await call(signal, (engine) => engine.activeVersionId()), signal);
+      await schema(capability, candidate.versionId, signal);
       const publicationId = sha(
         JSON.stringify(["dohc-local-collection-app-v1", options.workspaceId, candidate]),
       );

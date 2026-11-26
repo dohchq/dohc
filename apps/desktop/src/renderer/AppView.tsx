@@ -66,6 +66,7 @@ export type AppView = ReturnType<typeof useAppView>;
 export function useAppView(options: {
   workspaceId: string;
   appRoot: string;
+  versionId: string;
   enabled: boolean;
   visible: boolean;
   focused: boolean;
@@ -75,7 +76,7 @@ export function useAppView(options: {
   notices?: AppViewNotices | undefined;
   reportError?: ReportError | undefined;
 }) {
-  const { workspaceId, appRoot, enabled } = options;
+  const { workspaceId, appRoot, versionId, enabled } = options;
   const viewId = useRef(crypto.randomUUID()).current;
   const failureId = `app-view:${viewId}`;
   const sessionId = `app-view-session:${viewId}`;
@@ -128,12 +129,13 @@ export function useAppView(options: {
   const launch = useCallback(async () => {
     if (!alive.current) return;
     const mine = ++request.current;
-    const { workspaceId, appRoot, notices } = latest.current;
+    const { workspaceId, appRoot, versionId, notices } = latest.current;
     const current = () =>
       alive.current &&
       mine === request.current &&
       latest.current.workspaceId === workspaceId &&
-      latest.current.appRoot === appRoot;
+      latest.current.appRoot === appRoot &&
+      latest.current.versionId === versionId;
     sessionEnded.current = false;
     setState({ status: "checking" });
     setLoading(false);
@@ -145,6 +147,7 @@ export function useAppView(options: {
         action: "open",
         workspaceId,
         appRoot,
+        versionId,
         viewId,
         colorScheme: readColorScheme(),
       });
@@ -195,7 +198,7 @@ export function useAppView(options: {
       latest.current.notices?.clear(sessionId);
       latest.current.notices?.clear(downloadId);
     };
-  }, [enabled, workspaceId, appRoot, launch, viewId, failureId, sessionId, downloadId]);
+  }, [enabled, workspaceId, appRoot, versionId, launch, viewId, failureId, sessionId, downloadId]);
 
   const reload = useCallback(() => {
     if (stateRef.current.status === "failed" || sessionEnded.current) void launch();

@@ -1938,6 +1938,9 @@ const publicationFromList: readonly CliFieldSource[] = [
   { field: "expectedAuthorityRevision", from: "list", path: "publications[].authorityRevision" },
 ];
 
+const versionNote =
+  "Optional versionId names a version from Versions. It defaults to the active version. Apps on a version other than Main open as read-only previews and change no Collection.";
+
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   verifyFrontend: {
     summary:
@@ -1947,6 +1950,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       "Runs in an isolated offline sandbox against a fresh empty ephemeral database; live Collection records and workspace files are never read or mutated.",
       "Optional expectStartupBackend checks calls fired on load. Optional steps run waitFor (selector, optional textIncludes), fill (selector, value), and click (selector, optional expectBackend matched against calls triggered by that click).",
       "dohc_test_app only checks folder detection; verifyFrontend compiles and executes the app under dohc's real CSP and dohc-app-channel broker.",
+      versionNote,
     ],
   },
   createLink: {
@@ -1968,17 +1972,19 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       "Set open to true to show the folder in your file manager.",
     ],
   },
-  listLocal: { summary: "List an app's publications on this computer." },
+  listLocal: { summary: "List an app's publications on this computer.", notes: [versionNote] },
   checkLocal: {
     summary: "Read an app's current source revision on this computer.",
     notes: [
       "Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval.",
+      versionNote,
     ],
   },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
     notes: [
       "Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.",
+      versionNote,
     ],
   },
   stage: {

@@ -121,7 +121,5 @@ describe("local Collection engine binding", () => {
       afterPath: "trip/responses/a.md",
       limit: 5,
     });
-    h.adapter.getActiveVersion.mockResolvedValueOnce(null);
-    await expect(h.engine.activeVersionId()).rejects.toThrow(/no active version/);
   });
 });

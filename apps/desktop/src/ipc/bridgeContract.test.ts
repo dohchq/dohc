@@ -2978,6 +2978,7 @@ describe("site IPC contract", () => {
   it("tells one surface what preview it follows, or that none runs", () => {
     const event = {
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       holderId: "tab",
       generation: 3,
@@ -3213,6 +3214,7 @@ describe("site IPC contract", () => {
     expect(
       StartSitePreviewPayload.parse({
         workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
         mode: "static",
         holderId: "tab",
@@ -3220,6 +3222,7 @@ describe("site IPC contract", () => {
       }),
     ).toEqual({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: ".",
       mode: "static",
       holderId: "tab",
@@ -3228,6 +3231,16 @@ describe("site IPC contract", () => {
     expect(
       StartSitePreviewPayload.safeParse({
         workspaceId: "ws-sites",
+        siteRoot: ".",
+        mode: "static",
+        holderId: "tab",
+        restart: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      StartSitePreviewPayload.safeParse({
+        workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
         mode: "static",
         restart: false,
@@ -3264,16 +3277,18 @@ describe("site IPC contract", () => {
     expect(
       StopSitePreviewPayload.parse({
         workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
         holderId: "tab",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: ".", holderId: "tab" });
+    ).toEqual({ workspaceId: "ws-sites", versionId: "main", siteRoot: ".", holderId: "tab" });
     expect(
       GetSitePreviewLogsPayload.parse({
         workspaceId: "ws-sites",
+        versionId: "main",
         siteRoot: ".",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    ).toEqual({ workspaceId: "ws-sites", versionId: "main", siteRoot: "." });
     expect(
       GetSitePreviewLogsResult.parse({
         logs: [{ stream: "stderr", text: "late output", at: 2 }],

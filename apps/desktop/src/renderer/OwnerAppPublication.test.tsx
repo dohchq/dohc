@@ -1006,6 +1006,7 @@ describe("owner app publication", () => {
       datasetCapability: approvedAccess,
       approved: true,
       active: true,
+      versionId: "main",
     };
     const collectionRow = {
       publicationId: "d".repeat(64),
@@ -1016,6 +1017,7 @@ describe("owner app publication", () => {
       active: true,
       collectionCapability: approvedCollection,
       pendingCreates: 0,
+      versionId: "main",
     };
     const checked: Extract<OwnerAppPublicationResult, { kind: "localChecked" }> = {
       kind: "localChecked",
@@ -1092,10 +1094,10 @@ describe("owner app publication", () => {
       await ready();
       expect(approveButton().textContent).toBe("Approve and open");
       expect(actions("prepareLocal")).toEqual([
-        { action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip" },
+        { action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip", versionId: "main" },
       ]);
       expect(actions("checkLocal")).toEqual([
-        { action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" },
+        { action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip", versionId: "main" },
       ]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
@@ -1770,6 +1772,7 @@ it("shows every bound Collection and its alias in the local review dialog for a 
             datasetCapabilities: [expensesCap, workoutsCap],
             approved: true,
             active: true,
+            versionId: "main",
           },
         ],
       };
@@ -2103,6 +2106,7 @@ describe("appLinkUrl and Copy app link", () => {
       return answer(request);
     });
     vi.stubGlobal("dohcDesktop", api);
+    api.publishOwnerApp.mockClear();
     try {
       render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
       await user.click(screen.getByRole("button", { name: "Review app" }));
@@ -2115,6 +2119,56 @@ describe("appLinkUrl and Copy app link", () => {
       vi.unstubAllGlobals();
       api.publishOwnerApp.mockImplementation(answer);
       api.listRelayShareLinks.mockReset();
+    }
+  });
+
+  it("ignores Main staged reviews when reviewing a non-Main version", async () => {
+    const user = userEvent.setup();
+    api.publishOwnerApp.mockImplementation(async (request) => {
+      if (request.action === "listStaged") {
+        return {
+          kind: "stagedListed",
+          stages: [
+            {
+              stageId: "00000000-0000-4000-8000-000000000099",
+              appRoot: "trip",
+              reviewDigest: "c".repeat(64),
+              createdAtMs: 1_790_000_000_000,
+              sourceRevision: prepared.sourceRevision,
+              sourcePaths: ["trip/index.html"],
+              likelySecrets: [],
+              collections: [],
+              capabilities: [],
+              externalNetwork: true,
+            },
+          ],
+        };
+      }
+      if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+      if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
+      return answer(request);
+    });
+    vi.stubGlobal("dohcDesktop", api);
+    api.publishOwnerApp.mockClear();
+    try {
+      render(
+        <OwnerAppPublication
+          workspaceId="ws-trip"
+          version={{ id: "feature", name: "Feature" }}
+          appRoot="trip"
+          localApproval="browser"
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Review app" }));
+      await screen.findByTestId("app-publication-read-only");
+      expect(api.publishOwnerApp.mock.calls.some(([req]) => req.action === "listStaged")).toBe(
+        false,
+      );
+      expect(screen.queryByRole("button", { name: "Review agent changes" })).toBeNull();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+      api.publishOwnerApp.mockImplementation(answer);
     }
   });
 });

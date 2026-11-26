@@ -174,12 +174,14 @@ type PublicationProps = {
   onLocalChange?: () => void;
   onCollectionsChange?: () => void;
   access?: { context: AccessContext; server: string | null };
+  version?: { id: string; name: string } | null;
 };
 
 type ControlProps = PublicationProps & {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   testId: string;
+  disabled?: boolean;
 };
 
 /** Lists app source files that hold a likely secret token. It never blocks the review. */
@@ -210,7 +212,12 @@ export function LikelySecretsWarning(props: { secrets: Prepared["likelySecrets"]
 
 /** Review app: the person's one way to see what the app can reach, and to approve or publish it. */
 export function OwnerAppPublication(props: ControlProps) {
-  return <PublicationControl key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
+  return (
+    <PublicationControl
+      key={`${props.workspaceId}\0${props.version?.id ?? "main"}\0${props.appRoot}`}
+      {...props}
+    />
+  );
 }
 
 function PublicationControl(props: ControlProps) {
@@ -219,11 +226,12 @@ function PublicationControl(props: ControlProps) {
       <SecondaryButton
         size="compact"
         data-testid={props.testId}
+        disabled={props.disabled}
         onClick={() => props.onOpenChange(true)}
       >
         Review app
       </SecondaryButton>
-      {props.open ? (
+      {props.open && !props.disabled ? (
         <PublicationDialog
           {...props}
           onClose={() => props.onOpenChange(false)}
@@ -352,6 +360,7 @@ type LocalReview =
 function PublicationDialog(
   props: PublicationProps & { onClose: () => void; onReopen: () => void },
 ) {
+  const versionId = props.version?.id ?? "main";
   const [view, setView] = useState<"local" | "links">(props.localApproval ? "local" : "links");
   const [links, setLinks] = useState<ActiveLink[]>([]);
   const [selected, setSelected] = useState("");
@@ -603,6 +612,7 @@ function PublicationDialog(
         action: "listLocal",
         workspaceId: props.workspaceId,
         appRoot: props.appRoot,
+        versionId,
       });
       if (!current) return;
       if (page.kind !== "localListed") throw new Error(checkFailed);
@@ -616,6 +626,7 @@ function PublicationDialog(
           action: "checkLocal",
           workspaceId: props.workspaceId,
           appRoot: props.appRoot,
+          versionId,
         });
         if (checked.kind !== "localChecked" || checked.appRoot !== props.appRoot)
           throw new Error(sourceCheckFailed);
@@ -628,11 +639,14 @@ function PublicationDialog(
             else props.onReopen();
           });
       }
-      const listed = await api.publishOwnerApp({
-        action: "listStaged",
-        workspaceId: props.workspaceId,
-        appRoot: props.appRoot,
-      });
+      const listed =
+        versionId === "main"
+          ? await api.publishOwnerApp({
+              action: "listStaged",
+              workspaceId: props.workspaceId,
+              appRoot: props.appRoot,
+            })
+          : null;
       const staged: StagedProposal | null =
         listed && listed.kind === "stagedListed"
           ? (listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null)
@@ -650,7 +664,7 @@ function PublicationDialog(
     return () => {
       current = false;
     };
-  }, [api, props.workspaceId, props.appRoot, props.localApproval, localReload]);
+  }, [api, props.workspaceId, props.appRoot, props.localApproval, localReload, versionId]);
 
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
@@ -669,6 +683,7 @@ function PublicationDialog(
         action: "prepareLocal",
         workspaceId: props.workspaceId,
         appRoot: props.appRoot,
+        versionId,
       });
       const fresh = alive.current && mine === request.current;
       if (
@@ -1240,6 +1255,22 @@ function PublicationDialog(
               <span className="min-w-0 truncate" title={props.appRoot}>
                 {props.appRoot.split("/").pop() || props.appRoot}
               </span>
+              {props.version ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span
+                    data-testid="app-publication-version"
+                    className="min-w-0 truncate"
+                    title={props.version.name}
+                  >
+                    {props.version.name}
+                  </span>
+                  <span aria-hidden>·</span>
+                  <span data-testid="app-publication-read-only" className="shrink-0">
+                    Read-only preview
+                  </span>
+                </>
+              ) : null}
               {paths ? (
                 <>
                   <span aria-hidden>·</span>

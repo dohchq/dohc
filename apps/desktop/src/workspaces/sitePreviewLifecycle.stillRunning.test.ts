@@ -26,6 +26,7 @@ const acquire = (
     holderId: "tab",
     senderId: 1,
     workspaceId: "trip",
+    versionId: "main",
     siteRoot: "portal",
     mode: "dev",
     restart: false,
@@ -55,7 +56,9 @@ describe("a workspace stop that has to report app commands still running", () =>
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
       AppCommandStillRunningError,
     );
-    expect(lifecycle.status("trip", "portal").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(true);
 
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
       AppCommandStillRunningError,
@@ -65,7 +68,9 @@ describe("a workspace stop that has to report app commands still running", () =>
       lifecycle.stopWorkspace("trip", { rejectOnFailure: true }),
     ).resolves.toBeUndefined();
     expect(leftover.stop).toHaveBeenCalledTimes(2);
-    expect(lifecycle.status("trip", "portal").running).toBe(false);
+    expect(
+      lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(false);
   });
 
   it("reports an installed command whose tree kill left it running, keeps it, and lets no start run over it", async () => {
@@ -77,7 +82,9 @@ describe("a workspace stop that has to report app commands still running", () =>
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
       AppCommandStillRunningError,
     );
-    expect(lifecycle.status("trip", "portal").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(true);
     const replacement = vi.fn(async () => ({
       handle: handle({ alive: false }).value,
       result: { logs: [] as [] },
@@ -89,7 +96,9 @@ describe("a workspace stop that has to report app commands still running", () =>
     await expect(
       lifecycle.stopWorkspace("trip", { rejectOnFailure: true }),
     ).resolves.toBeUndefined();
-    expect(lifecycle.status("trip", "portal").running).toBe(false);
+    expect(
+      lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(false);
   });
 
   it("reports a start whose command began and whose own cleanup, after the cancel, left it running", async () => {
@@ -110,7 +119,9 @@ describe("a workspace stop that has to report app commands still running", () =>
     release.resolve();
     await expect(stopping).rejects.toThrow(AppCommandStillRunningError);
     expect(running.stop).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("trip", "portal").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "trip", versionId: "main", siteRoot: "portal" }).running,
+    ).toBe(true);
 
     state.alive = false;
     await expect(

@@ -129,7 +129,10 @@ const WORKSHOP_REVISION: DatasetRevision = (() => {
   return draft;
 })();
 
-function makeMemoryAdapter(files: Record<string, string>): VersionedLiveAdapter {
+function makeMemoryAdapter(
+  files: Record<string, string>,
+  versions: string[] = [],
+): VersionedLiveAdapter {
   const encode = (text: string) => new TextEncoder().encode(text);
   const workspaceRef = `mem-${Math.random()}`;
   return {
@@ -154,6 +157,7 @@ function makeMemoryAdapter(files: Record<string, string>): VersionedLiveAdapter 
       versionId: string;
       paths: string[];
     }) {
+      versions.push(input.versionId);
       const captured = input.paths.map((path) => {
         const text = files[path];
         if (text === undefined) throw new Error(`${path} does not exist`);
@@ -252,7 +256,7 @@ describe("verifyLocalAppFrontend", () => {
     });
 
     const noManifest = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/empty" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/empty", versionId: "main" },
       baseDeps({ "apps/empty/index.html": "<!doctype html><h1>Hi</h1>" }),
     );
     expect(noManifest.ok).toBe(false);
@@ -260,7 +264,7 @@ describe("verifyLocalAppFrontend", () => {
     expect(noManifest.diagnostics[0]?.code).toBe("manifest_error");
 
     const syntaxErr = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/bad" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/bad", versionId: "main" },
       baseDeps({
         "apps/bad/app.publish.json": JSON.stringify({
           version: 1,
@@ -280,7 +284,12 @@ describe("verifyLocalAppFrontend", () => {
     expect(runBrowser).not.toHaveBeenCalled();
 
     const datasetPathSyntaxErr = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/dataset-dashboard" },
+      {
+        action: "verifyFrontend",
+        workspaceId: "ws-1",
+        appRoot: "apps/dataset-dashboard",
+        versionId: "main",
+      },
       baseDeps({
         "apps/dataset-dashboard/app.publish.json": JSON.stringify({
           version: 1,
@@ -298,7 +307,12 @@ describe("verifyLocalAppFrontend", () => {
     expect(datasetPathSyntaxErr.diagnostics[0]?.path).toBe("apps/dataset-dashboard/app.js");
 
     const datasetCompileErr = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/broken-ds" },
+      {
+        action: "verifyFrontend",
+        workspaceId: "ws-1",
+        appRoot: "apps/broken-ds",
+        versionId: "main",
+      },
       {
         ...baseDeps({
           "workshop/dataset.json": JSON.stringify(WORKSHOP_DEF),
@@ -441,7 +455,7 @@ describe("verifyLocalAppFrontend", () => {
     };
 
     const result = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/multi" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/multi", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -584,7 +598,7 @@ describe("verifyLocalAppFrontend", () => {
     };
 
     const result = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/booking" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/booking", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -744,15 +758,16 @@ describe("verifyLocalAppFrontend", () => {
       "apps/static/index.html": "<!doctype html><h1>Static</h1>",
     };
 
+    const versions: string[] = [];
     const collectionResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
         signal: controller.signal,
         assertCurrent: () => {},
         flushCapture: async () => ({ deferredWrites: [] }),
-        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        withAdapter: async (work) => work(makeMemoryAdapter(files, versions)),
         compile: (req) => compileClosedApp(req),
         compileDataset: (src, path) => compileDatasetOperations(src, path),
         datasetRuntime: {},
@@ -793,6 +808,7 @@ describe("verifyLocalAppFrontend", () => {
       },
     );
     expect(collectionResult.ok).toBe(true);
+    expect(new Set(versions)).toEqual(new Set(["main"]));
     expect(collectionResult.diagnostics).toEqual([
       expect.objectContaining({
         code: "input_outside_app_root",
@@ -801,8 +817,65 @@ describe("verifyLocalAppFrontend", () => {
       }),
     ]);
 
+    const featureVersions: string[] = [];
+    const featureResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form", versionId: "feature" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files, featureVersions)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+            const created = await backend({
+              id: "c1",
+              op: "collection.create",
+              idempotencyKey: "k1",
+              fields: { Name: "Ada" },
+            });
+            expect(created.status).toBe(404);
+            expect(browserInput.consumeBackendHint("collection.create")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              detail:
+                "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
+            });
+            const listed = await backend({ id: "l1", op: "collection.list", limit: 10 });
+            expect(listed.status).toBe(200);
+            expect(await listed.json()).toMatchObject({
+              records: [],
+              nextPath: null,
+            });
+          } finally {
+            await started.stop();
+          }
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 2 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(featureResult.ok).toBe(true);
+    expect(new Set(featureVersions)).toEqual(new Set(["feature"]));
+
     const unconnectedResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/static" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/static", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -961,7 +1034,7 @@ describe("verifyLocalAppFrontend", () => {
     };
 
     const result = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/signup" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/signup", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -1181,7 +1254,7 @@ describe("verifyLocalAppFrontend", () => {
     };
 
     const result = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/tasks" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/tasks", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -1303,7 +1376,12 @@ describe("verifyLocalAppFrontend", () => {
     });
 
     const candidateResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "tournament/spectator" },
+      {
+        action: "verifyFrontend",
+        workspaceId: "ws-1",
+        appRoot: "tournament/spectator",
+        versionId: "main",
+      },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -1350,7 +1428,7 @@ describe("verifyLocalAppFrontend", () => {
       "apps/demo-shared/lib.ts": "export const x = 1;",
     };
     const siblingResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/demo" },
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/demo", versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",
@@ -1377,7 +1455,7 @@ describe("verifyLocalAppFrontend", () => {
 
     const pubId = sha("pub-outside");
     const pubResult = await verifyLocalAppFrontend(
-      { action: "verifyFrontend", workspaceId: "ws-1", publicationId: pubId },
+      { action: "verifyFrontend", workspaceId: "ws-1", publicationId: pubId, versionId: "main" },
       {
         workspaceId: "ws-1",
         workspaceRoot: "C:\\workspace",

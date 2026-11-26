@@ -14,20 +14,11 @@ export function localCollectionEngine(input: {
   rootPath: string;
   capture: Pick<WorkspaceEngineCapture, "writeAuthoredFile" | "readMoment">;
   withAdapter<T>(
-    work: (
-      adapter: Pick<VersionedLiveAdapter, "getActiveVersion" | "listTextFilePage" | "readTextFile">,
-    ) => Promise<T>,
+    work: (adapter: Pick<VersionedLiveAdapter, "listTextFilePage" | "readTextFile">) => Promise<T>,
   ): Promise<T>;
 }): LocalCollectionEngine {
   const { workspaceId } = input;
   return {
-    async activeVersionId() {
-      const version = await input.withAdapter((adapter) =>
-        adapter.getActiveVersion({ workspaceId }),
-      );
-      if (!version) throw new Error("This workspace has no active version.");
-      return version.id;
-    },
     listFiles: ({ versionId, folder, afterPath, limit }) =>
       input.withAdapter((adapter) =>
         adapter.listTextFilePage({

@@ -406,18 +406,18 @@ export async function prepareOwnerAppPublication(
  * dohc shows a folder without one as a site, which offers no review to see or remove an approval.
  */
 export async function prepareLocalAppPublication(
-  input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
+  input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot"> & { versionId: string },
   dependencies: AppPublicationPreparationDependencies,
 ): Promise<PreparedAppSources> {
-  return prepareAppSources(input, "main", localAllowed, dependencies, true);
+  return prepareAppSources(input, input.versionId, localAllowed, dependencies, true);
 }
 
 /** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
 export async function readLocalAppSource(
-  input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
+  input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot"> & { versionId: string },
   dependencies: SourceDependencies,
 ): Promise<{ sourceRevision: string; sourcePaths: string[] }> {
-  const { metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
+  const { metadata } = await selectAppSources(input, input.versionId, localAllowed, dependencies);
   return {
     sourceRevision: metadata.sourceDigest,
     sourcePaths: metadata.files.map((file) => file.path),

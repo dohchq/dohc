@@ -60,6 +60,7 @@ import {
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { LocalAppRow } from "../workspaces/localAppStore";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
+import { MAIN_ONLY_SCHEMA_CHANGES } from "../workspaces/localPreviewStore";
 import { collectionHistoryAuthors, type CollectionHistoryNames } from "./collectionHistoryAuthors";
 import {
   assertSourcePathsNotHeld,
@@ -71,6 +72,7 @@ type Workspace = { workspaceId: string; rootPath?: string; shareView?: unknown }
 type SourceAdapter = Pick<
   VersionedLiveAdapter,
   | "captureSourceMetadata"
+  | "getActiveVersion"
   | "hydrateCapturedSources"
   | "listTextFileMetadata"
   | "resolveFiles"
@@ -130,6 +132,7 @@ export function createDatasetHandler<
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<SourceCaptureStatus>;
   /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
   withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
+  withMainVersionLock?<T>(workspace: W, work: () => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(
     workspace: W,
@@ -230,6 +233,7 @@ export function createDatasetHandler<
             dependencies.withAdapter(operation.workspace, (adapter) =>
               work({
                 workspace: adapter.workspace,
+                getActiveVersion: adapter.getActiveVersion.bind(adapter),
                 listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
                 resolveFiles: adapter.resolveFiles.bind(adapter),
                 hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
@@ -241,6 +245,28 @@ export function createDatasetHandler<
                 },
               }),
             );
+          const onMain = async (adapter: Pick<SourceAdapter, "getActiveVersion">) => {
+            const active = await adapter.getActiveVersion({
+              workspaceId: operation.workspace.workspaceId,
+            });
+            if ((active?.id ?? "main") !== "main") throw new Error(MAIN_ONLY_SCHEMA_CHANGES);
+          };
+          const requireMain = async () => {
+            await dependencies.withAdapter(operation.workspace, async (adapter) => {
+              await onMain(adapter);
+              return {};
+            });
+            current();
+          };
+          const onMainLocked = <T>(work: () => Promise<T>) => {
+            const guarded = async () => {
+              await requireMain();
+              return work();
+            };
+            return dependencies.withMainVersionLock
+              ? dependencies.withMainVersionLock(operation.workspace, guarded)
+              : guarded();
+          };
           let input: ResolvedDatasetRequest;
           if ("datasetPath" in request) {
             if (capturesFirst) {
@@ -740,16 +766,22 @@ export function createDatasetHandler<
                 ...DatasetMigrationPreviewPage.parse(page),
               };
             }
-            // Consume before any authority read or SQL, including an uncertain remote reply.
-            pending.clear();
             if (input.action === "discardMigration") {
+              // Consume before any authority read or SQL, including an uncertain remote reply.
+              pending.clear();
               await migrationAuthority.discardMigrationCandidate(candidate);
               migrationAuthority.assertCurrent();
               return { kind: "migration-discarded" as const };
             }
-            const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, {
-              ...input,
-              signal: operation.signal,
+            const result = await onMainLocked(async () => {
+              if (migrations.get(input.preparationId) !== pending)
+                throw new Error("This Collection review expired. Prepare the change again.");
+              // Consume before any authority read or SQL, including an uncertain remote reply.
+              pending.clear();
+              return approveLocalDatasetMigration(migrationAuthority, pending.review, {
+                ...input,
+                signal: operation.signal,
+              });
             });
             migrationAuthority.assertCurrent();
             dependencies.collectionRulesChanged?.(input.workspaceId, candidate.datasetId);
@@ -771,9 +803,10 @@ export function createDatasetHandler<
                 await flushSourceCapture();
                 current();
               }
-              const prepared = await withSourceAdapter((adapter) =>
-                review.prepareMigration({ ...selection, adapter, signal: operation.signal }),
-              );
+              const prepared = await withSourceAdapter(async (adapter) => {
+                await onMain(adapter);
+                return review.prepareMigration({ ...selection, adapter, signal: operation.signal });
+              });
               migrationAuthority.assertCurrent();
               const { signal } = operation;
               const preparationId = prepared.preparationId;
@@ -887,6 +920,7 @@ export function createDatasetHandler<
               throw new Error(
                 "Saved Collection rules are unavailable. Update the host and try again.",
               );
+            await requireMain();
             const approved = await data.approvedArtifacts(input.datasetId);
             current();
             if (
@@ -916,10 +950,8 @@ export function createDatasetHandler<
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
             const prepared = await prepareMigration({
@@ -1203,6 +1235,7 @@ export function createDatasetHandler<
             return { kind: "discarded" as const };
           }
           if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
+            await requireMain();
             const approved = await data.approvedArtifacts(input.datasetId);
             current();
             if (!approved.active)
@@ -1231,10 +1264,8 @@ export function createDatasetHandler<
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
             const prepared = await prepareMigration({
@@ -1333,11 +1364,13 @@ export function createDatasetHandler<
           }
           const host = await localHost();
           if (input.action === "approve") {
-            const revision = await host.approve({
-              ...input,
-              approvalAgent,
-              signal: operation.signal,
-            });
+            const revision = await onMainLocked(() =>
+              host.approve({
+                ...input,
+                approvalAgent,
+                signal: operation.signal,
+              }),
+            );
             current();
             return { kind: "approved" as const, revision };
           }
@@ -1354,10 +1387,8 @@ export function createDatasetHandler<
             descriptorPath = Object.keys(generated.files).find(
               (path) => path === "dataset.json" || path.endsWith("/dataset.json"),
             )!;
-            await dependencies.createSources(
-              operation.workspace,
-              generated.files,
-              operation.signal,
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
             );
             current();
           } else {
@@ -1365,9 +1396,10 @@ export function createDatasetHandler<
             await flushSourceCapture();
             current();
           }
-          const prepared = await withSourceAdapter((adapter) =>
-            host.prepare({ descriptorPath, adapter, signal: operation.signal }),
-          );
+          const prepared = await withSourceAdapter(async (adapter) => {
+            await onMain(adapter);
+            return host.prepare({ descriptorPath, adapter, signal: operation.signal });
+          });
           current();
           if (input.action === "prepare")
             return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };
@@ -1378,12 +1410,14 @@ export function createDatasetHandler<
             );
           }
           // The creation control approves the generated fields and actions it just displayed.
-          const revision = await host.approve({
-            preparationId: prepared.preparationId,
-            revisionSha256: prepared.revision.revisionSha256,
-            approvalAgent,
-            signal: operation.signal,
-          });
+          const revision = await onMainLocked(() =>
+            host.approve({
+              preparationId: prepared.preparationId,
+              revisionSha256: prepared.revision.revisionSha256,
+              approvalAgent,
+              signal: operation.signal,
+            }),
+          );
           current();
           return { kind: "approved" as const, revision };
         },

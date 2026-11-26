@@ -77,10 +77,6 @@ function fakeEngine() {
     if (state.down) throw new Error("The engine stopped.");
   };
   const api: LocalCollectionEngine = {
-    async activeVersionId() {
-      check();
-      return state.active;
-    },
     async listFiles({ versionId, folder, afterPath, limit }) {
       check();
       const paths = [...versions.get(versionId)!.keys()]
@@ -236,7 +232,10 @@ async function fixture(
     ["trip/main.ts", "document.body.textContent = 'Trip';"],
     ["trip/responses/collection.yaml", schema],
   ]);
-  const collectionApp = (readFields = options.readFields ?? ["destination", "name"]) => {
+  const collectionApp = (
+    readFields = options.readFields ?? ["destination", "name"],
+    versionId = "main",
+  ) => {
     sources.set(
       "trip/app.publish.json",
       JSON.stringify({
@@ -254,7 +253,7 @@ async function fixture(
       }),
     );
     return prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "trip" },
+      { workspaceId: "w", appRoot: "trip", versionId },
       {
         deferredWrites: [],
         adapter: sourceCaptureAdapter(sources),
@@ -270,7 +269,7 @@ async function fixture(
       JSON.stringify({ version: 1, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }),
     );
     return prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "trip" },
+      { workspaceId: "w", appRoot: "trip", versionId: "main" },
       {
         deferredWrites: [],
         adapter: sourceCaptureAdapter(sources),
@@ -349,7 +348,7 @@ async function fixture(
     });
     for (const [path, source] of Object.entries(form.files)) sources.set(`trip/${path}`, source);
     return prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "trip" },
+      { workspaceId: "w", appRoot: "trip", versionId: "main" },
       {
         deferredWrites: [],
         adapter: sourceCaptureAdapter(sources),
@@ -379,6 +378,51 @@ async function fixture(
 }
 
 describe("local document Collection apps", () => {
+  it("previews another version's Collection app read-only, over that version's records", async () => {
+    const f = await fixture({ readFields: ["destination"] });
+    f.engine.fork("feature");
+    f.engine.files("feature").set(
+      "trip/responses/a.md",
+      `---
+${JSON.stringify({ destination: "Tokyo" })}
+---
+body`,
+    );
+    const preview = await f.host.apps.activate(
+      await f.collectionApp(["destination"], "feature"),
+      signal(),
+    );
+    expect(f.host.apps.list("trip", "feature")).toMatchObject([
+      { publicationId: preview.publicationId, active: true, versionId: "feature" },
+    ]);
+    expect(
+      await f.host.apps.request(preview.publicationId, "list", {
+        authorityRevision: preview.authorityRevision,
+        limit: 50,
+      }),
+    ).toMatchObject({ records: [{ fields: { destination: "Tokyo" } }] });
+    expect((await f.list()).records).toEqual([]);
+    await expect(
+      f.host.apps.request(preview.publicationId, "create", {
+        authorityRevision: preview.authorityRevision,
+        idempotencyKey: "preview-1",
+        fields: { destination: "Manila" },
+      }),
+    ).rejects.toThrow(
+      "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
+    );
+    expect(f.engine.state.writes).toEqual([]);
+    expect(f.host.apps.list("trip", "main")).toMatchObject([{ active: true }]);
+
+    // Closing while Main has an unsettled create must not let the preview runtime drain Main's queue.
+    f.engine.state.writeDown = true;
+    await expect(f.create({ destination: "Tokyo" }, "pending-main")).rejects.toBeInstanceOf(
+      LocalAppUnavailableError,
+    );
+    f.engine.state.writeDown = false;
+    await f.host.close();
+  });
+
   it("reads approved fields from the published projection in UTF-8 byte order", async () => {
     const f = await fixture({ readFields: ["destination"] });
     const files = f.engine.files();
@@ -488,18 +532,20 @@ describe("local document Collection apps", () => {
     await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(
       LocalAppUnavailableError,
     );
-    expect(f.host.apps.list("trip")[0]).toMatchObject({ pendingCreates: 1 });
+    expect(f.host.apps.list("trip", "main")[0]).toMatchObject({ pendingCreates: 1 });
     const createdAt = f.inspect((db) =>
       Number(db.prepare("SELECT created_at_ms FROM local_collection_creates").get()!.created_at_ms),
     );
     f.engine.state.down = true;
     await f.host.close();
     const restarted = await f.open();
-    expect(restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 1 });
+    expect(restarted.apps.list("trip", "main")[0]).toMatchObject({ pendingCreates: 1 });
     f.engine.state.down = false;
     f.engine.state.writes.length = 0;
     restarted.apps.reconcile();
-    await expect.poll(() => restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
+    await expect
+      .poll(() => restarted.apps.list("trip", "main")[0])
+      .toMatchObject({ pendingCreates: 0 });
     expect(f.engine.state.writes).toEqual([]);
     const receipt = await f.create({ destination: "Tokyo" }, "response-1", restarted);
     expect(receipt).toMatchObject({ acceptedAtMs: createdAt, objectId: "object-0" });
@@ -562,18 +608,20 @@ describe("local document Collection apps", () => {
       kind: "withdrawalUnconfirmed",
       authorityRevision: unconfirmed.authorityRevision,
     });
-    expect(f.host.apps.list("trip")[0]).toMatchObject({
+    expect(f.host.apps.list("trip", "main")[0]).toMatchObject({
       approved: false,
       pendingCreates: 1,
       authorityRevision: unconfirmed.authorityRevision,
     });
     await f.host.close();
     const restarted = await f.open();
-    expect(restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 1 });
+    expect(restarted.apps.list("trip", "main")[0]).toMatchObject({ pendingCreates: 1 });
     f.engine.state.down = false;
     f.engine.state.writeDown = false;
     restarted.apps.reconcile();
-    await expect.poll(() => restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
+    await expect
+      .poll(() => restarted.apps.list("trip", "main")[0])
+      .toMatchObject({ pendingCreates: 0 });
     expect(
       await restarted.apps.withdraw(f.published.publicationId, unconfirmed.authorityRevision),
     ).toEqual({
@@ -612,7 +660,7 @@ describe("local document Collection apps", () => {
       expect(budget).not.toBe(datasets);
     });
     const reopened = await f.open();
-    expect(reopened.apps.list("trip")[0]).toMatchObject({ active: true });
+    expect(reopened.apps.list("trip", "main")[0]).toMatchObject({ active: true });
   });
 
   it("moves a root between kinds only by explicit replacement, refusing each earlier session", async () => {
@@ -628,7 +676,9 @@ describe("local document Collection apps", () => {
         limit: 1,
       }),
     ).rejects.toThrow(/document Collection/);
-    expect(f.host.apps.list("trip").map((row) => [row.publicationId, row.approved])).toEqual(
+    expect(
+      f.host.apps.list("trip", "main").map((row) => [row.publicationId, row.approved]),
+    ).toEqual(
       expect.arrayContaining([
         [sessionA.publicationId, false],
         [datasetB.publicationId, true],
@@ -764,7 +814,7 @@ describe("local document Collection apps", () => {
         f.published.authorityRevision,
       ),
     ).toThrow(/approval changed/);
-    const listed = f.host.apps.list("trip");
+    const listed = f.host.apps.list("trip", "main");
     expect(listed).toEqual(
       expect.arrayContaining([
         {
@@ -774,6 +824,7 @@ describe("local document Collection apps", () => {
           sourceRevision: prepared.candidate.sourceRevision,
           approved: true,
           active: true,
+          versionId: "main",
         },
         expect.objectContaining({
           publicationId: f.published.publicationId,
@@ -883,7 +934,7 @@ describe("local document Collection apps", () => {
       expect(() =>
         f.host.apps.assertBrowserPublication(app.publicationId, app.authorityRevision),
       ).toThrow(/approval changed/);
-      expect(f.host.apps.list("trip")).toEqual(
+      expect(f.host.apps.list("trip", "main")).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             publicationId: collection.publicationId,
@@ -936,7 +987,7 @@ describe("local document Collection apps", () => {
       expect(db.prepare("SELECT count(*) AS n FROM local_unconnected_apps").get()!.n).toBe(1);
     });
     const reopened = await f.open();
-    expect(reopened.apps.list("trip")).toEqual(
+    expect(reopened.apps.list("trip", "main")).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           publicationId: app.publicationId,
@@ -1023,7 +1074,7 @@ describe("local document Collection apps", () => {
     await expect.poll(() => f.engine.state.writes.length).toBe(1);
     const closing = f.host.close();
     expect(() => f.host.list()).toThrow(/session ended/);
-    expect(() => f.host.apps.list("trip")).toThrow(/session ended/);
+    expect(() => f.host.apps.list("trip", "main")).toThrow(/session ended/);
     await expect(
       f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision),
     ).rejects.toThrow(/session ended/);

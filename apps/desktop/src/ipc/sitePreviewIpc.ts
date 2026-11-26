@@ -1,9 +1,10 @@
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { OwnedSiteCatalog } from "../workspaces/ownedSiteCatalog";
 import { requireExactSiteRoot, type SitePackageInfo } from "../workspaces/sitePackage";
-import type {
-  SitePreviewExecution,
-  createSitePreviewLifecycle,
+import {
+  START_CANCELLED_MESSAGE,
+  type SitePreviewExecution,
+  type createSitePreviewLifecycle,
 } from "../workspaces/sitePreviewLifecycle";
 import {
   previewRunsAppCode,
@@ -53,6 +54,7 @@ export interface StartSitePreviewDependencies<
   // Throws unless this computer trusts the workspace to run its apps' code.
   assertMayRunAppCode(workspace: Workspace): Promise<unknown>;
   execute(input: SitePreviewExecutionInput): Promise<SitePreviewExecution<SitePreviewResultBody>>;
+  activeVersionId(workspace: Workspace): Promise<string>;
 }
 
 function assertPreviewModeAllowed(
@@ -89,20 +91,29 @@ export function createStartSitePreviewHandler<
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
+        const assertVersionActive = async () => {
+          if ((await dependencies.activeVersionId(workspace)) !== payload.versionId) {
+            throw new Error("Switch to this version in Versions to preview its apps.");
+          }
+        };
         return StartSitePreviewAnswer.parse(
           await dependencies.lifecycle.acquire({
             holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
+            versionId: payload.versionId,
             siteRoot: payload.siteRoot,
             mode: payload.mode,
             restart: payload.restart,
             isCurrent,
+            verifyCurrent: assertVersionActive,
             // The start's own check, not this window's: a start another
             // window also holds outlives this one.
             prepare: async (startIsCurrent) => {
               const sharedView = dependencies.isSharedView(workspace.workspaceId);
               assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
+              await assertVersionActive();
+              if (!startIsCurrent()) throw new Error(START_CANCELLED_MESSAGE);
               const site = requireExactSiteRoot(
                 await dependencies.catalog.get(workspace, payload.siteRoot, payload.mode),
                 payload.siteRoot,
@@ -111,6 +122,7 @@ export function createStartSitePreviewHandler<
               if (previewRunsAppCode(site, payload.mode)) {
                 await dependencies.assertMayRunAppCode(workspace);
               }
+              await assertVersionActive();
               return (signal) =>
                 dependencies.execute({
                   workspaceId: workspace.workspaceId,

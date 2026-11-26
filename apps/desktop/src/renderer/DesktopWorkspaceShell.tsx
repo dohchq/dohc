@@ -8675,6 +8675,16 @@ function WorkspaceShell(props: {
   // A listing change asks again, a moment later, so a burst of listings asks
   // once and a new file that is one gets its mark.
   const activeVersionId = workspaceVersions.onMain ? null : (workspaceVersions.active?.id ?? null);
+  const activeVersionName = activeVersionId ? (workspaceVersions.active?.name ?? null) : null;
+  const versionPending =
+    !shareView && (!captureDecided || (captureAvailable && workspaceVersions.snapshot === null));
+  const versionPreview = useMemo(
+    () =>
+      activeVersionId && activeVersionName
+        ? { id: activeVersionId, name: activeVersionName }
+        : null,
+    [activeVersionId, activeVersionName],
+  );
   useEffect(() => {
     notVersionedMarks.set([]);
   }, [activeVersionId, captureAvailable, notVersionedMarks, workspaceId]);
@@ -9085,6 +9095,8 @@ function WorkspaceShell(props: {
                                 chatsNavigatorProps={chatsNavigatorProps}
                                 setAppPinned={setAppPinned}
                                 appAccess={appAccess}
+                                appVersion={versionPreview}
+                                appVersionPending={versionPending}
                                 shareView={shareView}
                                 historyTimeline={historyTimeline}
                                 sharing={{
@@ -10050,6 +10062,8 @@ function WorkspaceShell(props: {
                                           retryCollectionsList();
                                         }}
                                         access={appAccess}
+                                        version={versionPreview}
+                                        versionPending={versionPending}
                                       />
                                     </Suspense>
                                   </ErrorBoundary>

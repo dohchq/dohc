@@ -26,6 +26,7 @@ import type { MigrateDatasetInput } from "@dohc/app-backend-runtime/dataset-host
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import type { DatasetMigrationCandidate } from "@dohc/cli/dataset";
 import { isDatasetServerNotFound } from "./errorWords";
+import { MAIN_ONLY_SCHEMA_CHANGES } from "../workspaces/localPreviewStore";
 
 type SourceAdapter = AppPublicationPreparationDependencies["adapter"];
 
@@ -104,7 +105,9 @@ export function createLocalOwnerAppPublicationHandler<
   ): Promise<string>;
   verifyFrontend?(
     workspace: Workspace,
-    input: Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>,
+    input: Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }> & {
+      versionId: string;
+    },
     operation: Operation,
   ): Promise<OwnerAppPublicationResult>;
 }) {
@@ -151,7 +154,37 @@ export function createLocalOwnerAppPublicationHandler<
     };
     const appSource = (adapter: VersionedLiveAdapter): SourceAdapter =>
       deps.appSource?.(operation.workspace, adapter) ?? adapter;
+    const workspaceId = operation.workspace.workspaceId;
+    const activeVersionId = async () =>
+      (
+        await deps.withAdapter(operation.workspace, (adapter) =>
+          adapter.getActiveVersion({ workspaceId }),
+        )
+      )?.id ?? "main";
+    const resolveVersion = async (versionId: string | undefined) => {
+      if (deps.appSource) {
+        if (versionId !== undefined && versionId !== "main")
+          throw new Error("Personal apps open on Main only.");
+        return "main";
+      }
+      if (versionId === undefined) return activeVersionId();
+      if (versionId === "main") return versionId;
+      const versions = await deps.withAdapter(operation.workspace, (adapter) =>
+        adapter.listVersions({ workspaceId }),
+      );
+      current();
+      if (!versions?.some((version) => version.id === versionId))
+        throw new Error(
+          "dohc could not find this version. Choose one from Versions and try again.",
+        );
+      return versionId;
+    };
     current();
+    if (
+      (input.action === "stage" || input.action === "approveStaged") &&
+      (await activeVersionId()) !== "main"
+    )
+      throw new Error(MAIN_ONLY_SCHEMA_CHANGES);
     if (
       input.action === "stage" ||
       input.action === "listStaged" ||
@@ -307,7 +340,13 @@ export function createLocalOwnerAppPublicationHandler<
     if (input.action === "verifyFrontend") {
       if (!deps.verifyFrontend)
         throw new Error("App frontend verification is unavailable. Restart dohc and try again.");
-      const result = await deps.verifyFrontend(operation.workspace, input, operation);
+      const versionId = await resolveVersion(input.versionId);
+      current();
+      const result = await deps.verifyFrontend(
+        operation.workspace,
+        { ...input, versionId },
+        operation,
+      );
       current();
       return OwnerAppPublicationResult.parse(result);
     }
@@ -381,24 +420,29 @@ export function createLocalOwnerAppPublicationHandler<
     }
     if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot))
       throw new Error("Choose an app in your workspace.");
+    const versionId = await resolveVersion(input.versionId);
+    current();
     if (input.action === "listLocal") {
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal);
       current();
       return OwnerAppPublicationResult.parse({
         kind: "localListed",
-        publications: local.apps.list(input.appRoot),
+        publications: local.apps.list(input.appRoot, versionId),
       });
     }
     if (input.action === "checkLocal") {
       const capture = await deps.flushCapture(operation.workspace);
       current();
       const source = await deps.withAdapter(operation.workspace, (adapter) =>
-        readLocalAppSource(input, {
-          adapter: appSource(adapter),
-          signal: operation.signal,
-          assertCurrent: current,
-          deferredWrites: capture.deferredWrites,
-        }),
+        readLocalAppSource(
+          { ...input, versionId },
+          {
+            adapter: appSource(adapter),
+            signal: operation.signal,
+            assertCurrent: current,
+            deferredWrites: capture.deferredWrites,
+          },
+        ),
       );
       current();
       if (!source)
@@ -420,41 +464,45 @@ export function createLocalOwnerAppPublicationHandler<
       current();
       const datasets = new Map<string, { revision: DatasetRevision; schemaSql: string }>();
       const prepared = await deps.withAdapter(operation.workspace, (adapter) =>
-        prepareLocalAppPublication(input, {
-          adapter: appSource(adapter),
-          datasetAdapter: adapter,
-          signal: operation.signal,
-          assertCurrent: current,
-          compile: deps.compile,
-          deferredWrites: capture.deferredWrites,
-          ...(deps.datasetCapability
-            ? {
-                resolveDatasetCapability: (reference, datasetId, alias) =>
-                  deps.datasetCapability!(
-                    operation.workspace,
-                    reference,
-                    datasetId,
-                    alias,
-                    operation.signal,
-                  ),
-              }
-            : {}),
-          resolveDatasetRevision: async (binding) => {
-            if (!deps.approvedArtifacts)
-              throw new Error(
-                "This app's Collection is unavailable. Open the Collection and try again.",
+        prepareLocalAppPublication(
+          { ...input, versionId },
+          {
+            adapter: appSource(adapter),
+            datasetAdapter: adapter,
+            signal: operation.signal,
+            assertCurrent: current,
+            compile: deps.compile,
+            deferredWrites: capture.deferredWrites,
+            ...(deps.datasetCapability
+              ? {
+                  resolveDatasetCapability: (reference, datasetId, alias) =>
+                    deps.datasetCapability!(
+                      operation.workspace,
+                      reference,
+                      datasetId,
+                      alias,
+                      operation.signal,
+                    ),
+                }
+              : {}),
+            resolveDatasetRevision: async (binding) => {
+              if (!deps.approvedArtifacts)
+                throw new Error(
+                  "This app's Collection is unavailable. Open the Collection and try again.",
+                );
+              const approved = await deps.approvedArtifacts(
+                operation.workspace,
+                binding.datasetId,
+                operation.signal,
               );
-            const approved = await deps.approvedArtifacts(
-              operation.workspace,
-              binding.datasetId,
-              operation.signal,
-            );
-            current();
-            if (!approved.active) throw new Error("This Collection is unavailable on this device.");
-            datasets.set(binding.datasetId, approved);
-            return approved.revision;
+              current();
+              if (!approved.active)
+                throw new Error("This Collection is unavailable on this device.");
+              datasets.set(binding.datasetId, approved);
+              return approved.revision;
+            },
           },
-        }),
+        ),
       );
       current();
       if (!prepared)

@@ -1546,6 +1546,7 @@ describe("HexClash authoritative strategy game", () => {
         action: "verifyFrontend",
         workspaceId: "w",
         appRoot: "hex-tactics",
+        versionId: "main",
       },
       {
         workspaceId: "w",

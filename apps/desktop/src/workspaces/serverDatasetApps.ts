@@ -17,6 +17,8 @@ import { isDatasetServerNotFound } from "../ipc/errorWords";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { LocalAppAction } from "./localAppLaunch";
+import { PREVIEW_READ_ONLY } from "./localPreviewStore";
+import type { AppDatasetCapability } from "@dohc/security-contract/app-publication";
 import type { LocalDatasetAgent } from "./localDatasetHost";
 import {
   createLocalDatasetApps,
@@ -49,6 +51,13 @@ export interface ServerCollectionsTransport {
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown>;
+  /** The owner's own request to a Collection, as `invoke` or `file`. Only a version preview's reads use it. */
+  owner(
+    datasetId: string,
+    route: "invoke" | "file",
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
 }
 
 /** The owner's server's Collection routes this computer uses, over one way to send it a request. */
@@ -57,12 +66,13 @@ export function createServerCollectionsTransport(
   post: (path: string, body: unknown, signal?: AbortSignal) => Promise<unknown>,
 ): ServerCollectionsTransport {
   const workspacePath = `/sync/${encodeURIComponent(workspaceId)}`;
-  const binding = (datasetId: string) =>
-    `${workspacePath}/datasets/${encodeURIComponent(datasetId)}/binding`;
+  const dataset = (datasetId: string) =>
+    `${workspacePath}/datasets/${encodeURIComponent(datasetId)}`;
+  const binding = (datasetId: string) => `${dataset(datasetId)}/binding`;
   return {
     async activate({ revision, schemaSql, operationSource, approvalAgent }, signal) {
       const value = await post(
-        `${workspacePath}/datasets/${encodeURIComponent(revision.datasetId)}/activate`,
+        `${dataset(revision.datasetId)}/activate`,
         { revision, schemaSql, operationSource, ...(approvalAgent ? { approvalAgent } : {}) },
         signal,
       );
@@ -107,6 +117,7 @@ export function createServerCollectionsTransport(
         body,
         signal,
       ),
+    owner: (datasetId, route, body, signal) => post(`${dataset(datasetId)}/${route}`, body, signal),
   };
 }
 
@@ -140,7 +151,8 @@ export function createServerDatasetApps(options: {
   workspaceId: string;
   assertCurrent(): void;
   agentRun(): LocalDatasetAgent | null;
-  server: Pick<ServerCollectionsTransport, "approve" | "withdraw" | "request">;
+  server: Pick<ServerCollectionsTransport, "approve" | "withdraw" | "request" | "owner">;
+  preview?: boolean;
   /** Aborts when the workspace closes. */
   lifetime: AbortSignal;
   datasetRevision?(datasetId: string): number;
@@ -304,6 +316,73 @@ export function createServerDatasetApps(options: {
     current(publicationId, expected);
     return result;
   }
+  async function ownerRead(
+    publicationId: string,
+    expected: number,
+    cap: AppDatasetCapability,
+    operationId: string,
+    input: { input: unknown; idempotencyKey: string },
+    signal?: AbortSignal,
+  ) {
+    current(publicationId, expected);
+    const { catchUp: _, ...result } = (await options.server.owner(
+      cap.datasetId,
+      "invoke",
+      {
+        revision: cap.revision,
+        revisionSha256: cap.revisionSha256,
+        operationId,
+        input: input.input,
+        idempotencyKey: input.idempotencyKey,
+      },
+      signal,
+    )) as Record<string, unknown>;
+    signal?.throwIfAborted();
+    current(publicationId, expected);
+    return result;
+  }
+  async function previewFile(
+    publicationId: string,
+    input: { authorityRevision: number; input: unknown; idempotencyKey: string; dataset?: string },
+    operationId: string,
+    fileId: string,
+    signal?: AbortSignal,
+  ) {
+    const cap = selectDatasetCapability(
+      current(publicationId, input.authorityRevision).capabilities,
+      input.dataset,
+    );
+    const read = await ownerRead(
+      publicationId,
+      input.authorityRevision,
+      cap,
+      operationId,
+      input,
+      signal,
+    );
+    const granted = read.result as Record<string, unknown> | null;
+    if (
+      !granted ||
+      typeof granted !== "object" ||
+      Object.keys(granted).length !== 1 ||
+      granted.fileId !== fileId
+    )
+      throw new Error("This action does not grant access to the file.");
+    const reply = (await options.server.owner(
+      cap.datasetId,
+      "file",
+      { revision: cap.revision, revisionSha256: cap.revisionSha256, fileId },
+      signal,
+    )) as Record<string, unknown> | null;
+    current(publicationId, input.authorityRevision);
+    if (!reply || typeof reply.bytesBase64 !== "string")
+      throw new Error("Invalid Collection file response.");
+    const file = parseAppBackendFile(reply.file);
+    const bytes = Buffer.from(reply.bytesBase64, "base64");
+    if (bytes.byteLength !== file.byteLength || file.fileId !== fileId)
+      throw new Error("Invalid Collection file response.");
+    return { file, bytes };
+  }
   const operation = (publicationId: string, expected: number, name: string, dataset?: string) =>
     selectDatasetCapability(current(publicationId, expected).capabilities, dataset).operations.find(
       (candidate) => candidate.name === name,
@@ -313,6 +392,7 @@ export function createServerDatasetApps(options: {
     resolveAuthority() {
       throw new Error("App access is not permitted.");
     },
+    owns: () => false,
     async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent?: ApprovalAgent | null) {
       options.assertCurrent();
       signal.throwIfAborted();
@@ -325,6 +405,12 @@ export function createServerDatasetApps(options: {
       const capabilities = datasetCapabilitiesOf(candidate);
       const resourceId = capabilities.length === 1 ? capabilities[0]!.datasetId : "";
       const publicationId = localDatasetAppId(options.workspaceId, candidate);
+      if (options.preview)
+        return options.store.activate(
+          { kind: "dataset", resourceId, publicationId, prepared, agent },
+          signal,
+          (_existing, _displaced, commit) => commit(),
+        );
       // A withdrawal of this app waits until this computer has committed the approval or given it up.
       return approve(publicationId, candidate, signal, (approved) => {
         if (approved.publicationId !== publicationId) throw new Error("Invalid app approval.");
@@ -347,7 +433,7 @@ export function createServerDatasetApps(options: {
     },
     withdrawBinding(value: LocalAppRow, commit: () => void) {
       commit();
-      withdraw(value);
+      if (!options.preview) withdraw(value);
     },
     /** Waits for the work on its way to the server, once the lifetime has stopped it. */
     async close() {
@@ -381,6 +467,8 @@ export function createServerDatasetApps(options: {
     ): Promise<unknown> {
       if (action === "list" || action === "create")
         throw new Error("This app is not approved for document Collection access.");
+      if (options.preview && (action === "attempt" || action === "upload"))
+        throw new Error(PREVIEW_READ_ONLY);
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
           throw new Error("Invalid pending submission request.");
@@ -453,6 +541,10 @@ export function createServerDatasetApps(options: {
         (c) => c.name === input.operation && (action !== "query" || c.readOnly),
       );
       if (!found) throw new Error("This action is not approved for the app.");
+      if (options.preview) {
+        if (!found.readOnly) throw new Error(PREVIEW_READ_ONLY);
+        return ownerRead(publicationId, authorityRevision, cap, found.operationId, input, signal);
+      }
       // While an agent run is active, a change is the run's, unless a person's
       // click or key press in the app started it, as dohc's bootstrap reports.
       const run = activated ? null : options.agentRun();
@@ -528,6 +620,8 @@ export function createServerDatasetApps(options: {
         !/^[A-Za-z0-9_-]{16,128}$/.test(raw.fileId)
       )
         return Promise.reject(new Error("Choose an approved read action for this file."));
+      if (options.preview)
+        return previewFile(publicationId, input, found.operationId, raw.fileId, signal);
       return send(
         publicationId,
         input.authorityRevision,

@@ -749,6 +749,76 @@ describe("switchVersion", () => {
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(draftLogoBytes);
     await engine.stop();
   });
+
+  it("holds previews via aroundVersionSwitch across switching or creating versions", async () => {
+    const root = await createTestScratch("dohc-version-ops-");
+    await write(root, "plan.md", "v1\n");
+    const events: string[] = [];
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: Symbol("test"),
+      rustEngineSessions: mockDaemonSessions({
+        rootPath: root,
+        workspaceId: WORKSPACE_ID,
+        loopback,
+        requests,
+      }),
+      aroundVersionSwitch: async (work) => {
+        events.push(`before:${requests.filter((r) => r.method === "versions.setActive").length}`);
+        try {
+          return await work();
+        } finally {
+          events.push(`after:${requests.filter((r) => r.method === "versions.setActive").length}`);
+        }
+      },
+    });
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    expect(events).toEqual(["before:0", "after:1"]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
+    events.length = 0;
+    await expect(engine.switchVersion("unknown-version")).rejects.toThrow();
+    expect(events).toEqual([]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
+    await engine.switchVersion("main");
+    expect(events).toEqual(["before:1", "after:2"]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(2);
+    await engine.stop();
+  });
+
+  it("lets a workspace close settle without deadlocking when withVersionLock checks live capture state", async () => {
+    const root = await createTestScratch("dohc-version-ops-");
+    await write(root, "plan.md", "v1\n");
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
+    engine.start();
+    await engine.flush();
+    let entered!: () => void;
+    const enteredLock = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let releaseWork!: () => void;
+    const workGate = new Promise<void>((resolve) => {
+      releaseWork = resolve;
+    });
+    let activeCapture: WorkspaceEngineCapture | null = engine;
+    const locked = engine.withVersionLock(async () => {
+      entered();
+      await workGate;
+      if (activeCapture !== engine) {
+        throw new Error("capture closed");
+      }
+    });
+    await enteredLock;
+    activeCapture = null;
+    const closing = engine.settleAndCloseAllLiveSessions().then(() => engine.stop());
+    releaseWork();
+    await expect(locked).rejects.toThrow("capture closed");
+    await expect(closing).resolves.toBeUndefined();
+  });
 });
 
 describe("mergeVersionIntoMain", () => {
@@ -1075,7 +1145,7 @@ describe("updateVersionFromMain", () => {
       await write(root, file, "base\n");
     }
     const loopback = new ConflictLoopbackEngine();
-    loopback.conflictPageSize = 2;
+    loopback.conflictPageSize = 1;
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();

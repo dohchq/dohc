@@ -90,12 +90,14 @@ function startHandle(
   input: {
     senderId?: number;
     workspaceId?: string;
+    versionId?: string;
     siteRoot?: string;
   } = {},
 ) {
   return lifecycle.start({
     senderId: input.senderId ?? 1,
     workspaceId: input.workspaceId ?? "workspace-1",
+    versionId: input.versionId ?? "main",
     siteRoot: input.siteRoot ?? "site",
     isCurrent: () => true,
     prepare: async () => async () => execution(handle),
@@ -103,6 +105,20 @@ function startHandle(
 }
 
 describe("site preview lifecycle", () => {
+  it("keeps a preview for each version of the same app", async () => {
+    const { lifecycle } = testLifecycle();
+    const main = fakeStaticHandle("http://127.0.0.1:4173/");
+    const feature = fakeStaticHandle("http://127.0.0.1:5173/");
+    await startHandle(lifecycle, main);
+    await startHandle(lifecycle, feature, { versionId: "feature" });
+    expect(main.stop).not.toHaveBeenCalled();
+    const site = { workspaceId: "workspace-1", siteRoot: "site" };
+    expect(lifecycle.status({ ...site, versionId: "main" }).running).toBe(true);
+    expect(lifecycle.status({ ...site, versionId: "feature" }).running).toBe(true);
+    expect(lifecycle.status({ ...site, versionId: "other" }).running).toBe(false);
+    await lifecycle.stopAll();
+  });
+
   it("keeps the current preview when preparation rejects", async () => {
     const { lifecycle } = testLifecycle();
     const current = fakeStaticHandle("http://127.0.0.1:4173/");
@@ -112,6 +128,7 @@ describe("site preview lifecycle", () => {
       lifecycle.start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -121,7 +138,9 @@ describe("site preview lifecycle", () => {
     ).rejects.toThrow("Not a detected app: site");
 
     expect(current.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
     await lifecycle.stopAll();
   });
 
@@ -140,6 +159,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 7,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -152,6 +172,7 @@ describe("site preview lifecycle", () => {
     const stopping = lifecycle.stop({
       getActiveWorkspaceId: () => "workspace-1",
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
     });
     await stopping;
@@ -182,6 +203,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 7,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => async (signal) => {
@@ -197,6 +219,7 @@ describe("site preview lifecycle", () => {
     const stopping = lifecycle.stop({
       getActiveWorkspaceId: () => activeWorkspaceId,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
     });
     expect(observedSignal?.aborted).toBe(true);
@@ -241,7 +264,9 @@ describe("site preview lifecycle", () => {
       at: 2,
     });
 
-    expect(lifecycle.status("workspace-1", "site")).toEqual({
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }),
+    ).toEqual({
       logs: [
         {
           stream: "stderr",
@@ -254,7 +279,9 @@ describe("site preview lifecycle", () => {
     });
 
     server.exit();
-    expect(lifecycle.status("workspace-1", "site")).toEqual({
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }),
+    ).toEqual({
       logs: [
         {
           stream: "stderr",
@@ -310,6 +337,7 @@ describe("site preview lifecycle", () => {
     const first = lifecycle.start({
       senderId: 1,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => true,
       prepare: async () => async () => {
@@ -327,6 +355,7 @@ describe("site preview lifecycle", () => {
     const second = lifecycle.start({
       senderId: 2,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => true,
       prepare: async () => secondExecute,
@@ -358,6 +387,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -376,7 +406,9 @@ describe("site preview lifecycle", () => {
     expect(await staleStart).toBeInstanceOf(Error);
     expect(staleExecute).not.toHaveBeenCalled();
     expect(currentHandle.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     await lifecycle.stopAll();
     expect(currentHandle.stop).toHaveBeenCalledTimes(1);
@@ -392,6 +424,7 @@ describe("site preview lifecycle", () => {
     const firstStart = lifecycle.start({
       senderId: 1,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => true,
       prepare: async () => {
@@ -404,6 +437,7 @@ describe("site preview lifecycle", () => {
       lifecycle.start({
         senderId: 2,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -436,6 +470,7 @@ describe("site preview lifecycle", () => {
     const firstStart = lifecycle.start({
       senderId: 1,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => true,
       prepare: async () => async (signal) => {
@@ -451,6 +486,7 @@ describe("site preview lifecycle", () => {
       lifecycle.start({
         senderId: 2,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -466,7 +502,9 @@ describe("site preview lifecycle", () => {
       exited: false,
     });
     expect(firstHandle.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     await lifecycle.stopAll();
     expect(firstHandle.stop).toHaveBeenCalledTimes(1);
@@ -488,6 +526,7 @@ describe("site preview lifecycle", () => {
     const starting = lifecycle.start({
       senderId: 1,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => current,
       prepare: async () => async (signal) => {
@@ -505,7 +544,9 @@ describe("site preview lifecycle", () => {
     await expect(starting).rejects.toThrow(/renderer restarted/i);
     expect(observedSignal?.aborted).toBe(false);
     expect(candidate.stop).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(false);
     await lifecycle.stopAll();
   });
 
@@ -531,7 +572,9 @@ describe("site preview lifecycle", () => {
 
     expect(releaseOrigin).toHaveBeenCalledTimes(1);
     expect(handle.stop).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("workspace-1", "site")).toEqual({
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }),
+    ).toEqual({
       logs: [],
       running: false,
       exited: false,
@@ -564,7 +607,9 @@ describe("site preview lifecycle", () => {
 
     expect(releaseOrigin).toHaveBeenCalledTimes(1);
     expect(handle.stop).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     await startHandle(lifecycle, replacement, { senderId: 2 });
 
@@ -584,7 +629,9 @@ describe("site preview lifecycle", () => {
     expect(oldPreview.stop).toHaveBeenCalledTimes(1);
     expect(releases.get(oldPreview.url)).toHaveBeenCalledTimes(1);
     expect(replacement.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     await lifecycle.stopAll();
     expect(replacement.stop).toHaveBeenCalledTimes(1);
@@ -607,6 +654,7 @@ describe("site preview lifecycle", () => {
       lifecycle.start({
         senderId: 2,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => discardedExecute,
@@ -616,13 +664,17 @@ describe("site preview lifecycle", () => {
     expect(discardedExecute).not.toHaveBeenCalled();
     expect(oldPreview.stop).toHaveBeenCalledTimes(1);
     expect(releases.get(oldPreview.url)).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     await startHandle(lifecycle, replacement, { senderId: 3 });
 
     expect(oldPreview.stop).toHaveBeenCalledTimes(2);
     expect(replacement.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
     await lifecycle.stopAll();
   });
 
@@ -664,6 +716,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 2,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => discardedExecute,
@@ -675,6 +728,7 @@ describe("site preview lifecycle", () => {
     const secondReplacement = lifecycle.start({
       senderId: 3,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site",
       isCurrent: () => true,
       prepare: async () => replacementExecute,
@@ -709,12 +763,16 @@ describe("site preview lifecycle", () => {
     oldServer.exit();
 
     expect(isAllowedLoopbackFrameUrl(`${url}frame`)).toBe(true);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     replacement.exit();
 
     expect(isAllowedLoopbackFrameUrl(`${url}frame`)).toBe(false);
-    expect(lifecycle.status("workspace-1", "site").exited).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).exited,
+    ).toBe(true);
     await lifecycle.stopAll();
   });
 
@@ -732,6 +790,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 7,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site-a",
         isCurrent: () => true,
         prepare: async () => {
@@ -743,6 +802,7 @@ describe("site preview lifecycle", () => {
     const surviving = lifecycle.start({
       senderId: 8,
       workspaceId: "workspace-1",
+      versionId: "main",
       siteRoot: "site-b",
       isCurrent: () => true,
       prepare: async () => {
@@ -780,6 +840,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 7,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => async (signal) => {
@@ -820,6 +881,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 7,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => async () => {
@@ -855,6 +917,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -888,6 +951,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => async (signal) => {
@@ -937,7 +1001,9 @@ describe("site preview lifecycle", () => {
     await replacing;
 
     expect(replacement.stop).not.toHaveBeenCalled();
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
     await lifecycle.stopAll();
   });
 
@@ -953,6 +1019,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
@@ -990,6 +1057,7 @@ describe("site preview lifecycle", () => {
       .start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => async (signal) => {
@@ -1025,6 +1093,7 @@ describe("site preview lifecycle", () => {
       lifecycle.start({
         senderId: 1,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         isCurrent: () => true,
         prepare: prepareAfterRetirement,
@@ -1074,13 +1143,17 @@ describe("site preview lifecycle", () => {
     await expect(firstStop).rejects.toThrow(/quit stop remained ambiguous/);
     expect(preview.stop).toHaveBeenCalledTimes(1);
     expect(releases.get(preview.url)).toHaveBeenCalledTimes(1);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(true);
 
     const retry = lifecycle.stopAll();
     expect(retry).not.toBe(firstStop);
     await expect(retry).resolves.toBeUndefined();
     expect(preview.stop).toHaveBeenCalledTimes(2);
-    expect(lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(
+      lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" }).running,
+    ).toBe(false);
   });
 });
 
@@ -1126,6 +1199,7 @@ describe("an app preview shown by more than one surface", () => {
         holderId,
         senderId,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         mode: input.mode ?? "static",
         restart: input.restart ?? false,
@@ -1143,6 +1217,7 @@ describe("an app preview shown by more than one surface", () => {
         getActiveWorkspaceId: () => "workspace-1",
         holderId,
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
       });
     const close = (senderId: number) => {
@@ -1184,10 +1259,16 @@ describe("an app preview shown by more than one surface", () => {
 
       await s.hide(first);
       expect(s.handles[0]!.stop).not.toHaveBeenCalled();
-      expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+      expect(
+        s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+          .running,
+      ).toBe(true);
       await s.hide(second);
       expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
-      expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+      expect(
+        s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+          .running,
+      ).toBe(false);
       expect(s.notifyReplaced).not.toHaveBeenCalled();
     },
   );
@@ -1227,6 +1308,7 @@ describe("an app preview shown by more than one surface", () => {
       expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
       expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(otherSender, {
         workspaceId: "workspace-1",
+        versionId: "main",
         siteRoot: "site",
         holderId: other,
         generation: restarted.generation,
@@ -1272,7 +1354,10 @@ describe("an app preview shown by more than one surface", () => {
     );
     await s.hide("tab");
     await s.hide("pin");
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(
+      s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
   });
 
   it("answers a start another surface replaced as replaced, then moves that surface to the newer one", async () => {
@@ -1308,7 +1393,10 @@ describe("an app preview shown by more than one surface", () => {
     expect(s.handles[0]!.stop).not.toHaveBeenCalled();
     expect(s.notifyReplaced).not.toHaveBeenCalled();
     await s.hide("tab");
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(true);
     await s.hide("pin");
     expect(shown.url).toBe(s.handles[0]!.url);
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
@@ -1327,7 +1415,10 @@ describe("an app preview shown by more than one surface", () => {
     const shown = await tab;
     if ("replaced" in shown) throw new Error("The tab's start was counted as replaced.");
     expect(shown.url).toBe(s.handles[0]!.url);
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(true);
     expect(s.notifyReplaced).not.toHaveBeenCalled();
     await s.hide("tab");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
@@ -1363,7 +1454,10 @@ describe("an app preview shown by more than one surface", () => {
     release.resolve();
     const shown = await joined;
     expect(shown.url).toBe(s.handles[0]!.url);
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(
+      s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(true);
     await s.hide("pin");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
@@ -1380,7 +1474,10 @@ describe("an app preview shown by more than one surface", () => {
     s.close(2);
     release.resolve();
     await cancelled;
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(
+      s.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
   });
 
   it("stops a preview only a closed window showed", async () => {
@@ -1394,5 +1491,29 @@ describe("an app preview shown by more than one surface", () => {
     // closing the window queued has run.
     await s.hide("nobody");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("blocks new starts during holdVersionSwitch and aborts the switch if stopping fails", async () => {
+    const s = surfaces();
+    await s.show("tab", { senderId: 1 });
+    const release = deferred();
+    const holding = s.lifecycle.holdVersionSwitch("workspace-1", async () => {
+      await expect(s.show("pin", { senderId: 2 })).rejects.toThrow(
+        "The workspace is switching versions. Try again.",
+      );
+      await release.promise;
+      return "switched";
+    });
+    await expect.poll(() => vi.mocked(s.handles[0]!.stop).mock.calls.length).toBe(1);
+    release.resolve();
+    expect(await holding).toBe("switched");
+
+    await s.show("tab", { senderId: 1 });
+    const failing = s.handles.at(-1)!;
+    vi.mocked(failing.stop).mockRejectedValueOnce(new Error("stop hung"));
+    const work = vi.fn(async () => "never");
+    await expect(s.lifecycle.holdVersionSwitch("workspace-1", work)).rejects.toThrow("stop hung");
+    expect(work).not.toHaveBeenCalled();
+    await s.lifecycle.stopAll();
   });
 });

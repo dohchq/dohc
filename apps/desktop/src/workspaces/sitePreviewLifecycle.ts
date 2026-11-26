@@ -24,17 +24,26 @@ function assertActiveWorkspaceForSite(
   );
 }
 
-function previewKey(workspaceId: string, siteRoot: string): string {
-  return `${workspaceId}\0${siteRoot}`;
-}
+export type SitePreviewSite = { workspaceId: string; versionId: string; siteRoot: string };
+
+const workspacePrefix = (workspaceId: string) => `${workspaceId}\0`;
+const previewKey = (site: SitePreviewSite) =>
+  `${workspacePrefix(site.workspaceId)}${site.versionId}\0${site.siteRoot}`;
+const siteOf = ({ workspaceId, versionId, siteRoot }: SitePreviewSite): SitePreviewSite => ({
+  workspaceId,
+  versionId,
+  siteRoot,
+});
 
 const EXITED_LOG_ENTRY_BUDGET = MAX_LOG_ENTRIES - 1;
 export const START_CANCELLED_MESSAGE =
   "App preview start was cancelled because the renderer restarted.";
+export const VERSION_SWITCH_MESSAGE = "The workspace is switching versions. Try again.";
 
 type RunningPreview = {
   state: "running";
   workspaceId: string;
+  versionId: string;
   siteRoot: string;
   handle: SitePreviewHandle;
   releaseOrigin: (() => void) | null;
@@ -43,6 +52,7 @@ type RunningPreview = {
 type ExitedPreview = {
   state: "exited";
   workspaceId: string;
+  versionId: string;
   siteRoot: string;
   handle: SiteProcessHandle;
   releaseOrigin: null;
@@ -56,6 +66,7 @@ type StoppingPreview = {
   state: "stopping";
   lastKnownState: "running" | "exited";
   workspaceId: string;
+  versionId: string;
   siteRoot: string;
   handle: SitePreviewHandle;
   releaseOrigin: null;
@@ -101,6 +112,7 @@ type PreviewHolder = { senderId: number; isCurrent: () => boolean };
 // surfaces that did not ask for it are told when it settles.
 type PreviewHold<T> = {
   workspaceId: string;
+  versionId: string;
   siteRoot: string;
   generation: number;
   mode: string;
@@ -119,6 +131,7 @@ type PreviewHold<T> = {
 // shows, or null when none runs.
 export type SitePreviewReplacement<T> = {
   workspaceId: string;
+  versionId: string;
   siteRoot: string;
   holderId: string;
   generation: number;
@@ -145,6 +158,7 @@ export function createSitePreviewLifecycle<
   // restart can tell surfaces what still runs.
   const lastStarted = new Map<string, HeldPreview<T>>();
   const activePreviews = new Map<string, PreviewRecord>();
+  const switchPaused = new Map<string, number>();
   const pendingStarts = new Set<PendingStart>();
   const pendingBySender = new Map<number, Set<PendingStart>>();
   const pendingBySite = new Map<string, Set<PendingStart>>();
@@ -178,11 +192,7 @@ export function createSitePreviewLifecycle<
     pending.settle();
   };
 
-  const beginPending = (
-    senderId: number | null,
-    workspaceId: string,
-    siteRoot: string,
-  ): PendingStart => {
+  const beginPending = (senderId: number | null, site: SitePreviewSite): PendingStart => {
     let settle: () => void = () => undefined;
     const settled = new Promise<void>((resolve) => {
       settle = resolve;
@@ -190,8 +200,8 @@ export function createSitePreviewLifecycle<
     const pending: PendingStart = {
       sequence: nextStartSequence,
       senderId,
-      workspaceId,
-      siteKey: previewKey(workspaceId, siteRoot),
+      workspaceId: site.workspaceId,
+      siteKey: previewKey(site),
       phase: "preparing",
       controller: new AbortController(),
       settled,
@@ -224,12 +234,8 @@ export function createSitePreviewLifecycle<
     return pending;
   };
 
-  const markExitedIfCurrent = (
-    workspaceId: string,
-    siteRoot: string,
-    expected: SiteProcessHandle,
-  ): void => {
-    const key = previewKey(workspaceId, siteRoot);
+  const markExitedIfCurrent = (site: SitePreviewSite, expected: SiteProcessHandle): void => {
+    const key = previewKey(site);
     const active = activePreviews.get(key);
     if (active?.state !== "running" || active.handle !== expected) return;
     const logs = active.handle.logs().slice(-EXITED_LOG_ENTRY_BUDGET);
@@ -241,8 +247,7 @@ export function createSitePreviewLifecycle<
     releaseOrigin(active);
     activePreviews.set(key, {
       state: "exited",
-      workspaceId,
-      siteRoot,
+      ...site,
       handle: active.handle,
       releaseOrigin: null,
       logs,
@@ -283,8 +288,7 @@ export function createSitePreviewLifecycle<
     const stopping: StoppingPreview = {
       state: "stopping",
       lastKnownState: active.state,
-      workspaceId: active.workspaceId,
-      siteRoot: active.siteRoot,
+      ...siteOf(active),
       handle: active.handle,
       releaseOrigin: null,
       logs: logsFor(active),
@@ -300,18 +304,12 @@ export function createSitePreviewLifecycle<
 
   // A cancelled start's processes that outlived their stop, as a stopping
   // preview, so a later stop retries them and no start runs over them.
-  const keepLeftRunning = (
-    key: string,
-    workspaceId: string,
-    siteRoot: string,
-    handle: SiteProcessHandle,
-  ): void => {
+  const keepLeftRunning = (key: string, site: SitePreviewSite, handle: SiteProcessHandle): void => {
     if (activePreviews.has(key)) return;
     activePreviews.set(key, {
       state: "stopping",
       lastKnownState: "running",
-      workspaceId,
-      siteRoot,
+      ...site,
       handle,
       releaseOrigin: null,
       logs: handle.logs(),
@@ -319,12 +317,8 @@ export function createSitePreviewLifecycle<
     });
   };
 
-  const retainAndStop = async (
-    workspaceId: string,
-    siteRoot: string,
-    handle: SitePreviewHandle,
-  ): Promise<void> => {
-    const key = previewKey(workspaceId, siteRoot);
+  const retainAndStop = async (site: SitePreviewSite, handle: SitePreviewHandle): Promise<void> => {
+    const key = previewKey(site);
     const active = activePreviews.get(key);
     if (active) {
       if (active.handle !== handle) {
@@ -336,8 +330,7 @@ export function createSitePreviewLifecycle<
     const stopping: StoppingPreview = {
       state: "stopping",
       lastKnownState: "running",
-      workspaceId,
-      siteRoot,
+      ...site,
       handle,
       releaseOrigin: null,
       logs: "logs" in handle ? handle.logs() : [],
@@ -357,12 +350,8 @@ export function createSitePreviewLifecycle<
     throw error;
   };
 
-  const install = async (
-    workspaceId: string,
-    siteRoot: string,
-    handle: SitePreviewHandle,
-  ): Promise<void> => {
-    const key = previewKey(workspaceId, siteRoot);
+  const install = async (site: SitePreviewSite, handle: SitePreviewHandle): Promise<void> => {
+    const key = previewKey(site);
     try {
       const releaseAllowedOrigin = input.allowOrigin(handle.url);
       let released = false;
@@ -373,21 +362,18 @@ export function createSitePreviewLifecycle<
       };
       const record: RunningPreview = {
         state: "running",
-        workspaceId,
-        siteRoot,
+        ...site,
         handle,
         releaseOrigin: release,
       };
       activePreviews.set(key, record);
       if ("onExit" in handle) {
-        handle.onExit(() => markExitedIfCurrent(workspaceId, siteRoot, handle));
+        handle.onExit(() => markExitedIfCurrent(site, handle));
       }
     } catch (error) {
       const current = activePreviews.get(key);
       await failAfterCleanup(error, () =>
-        current?.handle === handle
-          ? stopCurrent(key, handle)
-          : retainAndStop(workspaceId, siteRoot, handle),
+        current?.handle === handle ? stopCurrent(key, handle) : retainAndStop(site, handle),
       );
     }
   };
@@ -395,6 +381,7 @@ export function createSitePreviewLifecycle<
   async function start(startInput: {
     senderId: number | null;
     workspaceId: string;
+    versionId: string;
     siteRoot: string;
     isCurrent: () => boolean;
     // Gets the start's own lifetime check, which execution must use: for a
@@ -407,9 +394,14 @@ export function createSitePreviewLifecycle<
     // Runs once preparation passed, before the start replaces anything.
     // Answering false stops the start.
     onPrepared?: () => boolean;
+    verifyCurrent?: () => Promise<void>;
   }): Promise<StartedPreview<T>> {
     if (retired) throw new Error(START_CANCELLED_MESSAGE);
-    const pending = beginPending(startInput.senderId, startInput.workspaceId, startInput.siteRoot);
+    if ((switchPaused.get(startInput.workspaceId) ?? 0) > 0) {
+      throw new Error(VERSION_SWITCH_MESSAGE);
+    }
+    const site = siteOf(startInput);
+    const pending = beginPending(startInput.senderId, site);
     const key = pending.siteKey;
     if (startInput.cancelled?.aborted) pending.controller.abort();
     startInput.cancelled?.addEventListener("abort", () => pending.controller.abort(), {
@@ -441,17 +433,18 @@ export function createSitePreviewLifecycle<
           execution = await execute(pending.controller.signal);
         } catch (error) {
           if (error instanceof AppCommandStillRunningError) {
-            keepLeftRunning(key, startInput.workspaceId, startInput.siteRoot, error.handle);
+            keepLeftRunning(key, site, error.handle);
           }
           throw error;
         }
-        if (!isCurrent()) {
-          await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
-            retainAndStop(startInput.workspaceId, startInput.siteRoot, execution.handle),
-          );
+        try {
+          if (!isCurrent()) throw new Error(START_CANCELLED_MESSAGE);
+          await startInput.verifyCurrent?.();
+        } catch (error) {
+          await failAfterCleanup(error, () => retainAndStop(site, execution.handle));
         }
 
-        await install(startInput.workspaceId, startInput.siteRoot, execution.handle);
+        await install(site, execution.handle);
 
         // onExit queues its callback when the process exited just before the
         // listener attached. This turn also lets sender teardown cancel the
@@ -500,15 +493,21 @@ export function createSitePreviewLifecycle<
     holderId: string;
     senderId: number;
     workspaceId: string;
+    versionId: string;
     siteRoot: string;
     mode: string;
     restart: boolean;
     isCurrent: () => boolean;
+    verifyCurrent?: () => Promise<void>;
     prepare: (
       isCurrent: () => boolean,
     ) => Promise<(signal: AbortSignal) => Promise<SitePreviewExecution<T>>>;
   }): Promise<HeldPreview<T> | ReplacedStart> {
-    const key = previewKey(acquireInput.workspaceId, acquireInput.siteRoot);
+    if ((switchPaused.get(acquireInput.workspaceId) ?? 0) > 0) {
+      return Promise.reject(new Error(VERSION_SWITCH_MESSAGE));
+    }
+    const site = siteOf(acquireInput);
+    const key = previewKey(site);
     const holder: PreviewHolder = {
       senderId: acquireInput.senderId,
       isCurrent: acquireInput.isCurrent,
@@ -533,16 +532,15 @@ export function createSitePreviewLifecycle<
     const cancel = new AbortController();
     const started = start({
       senderId: null,
-      workspaceId: acquireInput.workspaceId,
-      siteRoot: acquireInput.siteRoot,
+      ...site,
       isCurrent: () => [...holders.values()].some((each) => each.isCurrent()),
       cancelled: cancel.signal,
       prepare: acquireInput.prepare,
       onPrepared: () => takeOver(key, hold),
+      ...(acquireInput.verifyCurrent ? { verifyCurrent: acquireInput.verifyCurrent } : {}),
     });
     const hold: PreviewHold<T> = {
-      workspaceId: acquireInput.workspaceId,
-      siteRoot: acquireInput.siteRoot,
+      ...site,
       generation,
       mode: acquireInput.mode,
       holders,
@@ -625,8 +623,7 @@ export function createSitePreviewLifecycle<
     for (const [holderId, holder] of hold.holders) {
       if (hold.answered.has(holderId)) continue;
       input.notifyReplaced(holder.senderId, {
-        workspaceId: hold.workspaceId,
-        siteRoot: hold.siteRoot,
+        ...siteOf(hold),
         holderId,
         generation: hold.generation,
         preview,
@@ -666,9 +663,10 @@ export function createSitePreviewLifecycle<
     getActiveWorkspaceId: () => string | undefined;
     holderId: string;
     workspaceId: string;
+    versionId: string;
     siteRoot: string;
   }): Promise<void> {
-    const key = previewKey(releaseInput.workspaceId, releaseInput.siteRoot);
+    const key = previewKey(releaseInput);
     const hadHold = holds.has(key);
     const emptied = letGo(key, ([holderId]) => holderId === releaseInput.holderId);
     // Another surface still shows it, or this surface already let go.
@@ -695,15 +693,15 @@ export function createSitePreviewLifecycle<
   function dropHolds(workspaceId?: string): void {
     for (const map of [holds, preparing]) {
       for (const key of [...map.keys()]) {
-        if (workspaceId === undefined || key.startsWith(previewKey(workspaceId, ""))) {
+        if (workspaceId === undefined || key.startsWith(workspacePrefix(workspaceId))) {
           map.delete(key);
         }
       }
     }
   }
 
-  function status(workspaceId: string, siteRoot: string): SitePreviewStatus {
-    const active = activePreviews.get(previewKey(workspaceId, siteRoot));
+  function status(site: SitePreviewSite): SitePreviewStatus {
+    const active = activePreviews.get(previewKey(site));
     if (!active) return { logs: [], running: false, exited: false };
     if (active.state === "exited") {
       return { logs: [...active.logs], running: false, exited: true };
@@ -725,6 +723,7 @@ export function createSitePreviewLifecycle<
   async function stop(stopInput: {
     getActiveWorkspaceId: () => string | undefined;
     workspaceId: string;
+    versionId: string;
     siteRoot: string;
   }): Promise<void> {
     assertActiveWorkspaceForSite(
@@ -733,7 +732,7 @@ export function createSitePreviewLifecycle<
       "app preview stop request",
       "stop the preview again",
     );
-    const key = previewKey(stopInput.workspaceId, stopInput.siteRoot);
+    const key = previewKey(stopInput);
     abortPending(pendingBySite.get(key) ?? []);
     await runInKeyedLane(startLanes, key, async () => {
       assertActiveWorkspaceForSite(
@@ -806,6 +805,18 @@ export function createSitePreviewLifecycle<
       : new AggregateError(failures, "Some app previews did not stop.");
   }
 
+  async function holdVersionSwitch<R>(workspaceId: string, work: () => Promise<R>): Promise<R> {
+    switchPaused.set(workspaceId, (switchPaused.get(workspaceId) ?? 0) + 1);
+    try {
+      await stopWorkspace(workspaceId, { rejectOnFailure: true });
+      return await work();
+    } finally {
+      const next = (switchPaused.get(workspaceId) ?? 1) - 1;
+      if (next <= 0) switchPaused.delete(workspaceId);
+      else switchPaused.set(workspaceId, next);
+    }
+  }
+
   let stopAllPromise: Promise<void> | null = null;
 
   function stopAll(): Promise<void> {
@@ -848,6 +859,7 @@ export function createSitePreviewLifecycle<
     stop,
     cancelSender,
     stopWorkspace,
+    holdVersionSwitch,
     stopAll,
   };
 }

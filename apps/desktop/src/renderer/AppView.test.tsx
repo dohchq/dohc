@@ -244,6 +244,7 @@ describe("an owner app in its tab", () => {
       action: "open",
       workspaceId: "ws-shop",
       appRoot: "preorders",
+      versionId: "main",
       viewId: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/),
       colorScheme: "light",
     });

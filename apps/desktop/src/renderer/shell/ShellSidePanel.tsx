@@ -55,6 +55,8 @@ export interface ShellSidePanelProps {
   reportShellError: SitePreviewPageProps["reportError"];
   appNotices: SitePreviewPageProps["notices"];
   appAccess: SitePreviewPageProps["access"];
+  appVersion: SitePreviewPageProps["version"];
+  appVersionPending?: SitePreviewPageProps["versionPending"];
   onCollectionsChange?: SitePreviewPageProps["onCollectionsChange"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
@@ -74,6 +76,8 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     reportShellError,
     appNotices,
     appAccess,
+    appVersion,
+    appVersionPending,
     onCollectionsChange,
     setAppPinned,
     setShareTarget,
@@ -119,7 +123,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
           // on a dohc loopback server, with no dohc bridge.
           <Suspense fallback={<SkeletonRows layout="panel" label="Loading app…" />}>
             <LazySitePreviewPage
-              key={selectedAppRoot}
+              key={`${appVersion?.id ?? "main"}\0${selectedAppRoot}`}
               variant="panel"
               onOpenApp={openAppTab}
               onUnpin={() => void setAppPinned(selectedAppRoot, false)}
@@ -133,6 +137,8 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
               }
               onCollectionsChange={onCollectionsChange}
               access={appAccess}
+              version={appVersion}
+              versionPending={appVersionPending}
             />
           </Suspense>
         ) : null}

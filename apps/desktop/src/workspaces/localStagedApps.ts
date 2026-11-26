@@ -783,7 +783,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       steps.sort((a, b) => a.datasetId.localeCompare(b.datasetId));
 
       const preparedApp = await prepareLocalAppPublication(
-        { workspaceId: deps.workspaceId, appRoot: input.appRoot },
+        { workspaceId: deps.workspaceId, appRoot: input.appRoot, versionId: "main" },
         {
           adapter: input.adapter,
           signal: input.signal,

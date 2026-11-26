@@ -611,6 +611,7 @@ describe("app preview execution", () => {
     const pending = lifecycle.start({
       senderId: 7,
       workspaceId: "workspace-a",
+      versionId: "main",
       siteRoot: "portal",
       isCurrent: h.input.isCurrent,
       prepare: async () => (signal) => h.execute({ ...h.input, signal }),
@@ -640,6 +641,7 @@ describe("app preview execution", () => {
       [2, true],
     ]);
     const handler = createStartSitePreviewHandler({
+      activeVersionId: async () => "main",
       authority: {
         requireTrustedSender: (event: { sender: { id: number } }) => event.sender,
         withActiveWorkspace: (sender, _workspaceId, _subject, _action, work) =>
@@ -671,12 +673,21 @@ describe("app preview execution", () => {
     const start = (senderId: number, holderId: string) =>
       handler(
         { sender: { id: senderId } },
-        { workspaceId: "workspace-a", siteRoot: "portal", mode: "build", holderId, restart: false },
+        {
+          workspaceId: "workspace-a",
+          versionId: "main",
+          siteRoot: "portal",
+          mode: "build",
+          holderId,
+          restart: false,
+        },
       );
     const asked = start(1, "tab");
     asked.catch(() => undefined);
     await building.promise;
+    const acquire = vi.spyOn(lifecycle, "acquire");
     const joined = start(2, "pin");
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
     // The tab's window closes while the build runs.
     open.set(1, false);
     lifecycle.cancelSender(1);
