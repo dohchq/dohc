@@ -2497,7 +2497,7 @@ Reads app.publish.json and each bound Collection without writing workspace files
 - `migrations`: `{ [key: string]: string }`
 - `agentLabel`: `string`
 
-Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true } }`.
+Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets: { path, prefix }[], collections, capabilities, externalNetwork: true } }`.
 
 #### `dohc app listStaged`
 
@@ -2508,7 +2508,7 @@ Pass optional appRoot to filter to one app folder.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`
 
-Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true }[] }`.
+Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets: { path, prefix }[], collections, capabilities, externalNetwork: true }[] }`.
 
 #### `dohc app approveStaged`
 

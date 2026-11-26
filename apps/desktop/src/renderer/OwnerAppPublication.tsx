@@ -1280,6 +1280,9 @@ function PublicationDialog(
                 <More>Approving applies these Collection rules and approves this app.</More>
               </StateLine>
               <StagedCollectionsBox collections={staged.collections} />
+              {staged.likelySecrets.length > 0 ? (
+                <LikelySecretsWarning secrets={staged.likelySecrets} />
+              ) : null}
               <AppAccessSummary
                 capabilities={staged.capabilities}
                 approved={approval ? approvedCapabilities(approval) : null}

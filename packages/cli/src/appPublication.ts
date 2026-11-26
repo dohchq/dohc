@@ -180,6 +180,9 @@ const StagedAppCollectionSummary = z
   })
   .strict();
 export type StagedAppCollectionSummary = z.infer<typeof StagedAppCollectionSummary>;
+const LikelySecrets = z
+  .array(z.object({ path: z.string().min(1).max(1024), prefix: z.enum(SECRET_PREFIXES) }).strict())
+  .max(512);
 export const StagedAppSummary = z
   .object({
     stageId: z.string().uuid(),
@@ -188,6 +191,7 @@ export const StagedAppSummary = z
     createdAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     sourceRevision: hash,
     sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
+    likelySecrets: LikelySecrets,
     collections: z.array(StagedAppCollectionSummary).max(APP_DATASET_MAX_BINDINGS),
     capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
     externalNetwork: z.literal(true),
@@ -606,11 +610,7 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
         ])
         .optional(),
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
-      likelySecrets: z
-        .array(
-          z.object({ path: z.string().min(1).max(1024), prefix: z.enum(SECRET_PREFIXES) }).strict(),
-        )
-        .max(512),
+      likelySecrets: LikelySecrets,
       capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
       external: externalOperations,
       externalNetwork: z.literal(true),

@@ -1865,6 +1865,7 @@ it("renders a single plain-English staged review card for new/updated Collection
                 createdAtMs: 1_790_000_000_000,
                 sourceRevision: prepared.sourceRevision,
                 sourcePaths: ["control-tower/index.tsx"],
+                likelySecrets: [{ path: "control-tower/index.tsx", prefix: "xoxb-" }],
                 collections: [
                   {
                     alias: "expenses",
@@ -1943,6 +1944,9 @@ it("renders a single plain-English staged review card for new/updated Collection
     expect(card.textContent).toContain("Date, Merchant, Amount");
     expect(card.textContent).toContain("Workouts");
     expect(card.textContent).toContain("Changes the code for the actions");
+    expect(within(card).getByTestId("app-publication-likely-secrets").textContent).toContain(
+      "control-tower/index.tsx",
+    );
 
     await user.click(screen.getByTestId("staged-app-approve"));
     await waitFor(() =>
