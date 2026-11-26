@@ -1237,6 +1237,111 @@ fn assert_refused_fold(initial: &str, chosen_file_head: bool) {
 }
 
 #[test]
+fn an_outside_save_a_format_two_note_cannot_hold_lands_with_its_file_as_the_source() {
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let file = "Run [`npm install`](https://example.com) first\n";
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let (_scratch, _path, mut engine) = open_store();
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_300, &NoFaults)
+            .expect("main version");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES ('ws','object-nearest',1_400)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("scaffolding");
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "object-nearest").expect("key");
+        let marked = yrs::Doc::new();
+        let meta = marked.get_or_insert_map("meta");
+        meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(
+            &marked
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default()),
+        )
+        .expect("format 2");
+        doc.rewrite_content_to_markdown_for_fold(
+            dohc_engine_collab::ContentKind::Richdoc,
+            "Run it first\n",
+        )
+        .expect("seed rich document");
+        assert_eq!(doc.note_schema_version(), 2);
+        dohc_engine_collab::claim_base(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Richdoc,
+            &doc.encode_full_state(),
+            &NoFaults,
+            1_500,
+        )
+        .expect("claim");
+        for (at, text) in [(1_600, "Run it now\n"), (1_700, file)] {
+            engine
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_domain::write_projected_text_in_tx(
+                        tx,
+                        &dohc_engine_domain::WriteText {
+                            workspace_id: "ws".to_owned(),
+                            version_id: "main".to_owned(),
+                            object_id: key.object_id.clone(),
+                            path: "notes/nearest.md".to_owned(),
+                            text: text.to_owned(),
+                            moment_id: format!("save-{at}"),
+                            metadata_origin: "local-file".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: at,
+                            request_id: None,
+                        },
+                    )
+                })
+                .expect("the saved file");
+            let landed = engine.write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::reconcile_local_head_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "object-nearest",
+                    crate::ydoc_apply::ResultingHead::Text {
+                        path: "notes/nearest.md",
+                        text,
+                    },
+                    None,
+                    None,
+                    None,
+                    at + 10,
+                )
+                .map(|_| ())
+            });
+            assert!(landed.is_ok(), "{text:?} lands: {landed:?}");
+        }
+        let settled: Option<String> = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND object_id='object-nearest'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .expect("settled");
+        assert_eq!(
+            settled.as_deref(),
+            Some(dohc_engine_storage::hex_sha256(file.as_bytes()).as_str())
+        );
+    });
+}
+
+#[test]
 fn a_resolution_over_an_incomplete_lineage_refuses() {
     // One property with the orientation fix: the reviewed bytes are the
     // bytes that end up in the lineage, permanently.

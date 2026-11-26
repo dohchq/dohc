@@ -431,7 +431,15 @@ impl Budget<'_> {
         if let Some(stored) = &stored.code {
             return Ok(vec![self.mark(MarkKind::Code, "code", stored, depth)?]);
         }
+        self.stored_marks(stored, depth)
+    }
+
+    /// Every known mark the letters store, including those inline code hides.
+    fn stored_marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<Marks> {
         let mut marks = Marks::new();
+        if let Some(code) = &stored.code {
+            marks.push(self.mark(MarkKind::Code, "code", code, depth)?);
+        }
         for ((kind, name), stored) in MARKS.iter().zip(&stored.others) {
             if let Some(stored) = stored {
                 marks.push(self.mark(*kind, name, stored, depth)?);
@@ -576,6 +584,69 @@ fn inline_place<'leaf>(
     Ok(&mut leaf.after)
 }
 
+pub(super) type Stored = BTreeMap<&'static str, Any>;
+
+pub(super) enum Slot {
+    Unit(u16, u32),
+    Inline(usize),
+    Line(usize),
+    Skipped,
+}
+
+pub(super) struct Line {
+    pub(super) boundary: Option<yrs::XmlElementRef>,
+    pub(super) tag: &'static str,
+    pub(super) attributes: Stored,
+    pub(super) frames: Vec<usize>,
+    pub(super) slot: usize,
+    pub(super) owner: Option<usize>,
+}
+
+pub(super) struct Frame {
+    pub(super) id: String,
+    pub(super) kind: &'static str,
+    pub(super) attributes: Stored,
+}
+
+#[derive(Default)]
+pub(super) struct Trace {
+    pub(super) slots: Vec<Slot>,
+    pub(super) marks: Vec<yrs::types::Attrs>,
+    pub(super) inline: Vec<(&'static str, Stored)>,
+    pub(super) lines: Vec<Line>,
+    pub(super) frames: Vec<Frame>,
+    pub(super) unknown_width: bool,
+    open: Vec<usize>,
+    generation: Option<u64>,
+}
+
+impl Trace {
+    fn line(
+        &mut self,
+        boundary: Option<yrs::XmlElementRef>,
+        tag: &'static str,
+        attributes: Stored,
+    ) {
+        let frames = self.open.clone();
+        self.slots.push(Slot::Line(self.lines.len()));
+        let slot = self.slots.len() - 1;
+        let owner = None;
+        let line = Line {
+            boundary,
+            tag,
+            attributes,
+            frames,
+            slot,
+            owner,
+        };
+        self.lines.push(line);
+    }
+}
+
+fn stored_reading(kind: &str, attrs: &Attributes) -> Stored {
+    body_sequence_writer::stored(kind, |name| attrs.get(name).cloned())
+}
+
 struct Reader<'a> {
     containers: &'a MapRef,
     budget: Budget<'a>,
@@ -584,6 +655,7 @@ struct Reader<'a> {
     open: Vec<Open>,
     leaf: Option<Leaf>,
     newest_run: Option<u64>,
+    trace: Option<&'a mut Trace>,
 }
 
 impl Reader<'_> {
@@ -595,8 +667,57 @@ impl Reader<'_> {
                 Ok(())
             }
             TextItem::Embed(Out::YXmlElement(stored)) => self.element(&stored),
-            TextItem::Embed(_) | TextItem::Other => Ok(()),
+            TextItem::Embed(_) => {
+                self.skipped();
+                Ok(())
+            }
+            TextItem::Other => {
+                if let Some(trace) = self.trace.as_deref_mut() {
+                    trace.unknown_width = true;
+                }
+                Ok(())
+            }
         }
+    }
+
+    fn skipped(&mut self) {
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.slots.push(Slot::Skipped);
+        }
+    }
+
+    fn bare(&mut self, holds: fn(&Leaf) -> bool) {
+        let Some(trace) = self.trace.as_deref_mut() else {
+            return;
+        };
+        let owner = match &self.leaf {
+            None => None,
+            Some(leaf) if !holds(leaf) && leaf.after.is_empty() => trace.lines.len().checked_sub(1),
+            Some(_) => return,
+        };
+        trace.line(None, PARAGRAPH, Stored::new());
+        let line = trace.lines.len() - 1;
+        trace.lines[line].owner = owner;
+    }
+
+    fn traced_letters(&mut self, text: &str, depth: usize) -> ProjectionResult<()> {
+        let Some(trace) = self.trace.as_deref_mut() else {
+            return Ok(());
+        };
+        if trace.generation != Some(self.formatting.generation) {
+            let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+            let mut budget = Budget {
+                nodes: &mut nodes,
+                bytes: &mut bytes,
+            };
+            let marks = budget.stored_marks(&self.formatting, depth)?;
+            trace.marks.push(body_sequence_writer::marks_of(&marks));
+            trace.generation = Some(self.formatting.generation);
+        }
+        let marks = (trace.marks.len() - 1) as u32;
+        let units = text.encode_utf16().map(|unit| Slot::Unit(unit, marks));
+        trace.slots.extend(units);
+        Ok(())
     }
 
     fn letters(&mut self, text: &str) -> ProjectionResult<()> {
@@ -604,6 +725,8 @@ impl Reader<'_> {
             return Ok(());
         }
         let depth = self.open.len() + 1;
+        self.bare(Leaf::holds_letters);
+        self.traced_letters(text, depth)?;
         self.budget.bytes(text.len())?;
         let unmarked = match &self.leaf {
             Some(leaf) => leaf.holds_letters_without_marks(),
@@ -625,6 +748,7 @@ impl Reader<'_> {
             return self.boundary(stored);
         }
         let Some(tag) = known(&INLINE_ITEMS, stored.tag()) else {
+            self.skipped();
             return Ok(());
         };
         let depth = self.open.len() + 1;
@@ -633,6 +757,11 @@ impl Reader<'_> {
         let held = |name: &str| stored_under(stored, name);
         let attrs = self.budget.attributes(tag, depth, held)?;
         let holds = Leaf::holds_inline_items;
+        self.bare(holds);
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.slots.push(Slot::Inline(trace.inline.len()));
+            trace.inline.push((tag, stored_reading(tag, &attrs)));
+        }
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
         place.push(element(tag, attrs, Vec::new()));
         Ok(())
@@ -674,6 +803,29 @@ impl Reader<'_> {
         self.budget.node(depth)?;
         self.budget.bytes(tag.len())?;
         let attrs = self.budget.attributes(tag, depth, held)?;
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.open.truncate(shared);
+            let items = trace.lines.len();
+            for (at, open) in self.open.iter().enumerate().skip(shared) {
+                let attributes = stored_reading(open.tag, &open.attrs);
+                let (id, kind) = (open.id.clone(), open.tag);
+                trace.frames.push(Frame {
+                    id,
+                    kind,
+                    attributes,
+                });
+                trace.open.push(trace.frames.len() - 1);
+                let item = matches!(kind, "listItem" | "taskItem");
+                if item && (at + 1 < self.open.len() || tag != PARAGRAPH) {
+                    trace.line(None, PARAGRAPH, Stored::new());
+                }
+            }
+            trace.line(Some(stored.clone()), tag, stored_reading(tag, &attrs));
+            let line = trace.lines.len() - 1;
+            for item in &mut trace.lines[items..line] {
+                item.owner = Some(line);
+            }
+        }
         self.leaf = Some(Leaf::new(tag, attrs));
         Ok(())
     }
@@ -748,6 +900,11 @@ impl Reader<'_> {
             self.budget.node(0)?;
             let paragraph = element(PARAGRAPH, Attributes::new(), Vec::new());
             self.top.push(paragraph);
+            if let Some(trace) = self.trace.as_deref_mut() {
+                let skipped = std::mem::take(&mut trace.slots);
+                trace.line(None, PARAGRAPH, Stored::new());
+                trace.slots.extend(skipped);
+            }
         }
         Ok(self.top)
     }
@@ -776,24 +933,57 @@ pub(super) fn blocks<T: ReadTxn>(
     remaining_nodes: &mut usize,
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<Vec<MarkdownNode>> {
+    read(
+        txn,
+        sequence,
+        containers,
+        remaining_nodes,
+        source_text_bytes,
+        None,
+    )
+}
+
+pub(super) fn traced<T: ReadTxn>(
+    txn: &T,
+    sequence: &yrs::TextRef,
+    containers: &MapRef,
+) -> ProjectionResult<Trace> {
+    let (mut nodes, mut bytes, mut trace) = (MAX_PROJECTION_NODES, 0, Trace::default());
+    read(
+        txn,
+        sequence,
+        containers,
+        &mut nodes,
+        &mut bytes,
+        Some(&mut trace),
+    )?;
+    Ok(trace)
+}
+
+fn read<'a, T: ReadTxn>(
+    txn: &T,
+    sequence: &yrs::TextRef,
+    containers: &'a MapRef,
+    nodes: &'a mut usize,
+    bytes: &'a mut usize,
+    trace: Option<&'a mut Trace>,
+) -> ProjectionResult<Vec<MarkdownNode>> {
     let mut reader = Reader {
         containers,
-        budget: Budget {
-            nodes: remaining_nodes,
-            bytes: source_text_bytes,
-        },
+        budget: Budget { nodes, bytes },
         formatting: Formatting::default(),
         top: Vec::new(),
         open: Vec::new(),
         leaf: None,
         newest_run: None,
+        trace,
     };
     sequence.try_visit_items(txn, |stored| reader.item(stored))?;
     reader.finish()
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use base64::Engine as _;
 
@@ -1043,7 +1233,7 @@ mod tests {
         matches!(read, Err(CollabError::ProjectionTooLarge { .. }))
     }
 
-    fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
+    pub(in crate::ydoc) fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
         let mut shown_nodes = Vec::new();
         for node in nodes {
             match node {
@@ -1094,7 +1284,7 @@ mod tests {
         }
     }
 
-    fn same_document(recorded: &Value, here: &Value) -> bool {
+    pub(in crate::ydoc) fn same_document(recorded: &Value, here: &Value) -> bool {
         match (recorded, here) {
             (Value::Number(recorded), Value::Number(here)) => recorded.as_f64() == here.as_f64(),
             (Value::Array(recorded), Value::Array(here)) => {

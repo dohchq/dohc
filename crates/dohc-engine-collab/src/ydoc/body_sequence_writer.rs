@@ -57,8 +57,8 @@ impl Prelim for Piece {
 
 #[derive(Default)]
 pub(super) struct NewBody {
-    pieces: Vec<Delta<Piece>>,
-    records: Vec<(String, Any)>,
+    pub(super) pieces: Vec<Delta<Piece>>,
+    pub(super) records: Vec<(String, Any)>,
     containers: usize,
 }
 
@@ -80,7 +80,10 @@ pub(super) fn write(
     sequence.apply_delta(txn, body.pieces);
 }
 
-fn stored(kind: &str, given: impl Fn(&str) -> Option<Value>) -> BTreeMap<&'static str, Any> {
+pub(super) fn stored(
+    kind: &str,
+    given: impl Fn(&str) -> Option<Value>,
+) -> BTreeMap<&'static str, Any> {
     body_sequence::written_attributes(kind, given)
         .map(|(name, value)| (name, json_to_any(&value)))
         .collect()
@@ -98,8 +101,8 @@ fn mark_name(kind: MarkKind) -> &'static str {
     }
 }
 
-fn marks_of(run: &TextRun) -> Attrs {
-    run.marks
+pub(super) fn marks_of(marks: &[MarkdownMark]) -> Attrs {
+    marks
         .iter()
         .map(|mark| {
             let name = mark_name(mark.kind);
@@ -132,7 +135,11 @@ impl NewBody {
                         self.containers += 1;
                         self.records(&id, container, attrs);
                         path.push(id);
+                        let pieces = self.pieces.len();
                         self.blocks(children, path)?;
+                        if self.pieces.len() == pieces {
+                            return None;
+                        }
                         path.pop();
                     }
                     _ => return None,
@@ -186,7 +193,7 @@ impl NewBody {
         match node {
             MarkdownNode::Text(runs) => {
                 for run in runs.iter().filter(|run| !run.text.is_empty()) {
-                    let marks = Some(Box::new(marks_of(run)));
+                    let marks = Some(Box::new(marks_of(&run.marks)));
                     let letters = Piece::Letters(run.text.clone());
                     self.pieces.push(Delta::Inserted(letters, marks));
                 }
@@ -205,6 +212,13 @@ impl NewBody {
         }
         Some(())
     }
+}
+
+pub(super) fn same_family(kind: &str, other: &str) -> bool {
+    kind == other
+        || KINDS_A_CONTAINER_CAN_BECOME
+            .iter()
+            .any(|family| family.contains(&kind) && family.contains(&other))
 }
 
 fn base_36(mut number: usize) -> String {

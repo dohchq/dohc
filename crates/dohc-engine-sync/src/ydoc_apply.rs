@@ -5653,7 +5653,8 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
         }
         // Capture already installed the chosen snapshot here. Peers still
         // hold the lineage's previous settled source, so only that body may
-        // use the settled-rule exception. New bodies must pass the strict rule.
+        // use the settled-rule exception. New bodies must pass the strict rule,
+        // except in a format-2 note, which keeps any source that rebuilds it.
         let refolded = if canonical.content == chosen_text {
             canonical
         } else {

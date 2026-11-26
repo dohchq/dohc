@@ -463,8 +463,7 @@ impl ClockIdentityIndex {
 /// Derives `PartialEq`/`Debug` for the doc cache's differential check
 /// (`doc_cache.rs`): two byte-replay-equivalent documents must present the
 /// identical canonical structure — the exact thing the gate consumes — even
-/// though their raw re-encodes can differ, for example in how a peer's update
-/// ordered the entries of a map value it wrote.
+/// though their raw re-encodes can differ.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,

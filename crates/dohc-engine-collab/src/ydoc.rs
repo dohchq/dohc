@@ -48,6 +48,7 @@ use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 mod body_sequence;
+mod body_sequence_fold;
 mod body_sequence_writer;
 mod bounded_encoder;
 mod frontmatter_yaml;
@@ -124,7 +125,7 @@ pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
 
 fn body_sequence_setting() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if READS_BODY_SEQUENCE_HERE.get() {
         return true;
     }
@@ -132,13 +133,13 @@ fn body_sequence_setting() -> bool {
     *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READS_BODY_SEQUENCE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(crate) fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
     READS_BODY_SEQUENCE_HERE.set(true);
     let ran = run();
     READS_BODY_SEQUENCE_HERE.set(false);
@@ -282,12 +283,12 @@ impl SuccessorIdentity {
     /// Bind a successor whose note is written in rich-document
     /// `schema_version`. A successor of a format-2 note is written in format
     /// 2 where that format holds it, and the version is part of its epoch tag.
-    /// Any other version derives what [`Self::derive`] derives.
+    /// Any other version, or any other content kind, derives what
+    /// [`Self::derive`] derives.
     pub fn derive_with_schema_version(
         input: SuccessorIdentityInput<'_>,
         schema_version: u8,
     ) -> Self {
-        let schema_version = if schema_version == 2 { 2 } else { 1 };
         let SuccessorIdentityInput {
             key,
             predecessor_claim_id,
@@ -298,6 +299,10 @@ impl SuccessorIdentity {
             content_kind,
             result_sha256,
         } = input;
+        let schema_version = match (schema_version, content_kind) {
+            (2, ContentKind::Richdoc) => 2,
+            _ => 1,
+        };
         let mut identity = Vec::new();
         identity.extend_from_slice(SUCCESSOR_EPOCH_DOMAIN);
         for field in [
@@ -371,7 +376,7 @@ pub fn fresh_successor_base(
             observed: observed_result,
         });
     }
-    let format_two = identity.schema_version == 2 && identity.content_kind == ContentKind::Richdoc;
+    let format_two = identity.schema_version == 2;
     if format_two && !body_sequence_setting() {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "format-2 successor",
@@ -846,7 +851,9 @@ impl Ydoc {
     /// frontmatter-only engine edit rewrote such a body. Every projection
     /// compared with the version's file uses this rule, so a settle, a later
     /// check that the version is settled, and live activation agree. The
-    /// live baseline keeps the strict rule.
+    /// live baseline keeps the strict rule. A format-2 note holds a file it
+    /// cannot hold as the nearest reading, so it keeps any source that still
+    /// rebuilds it, whatever the snapshot holds.
     pub fn settled_markdown_source<E>(
         &self,
         canonical_projection: &str,
@@ -854,6 +861,9 @@ impl Ydoc {
     ) -> Result<Option<String>, E> {
         if let Some(source) = self.preserved_markdown_source(canonical_projection) {
             return Ok(Some(source));
+        }
+        if self.body_sequence_roots().is_some() {
+            return Ok(self.reprojected_markdown_source(canonical_projection));
         }
         let Some(reference) = self.markdown_source_reference() else {
             return Ok(None);
@@ -901,11 +911,16 @@ impl Ydoc {
         canonical_projection: &str,
         reads_alike: bool,
     ) -> bool {
+        let format_two = self.body_sequence_roots().is_some();
         [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
             .any(|reading| {
                 let staged = Ydoc::wire();
+                if format_two {
+                    let meta = staged.doc.get_or_insert_map(ROOT_META);
+                    meta.insert(&mut staged.doc.transact_mut(), "schemaVersion", 2.0);
+                }
                 if staged
                     .rewrite_content_to_markdown_checked::<false>(
                         ContentKind::Richdoc,
@@ -1751,6 +1766,7 @@ impl Ydoc {
         self.stage_source_preserving_edit_bounded(markdown, None, false, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
+            let format_two = staged.body_sequence_roots().is_some();
             let mut transaction = staged.doc.transact_mut();
             let txn = &mut transaction;
             match meta.get(txn, "schemaVersion") {
@@ -1758,6 +1774,7 @@ impl Ydoc {
                     meta.insert(txn, "schemaVersion", Any::Number(1.0));
                 }
                 Some(Out::Any(Any::Number(1.0))) => {}
+                Some(Out::Any(Any::Number(2.0))) if format_two => {}
                 _ => {
                     return Err(CollabError::MalformedUpdate {
                         reason: "unsupported rich-document schema version".into(),
@@ -1823,15 +1840,7 @@ impl Ydoc {
             ContentKind::Richdoc => {
                 let meta = self.doc.get_or_insert_map(ROOT_META);
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-                let sequence_roots = self.body_sequence_roots().filter(|(sequence, containers)| {
-                    fold == FileFold::No
-                        && reading == MarkdownReading::Successor
-                        && body_sequence::holds_no_item([
-                            frag.as_ref(),
-                            sequence.as_ref(),
-                            containers.as_ref(),
-                        ])
-                });
+                let sequence_roots = self.body_sequence_roots();
                 let stored_version = meta.get(&self.doc.transact(), "schemaVersion");
                 let missing_schema_version = match stored_version {
                     None => true,
@@ -1854,19 +1863,31 @@ impl Ydoc {
                 let normalized_body =
                     normalize_list_tabs(normalized_body.as_deref().unwrap_or(body), reading);
                 let (blocks, refused) = parse_markdown_blocks_checked(&normalized_body, reading);
-                if refused || (fold == FileFold::Strict && refused_fold_item_bodies(&blocks)) {
+                let format_one_fold = sequence_roots.is_none() && fold == FileFold::Strict;
+                if refused || (format_one_fold && refused_fold_item_bodies(&blocks)) {
                     return Err(CollabError::MarkdownNotRepresentable);
                 }
-                if file_fold && quote_fold_overflows(&blocks, 0) {
+                if file_fold && sequence_roots.is_none() && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
                 let new_body = match &sequence_roots {
-                    Some(_) => {
+                    Some((sequence, containers)) => {
                         let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
                         let read = read_blocks::<WIRE_SEED>(&blocks, &mut nodes, &mut bytes)
                             .map_err(|_| CollabError::MarkdownNotRepresentable)?;
                         let written = body_sequence_writer::new_body(&read)
                             .ok_or(CollabError::MarkdownNotRepresentable)?;
+                        let roots = [frag.as_ref(), sequence.as_ref(), containers.as_ref()];
+                        let written = match body_sequence::holds_no_item(roots) {
+                            true => body_sequence_fold::Written::New(written),
+                            false => body_sequence_fold::Written::Folded(body_sequence_fold::plan(
+                                &self.doc.transact(),
+                                self.doc.client_id(),
+                                sequence,
+                                containers,
+                                written,
+                            )?),
+                        };
                         Some((read, written))
                     }
                     None => None,
@@ -1902,7 +1923,7 @@ impl Ydoc {
                     if let (Some((sequence, containers)), Some(written)) =
                         (&sequence_roots, written)
                     {
-                        body_sequence_writer::write(txn, sequence, containers, written);
+                        written.write(txn, sequence, containers);
                         return;
                     }
                     // A live note keeps every block it deletes, so an outside
@@ -1951,7 +1972,13 @@ impl Ydoc {
                     if !same_reading(&written, read)
                         && markdown_document(&written)? != markdown_document(read)?
                     {
-                        return Err(CollabError::MarkdownNotRepresentable);
+                        let nearest = match reading {
+                            MarkdownReading::Successor => None,
+                            _ => body_sequence_fold::nearest_reading(read)?,
+                        };
+                        if !nearest.is_some_and(|nearest| same_reading(&written, &nearest)) {
+                            return Err(CollabError::MarkdownNotRepresentable);
+                        }
                     }
                 }
                 update
@@ -12401,3 +12428,7 @@ mod nested1b_allowlist_tests;
 #[cfg(test)]
 #[path = "ydoc/successor_format_two_tests.rs"]
 mod successor_format_two_tests;
+
+#[cfg(test)]
+#[path = "ydoc/body_sequence_fold_tests.rs"]
+mod body_sequence_fold_tests;
