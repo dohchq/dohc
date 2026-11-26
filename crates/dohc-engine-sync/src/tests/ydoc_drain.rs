@@ -2149,6 +2149,17 @@ fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', 'object-two', 1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("file object");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-two").expect("doc key");
     let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
     let newer_base = engine

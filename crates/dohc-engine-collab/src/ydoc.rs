@@ -141,9 +141,9 @@ thread_local! {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
-    READS_BODY_SEQUENCE_HERE.set(true);
+    let before = READS_BODY_SEQUENCE_HERE.replace(true);
     let ran = run();
-    READS_BODY_SEQUENCE_HERE.set(false);
+    READS_BODY_SEQUENCE_HERE.set(before);
     ran
 }
 
