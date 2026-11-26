@@ -1202,27 +1202,44 @@ pub fn compare_secret_files_page_with_drift(
                 (None, Some(_)) => Some(VersionFileChangeStatus::Added),
                 (Some(_), None) => Some(VersionFileChangeStatus::Deleted),
                 (Some(_), Some(_)) => {
-                    let t_sealed = sealed_from(&t_iv, &t_tag, &t_ct, t_len)?;
-                    let s_sealed = sealed_from(&s_iv, &s_tag, &s_ct, s_len)?;
-                    if open_diff(&path, &t_sealed, &s_sealed)? {
-                        Some(VersionFileChangeStatus::Modified)
-                    } else if let Some((named, merged_into)) = &pair {
-                        let (t_opt, s_opt) = (Some(t_sealed), Some(s_sealed));
-                        let tips = if *merged_into == MERGED_INTO_NAMED {
-                            [&s_opt, &t_opt]
-                        } else {
-                            [&t_opt, &s_opt]
-                        };
-                        let base =
-                            select_secret_merge_base(conn, workspace_id, named, &path, tips)?;
-                        let drifted = match (&base, &s_opt) {
-                            (Some(b), Some(s)) => open_diff(&path, b, s)?,
-                            (None, Some(_)) => true,
-                            _ => false,
-                        };
-                        drifted.then_some(VersionFileChangeStatus::Modified)
-                    } else {
+                    let same_sealed =
+                        t_iv == s_iv && t_tag == s_tag && t_ct == s_ct && t_len == s_len;
+                    if same_sealed && pair.is_none() {
                         None
+                    } else {
+                        let t_sealed = sealed_from(&t_iv, &t_tag, &t_ct, t_len)?;
+                        let s_sealed = if same_sealed {
+                            None
+                        } else {
+                            Some(sealed_from(&s_iv, &s_tag, &s_ct, s_len)?)
+                        };
+                        if let Some(ref s) = s_sealed
+                            && open_diff(&path, &t_sealed, s)?
+                        {
+                            Some(VersionFileChangeStatus::Modified)
+                        } else if let Some((named, merged_into)) = &pair {
+                            let t_opt = Some(t_sealed);
+                            let s_ref = if s_sealed.is_some() {
+                                &s_sealed
+                            } else {
+                                &t_opt
+                            };
+                            let tips = if *merged_into == MERGED_INTO_NAMED {
+                                [s_ref, &t_opt]
+                            } else {
+                                [&t_opt, s_ref]
+                            };
+                            let base =
+                                select_secret_merge_base(conn, workspace_id, named, &path, tips)?;
+                            let drifted = match (&base, s_ref) {
+                                (Some(b), Some(s)) => open_diff(&path, b, s)?,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            drifted.then_some(VersionFileChangeStatus::Modified)
+                        } else {
+                            None
+                        }
                     }
                 }
                 (None, None) => match &pair {
