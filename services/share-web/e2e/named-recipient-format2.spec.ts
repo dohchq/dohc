@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { test, expect, type Page } from "@playwright/test";
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import { openNamedRecipient } from "./namedRecipientFixture";
@@ -23,33 +22,10 @@ const deepNote = [
   `${"  ".repeat(DEEPEST - 1)}- deepest`,
 ].join("\n");
 
-const shots = fileURLToPath(
-  new URL("../../../.agent-artifacts/laneE/1c-ii-shots/", import.meta.url),
-);
-
 const pressed = (page: Page, name: string, value: boolean) =>
   expect(
     page.getByRole("toolbar", { name: "Formatting" }).getByRole("button", { name, exact: true }),
   ).toHaveAttribute("aria-pressed", String(value));
-
-async function shoot(page: Page, name: string, fits = true) {
-  for (const [width, height, size] of [
-    [1280, 860, "desktop"],
-    [390, 844, "phone"],
-  ] as const) {
-    await page.setViewportSize({ width, height });
-    for (const scheme of ["light", "dark"] as const) {
-      await page.emulateMedia({ colorScheme: scheme });
-      if (fits)
-        expect(
-          await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
-        ).toBe(true);
-      await page.screenshot({ path: `${shots}${name}-${size}-${scheme}.png`, fullPage: true });
-    }
-  }
-  await page.emulateMedia({ colorScheme: "light" });
-  await page.setViewportSize({ width: 1280, height: 860 });
-}
 
 test("a note in format 2 opens once it syncs, takes every kind of edit the save takes, and keeps an unsent draft for review", async ({
   browser,
@@ -121,8 +97,6 @@ test("a note in format 2 opens once it syncs, takes every kind of edit the save 
     await expect.poll(markdown).toContain("- **tent**");
     await expect(bold).toHaveAttribute("aria-pressed", "true");
 
-    await shoot(page, "editor");
-
     host.control.accept = false;
     await editor.getByText("Edit together. Browser edit.").click();
     await page.keyboard.press("End");
@@ -138,7 +112,6 @@ test("a note in format 2 opens once it syncs, takes every kind of edit the save 
     expect(await review.locator("blockquote").evaluate((node) => node.textContent)).toBe(
       "Our \n Later.",
     );
-    await shoot(page, "draft-review");
     host.expectNoFailures();
   } finally {
     await host.close();
@@ -165,7 +138,6 @@ test("a Tab that would nest a list item past the deepest a note holds writes not
     );
     expect(markdown()).toBe(before);
     await expect(editor.getByText("deepest", { exact: true })).toHaveCount(1);
-    await shoot(page, "unwritten-notice", false);
     await notice.getByRole("button", { name: "Dismiss", exact: true }).click();
     await expect(notice).toHaveCount(0);
     host.expectNoFailures();

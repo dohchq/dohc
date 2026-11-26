@@ -632,6 +632,29 @@ describe("mountLiveBodyEditor on a note in format 2", () => {
     }
   });
 
+  it("writes typing, Enter and list toggles in a browser that has no toSorted or toReversed", () => {
+    const missing = ["toSorted", "toReversed"] as const;
+    const kept = missing.map((name) => Object.getOwnPropertyDescriptor(Array.prototype, name)!);
+    for (const name of missing) Reflect.deleteProperty(Array.prototype, name);
+    const ctx = sequenceNote("Item one\n\nItem two");
+    try {
+      ctx.setCaretAt(ctx.textbox.querySelector("p")!.firstChild!, 8);
+      ctx.paste(" and more");
+      expect(yDocToMarkdown(ctx.doc)).toBe("Item one and more\n\nItem two\n");
+      expect(ctx.editor.toggleBulletList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("- Item one and more\n\nItem two\n");
+      ctx.dispatchKey("Enter");
+      ctx.paste("new");
+      expect(yDocToMarkdown(ctx.doc)).toBe("- Item one and more\n- new\n\nItem two\n");
+      expect(ctx.editor.toggleOrderedList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("- Item one and more\n\n1. new\n\nItem two\n");
+      expect(ctx.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      ctx.cleanup();
+      missing.forEach((name, at) => Object.defineProperty(Array.prototype, name, kept[at]!));
+    }
+  });
+
   it("undoes and redoes from the toolbar, which says when each can", () => {
     const ctx = sequenceNote("Item one");
     try {
@@ -658,19 +681,24 @@ describe("mountLiveBodyEditor on a note in format 2", () => {
     try {
       ctx.setCaretAt(ctx.textbox.querySelector("p")!.firstChild!, 4);
       expect(ctx.editor.toggleBlockquote()).toBe(true);
+      const refuses = (markdown: string) => {
+        ctx.setEditable(false);
+        const before = Y.encodeStateAsUpdate(ctx.doc);
+        expect(ctx.editor.undo()).toBe(false);
+        expect(ctx.editor.redo()).toBe(false);
+        for (const [key, mods] of [
+          ["z", { ctrlKey: true, keyCode: 90 }],
+          ["Z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+          ["y", { ctrlKey: true, keyCode: 89 }],
+        ] as const)
+          ctx.dispatchKey(key, mods);
+        expect(Y.encodeStateAsUpdate(ctx.doc)).toEqual(before);
+        expect(yDocToMarkdown(ctx.doc)).toBe(markdown);
+        ctx.setEditable(true);
+      };
+      refuses("> Item one\n");
       expect(ctx.editor.undo()).toBe(true);
-      ctx.setEditable(false);
-      const before = Y.encodeStateAsUpdate(ctx.doc);
-      expect(ctx.editor.undo()).toBe(false);
-      expect(ctx.editor.redo()).toBe(false);
-      for (const [key, mods] of [
-        ["z", { ctrlKey: true, keyCode: 90 }],
-        ["Z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
-        ["y", { ctrlKey: true, keyCode: 89 }],
-      ] as const)
-        ctx.dispatchKey(key, mods);
-      expect(Y.encodeStateAsUpdate(ctx.doc)).toEqual(before);
-      expect(yDocToMarkdown(ctx.doc)).toBe("Item one\n");
+      refuses("Item one\n");
     } finally {
       ctx.cleanup();
     }

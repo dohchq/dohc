@@ -119,7 +119,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const [uri, setUri] = useState<string | null>(null);
   const [lostPage, setLostPage] = useState<false | "failed" | "noSpace">(false);
   const [needsNewer, setNeedsNewer] = useState(false);
-  const [unwritten, setUnwritten] = useState<string | null>(null);
+  const [unwritten, setUnwritten] = useState<{ mount: number; text: string } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [host] = useState(() =>
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
@@ -206,7 +206,8 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
     if (data.kind === "unsupportedFormat") setNeedsNewer(true);
-    if (data.kind === "unwritten") setUnwritten(unwrittenText("why" in data ? data.why : null));
+    if (current && data.kind === "unwritten")
+      setUnwritten({ mount: from, text: unwrittenText("why" in data ? data.why : null) });
     // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
     if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
       const done = copying.current;
@@ -403,11 +404,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
             />
           ) : null}
           {liveStrip}
-          {unwritten !== null ? (
+          {unwritten?.mount === mount ? (
             <Strip
               theme={theme}
               icon="failed"
-              text={unwritten}
+              text={unwritten.text}
               action={documentWords.dismiss}
               onAction={() => setUnwritten(null)}
             />

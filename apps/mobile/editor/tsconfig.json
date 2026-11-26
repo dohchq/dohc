@@ -1,7 +1,7 @@
 {
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["dom", "dom.iterable", "ES2024"]
+    "lib": ["dom", "dom.iterable", "ES2022", "ES2024.String"]
   },
   "include": ["**/*.ts", "../src/pages/liveAdapter.test.ts", "../src/pages/noteFormat.test.ts"]
 }

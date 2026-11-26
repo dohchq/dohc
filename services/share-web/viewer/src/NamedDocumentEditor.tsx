@@ -6,6 +6,7 @@ import {
   type LiveBodyEditorHandle,
   type LiveEditorToolbarState,
 } from "@dohc/ydoc-projection/browser-editor";
+import { documentWords } from "@dohc/interface-words/documents";
 import type { BodySequenceUnwritten } from "@dohc/ydoc-projection/body-sequence-editor";
 import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import {
@@ -139,12 +140,6 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   );
 }
 
-const UNWRITTEN = {
-  overtaken:
-    "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
-  unwritable: "dohc can't save this change in a live note yet, so it put the note back as it was.",
-};
-
 function UnwrittenNotice({ why, onDismiss }: { why: BodySequenceUnwritten; onDismiss(): void }) {
   return (
     <div className="edit-notice" role="alert" data-testid="unwritten-notice">
@@ -152,10 +147,10 @@ function UnwrittenNotice({ why, onDismiss }: { why: BodySequenceUnwritten; onDis
         <Icon name="info" />
       </span>
       <div>
-        <p>{why === "overtaken" ? UNWRITTEN.overtaken : UNWRITTEN.unwritable}</p>
+        <p>{why === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten}</p>
         <div className="edit-notice-actions">
           <button className="handoff-button secondary" onClick={onDismiss}>
-            Dismiss
+            {documentWords.dismiss}
           </button>
         </div>
       </div>

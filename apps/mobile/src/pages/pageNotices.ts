@@ -53,7 +53,6 @@ export function pageNotices(state: {
   ];
 }
 
-/** The strip for a change the page did not save and put back, from the reason its message gives. */
 export const unwrittenText = (why: unknown) =>
   why === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten;
 
