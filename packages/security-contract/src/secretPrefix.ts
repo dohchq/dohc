@@ -1,4 +1,11 @@
-export const SECRET_PREFIXES = ["phx_", "sk_live_", "ghp_", "github_pat_", "xoxb-", "xoxp-"] as const;
+export const SECRET_PREFIXES = [
+  "phx_",
+  "sk_live_",
+  "ghp_",
+  "github_pat_",
+  "xoxb-",
+  "xoxp-",
+] as const;
 
 export type SecretPrefix = (typeof SECRET_PREFIXES)[number];
 
