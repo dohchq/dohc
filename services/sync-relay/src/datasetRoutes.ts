@@ -31,6 +31,7 @@ import { CHAIN_STOPPED_PRESS } from "@dohc/automation-executor/automation-failed
 import type { DatasetServerPress } from "./datasetAutomations";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import type { RelayDatasetHost } from "./datasetHost";
+import { MemberAppRefusal } from "./storage/memberApps";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendRoute } from "./appBackendRoutes";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
@@ -952,7 +953,7 @@ export function createDatasetAppRoutes(
   },
 ) {
   const admit = createAppBackendAdmission(options.limits);
-  return async (
+  const serve = async (
     request: Request,
     route: AppBackendRoute,
     auth: AppBackendAuth,
@@ -980,15 +981,17 @@ export function createDatasetAppRoutes(
         await options.events.wait({ ...current, since, holdMs, signal });
       }
     }
-    const published = host.servedPublication(auth, route.publicationId);
+    const reviewing =
+      route.action === "summary" || route.action === "consent" || route.action === "blob";
+    const published = host.servedPublication(auth, route.publicationId, reviewing);
     const get =
       route.action === "descriptor" || route.action === "summary" || route.action === "blob";
     if (
       !published ||
       (!options.publications && !published.local) ||
       (publishedOnly && published.local) ||
-      // An app with no dataset serves only its files.
-      (!published.capabilities.length && !get)
+      // An app with no dataset serves only its files, and a Member app its consent.
+      (!published.capabilities.length && !get && route.action !== "consent")
     )
       throw notFound();
     const { authority, workspaceId, authorityRevision, capabilities } = published;
@@ -1015,7 +1018,12 @@ export function createDatasetAppRoutes(
     if (raw !== undefined && auth.kind === "named") await auth.launch?.recheck();
     let targetCapability = published.capability;
     let targetDatasetAlias: string | undefined;
-    if (!get && route.action !== "activate" && capabilities.length > 0) {
+    if (
+      !get &&
+      route.action !== "activate" &&
+      route.action !== "consent" &&
+      capabilities.length > 0
+    ) {
       if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.hasOwn(raw, "dataset")) {
         const value = (raw as Record<string, unknown>).dataset;
         if (
@@ -1075,7 +1083,16 @@ export function createDatasetAppRoutes(
           query.get("authorityRevision") !== String(authorityRevision)
         )
           throw notFound();
-        const file = published.candidate.files.find((file) => file.sha256 === route.sha256);
+        const { member } = published;
+        const file =
+          (!member || member.consent === "current"
+            ? published.candidate.files.find((file) => file.sha256 === route.sha256)
+            : undefined) ??
+          (member
+            ? published.candidate.inputs
+                .map((input) => ({ ...input, contentType: "application/octet-stream" }))
+                .find((input) => input.sha256 === route.sha256)
+            : undefined);
         if (!file) throw notFound();
         const bytes = storage.getBlob(workspaceId, file.sha256);
         if (!bytes || bytes.byteLength !== file.byteLength) throw notFound();
@@ -1087,6 +1104,45 @@ export function createDatasetAppRoutes(
       if (query.size) throw badRequest("App operations do not accept a query.");
       return await response(async () => {
         signal.throwIfAborted();
+        if (route.action === "summary" && published.member) {
+          const authorName =
+            (await options
+              .shareSenderLabel?.(published.member.publisherUserId)
+              .catch(() => null)) ?? null;
+          signal.throwIfAborted();
+          const member = host.servedPublication(auth, route.publicationId, true)?.member;
+          if (!member) throw notFound();
+          return {
+            subjectName: member.slug,
+            sharerName: authorName,
+            access: "member",
+            review: {
+              authorityRevision,
+              consent: member.consent,
+              scopeDigest: member.digest,
+              collections: member.scope.map(({ datasetId, operationIds, access }) => {
+                const declared = capabilities.find((value) => value.datasetId === datasetId)!;
+                return {
+                  name: declared.name,
+                  access,
+                  operations: declared.operations
+                    .filter((operation) => operationIds.includes(operation.operationId))
+                    .map(({ name, readOnly }) => ({ name, readOnly })),
+                };
+              }),
+              source: published.candidate.inputs,
+            },
+          };
+        }
+        if (route.action === "consent") {
+          if (!published.member || auth.kind !== "named") throw notFound();
+          if (raw && typeof raw === "object" && Object.hasOwn(raw, "agent"))
+            throw new MemberAppRefusal("agent");
+          const body = record(raw, ["scopeDigest"]);
+          if (typeof body.scopeDigest !== "string" || !/^[0-9a-f]{64}$/.test(body.scopeDigest))
+            throw badRequest("Invalid Member app review.");
+          return host.consentMemberApp(auth, route.publicationId, body.scopeDigest);
+        }
         if (route.action === "summary") {
           if (auth.kind !== "named") throw notFound();
           if (authority.caller.kind === "owner")
@@ -1116,7 +1172,7 @@ export function createDatasetAppRoutes(
           };
         }
         if (route.action === "activate") {
-          if (published.local) throw notFound();
+          if (published.local || published.member) throw notFound();
           const body = record(raw, ["authorityRevision"]);
           if (body.authorityRevision !== authorityRevision) throw notFound();
           const datasetIds = host.bindPublication(auth, {
@@ -1225,6 +1281,17 @@ export function createDatasetAppRoutes(
       });
     } finally {
       release();
+    }
+  };
+  return async (...args: Parameters<typeof serve>) => {
+    try {
+      return await serve(...args);
+    } catch (error) {
+      if (!(error instanceof MemberAppRefusal)) throw error;
+      return Response.json(
+        { code: error.code, message: error.message },
+        { status: error.status, headers },
+      );
     }
   };
 }

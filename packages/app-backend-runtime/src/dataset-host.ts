@@ -174,11 +174,16 @@ export interface DatasetAuthority {
   authorityToken?: string;
   /**
    * A host ceiling on the operations an app caller runs: only those its data
-   * grant or workspace defaults hold when `grantedOnly` is set, and only
-   * read-only ones when `readOnlyOnly` is set. Fold its inputs into
-   * `authorityToken`, so a narrower ceiling stops in-flight work.
+   * grant or workspace defaults hold when `grantedOnly` is set, only
+   * read-only ones when `readOnlyOnly` is set, and only those in
+   * `operationIds` when it is set. Fold its inputs into `authorityToken`, so
+   * a narrower ceiling stops in-flight work.
    */
-  operationCeiling?: { grantedOnly?: boolean; readOnlyOnly?: boolean };
+  operationCeiling?: {
+    grantedOnly?: boolean;
+    readOnlyOnly?: boolean;
+    operationIds?: readonly string[];
+  };
   /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
   defaultOperationIds?: readonly string[];
   /**
@@ -812,7 +817,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     }
     const ceiling = verified.operationCeiling;
     if (ceiling)
-      operations = operations.filter((operation) => !ceiling.readOnlyOnly || operation.readOnly);
+      operations = operations.filter(
+        (operation) =>
+          (!ceiling.readOnlyOnly || operation.readOnly) &&
+          (!ceiling.operationIds || ceiling.operationIds.includes(operation.operationId)),
+      );
     return {
       authority: verified,
       revision: approved,

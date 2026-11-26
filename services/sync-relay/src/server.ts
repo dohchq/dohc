@@ -23,6 +23,7 @@ import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
+import { createMemberAppRoutes, MEMBER_APP_UPLOAD_BYTES } from "./memberAppRoutes";
 import { createPhoneApps } from "./phoneApps";
 import { createPhoneCollections } from "./phoneCollections";
 import type { PhoneAppLaunchScope } from "./storage/phoneApps";
@@ -1391,6 +1392,9 @@ export function createSyncRelayHandler({
     collectionsEnabled: appCollectionPolicy !== undefined,
     nowMs,
   });
+  const respondToMemberApps = datasetHost
+    ? createMemberAppRoutes({ host: datasetHost, storage, limits: appPublicationLimits })
+    : undefined;
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,
@@ -1641,6 +1645,21 @@ export function createSyncRelayHandler({
           userId: actor.userId,
           ...(grant === null ? {} : { grantId: parseShareId(grant) }),
         });
+      }
+      if (route.route === "member-apps") {
+        if (!respondToMemberApps) throw notFound();
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^s]+$/.test(authorization ?? ""))
+          throw notFound();
+        const actor = await resolveNamedActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          route.workspaceId,
+        );
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToMemberApps(request, route, actor.userId);
       }
       if (route.route === "owner-app-publication" || route.route === "owner-app-responses") {
         const authorization = request.headers.get("authorization");
@@ -2205,6 +2224,8 @@ export function maxRequestBodyBytes(url: URL): number {
       return route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : DEFAULT_BODY_BYTES;
     case "dataset-replica":
       return datasetReplicaRequestBytes(route.action);
+    case "member-apps":
+      return route.action === "apps" ? MEMBER_APP_UPLOAD_BYTES : DEFAULT_BODY_BYTES;
     // Its handler reserves the link's bytes before reading, so the body arrives first.
     case "link-app-collection":
       return APP_COLLECTION_REQUEST_BYTES;
@@ -2279,6 +2300,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
       route.route === "link-collection-writes" ||
       route.route === "account-operation" ||
       (route.route === "notice-marks" && method === "POST") ||
+      (route.route === "member-apps" && route.action === "apps" && method === "POST") ||
       (route.route === "personal-agent-tools" && route.action === "collection-writes")
     );
   } catch {

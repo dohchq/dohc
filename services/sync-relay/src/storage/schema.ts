@@ -76,6 +76,7 @@ import { initializeDeletedMessageSchema } from "./messageDeletes";
 import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
 import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
 import { initializeIncomingWebhookSchema } from "./incomingWebhooks";
+import { initializeMemberAppSchema } from "./memberApps";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1706,6 +1707,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeShareInvitationEmailSchema(db);
   initializeAccountNames(db);
   initializeWorkspaceLevelChanges(db);
+  initializeMemberAppSchema(db);
   initializeDirectMessageSchema(db);
   initializeGroupRuleSchema(db);
   initializeDeletedMessageSchema(db);

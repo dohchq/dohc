@@ -11,6 +11,7 @@ import type { DatasetReplicaRoute } from "./datasetReplicaRoutes";
 import type { LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
 import type { LinkAppCollectionRoute } from "./appCollectionRoutes";
 import type { OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
+import type { MemberAppRoute } from "./memberAppRoutes";
 import type { OwnerAppResponseRoute } from "./ownerAppResponseRoutes";
 import type { PersonalAgentToolRoute } from "./personalAgentRoutes";
 import { MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute } from "./heldDocumentRoutes";
@@ -68,6 +69,7 @@ export type SyncRelayRoute =
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
+  | MemberAppRoute
   | OwnerAppResponseRoute
   | HeldDocumentRoute
   | LiveRoomPauseRoute
@@ -463,6 +465,14 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts[2] === "app-responses" && parts.length === 4)
     return { route: "owner-app-responses", workspaceId, grantId: parseShareId(parts[3]) };
+  if (parts[2] === "member-apps") {
+    if (parts.length === 3) return { route: "member-apps", workspaceId, action: "apps" };
+    if (parts.length === 4 && parts[3] === "settings")
+      return { route: "member-apps", workspaceId, action: "settings" };
+    if (parts.length === 5 && /^[0-9a-f]{64}$/.test(parts[3]!) && parts[4] === "withdraw")
+      return { route: "member-apps", workspaceId, action: "withdraw", publicationId: parts[3]! };
+    throw notFound();
+  }
   if (parts[2] === "app-publications") {
     if (parts.length === 3)
       return { route: "owner-app-publication", workspaceId, action: "publish" };
@@ -491,6 +501,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         parts[5] === "attempt" ||
         parts[5] === "descriptor" ||
         parts[5] === "summary" ||
+        parts[5] === "consent" ||
         parts[5] === "redeem")
     ) {
       return { route: "app-backend", workspaceId, publicationId, action: parts[5] };

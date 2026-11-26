@@ -331,3 +331,57 @@ it.each([
       expect(container.innerHTML).not.toContain(detail);
   },
 );
+it("asks a viewer to review a Member app's reach and source, then opens it once they allow it", async () => {
+  const review = {
+    authorityRevision: 2,
+    consent: "changed",
+    scopeDigest: "d".repeat(64),
+    collections: [
+      {
+        name: "Registrations",
+        access: "edit",
+        operations: [
+          { name: "read", readOnly: true },
+          { name: "edit", readOnly: false },
+        ],
+      },
+    ],
+    source: [{ path: "app/index.ts", sha256: "e".repeat(64), byteLength: 12 }],
+  };
+  const sent: Array<[string, unknown]> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.body) sent.push([path, JSON.parse(String(init.body))]);
+      if (path === "/api/account/session")
+        return jsonResponse({ user: { id: "ben", name: "Ben" } });
+      if (path === "/api/apps/summary")
+        return jsonResponse({
+          subjectName: "tracker",
+          sharerName: "Ana",
+          access: "member",
+          review,
+        });
+      if (path === "/api/apps/source") return jsonResponse({ text: "export const x = 1;" });
+      if (path === "/api/apps/consent") return jsonResponse({ consent: "current" });
+      if (path === "/api/apps/launch") return jsonResponse(launch());
+      throw Error(path);
+    }),
+  );
+  await render();
+  expect(container.textContent).toContain("This app changed");
+  expect(container.textContent).toContain("Made by Ana");
+  expect(container.textContent).not.toContain("Member access");
+  expect(container.textContent).toContain("edit (changes data)");
+  expect(button("Open app")).toBeUndefined();
+  await click("View");
+  expect(container.querySelector(".member-review pre")?.textContent).toBe("export const x = 1;");
+  await click("Allow and open");
+  await settle(() => submitted.length === 1);
+  expect(sent.filter(([path]) => path !== "/api/apps/summary")).toEqual([
+    ["/api/apps/source", { ...target, sha256: "e".repeat(64), authorityRevision: 2 }],
+    ["/api/apps/consent", { ...target, scopeDigest: "d".repeat(64) }],
+    ["/api/apps/launch", target],
+  ]);
+});

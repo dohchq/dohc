@@ -76,7 +76,7 @@ const HOLD_BACKFILL = `INSERT INTO sync_relay_app_publishing_holds(publication_i
   SELECT t.publication_id,p.owner_user_id,t.disabled_at_ms FROM sync_relay_app_publication_takedowns t
   JOIN sync_relay_app_publications p USING(publication_id)`;
 
-function initializeMarkedTable(
+export function initializeMarkedTable(
   db: SqliteDb,
   migration: string,
   table: string,

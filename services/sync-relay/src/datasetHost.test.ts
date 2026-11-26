@@ -1,4 +1,5 @@
 import { createDatasetAppRoutes } from "./datasetRoutes";
+import { parseMemberAppUpload } from "./memberAppRoutes";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,7 +11,19 @@ import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-aut
 import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendAction } from "./appBackendRoutes";
-import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import {
+  parseAppPublicationCandidate,
+  type AppPublicationCandidate,
+} from "@dohc/security-contract/app-publication";
+import { setMemberAppSetting, withdrawMemberApp } from "./storage/memberApps";
+import { disableAppPublication } from "./storage/publications";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import {
+  approvePhoneApp,
+  issuePhoneAppGrant,
+  phoneAppLaunch,
+  redeemPhoneAppGrant,
+} from "./storage/phoneApps";
 import type { PublicEditRelease } from "@dohc/security-contract";
 import {
   createRelayDatasetHost,
@@ -1545,4 +1558,465 @@ it("keeps a Collection open to a member when its dataset.json names no Collectio
     text: "{}",
   });
   expect((await f.read()).result).toBe("edit");
+});
+
+const memberAppSource = Buffer.from("export default 'tracker';\n");
+const memberAppBundle = Buffer.from("document.body.textContent='tracker'");
+const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const ben: AppBackendAuth = { kind: "named", workspaceId: "w", userId: "ben" };
+
+async function memberAppFixture() {
+  const f = await memberFixture();
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: "w",
+      actorUserId: "owner",
+      workspaceName: "Team",
+      email: "ben@dohc.test",
+      recipientUserId: "ben",
+      newMemberId: () => "ben-entry",
+      newGrantId: () => "ben-grant",
+      newShareId: () => "unused",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  const grant = (grantId: string, operationIds: string[]) =>
+    f.host.setDataGrant(owner, { ...scope, grantId, grant: { ...anaGrant(), operationIds } });
+  grant("ben-grant", [id(6), id(7)]);
+  const share = (membersCanShare: boolean) =>
+    setMemberAppSetting(f.storage, { workspaceId: "w", actorUserId: "owner", membersCanShare });
+  share(true);
+  const base = f.storage.readAppPublication({
+    ...scope,
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  }).candidate;
+  const candidate = (operationIds = [id(5), id(6), id(7)], revisions = [memberRevision]) => {
+    const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
+    const inputs = [
+      {
+        path: "app/index.ts",
+        sha256: sha(memberAppSource),
+        byteLength: memberAppSource.byteLength,
+      },
+    ];
+    const files = [
+      {
+        path: "bundle.js",
+        sha256: sha(memberAppBundle),
+        byteLength: memberAppBundle.byteLength,
+        contentType: "text/javascript; charset=utf-8",
+      },
+    ];
+    const sourceDigest = digest("dohc-app-source-v2", {
+      entry: base.entryPath,
+      files: inputs,
+      packages: [],
+    });
+    const dependencyLockDigest = digest("dohc-app-dependencies-v1", inputs);
+    const bundleDigest = digest("dohc-app-bundle-v1", files);
+    return parseAppPublicationCandidate(
+      {
+        ...base,
+        inputs,
+        dependencies: ["app/index.ts"],
+        files,
+        sourceDigest,
+        dependencyLockDigest,
+        bundleDigest,
+        buildDigest: digest("dohc-app-build-v1", {
+          sourceDigest,
+          dependencyLockDigest,
+          compiler: base.compilerIdentity,
+          bundleDigest,
+        }),
+        capabilities: revisions.map((value, index) =>
+          resolveAppDatasetCapability(
+            {
+              kind: "dataset",
+              ...(revisions.length > 1 ? { alias: `c${index}` } : {}),
+              datasetId: value.datasetId,
+              revision: 1,
+              revisionSha256: value.revisionSha256,
+              operationIds,
+            },
+            value,
+          ),
+        ),
+      },
+      limits,
+    );
+  };
+  const blobs = new Map([
+    [sha(memberAppSource), memberAppSource],
+    [sha(memberAppBundle), memberAppBundle],
+  ]);
+  const publish = (
+    operationIds?: string[],
+    auth: AppBackendAuth = ana,
+    revisions?: Parameters<typeof candidate>[1],
+  ) =>
+    f.host.publishMemberApp(auth, {
+      workspaceId: "w",
+      slug: "tracker",
+      candidate: candidate(operationIds, revisions),
+      blobs,
+      agent: null,
+    }).publicationId;
+  const review = (auth: AppBackendAuth, publicationId: string) =>
+    f.host.servedPublication(auth, publicationId, true)!.member!;
+  const allow = (auth: AppBackendAuth, publicationId: string) =>
+    f.host.consentMemberApp(auth, publicationId, review(auth, publicationId).digest);
+  return { ...f, grant, share, candidate, blobs, publish, review, allow };
+}
+
+const reviewRequired = { code: "member_app_review_required", status: 409 };
+const reviewChanged = { code: "member_app_review_changed", status: 409 };
+
+it("shares a Member app only while members may, never as the owner, and runs it within both the author's and the viewer's reach", async () => {
+  const f = await memberAppFixture();
+  f.share(false);
+  expect(() => f.publish()).toThrow(expect.objectContaining({ code: "members_forbidden" }));
+  f.share(true);
+  expect(() => f.publish(undefined, owner)).toThrow(
+    expect.objectContaining({ code: "members_forbidden" }),
+  );
+  const app = f.publish();
+  await expect(f.invoke(ben, id(6), {}, app, "unreviewed")).rejects.toMatchObject(reviewRequired);
+  expect(f.review(ben, app)).toMatchObject({
+    consent: "none",
+    scope: [{ datasetId: id(1), operationIds: [id(6), id(7)].sort(), access: "edit" }],
+  });
+
+  // The owner holds every action, but the app reaches only what its author holds.
+  expect(f.review(owner, app).scope[0]!.operationIds).toEqual([id(6), id(7)].sort());
+  f.allow(owner, app);
+  await expect(f.invoke(owner, id(5), { name: "Owner" }, app, "escalate")).rejects.toMatchObject(
+    refused,
+  );
+  expect((await f.invoke(owner, id(6), {}, app, "owner-read")).result).toBe("edit");
+
+  // And a viewer reaches only what they hold.
+  f.grant("ben-grant", [id(6)]);
+  f.allow(ben, app);
+  expect((await f.invoke(ben, id(6), {}, app, "ben-read")).result).toBe("edit");
+  await expect(f.invoke(ben, id(7), { id: "x", name: "y" }, app, "ben-edit")).rejects.toMatchObject(
+    refused,
+  );
+  expect((await f.invoke(ana, id(6), {}, app, "author-read")).result).toBe("edit");
+});
+
+it("refuses a Member app's running write, and every later call, once its author loses reach", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  f.allow(ben, app);
+  const original = f.storage.memberReach.bind(f.storage);
+  let lower: (() => unknown) | null = null;
+  const dispatched = () => {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = Infinity;
+    const stack = String(new Error().stack);
+    Error.stackTraceLimit = limit;
+    return stack.includes("supervisor.mjs");
+  };
+  vi.spyOn(f.storage, "memberReach").mockImplementation((...args) => {
+    if (lower && dispatched()) {
+      const run = lower;
+      lower = null;
+      setImmediate(run);
+    }
+    return original(...args);
+  });
+  const edit = (key: string) => f.invoke(ben, id(7), { id: "x", name: "y" }, app, key);
+  const { revision } = await edit("edit-0");
+  lower = () => f.grant("ana-grant", [id(6)]);
+  await expect(edit("edit-1")).rejects.toMatchObject(refused);
+  expect(lower).toBeNull();
+  await expect(edit("edit-2")).rejects.toMatchObject(refused);
+  // Narrowing asks nobody again, and widening does.
+  expect((await f.invoke(ben, id(6), {}, app, "read")).result).toBe("edit");
+  f.allow(ben, app);
+  f.grant("ana-grant", [id(6), id(7)]);
+  await expect(edit("widened")).rejects.toMatchObject(reviewChanged);
+  f.allow(ben, app);
+  expect((await edit("edit-3")).revision).toBe(revision + 1);
+  expect(
+    f.storage.removeWorkspaceMember({
+      workspaceId: "w",
+      actorUserId: "owner",
+      memberId: "ana-entry",
+      nowMs: 20,
+    }),
+  ).toEqual({ ok: true });
+  await expect(f.invoke(ben, id(6), {}, app, "author-gone")).rejects.toMatchObject({
+    code: "not_found",
+  });
+});
+
+it("asks a viewer again for a new version, and only a person can allow it", async () => {
+  const f = await memberAppFixture();
+  const first = f.publish([id(6)]);
+  f.allow(ben, first);
+  expect((await f.invoke(ben, id(6), {}, first, "first")).result).toBe("edit");
+  const second = f.publish([id(6), id(7)]);
+  expect(f.publish([id(6), id(7)])).toBe(second);
+  expect(() => f.host.servedPublication(ben, first, true)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+  await expect(f.invoke(ben, id(6), {}, second, "second")).rejects.toMatchObject(reviewChanged);
+  const { digest } = f.review(ben, second);
+  expect(() =>
+    f.host.consentMemberApp({ ...ben, agent: { depth: 1, agentId: "agent" } }, second, digest),
+  ).toThrow(expect.objectContaining({ code: "member_app_person_only", status: 403 }));
+  expect(() => f.host.consentMemberApp(ben, second, "0".repeat(64))).toThrow(
+    expect.objectContaining(reviewChanged),
+  );
+  f.host.consentMemberApp(ben, second, digest);
+  expect((await f.invoke(ben, id(6), {}, second, "allowed")).result).toBe("edit");
+  expect(f.host.memberApps(ben, { workspaceId: "w" }).apps).toMatchObject([
+    { publicationId: second, publisherUserId: "ana", slug: "tracker", consent: "current" },
+  ]);
+});
+
+it("stops a member's Member apps when members may no longer share, but not an admin's", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  f.allow(ben, app);
+  f.share(false);
+  await expect(f.invoke(ben, id(6), {}, app, "off")).rejects.toMatchObject({ code: "not_found" });
+  expect(f.host.memberApps(ben, { workspaceId: "w" }).apps).toEqual([]);
+  f.share(true);
+  expect((await f.invoke(ben, id(6), {}, app, "on")).result).toBe("edit");
+  f.admin();
+  f.share(false);
+  expect((await f.invoke(ben, id(6), {}, app, "admin")).result).toBe("edit");
+  expect(() =>
+    setMemberAppSetting(f.storage, { workspaceId: "w", actorUserId: "ben", membersCanShare: true }),
+  ).toThrow(expect.objectContaining({ code: "members_forbidden" }));
+});
+
+it("refuses Member apps that read for share links or use owner-only actions, and never opens or binds one as an official app", async () => {
+  const f = await memberAppFixture();
+  const plain = f.candidate([id(6)]);
+  const linkReads = {
+    ...plain.capabilities[0]!,
+    linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }],
+  } as AppPublicationCandidate["capabilities"][number];
+  expect(() =>
+    f.host.publishMemberApp(ana, {
+      workspaceId: "w",
+      slug: "tracker",
+      candidate: { ...plain, capabilities: [linkReads] },
+      blobs: f.blobs,
+      agent: null,
+    }),
+  ).toThrow(expect.objectContaining({ code: "bad_request" }));
+  const ownerOnly = await f.collection(id(12), "private", true);
+  expect(() => f.publish([id(6)], ana, [memberRevision, ownerOnly])).toThrow(
+    expect.objectContaining({ code: "bad_request" }),
+  );
+  const app = f.publish();
+  expect(() => f.host.servedPublication(f.link("visitor"), app)).toThrow();
+  expect(() => f.host.bindPublication(owner, { workspaceId: "w", publicationId: app })).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+  expect(() =>
+    f.host.unbindPublication(owner, { workspaceId: "w", datasetId: id(1), publicationId: app }),
+  ).toThrow(expect.objectContaining({ code: "not_found" }));
+});
+
+it("takes a Member app down and holds its author's publishing", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  f.allow(ben, app);
+  disableAppPublication(f.storage, { publicationId: app, reason: "Spam", nowMs: 20 });
+  await expect(f.invoke(ben, id(6), {}, app, "taken-down")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  expect(() => f.publish()).toThrow(expect.objectContaining({ code: "conflict" }));
+  expect(() => f.publish([id(6)])).toThrow(expect.objectContaining({ code: "conflict" }));
+  expect(
+    f.storage.db
+      .prepare("SELECT active FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(app),
+  ).toEqual({ active: 0 });
+});
+
+it("lets a Member app's author or the owner withdraw it, and no other member", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  expect(() =>
+    withdrawMemberApp(f.storage, { workspaceId: "w", actorUserId: "ben", publicationId: app }),
+  ).toThrow(expect.objectContaining({ code: "not_found" }));
+  withdrawMemberApp(f.storage, { workspaceId: "w", actorUserId: "owner", publicationId: app });
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(app),
+  ).toEqual({ n: 0 });
+});
+
+it("ends an author's Member apps when their account is deleted", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  f.allow(ben, app);
+  const key = "member-app-deletion-key-at-least-32-bytes";
+  initializeAccountDeletion(f.storage, key);
+  fenceAccount(f.storage, key, "ana", "ana@dohc.test");
+  await expect(f.invoke(ben, id(6), {}, app, "deleted")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  expect(
+    f.storage.db
+      .prepare("SELECT active FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(app),
+  ).toEqual({ active: 0 });
+});
+
+it("never launches a Member app on a phone, even for its author", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  const { approvalId } = approvePhoneApp(f.storage, {
+    userId: "ana",
+    workspaceId: "w",
+    publicationId: app,
+    authorityRevision: 1,
+    newApprovalId: "a".repeat(32),
+    nowMs: 10,
+  });
+  issuePhoneAppGrant(f.storage, {
+    approvalId,
+    userId: "ana",
+    sessionId: "session",
+    workspaceId: "w",
+    publicationId: app,
+    authorityRevision: 1,
+    grantHash: "1".repeat(64),
+    expiresAtMs: 1e12,
+    nowMs: 10,
+  });
+  expect(
+    redeemPhoneAppGrant(f.storage, {
+      grantHash: "1".repeat(64),
+      launchHash: "2".repeat(64),
+      launchHost: "launch.test",
+      workspaceId: "w",
+      publicationId: app,
+      nowMs: 10,
+      expiresAtMs: 1e12,
+    }),
+  ).not.toBeNull();
+  expect(phoneAppLaunch(f.storage, "2".repeat(64), 10)).toBeNull();
+});
+
+function memberAppUpload(header: unknown, blobs: Array<Uint8Array>) {
+  const json = Buffer.from(JSON.stringify(header));
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(json.byteLength);
+  return new Uint8Array(Buffer.concat([length, json, ...blobs]));
+}
+
+it("takes a Member app only with every file and source byte it names, each matching its digest", async () => {
+  const f = await memberAppFixture();
+  const candidate = f.candidate([id(6)]);
+  const ordered = [...f.blobs.keys()].sort().map((key) => f.blobs.get(key)!);
+  const header = { slug: "tracker", candidate };
+  expect(parseMemberAppUpload(memberAppUpload(header, ordered), limits)).toMatchObject({
+    slug: "tracker",
+    agent: null,
+  });
+  const badRequest = expect.objectContaining({ code: "bad_request" });
+  // Bytes the relay already stores still have to come with the upload.
+  expect(() =>
+    parseMemberAppUpload(
+      memberAppUpload(
+        header,
+        ordered.filter((bytes) => bytes !== memberAppBundle),
+      ),
+      limits,
+    ),
+  ).toThrow(badRequest);
+  const tampered = ordered.map((bytes) => Buffer.from(bytes).fill(120));
+  expect(() => parseMemberAppUpload(memberAppUpload(header, tampered), limits)).toThrow(badRequest);
+  expect(() =>
+    parseMemberAppUpload(memberAppUpload(header, [...ordered, Buffer.from("x")]), limits),
+  ).toThrow(badRequest);
+  expect(() =>
+    parseMemberAppUpload(memberAppUpload({ ...header, slug: "Tracker!" }, ordered), limits),
+  ).toThrow(badRequest);
+});
+
+it("shows a Member app's reach and source for review, and its bundle only once allowed", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  const route = createDatasetAppRoutes(f.host, f.storage, {
+    nowMs: () => 10,
+    publications: true,
+    shareSenderLabel: async () => "Ana (ana@dohc.test)",
+  });
+  const call = (action: AppBackendAction, init: RequestInit = {}, sha256 = "", query = "") =>
+    route(
+      new Request(`https://relay.test/${action}${query}`, init),
+      {
+        route: "app-backend",
+        action,
+        publicationId: app,
+        workspaceId: "w",
+        ...(sha256 && { sha256 }),
+      },
+      ben,
+    );
+  const summary = (await (await call("summary")).json()) as {
+    review: { scopeDigest: string; consent: string };
+  };
+  expect(summary).toMatchObject({
+    subjectName: "tracker",
+    sharerName: "Ana (ana@dohc.test)",
+    access: "member",
+    review: {
+      consent: "none",
+      collections: [
+        {
+          name: "Registrations",
+          access: "edit",
+          operations: [
+            { name: "read", readOnly: true },
+            { name: "edit", readOnly: false },
+          ],
+        },
+      ],
+      source: [{ path: "app/index.ts" }],
+    },
+  });
+  const blob = (bytes: Uint8Array) => call("blob", {}, sha(bytes), "?authorityRevision=1");
+  expect(await (await blob(memberAppSource)).text()).toBe(memberAppSource.toString());
+  await expect(blob(memberAppBundle)).rejects.toThrow();
+  const descriptor = await call("descriptor");
+  expect(descriptor.status).toBe(409);
+  expect(await descriptor.json()).toMatchObject({ code: "member_app_review_required" });
+
+  const consent = (body: unknown) =>
+    call("consent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const agent = await consent({
+    scopeDigest: summary.review.scopeDigest,
+    agent: { depth: 1, agentId: "agent" },
+  });
+  expect(agent.status).toBe(403);
+  expect(await agent.json()).toMatchObject({ code: "member_app_person_only" });
+  expect(await (await consent({ scopeDigest: summary.review.scopeDigest })).json()).toMatchObject({
+    consent: "current",
+  });
+  expect(await (await blob(memberAppBundle)).text()).toBe(memberAppBundle.toString());
+  await expect(
+    call("activate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authorityRevision: 1 }),
+    }),
+  ).rejects.toThrow();
 });
