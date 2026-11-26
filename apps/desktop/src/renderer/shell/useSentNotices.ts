@@ -73,7 +73,7 @@ export interface SentNotices {
   hideToast: () => void;
   // Both mark notices from the list on screen, for the account it shows.
   read: (refs: readonly NoticeRef[]) => Promise<void>;
-  dismiss: (ref: NoticeRef) => Promise<void>;
+  dismiss: (refs: readonly NoticeRef[]) => Promise<void>;
 }
 
 /**
@@ -186,10 +186,11 @@ export function useSentNotices(enabled: boolean): SentNotices {
   );
 
   const dismiss = useCallback(
-    async (ref: NoticeRef) => {
-      const key = noticeKey(account, ref);
-      setHeld((current) => ({ ...current, dismissed: new Set(current.dismissed).add(key) }));
-      await settle([key], () => send("dismissed", [ref]));
+    async (refs: readonly NoticeRef[]) => {
+      if (refs.length === 0) return;
+      const keys = refs.map((ref) => noticeKey(account, ref));
+      setHeld((current) => ({ ...current, dismissed: new Set([...current.dismissed, ...keys]) }));
+      await settle(keys, () => send("dismissed", refs));
     },
     [account, send, settle],
   );

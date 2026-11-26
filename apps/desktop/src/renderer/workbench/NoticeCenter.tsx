@@ -46,7 +46,7 @@ import {
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
 import { RELAY_API_VERSION_CAUSE, type NoticeKind } from "@dohc/workspace-contracts/relay";
-import { SectionLabel } from "../ui/controls";
+import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { DismissDraftControls, RecoveryList } from "../RecoveryList";
 import { errorDetails } from "../shell/copyDetails";
@@ -221,6 +221,9 @@ const isFailure = (notice: NoticeRow): boolean =>
 // A held change to a lossy note, from another workspace. dohc held it on
 // purpose, so it shows as a warning, not a failure.
 const isHeld = (notice: NoticeRow): boolean => notice.kind === "markdown-write-held";
+// A wake from the server waits for one of this person's computers to run it;
+// dismissing it would cancel it.
+const sentDismissable = (notice: NoticeRow): boolean => notice.kind !== "automation-wake";
 
 // What Copy details puts on the clipboard for a failed run's notice. The
 // notice store already bounds the body, so the report keeps all of the text
@@ -1071,6 +1074,9 @@ const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
     "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
+const HEADER_ACTION_CLASS =
+  "shrink-0 rounded-md px-1.5 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink";
+
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
   rail: "bottom-12 left-14 w-[min(360px,calc(100vw-68px))]",
   corner: "bottom-14 right-3 w-[min(360px,calc(100vw-24px))]",
@@ -1508,7 +1514,7 @@ export function NoticeCenter(props: {
   // to a sentence that says why it could not. Opens nothing once `signal`
   // aborts.
   onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
-  onDismissSentNotice?: (notice: NoticeRow) => void;
+  onDismissSentNotices?: (notices: readonly NoticeRow[]) => void;
   // Run now on a skipped schedule's notice. Resolves to null once the run
   // started here, or to a sentence that says why it did not.
   onRunSentNoticeNow?: (notice: NoticeRow) => Promise<string | null>;
@@ -2332,6 +2338,27 @@ export function NoticeCenter(props: {
   const count = unreadLocal + unreadSent;
   const canReadAll =
     unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
+  const clearableLocal = notices.filter((notice) => notice.onDismiss !== undefined);
+  const clearableSent = props.onDismissSentNotices
+    ? sentNotices.map(({ notice }) => notice).filter(sentDismissable)
+    : [];
+  const clearCount = clearableLocal.length + clearableSent.length;
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const clearRef = useRef<HTMLButtonElement | null>(null);
+  const clearCancelRef = useRef<HTMLButtonElement | null>(null);
+  if (confirmingClear && (!open || clearCount === 0)) setConfirmingClear(false);
+  const confirmClear = (confirming: boolean) => {
+    centerRef.current?.focus();
+    flushSync(() => setConfirmingClear(confirming));
+    (confirming ? clearCancelRef : clearRef).current?.focus();
+  };
+  const clearAll = () => {
+    setConfirmingClear(false);
+    centerRef.current?.focus();
+    cancelOpen();
+    for (const notice of clearableLocal) notice.onDismiss?.();
+    if (clearableSent.length > 0) props.onDismissSentNotices?.(clearableSent);
+  };
   // Reading a row of this computer's keeps the row and closes its toast. A
   // read dohc could not save shows the row unread again.
   // `sections` are the keys of the list rows read with them.
@@ -2866,7 +2893,8 @@ export function NoticeCenter(props: {
                 if (event.key !== "Escape" || event.defaultPrevented) return;
                 event.preventDefault();
                 event.stopPropagation();
-                setOpen(false);
+                if (confirmingClear) confirmClear(false);
+                else setOpen(false);
               }}
               onBlur={(event) => {
                 // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
@@ -2885,28 +2913,62 @@ export function NoticeCenter(props: {
               <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
                 <Bell size={13} aria-hidden className="text-subtle" />
                 <span className="text-sm font-semibold text-ink">Notices</span>
-                {canReadAll ? (
-                  <button
-                    type="button"
-                    data-testid="notice-center-read-all"
-                    onClick={() => {
-                      centerRef.current?.focus();
-                      readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
-                      if (unreadSent > 0) props.onReadAllSentNotices?.();
-                    }}
-                    className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Mark all read
-                  </button>
-                ) : null}
-                {count > 0 ? (
-                  <span
-                    data-testid="notice-center-count"
-                    className={`${canReadAll ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
-                  >
-                    {count}
+                {confirmingClear ? (
+                  <span className="ml-auto flex shrink-0 items-center gap-2">
+                    <SecondaryButton
+                      ref={clearCancelRef}
+                      size="row"
+                      data-testid="notice-center-clear-cancel"
+                      onClick={() => confirmClear(false)}
+                    >
+                      Cancel
+                    </SecondaryButton>
+                    <DangerButton
+                      size="row"
+                      data-testid="notice-center-clear-confirm"
+                      onClick={clearAll}
+                    >
+                      {clearCount === 1 ? "Clear 1 Notice" : `Clear ${clearCount} Notices`}
+                    </DangerButton>
                   </span>
                 ) : null}
+                {confirmingClear ? null : (
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
+                    {canReadAll ? (
+                      <button
+                        type="button"
+                        data-testid="notice-center-read-all"
+                        onClick={() => {
+                          centerRef.current?.focus();
+                          readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
+                          if (unreadSent > 0) props.onReadAllSentNotices?.();
+                        }}
+                        className={HEADER_ACTION_CLASS}
+                      >
+                        Mark all read
+                      </button>
+                    ) : null}
+                    {clearCount > 0 ? (
+                      <button
+                        ref={clearRef}
+                        type="button"
+                        data-testid="notice-center-clear-all"
+                        onClick={() => confirmClear(true)}
+                        className={HEADER_ACTION_CLASS}
+                      >
+                        Clear all
+                      </button>
+                    ) : null}
+                    {count > 0 ? (
+                      <span
+                        data-testid="notice-center-count"
+                        className="ml-1 rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
+                      >
+                        {count}
+                      </span>
+                    ) : null}
+                  </span>
+                )}
               </header>
               <p role="status" data-testid="notice-center-said" className="sr-only">
                 {said}
@@ -3058,12 +3120,11 @@ export function NoticeCenter(props: {
                               : undefined;
                           const copies = isFailure(notice);
                           const running = runningKey === key;
-                          // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
                           const dismissNotice =
-                            props.onDismissSentNotice && notice.kind !== "automation-wake"
+                            props.onDismissSentNotices && sentDismissable(notice)
                               ? () => {
                                   cancelOpen(key);
-                                  props.onDismissSentNotice?.(notice);
+                                  props.onDismissSentNotices?.([notice]);
                                 }
                               : undefined;
                           return (

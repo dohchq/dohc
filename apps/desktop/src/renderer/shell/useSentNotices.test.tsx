@@ -85,7 +85,7 @@ describe("sent notices in a window", () => {
       ]);
       listed = [{ ...shown, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }];
     });
-    await act(async () => result.current.dismiss(sentNoticeRef(shown)));
+    await act(async () => result.current.dismiss([sentNoticeRef(shown)]));
     expect(result.current.notices).toEqual(listed);
   });
 
@@ -138,7 +138,7 @@ describe("sent notices in a window", () => {
     let dismissed: Promise<void> = Promise.resolve();
     act(() => {
       read = result.current.read([{ store: "account", noticeId: "a" }]);
-      dismissed = result.current.dismiss({ store: "account", noticeId: "b" });
+      dismissed = result.current.dismiss([{ store: "account", noticeId: "b" }]);
     });
     expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([
       ["a", true],
@@ -176,11 +176,41 @@ describe("sent notices in a window", () => {
     await waitFor(() => expect(result.current.notices).toHaveLength(1));
     bridge.markNotices.mockRejectedValueOnce(new Error("disk full"));
     await act(async () => {
-      await expect(result.current.dismiss({ store: "account", noticeId: "a" })).rejects.toThrow(
+      await expect(result.current.dismiss([{ store: "account", noticeId: "a" }])).rejects.toThrow(
         "disk full",
       );
     });
     expect(result.current.notices.map((row) => row.noticeId)).toEqual(["a"]);
+  });
+
+  it("hides every notice of a clear at once, and dismisses them in one mark", async () => {
+    listed = [notice("a"), notice("b"), notice("c")];
+    const { result } = renderHook(() => useSentNotices(true));
+    await waitFor(() => expect(result.current.notices).toHaveLength(3));
+    const sent = deferred<undefined>();
+    bridge.markNotices.mockImplementationOnce(() => sent.promise);
+    let dismissed: Promise<void> = Promise.resolve();
+    act(() => {
+      dismissed = result.current.dismiss([
+        { store: "account", noticeId: "a" },
+        { store: "account", noticeId: "c" },
+      ]);
+    });
+    expect(result.current.notices.map((row) => row.noticeId)).toEqual(["b"]);
+    expect(bridge.markNotices).toHaveBeenCalledExactlyOnceWith({
+      account: ANA,
+      mark: "dismissed",
+      notices: [
+        { store: "account", noticeId: "a" },
+        { store: "account", noticeId: "c" },
+      ],
+    });
+    listed = [notice("b")];
+    await act(async () => {
+      sent.resolve(undefined);
+      await dismissed;
+    });
+    expect(result.current.notices.map((row) => row.noticeId)).toEqual(["b"]);
   });
 
   it("marks a long list read in batches main accepts", async () => {
@@ -228,7 +258,7 @@ describe("sent notices in a window", () => {
       mark: "read",
       notices: [{ store: "account", noticeId: "b" }],
     });
-    await act(async () => result.current.dismiss({ store: "account", noticeId: "c" }));
+    await act(async () => result.current.dismiss([{ store: "account", noticeId: "c" }]));
     expect(bridge.markNotices).toHaveBeenLastCalledWith({
       account: BEN,
       mark: "dismissed",
