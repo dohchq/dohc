@@ -283,6 +283,7 @@ fn apply_remote_update_in_transaction(
     }
     // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        load_doc_in(tx, key)?.refuse_a_newer_format()?;
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
     crate::author_coverage::check_remote_admission_in(
@@ -360,9 +361,11 @@ pub fn apply_remote_update_in_transaction_with_projection(
         // A dedupe never reached the gate, so it has no gate scratch. Keep the
         // projection on the byte-replay-identical cold base; do not synthesize
         // an owned doc by applying a cached full-state encode.
+        let doc = load_doc_in(tx, key)?;
+        doc.refuse_a_newer_format()?;
         return Ok(RemoteApplyProjection {
             outcome: ReplicationApplyOutcome::Deduped { seq: existing },
-            doc: load_doc_in(tx, key)?,
+            doc,
             content_kind: marker.content_kind,
             introduced_unattributed: false,
             record_facts: None,

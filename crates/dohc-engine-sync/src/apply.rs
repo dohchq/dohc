@@ -467,10 +467,23 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             crate::moment_apply::retain_refused_moment_blobs(tx, envelope)?;
         }
         if let Admission::Refused(refusal) = &admission
-            && envelope.op_kind == "ydoc.update"
-            && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
+            && match envelope.op_kind.as_str() {
+                "ydoc.update" => true,
+                "conflict.resolve" => envelope
+                    .payload
+                    .pointer("/lineageTransition/successor")
+                    .is_some_and(serde_json::Value::is_object),
+                _ => false,
+            }
+            && matches!(
+                refusal.reason.message(),
+                crate::ydoc_apply::LIVE_UNADMITTED_UPDATE | crate::ydoc_apply::NEWER_BODY_FORMAT
+            )
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            if refusal.reason.message() == crate::ydoc_apply::NEWER_BODY_FORMAT {
+                crate::ydoc_apply::refuse_rows_of_a_kept_base_in_tx(tx, envelope)?;
+            }
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         if hosted {

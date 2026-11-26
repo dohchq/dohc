@@ -112,7 +112,13 @@ mod tests {
                 )
                 .unwrap();
             let key = DocKey::new("workspace", "main", "object").unwrap();
-            durable::claim_base(&mut store, &key, ContentKind::Richdoc, &bytes, &NoFaults, 2)
+            let stored = Ydoc::wire();
+            stored.apply(&bytes).unwrap();
+            let base = durable::IncomingBase::stored(&bytes, stored);
+            store
+                .write_with(&NoFaults, |tx| {
+                    durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &base, 2)
+                })
                 .unwrap();
             let source = OwnerSeedSource {
                 moment_id: "original".into(),
@@ -335,6 +341,45 @@ mod tests {
             .iter()
             .map(|t| self.store.table_row_count(t).unwrap())
             .collect()
+        }
+    }
+
+    fn rich_note_deleting_units_of_its_emoji(units: u8) -> (String, Vec<u8>) {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let writer = Ydoc::with_client_id(5);
+        writer.richdoc_append_paragraph("\u{1f600}X");
+        let letters_end = writer.encode_state_vector()[2];
+        let version = writer.missing_schema_version_update(&key).unwrap();
+        writer.apply(&version.unwrap()).unwrap();
+        let delete = vec![0, 1, 5, 1, letters_end - 3, units];
+        let bytes = crate::merge_updates(&[writer.encode_full_state(), delete]).unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&bytes).unwrap();
+        (doc.project(ContentKind::Richdoc).unwrap().content, bytes)
+    }
+
+    #[test]
+    fn an_adoption_whose_baseline_splits_an_emoji_writes_nothing() {
+        let (text, bytes) = rich_note_deleting_units_of_its_emoji(2);
+        Fixture::with_source(text, bytes)
+            .adopt()
+            .expect("a baseline that deletes a whole emoji adopts");
+        let (text, bytes) = rich_note_deleting_units_of_its_emoji(1);
+        let mut f = Fixture::with_source(text, bytes);
+        let before = f.counts();
+        let refused = f.adopt();
+        assert!(
+            matches!(
+                refused,
+                Err(ApplicationError::Collab(
+                    CollabError::ReplayParityViolation { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(f.counts(), before);
+        for table in ["live_owner_adoptions", "live_accepted_checkpoints"] {
+            assert_eq!(f.store.table_row_count(table).unwrap(), 0, "{table}");
         }
     }
 
@@ -1452,8 +1497,10 @@ pub fn adopt_owner_committed(
         if local.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
+        let baseline = crate::IncomingBase::new(&cut.baseline_bytes);
         let (coverage,covered_sequence,seed,current_outbox,retired) = match &succession {
             None => {
+                baseline.doc()?;
                 let journal = Ydoc::wire();
                 journal.apply(&cut.baseline_bytes)?;
                 let reader = imported_source.as_ref().is_some_and(|source| source.reader_source);
@@ -1557,7 +1604,7 @@ pub fn adopt_owner_committed(
         }
         // A successor continues the lineage's accepted history as it is.
         if succession.is_none() {
-            accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
+            accepted_history::initialize(tx, &held, &baseline)?;
             for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         }
         follow_up(tx, &held.namespace, b, cut.events.len() as i64)?;

@@ -186,6 +186,14 @@ pub enum CollabError {
         observed: String,
     },
 
+    /// The note is in a body format this engine does not read yet.
+    #[error("this note uses a newer body format; update dohc")]
+    NewerBodyFormat,
+
+    /// An update writes outside a format-2 note's sequence and containers.
+    #[error("an update writes outside a format-2 note's sequence and containers")]
+    OutsideFormatTwoRoots,
+
     /// A successor cannot archive a lineage while queued or unintegrated
     /// updates could still change its state.
     #[error("Y.Doc lineage is incomplete: {reason}; drain dependencies and retry")]
@@ -282,6 +290,8 @@ impl CollabError {
             CollabError::LineagePredecessorMismatch { .. } => "lineage-predecessor-mismatch",
             CollabError::LineageStateVectorMismatch { .. } => "lineage-state-vector-mismatch",
             CollabError::InvalidSuccessorBase { .. } => "invalid-successor-base",
+            CollabError::NewerBodyFormat => "ydoc-note-uses-a-newer-body-format",
+            CollabError::OutsideFormatTwoRoots => "ydoc-update-outside-format-two-roots",
             CollabError::LineageIncomplete { .. } => "lineage-incomplete",
             CollabError::LeaseHeld => "lease-held",
             CollabError::AuthorCapacity => "ydoc-author-capacity",

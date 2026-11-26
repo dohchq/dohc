@@ -3370,3 +3370,265 @@ fn a_reviewed_install_reports_an_unreadable_compacted_update_as_corruption() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn a_remote_write_under_body_in_a_format_two_note_is_refused_and_a_typed_letter_applies() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Text, Transact, XmlFragment};
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        let base = note.encode_full_state();
+        let elsewhere = |client: u64, edit: &dyn Fn(&yrs::Doc)| {
+            let other = yrs::Doc::with_client_id(client);
+            other
+                .transact_mut()
+                .apply_update(yrs::Update::decode_v1(&base).expect("decode"))
+                .expect("load note");
+            let before = other.transact().state_vector();
+            edit(&other);
+            let after = other.transact();
+            after.encode_state_as_update_v1(&before)
+        };
+        let under_body = elsewhere(7, &|doc| {
+            let body = doc.get_or_insert_xml_fragment(dohc_engine_collab::ydoc::ROOT_BODY);
+            body.insert(&mut doc.transact_mut(), 0, yrs::XmlTextPrelim::new("Typed"));
+        });
+        let typed = elsewhere(8, &|doc| {
+            let sequence = doc.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
+            sequence.insert(&mut doc.transact_mut(), 1, "z");
+        });
+        let remote = |origin_seq: i64, bytes: &[u8]| RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq,
+            bytes: bytes.to_vec(),
+        };
+        for projected in [false, true] {
+            let mut ts = fresh_store("format-two-remote-under-body");
+            let key = test_key();
+            seed_parents(&mut ts.store, &key, 1_000);
+            committed(
+                claim_base(
+                    &mut ts.store,
+                    &key,
+                    ContentKind::Richdoc,
+                    &base,
+                    &NoFaults,
+                    1_000,
+                )
+                .expect("claim format-2 base"),
+            );
+            let mut apply = |update: RemoteUpdate| -> Result<(), CollabError> {
+                if projected {
+                    ts.store
+                        .write_with(&NoFaults, |tx| {
+                            apply_remote_update_in_transaction_with_projection(
+                                tx,
+                                &WriterDocCache::new(),
+                                &mut RemoteAppendProbe::default(),
+                                &key,
+                                &update,
+                                None,
+                                None,
+                                1_100,
+                            )
+                        })
+                        .map(drop)
+                } else {
+                    apply_remote_update(
+                        &mut ts.store,
+                        &mut WriterDocCache::new(),
+                        &key,
+                        &update,
+                        None,
+                        None,
+                        &NoFaults,
+                        1_100,
+                    )
+                    .map(drop)
+                }
+            };
+            let refused = apply(remote(1, &under_body));
+            assert!(
+                refused.as_ref().err().map(CollabError::code)
+                    == Some("ydoc-update-outside-format-two-roots"),
+                "projected={projected}: {refused:?}"
+            );
+            apply(remote(1, &typed)).expect("a typed letter applies");
+            let stored = load_persisted(&ts.store, &key)
+                .expect("load")
+                .expect("note");
+            let text = stored.doc.project(ContentKind::Richdoc).expect("project");
+            assert!(text.content.contains('z'), "{}", text.content);
+            assert!(!text.content.contains("Typed"), "{}", text.content);
+        }
+    });
+}
+
+#[test]
+fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newer() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Text, Transact};
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let base = note.encode_full_state();
+    let typed = |client: u64, letter: &str| {
+        let other = yrs::Doc::with_client_id(client);
+        other
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&base).expect("decode"))
+            .expect("load note");
+        let before = other.transact().state_vector();
+        let sequence = other.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
+        sequence.insert(&mut other.transact_mut(), 1, letter);
+        let after = other.transact();
+        after.encode_state_as_update_v1(&before)
+    };
+    let held = typed(6, "y");
+    let mut ts = fresh_store("format-two-switch-off");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        committed(
+            claim_base(
+                &mut ts.store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &NoFaults,
+                1_000,
+            )
+            .expect("claim format-2 base"),
+        );
+        apply_remote_update(
+            &mut ts.store,
+            &mut WriterDocCache::new(),
+            &key,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 1,
+                bytes: held.clone(),
+            },
+            None,
+            None,
+            &NoFaults,
+            1_050,
+        )
+        .expect("a typed letter applies");
+    });
+    let before = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("note");
+    let remote = apply_remote_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: typed(7, "z"),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_100,
+    )
+    .map(drop);
+    assert!(
+        remote.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{remote:?}"
+    );
+    let deduped = ts
+        .store
+        .write_with(&NoFaults, |tx| {
+            apply_remote_update_in_transaction_with_projection(
+                tx,
+                &WriterDocCache::new(),
+                &mut RemoteAppendProbe::default(),
+                &key,
+                &RemoteUpdate {
+                    origin_id: "elsewhere".to_owned(),
+                    origin_seq: 1,
+                    bytes: held.clone(),
+                },
+                None,
+                None,
+                1_100,
+            )
+        })
+        .map(drop);
+    assert!(
+        deduped.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{deduped:?}"
+    );
+    let duplicate = apply_remote_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &RemoteUpdate {
+            origin_id: "elsewhere".to_owned(),
+            origin_seq: 1,
+            bytes: held.clone(),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_100,
+    )
+    .map(drop);
+    assert!(
+        duplicate.as_ref().err().map(CollabError::code)
+            == Some("ydoc-note-uses-a-newer-body-format"),
+        "{duplicate:?}"
+    );
+    let local = record_local_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &typed(8, "z"),
+        LocalAppend::default(),
+        &NoFaults,
+        1_100,
+        |_, _, _| Ok(()),
+    )
+    .map(drop);
+    assert!(
+        local.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{local:?}"
+    );
+    let after = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("note");
+    assert_eq!(after.up_to_seq, before.up_to_seq);
+    assert_eq!(
+        after.doc.encode_full_state(),
+        before.doc.encode_full_state()
+    );
+    let folded = after
+        .doc
+        .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "Changed.\n")
+        .map(drop);
+    assert!(
+        folded.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{folded:?}"
+    );
+    let frontmatter = after
+        .doc
+        .replace_frontmatter_for_fold("---\nstatus: open\n---\nA note.\n")
+        .map(drop);
+    assert!(
+        frontmatter.as_ref().err().map(CollabError::code)
+            == Some("ydoc-note-uses-a-newer-body-format"),
+        "{frontmatter:?}"
+    );
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let reread = load_persisted(&ts.store, &key)
+            .expect("load")
+            .expect("note");
+        let text = reread.doc.project(ContentKind::Richdoc).expect("project");
+        assert!(
+            text.content.contains('y') && !text.content.contains('z'),
+            "{}",
+            text.content
+        );
+        assert!(!text.content.contains("status"), "{}", text.content);
+    });
+}

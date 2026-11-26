@@ -2142,3 +2142,538 @@ fn a_queued_base_that_splits_an_emoji_is_refused_and_the_drain_goes_on() {
     assert_eq!(persisted.doc.plaintext_string(), "base more");
     assert_eq!(persisted.marker.lineage_claim_id, Some(lineage));
 }
+
+fn seed_object_two(engine: &mut EngineStore) -> dohc_engine_collab::DocKey {
+    VersionedTextStore::new(engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', 'object-two', 1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("file object");
+    dohc_engine_collab::DocKey::new("ws", "main", "object-two").expect("doc key")
+}
+
+fn object_two_payload(blob: &str, claim: &str, base: bool) -> serde_json::Value {
+    json!({
+        "versionId": "main",
+        "objectId": "object-two",
+        "path": "notes/two.md",
+        "contentKind": "richdoc",
+        "updateBlobSha256": blob,
+        "lineageClaimId": claim,
+        "isBaseState": base
+    })
+}
+
+fn queue_a_format_two_lineage_before_a_format_one(
+    engine: &mut EngineStore,
+    newer: &[(&str, i64, &[u8], &[u8])],
+) -> (dohc_engine_collab::DocKey, String) {
+    let key = seed_object_two(engine);
+    let older = dohc_engine_collab::Ydoc::wire();
+    older
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Other.\n")
+        .expect("format-1 note");
+    let older_base = older.encode_full_state();
+    let older_delta = older.richdoc_append_paragraph("More");
+    let mut rows: Vec<(&str, i64, &[u8], &[u8])> = newer.to_vec();
+    rows.push(("peer-b", 0, &older_base[..], &older_base[..]));
+    rows.push(("peer-b", 1, &older_delta[..], &older_base[..]));
+    for (relay_seq, (origin, origin_seq, bytes, claim_bytes)) in (3..).zip(rows) {
+        let blob = engine.put_binary_blob(bytes).expect("queued blob");
+        let claim = dohc_engine_storage::hex_sha256(claim_bytes);
+        let mut op = envelope(
+            origin,
+            origin_seq,
+            "ydoc.update",
+            object_two_payload(&blob, &claim, bytes == claim_bytes),
+        );
+        op.relay_seq = Some(relay_seq);
+        crate::apply_envelope_with(engine, &op, &NoFaults, |tx, op| {
+            crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &claim, relay_seq, None)
+        })
+        .expect("queue");
+    }
+    (key, dohc_engine_storage::hex_sha256(&older_base))
+}
+
+fn assert_the_format_one_lineage_drained(
+    engine: &EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    older_base: &str,
+    kept_for_peer_a: i64,
+) {
+    let (queue, kept): (i64, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM ydoc_deferred_updates),
+                        (SELECT COUNT(*) FROM replication_refused_ydoc_blobs WHERE origin_id='peer-a')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("queue count");
+    assert_eq!((queue, kept), (0, kept_for_peer_a));
+    let persisted = dohc_engine_collab::load_persisted(engine, key)
+        .expect("load lineage")
+        .expect("persisted lineage");
+    assert_eq!(
+        persisted.marker.lineage_claim_id.as_deref(),
+        Some(older_base)
+    );
+    let text = persisted
+        .doc
+        .project(dohc_engine_collab::ContentKind::Richdoc)
+        .expect("project")
+        .content;
+    assert!(text.contains("More"), "{text}");
+}
+
+fn refused_rows(drained: &YdocDrainResult) -> Vec<(&str, i64, &str)> {
+    drained
+        .refusals
+        .iter()
+        .map(|refusal| {
+            (
+                refusal.origin_id.as_str(),
+                refusal.origin_seq,
+                refusal.reason.message(),
+            )
+        })
+        .collect()
+}
+
+const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
+
+fn format_two_base_and_edit() -> (Vec<u8>, Vec<u8>) {
+    let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let edit = crate::moment_apply_tests::format_two_sequence_edit(&newer, 7, "z");
+    (newer.encode_full_state(), edit)
+}
+
+#[test]
+fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
+    let (_scratch, _path, mut engine) = open_store();
+    let (base, edit) = format_two_base_and_edit();
+    let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+        &mut engine,
+        &[
+            ("peer-a", 0, &base[..], &base[..]),
+            ("peer-a", 1, &edit[..], &base[..]),
+        ],
+    );
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(
+        refused_rows(&drained),
+        [
+            ("peer-a", 0, NEWER_BODY_FORMAT),
+            ("peer-a", 1, NEWER_BODY_FORMAT),
+        ]
+    );
+    assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+}
+
+#[test]
+fn a_refused_base_between_a_format_two_base_and_its_edit_strands_nothing() {
+    let (_scratch, _path, mut engine) = open_store();
+    let (base, edit) = format_two_base_and_edit();
+    let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+    let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+        &mut engine,
+        &[
+            ("peer-a", 0, &base[..], &base[..]),
+            ("peer-c", 0, &split[..], &split[..]),
+            ("peer-a", 1, &edit[..], &base[..]),
+        ],
+    );
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(
+        refused_rows(&drained),
+        [
+            ("peer-a", 0, NEWER_BODY_FORMAT),
+            ("peer-a", 1, NEWER_BODY_FORMAT),
+            ("peer-c", 0, "ydoc.update base fails the replay check"),
+        ]
+    );
+    assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+}
+
+#[test]
+fn an_edit_queued_after_its_format_two_base_was_kept_is_kept_and_the_drain_goes_on() {
+    let (_scratch, _path, mut engine) = open_store();
+    let (base, edit) = format_two_base_and_edit();
+    seed_object_two(&mut engine);
+    let claim = engine.put_binary_blob(&base).expect("base blob");
+    let mut arriving = envelope(
+        "peer-a",
+        0,
+        "ydoc.update",
+        object_two_payload(&claim, &claim, true),
+    );
+    arriving.relay_seq = Some(1);
+    let refused = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &arriving,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("the base is refused");
+    assert!(
+        matches!(&refused.primary, ApplyDisposition::Refused(refusal) if refusal.reason.message() == NEWER_BODY_FORMAT),
+        "{:?}",
+        refused.primary
+    );
+    let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+        &mut engine,
+        &[("peer-a", 1, &edit[..], &base[..])],
+    );
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(refused_rows(&drained), [("peer-a", 1, NEWER_BODY_FORMAT)]);
+    assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+}
+
+#[test]
+fn a_queued_format_two_base_writing_under_body_is_set_aside_for_its_note() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Transact, XmlFragment};
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        let stray = yrs::Doc::with_client_id(7);
+        stray
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&newer.encode_full_state()).expect("decode"))
+            .expect("load note");
+        let body = stray.get_or_insert_xml_fragment(dohc_engine_collab::ydoc::ROOT_BODY);
+        body.insert(
+            &mut stray.transact_mut(),
+            0,
+            yrs::XmlTextPrelim::new("Typed"),
+        );
+        let stray_base = stray
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let edit = crate::moment_apply_tests::format_two_sequence_edit(&newer, 8, "z");
+        let (_scratch, _path, mut engine) = open_store();
+        let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+            &mut engine,
+            &[
+                ("peer-a", 0, &stray_base[..], &stray_base[..]),
+                ("peer-a", 1, &edit[..], &stray_base[..]),
+            ],
+        );
+        let drained = drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults,
+        )
+        .expect("the drain goes on");
+        assert_eq!(
+            refused_rows(&drained),
+            [
+                ("peer-a", 0, "ydoc-update-outside-format-two-roots"),
+                ("peer-a", 1, "ydoc-update-outside-format-two-roots"),
+            ]
+        );
+        assert_the_format_one_lineage_drained(&engine, &key, &older_base, 0);
+    });
+}
+
+#[test]
+fn a_crash_while_setting_a_format_two_lineage_aside_leaves_a_drain_that_goes_on() {
+    let (base, edit) = format_two_base_and_edit();
+    for point in [
+        dohc_engine_storage::FaultPoint::StorageBeforePersist,
+        dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        for nth in 0..4 {
+            let (_scratch, _path, mut engine) = open_store();
+            let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+                &mut engine,
+                &[
+                    ("peer-a", 0, &base[..], &base[..]),
+                    ("peer-a", 1, &edit[..], &base[..]),
+                ],
+            );
+            let crash = super::ordinary_pull_progress::CrashAt {
+                point,
+                nth,
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let _ = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &crash,
+            );
+            drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .unwrap_or_else(|error| panic!("{point:?} #{nth}: {error:?}"));
+            assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ArchivedWay {
+    Arrival,
+    Drain,
+    InactiveDrain,
+}
+
+#[test]
+fn an_edit_of_an_archived_format_two_lineage_is_refused_and_kept_every_way_in() {
+    for way in [
+        ArchivedWay::Arrival,
+        ArchivedWay::Drain,
+        ArchivedWay::InactiveDrain,
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_replication_version(&mut engine, "main", "main");
+        let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        let archived = engine.put_binary_blob(&note.encode_full_state()).unwrap();
+        let payload = |blob: &str, claim: &str, base: bool| json!({"versionId":"main","objectId":"archived-two","path":"archived.md","contentKind":"richdoc","updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":base});
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "archived-two").unwrap();
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut Default::default(),
+                &envelope(
+                    "base-peer",
+                    0,
+                    "ydoc.update",
+                    payload(&archived, &archived, true),
+                ),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            let vector = dohc_engine_storage::hex_sha256(&note.encode_state_vector());
+            engine
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::archive_active_lineage_in_tx(
+                        tx,
+                        &key,
+                        &archived,
+                        &vector,
+                        Some(&dohc_engine_storage::hex_sha256(b"A note.\n")),
+                        2,
+                    )
+                })
+                .unwrap();
+        });
+        let replacement = dohc_engine_collab::Ydoc::wire();
+        replacement
+            .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Head.\n")
+            .unwrap();
+        let replacement = engine
+            .put_binary_blob(&replacement.encode_full_state())
+            .unwrap();
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut Default::default(),
+            &envelope(
+                "replacement-peer",
+                0,
+                "ydoc.update",
+                payload(&replacement, &replacement, true),
+            ),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        let archive_and_files = |engine: &EngineStore| -> (String, String, i64) {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT full_state_blob_sha256,last_surfaced_projection_sha256,
+                                (SELECT COUNT(*) FROM snapshots)
+                           FROM ydoc_inactive_lineages WHERE object_id='archived-two'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                })
+                .unwrap()
+        };
+        let before = archive_and_files(&engine);
+        let edit = engine
+            .put_binary_blob(&crate::moment_apply_tests::format_two_sequence_edit(
+                &note, 7, "z",
+            ))
+            .unwrap();
+        let mut delta = envelope(
+            "late-peer",
+            0,
+            "ydoc.update",
+            payload(&edit, &archived, false),
+        );
+        delta.relay_seq = Some(110);
+        let refused: Vec<(String, i64, String)> = match way {
+            ArchivedWay::Arrival => {
+                let arrived = apply_ydoc_envelope(
+                    &mut engine,
+                    &mut Default::default(),
+                    &delta,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                match arrived.primary {
+                    ApplyDisposition::Refused(refusal) => vec![(
+                        refusal.origin_id,
+                        refusal.origin_seq,
+                        refusal.reason.message().to_owned(),
+                    )],
+                    other => panic!("the edit was not refused: {other:?}"),
+                }
+            }
+            ArchivedWay::Drain | ArchivedWay::InactiveDrain => {
+                let parked = apply_ydoc_envelope(
+                    &mut engine,
+                    &mut Default::default(),
+                    &delta,
+                    &NoFaults,
+                    &crate::ydoc_apply::AlwaysLive,
+                )
+                .unwrap();
+                assert!(matches!(
+                    parked.primary,
+                    ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })
+                ));
+                let refusals = if matches!(way, ArchivedWay::Drain) {
+                    drain_deferred_ydoc_for_key(
+                        &mut engine,
+                        &mut Default::default(),
+                        &key,
+                        &NoFaults,
+                    )
+                    .unwrap()
+                    .refusals
+                } else {
+                    let tails =
+                        dohc_engine_collab::live_update_application::ReleasedTails::default()
+                            .bound_to(&engine);
+                    crate::ydoc_apply::drain_inactive_ydoc_updates(
+                        &mut engine,
+                        crate::ydoc_apply::InactiveScope::Document(&key, &[]),
+                        &tails,
+                        &mut Vec::new(),
+                        crate::ydoc_apply::DrainReporting::Returned,
+                        &NoFaults,
+                    )
+                    .unwrap()
+                    .refusals
+                };
+                refusals
+                    .into_iter()
+                    .map(|refusal| {
+                        (
+                            refusal.origin_id,
+                            refusal.origin_seq,
+                            refusal.reason.message().to_owned(),
+                        )
+                    })
+                    .collect()
+            }
+        };
+        assert_eq!(
+            refused,
+            [("late-peer".to_owned(), 0, NEWER_BODY_FORMAT.to_owned())],
+            "{way:?}"
+        );
+        let (kept, queued): (Option<String>, i64) = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT update_sha256 FROM replication_refused_ydoc_blobs
+                              WHERE origin_id='late-peer' AND origin_seq=0),
+                            (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!((kept, queued), (Some(edit), 0), "{way:?}");
+        assert_eq!(archive_and_files(&engine), before, "{way:?}");
+    }
+}
+
+#[test]
+fn a_parked_duplicate_of_a_format_two_edit_is_refused_and_kept_when_drained() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (base, edit) = format_two_base_and_edit();
+    let claim = engine.put_binary_blob(&base).unwrap();
+    let typed = engine.put_binary_blob(&edit).unwrap();
+    let payload = |blob: &str, base: bool| json!({"versionId":"main","objectId":"note-two","path":"two.md","contentKind":"richdoc","updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":base});
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "note-two").unwrap();
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        for (seq, blob, base) in [(0, &claim, true), (1, &typed, false)] {
+            let applied = apply_ydoc_envelope(
+                &mut engine,
+                &mut Default::default(),
+                &envelope("base-peer", seq, "ydoc.update", payload(blob, base)),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(matches!(applied.primary, ApplyDisposition::Applied(_)));
+        }
+    });
+    let mut duplicate = envelope("dup-peer", 0, "ydoc.update", payload(&typed, false));
+    duplicate.relay_seq = Some(120);
+    crate::apply_envelope_with(&mut engine, &duplicate, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &claim, 120, None)
+    })
+    .expect("park the duplicate");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(refused_rows(&drained), [("dup-peer", 0, NEWER_BODY_FORMAT)]);
+    let (kept, queued): (Option<String>, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT update_sha256 FROM replication_refused_ydoc_blobs
+                          WHERE origin_id='dup-peer' AND origin_seq=0),
+                        (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((kept, queued), (Some(typed), 0));
+}

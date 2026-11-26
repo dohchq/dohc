@@ -3244,11 +3244,9 @@ fn archive_conflicting_successor(
         return Ok(());
     }
     let base = imported_successor(tx, transition, successor)?;
-    let doc = dohc_engine_collab::validate_replay_parity_with_scratch(
-        &dohc_engine_collab::Ydoc::wire(),
-        &base.update,
-    )
-    .map_err(map_successor_collab_error)?;
+    let doc = dohc_engine_collab::IncomingBase::new(&base.update)
+        .into_doc()
+        .map_err(map_successor_collab_error)?;
     if doc.has_pending_dependencies()
         || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
             != successor.state_vector_blob_sha256
@@ -4305,11 +4303,8 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::InvalidSuccessorBase {
-            constraint: "format-2 successor",
-            ..
-        } => SyncError::InvalidInput {
-            reason: "ydoc-note-uses-a-newer-body-format",
+        CollabError::NewerBodyFormat => SyncError::InvalidInput {
+            reason: crate::ydoc_apply::NEWER_BODY_FORMAT,
         },
         CollabError::MarkdownNotRepresentable
         | CollabError::MarkdownQuoteDepthExceeded
@@ -4325,7 +4320,9 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
 
 fn map_successor_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
     match error {
-        dohc_engine_collab::CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
+        dohc_engine_collab::CollabError::ReplayParityViolation { .. }
+        | dohc_engine_collab::CollabError::MalformedUpdate { .. }
+        | dohc_engine_collab::CollabError::OutsideFormatTwoRoots => SyncError::InvalidInput {
             reason: "ydoc-resolution-not-representable",
         },
         other => map_local_collab_error(other),
@@ -7517,17 +7514,17 @@ mod tests {
         projected
     }
 
-    fn refuses_the_split_successor(store: &mut EngineStore, key: &DocKey, value: Value) {
+    fn refuses_the_successor(store: &mut EngineStore, key: &DocKey, value: Value, reason: &str) {
         let before = active_claim(store, key);
         let parent = imported_envelope(0, "conflict.resolve", value);
         let leases = crate::NoLiveLeases;
         let outcome = crate::apply_conflict_envelope(store, &parent, &NoFaults, &leases);
         let outcome = outcome.expect("the pull goes on");
-        let reason = match outcome.primary {
+        let refused = match outcome.primary {
             crate::ApplyDisposition::Refused(refusal) => refusal.reason.message().to_owned(),
-            _ => panic!("the successor was not refused"),
+            other => panic!("the successor was not refused: {other:?}"),
         };
-        assert_eq!(reason, "ydoc-resolution-not-representable");
+        assert_eq!(refused, reason);
         assert_eq!(active_claim(store, key), before);
         let notices = crate::list_refusal_notices(store, "ws").expect("notices");
         let named = notices.iter().any(|notice| {
@@ -7539,10 +7536,266 @@ mod tests {
         assert!(named, "{notices:?}");
     }
 
+    const NOT_REPRESENTABLE: &str = "ydoc-resolution-not-representable";
+    const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
+
+    fn format_two_successor_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_shaped(false, ContentKind::Richdoc, |mut successor| {
+            use yrs::updates::decoder::Decode;
+            use yrs::{Map, ReadTxn, Transact};
+            let raw = yrs::Doc::with_client_id(9);
+            let meta = raw.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META);
+            raw.transact_mut()
+                .apply_update(yrs::Update::decode_v1(&successor.update).expect("decode"))
+                .expect("load successor");
+            meta.insert(&mut raw.transact_mut(), "schemaVersion", 2.0);
+            let marked = raw
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default());
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&marked).expect("the successor applies");
+            assert_eq!(doc.note_schema_version(), 2);
+            successor.state_vector = doc.encode_state_vector();
+            successor.lineage_claim_id = dohc_engine_storage::hex_sha256(&marked);
+            successor.update = marked;
+            successor
+        })
+    }
+
+    fn diverge(store: &mut EngineStore) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "local newer".to_owned(),
+                    moment_id: "moment-local-newer".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("advance local head");
+    }
+
+    fn divergence_state(store: &EngineStore) -> (i64, i64) {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND disposition='conflicting-successor'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("divergence state")
+    }
+
+    #[test]
+    fn an_engine_that_does_not_read_format_two_refuses_a_format_two_successor() {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+    }
+
+    #[test]
+    fn a_diverged_note_refuses_a_format_two_successor_on_an_engine_that_does_not_read_it() {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        diverge(&mut store);
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        assert_eq!(divergence_state(&store), (0, 0));
+    }
+
+    #[test]
+    fn an_edit_of_a_refused_format_two_successor_is_kept_with_it() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Text, Transact};
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let raw = yrs::Doc::with_client_id(11);
+        let successor_bytes = store
+            .get_binary_blob(&successor)
+            .expect("read successor")
+            .expect("successor blob");
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
+            .expect("load successor");
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
+            .insert(&mut raw.transact_mut(), 0, "z");
+        let edit = store
+            .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
+            .expect("edit blob");
+        let mut next = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false}),
+        );
+        next.relay_seq = Some(1);
+        let applied = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the pull goes on");
+        match applied.primary {
+            crate::ApplyDisposition::Refused(refusal) => {
+                assert_eq!(refusal.reason.message(), NEWER_BODY_FORMAT)
+            }
+            other => panic!("the edit was not refused as newer: {other:?}"),
+        }
+        let kept: Vec<(i64, String)> = store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT origin_seq,update_sha256 FROM replication_refused_ydoc_blobs \
+                     WHERE origin_id='peer' ORDER BY origin_seq",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()
+            })
+            .expect("kept blobs");
+        assert_eq!(kept, [(0, successor), (1, edit)]);
+    }
+
+    #[test]
+    fn a_refused_resolution_with_no_successor_lets_the_pull_go_on() {
+        use yrs::{Map as _, ReadTxn as _, Text as _, Transact as _};
+        let (_scratch, mut store, key, built) =
+            receiver_fixture_shaped(false, ContentKind::Plaintext, |successor| successor);
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("retire the claimed lineage");
+        let raw = yrs::Doc::new();
+        raw.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META)
+            .insert(&mut raw.transact_mut(), "schemaVersion", 2.0);
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_PLAINTEXT)
+            .insert(&mut raw.transact_mut(), 0, "current text");
+        let note = raw
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let seeded = dohc_engine_storage::hex_sha256(b"current text");
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &note,
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some("doc.md"),
+                        content_kind: ContentKind::Plaintext,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    require_empty_lineage: true,
+                    is_seed: true,
+                    seed_source_sha256: Some(&seeded),
+                    ..Default::default()
+                },
+                &NoFaults,
+                12,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+        })
+        .expect("seed a format-2 note");
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("carrier");
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value);
+        envelope.recorded_at_ms = 21;
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the pull goes on");
+        match outcome.primary {
+            crate::ApplyDisposition::Refused(refusal) => {
+                assert_eq!(refusal.reason.message(), NEWER_BODY_FORMAT)
+            }
+            other => panic!("the resolution was not refused as newer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_edit_parked_before_its_format_two_successor_is_kept_with_it() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Text, Transact};
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        let raw = yrs::Doc::with_client_id(11);
+        let successor_bytes = store
+            .get_binary_blob(&successor)
+            .expect("read successor")
+            .expect("successor blob");
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
+            .expect("load successor");
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
+            .insert(&mut raw.transact_mut(), 0, "z");
+        let edit = store
+            .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
+            .expect("edit blob");
+        let mut parked = imported_envelope(
+            0,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false}),
+        );
+        parked.origin_id = "editor".to_owned();
+        parked.relay_seq = Some(1);
+        crate::apply_envelope_with(&mut store, &parked, &NoFaults, |tx, op| {
+            crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &successor, 1, None)
+        })
+        .expect("park the edit");
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let (refused, kept, queued): (Option<String>, Option<String>, i64) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT reason_message FROM replication_pending_refusals \
+                              WHERE origin_id='editor' AND origin_seq=0), \
+                            (SELECT update_sha256 FROM replication_refused_ydoc_blobs \
+                              WHERE origin_id='editor' AND origin_seq=0), \
+                            (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("parked edit state");
+        assert_eq!(
+            (refused.as_deref(), kept, queued),
+            (Some(NEWER_BODY_FORMAT), Some(edit), 0)
+        );
+    }
+
     #[test]
     fn a_successor_that_splits_an_emoji_is_refused_and_the_pull_goes_on() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
-        refuses_the_split_successor(&mut store, &key, built.value);
+        refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);
         let other = dohc_engine_collab::Ydoc::wire();
         other.plaintext_insert(0, "other");
         let claim = store
@@ -7573,43 +7826,9 @@ mod tests {
     #[test]
     fn a_diverged_note_refuses_a_successor_that_splits_an_emoji() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
-        VersionedTextStore::new(&mut store)
-            .write_text(
-                &WriteText {
-                    workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
-                    object_id: "object-a".to_owned(),
-                    path: "doc.md".to_owned(),
-                    text: "local newer".to_owned(),
-                    moment_id: "moment-local-newer".to_owned(),
-                    metadata_origin: "api".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 20,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .expect("advance local head");
-        refuses_the_split_successor(&mut store, &key, built.value);
-        let (open, inactive): (i64, i64) = store
-            .read_with(|conn| {
-                Ok::<_, rusqlite::Error>((
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND disposition='conflicting-successor'",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                ))
-            })
-            .expect("divergence state");
-        assert_eq!((open, inactive), (0, 0));
+        diverge(&mut store);
+        refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);
+        assert_eq!(divergence_state(&store), (0, 0));
     }
 
     #[test]

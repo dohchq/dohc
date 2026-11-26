@@ -199,13 +199,31 @@ impl<'a> IncomingBase<'a> {
         }
     }
 
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub fn doc(&self) -> Result<&Ydoc, CollabError> {
         if let Some(doc) = self.doc.get() {
             return Ok(doc);
         }
-        validate_update_size(self.bytes)?;
-        let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), self.bytes)?;
+        let doc = Self::checked(self.bytes)?;
         Ok(self.doc.get_or_init(|| doc))
+    }
+
+    /// The checked note, for a caller that keeps it.
+    pub fn into_doc(self) -> Result<Ydoc, CollabError> {
+        match self.doc.into_inner() {
+            Some(doc) => Ok(doc),
+            None => Self::checked(self.bytes),
+        }
+    }
+
+    fn checked(bytes: &[u8]) -> Result<Ydoc, CollabError> {
+        validate_update_size(bytes)?;
+        let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), bytes)?;
+        doc.check_format_two_roots()?;
+        Ok(doc)
     }
 }
 
@@ -860,6 +878,7 @@ pub(crate) fn append_validated_and_index_update(
     // The one choke point every durable update write passes, local or remote:
     // an out-of-bounds attribution never reaches a row.
     validate_attribution(attribution)?;
+    base.refuse_a_newer_format()?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(
         conn,
@@ -2222,8 +2241,7 @@ fn validate_successor_base(
     successor: &SuccessorBase,
     scene_result: Option<&str>,
 ) -> Result<Ydoc, CollabError> {
-    validate_update_size(&successor.update)?;
-    let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), &successor.update)?;
+    let doc = IncomingBase::new(&successor.update).into_doc()?;
     let observed_claim = crate::hex_sha256(&successor.update);
     if observed_claim != successor.lineage_claim_id {
         return Err(CollabError::InvalidSuccessorBase {
@@ -2257,7 +2275,6 @@ fn validate_successor_base(
             observed: crate::hex_sha256(&observed_state_vector),
         });
     }
-    doc.check_format_two_base()?;
     let projected = if successor.content_kind == ContentKind::Scene {
         let scene_result = scene_result.ok_or_else(|| CollabError::InvalidSuccessorBase {
             constraint: "scene successor portable artifact",
@@ -3493,14 +3510,14 @@ pub fn validate_remote_update(
     validate_update_bytes(bytes)?;
     if pending.is_empty() {
         if let Some(cached) = store.read_with(|conn| cache.doc_for_consumer(conn, key))? {
-            return crate::validate_replay_parity(cached, bytes);
+            return validate_replay_parity_with_scratch(cached, bytes)?.check_format_two_roots();
         }
     }
     let base = store.read_with(|conn| load_doc_in(conn, key))?;
     for queued in pending {
         base.apply(queued)?;
     }
-    crate::validate_replay_parity(&base, bytes)
+    validate_replay_parity_with_scratch(&base, bytes)?.check_format_two_roots()
 }
 
 /// The content sha the lineage last durably settled (public read for the
@@ -3856,23 +3873,17 @@ mod successor_validation_tests {
             .expect("format-2 successor")
     }
 
-    fn refused_as_a_format_two_base(error: CollabError) -> bool {
-        matches!(
-            error,
-            CollabError::InvalidSuccessorBase {
-                constraint: "format-2 successor base",
-                ..
-            }
-        )
-    }
-
     #[test]
     fn an_engine_that_does_not_read_format_two_refuses_a_format_two_successor_base() {
         let base = format_two_successor("A note.\n");
         crate::ydoc::reading_body_sequence_here(|| validate_successor_base(&base, None))
             .expect("an engine that reads format 2 takes the base");
         let error = validate_successor_base(&base, None).expect_err("refused");
-        assert!(refused_as_a_format_two_base(error));
+        assert_eq!(
+            error.code(),
+            "ydoc-note-uses-a-newer-body-format",
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -3906,7 +3917,10 @@ mod successor_validation_tests {
             validate_successor_base(&tampered, None)
         })
         .expect_err("refused");
-        assert!(refused_as_a_format_two_base(error));
+        assert!(
+            error.code() == "ydoc-update-outside-format-two-roots",
+            "{error:?}"
+        );
     }
 
     fn successor_merged_with(update: Vec<u8>) -> SuccessorBase {
@@ -4356,7 +4370,8 @@ mod append_compaction_query_tests {
             for mut cache in [warm, WriterDocCache::new()] {
                 let refused = append(&mut store, &mut cache, &under_body);
                 assert!(
-                    matches!(refused, Err(CollabError::MalformedUpdate { .. })),
+                    refused.as_ref().err().map(CollabError::code)
+                        == Some("ydoc-update-outside-format-two-roots"),
                     "{refused:?}"
                 );
                 assert_eq!(stored(&store), kept);

@@ -237,8 +237,9 @@ pub fn enroll_in_tx(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let host = Ydoc::wire();
-    host.apply(&input.checkpoint).map_err(collab)?;
+    let host = crate::IncomingBase::new(&input.checkpoint)
+        .into_doc()
+        .map_err(collab)?;
     let original = Ydoc::wire();
     original
         .apply(&bounded_blob(tx, &input.binding.lineage_claim_id)?)

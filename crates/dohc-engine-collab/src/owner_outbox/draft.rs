@@ -509,6 +509,9 @@ pub fn restart_committed_rows(cache: &mut crate::WriterDocCache, key: &DocKey) {
 pub(super) fn collab(error: CollabError) -> OwnerOutboxError {
     match error {
         CollabError::Storage(error) => OwnerOutboxError::Storage(error),
+        CollabError::NewerBodyFormat => {
+            OwnerOutboxError::InvalidInput("ydoc-note-uses-a-newer-body-format")
+        }
         _ => OwnerOutboxError::InvalidInput("invalid owner draft state"),
     }
 }
@@ -1030,10 +1033,12 @@ fn append_prepared_draft_in_tx(
     // A draft may already wait on rows it does not hold (`apply_pending_in`).
     // The edit may add no wait of its own.
     let waits = draft.doc.pending_waits();
+    crate::validate_replay_parity(&draft.doc, &update).map_err(collab)?;
     draft.doc.apply(&update).map_err(collab)?;
     if draft.doc.pending_waits() != waits || draft.doc.lineage_epoch_tag() != epoch {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    draft.doc.check_format_two_roots().map_err(collab)?;
     draft
         .doc
         .project(crate::ContentKind::Richdoc)

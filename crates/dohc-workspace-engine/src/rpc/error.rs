@@ -48,6 +48,7 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
             return WireError::new(ErrorCode::Overloaded, "owner-stop-restore-pending");
         }
         OwnerOutboxError::StopConflict => "owner-stop-conflict",
+        OwnerOutboxError::InvalidInput(reason @ "ydoc-note-uses-a-newer-body-format") => reason,
         OwnerOutboxError::InvalidInput(_) => "invalid-owner-outbox-input",
         OwnerOutboxError::WorkspaceMismatch => "owner-outbox-workspace-mismatch",
         OwnerOutboxError::MainVersionMismatch => "owner-outbox-main-version-mismatch",
@@ -804,6 +805,8 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
         | CollabError::LineagePredecessorMismatch { .. }
         | CollabError::LineageStateVectorMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
+        | CollabError::NewerBodyFormat
+        | CollabError::OutsideFormatTwoRoots
         | CollabError::LineageIncomplete { .. }
         | CollabError::LeaseHeld
         | CollabError::NoMarker
@@ -913,6 +916,10 @@ mod tests {
         });
         assert!(matches!(wire.code, ErrorCode::InvalidParams));
         assert_eq!(wire.message, "ydoc-note-uses-a-newer-body-format");
+        let owner = super::map_owner_outbox(dohc_engine_collab::OwnerOutboxError::InvalidInput(
+            "ydoc-note-uses-a-newer-body-format",
+        ));
+        assert_eq!(owner.message, "ydoc-note-uses-a-newer-body-format");
     }
 
     #[test]
@@ -1118,6 +1125,13 @@ mod tests {
                 )),
                 ErrorCode::InvalidParams,
                 "baseline-schema-version-missing",
+            ),
+            (
+                RuntimeError::LiveApplication(ApplicationError::Collab(
+                    CollabError::NewerBodyFormat,
+                )),
+                ErrorCode::InvalidParams,
+                "ydoc-note-uses-a-newer-body-format",
             ),
             (
                 RuntimeError::Relay(RelayError::QuotaExceeded),

@@ -1184,3 +1184,134 @@ fn accepted_collection_replay_storage_error_rolls_back_the_frame() {
         serde_json::json!({"title":"Edited title","status":"done","priority":"high"}),
     );
 }
+
+fn edited_elsewhere(state: &[u8], edit: impl FnOnce(&yrs::Doc)) -> Vec<u8> {
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{ReadTxn, Transact};
+    let other = yrs::Doc::with_client_id(7);
+    other
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(state).unwrap())
+        .unwrap();
+    let before = other.transact().state_vector();
+    edit(&other);
+    let after = other.transact();
+    after.encode_state_as_update_v1(&before)
+}
+
+fn draft_edit(
+    observed: &ObservedOwnerBinding,
+    revision: i64,
+    append_key: &str,
+    update: Vec<u8>,
+) -> crate::owner_outbox::draft::OwnerDraftAppendInput {
+    crate::owner_outbox::draft::OwnerDraftAppendInput {
+        person_edit: true,
+        binding: observed.binding.clone(),
+        expected_revision: Some(revision),
+        append_key: append_key.into(),
+        update,
+        now_ms: 11,
+        agent_declaration: None,
+        agent_run_id: None,
+        automation_declaration: None,
+    }
+}
+
+#[test]
+fn a_format_two_owner_draft_refuses_an_edit_under_body_and_takes_a_typed_letter() {
+    use crate::owner_outbox::draft::append_draft_cached;
+    use yrs::{Text, Transact, XmlFragment};
+    crate::ydoc::reading_body_sequence_here(|| {
+        let note = crate::ydoc::format_two_note_for_test("A note.\n");
+        let markdown = note.project(crate::ContentKind::Richdoc).unwrap().content;
+        let (_dir, mut store, observed, checkpoint) =
+            fixture_with_source(&note.encode_full_state(), &markdown, "owner.md");
+        let enrollment = input(&store, &observed, checkpoint.clone());
+        let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+        let mut cache = crate::WriterDocCache::new();
+        let under_body = edited_elsewhere(&checkpoint, |doc| {
+            let body = doc.get_or_insert_xml_fragment(crate::ROOT_BODY);
+            body.insert(&mut doc.transact_mut(), 0, yrs::XmlTextPrelim::new("Typed"));
+        });
+        let entries = store.table_row_count("owner_ydoc_outbox_entries").unwrap();
+        let refused = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            draft_edit(&observed, enrolled.revision, "under-body", under_body),
+            &NoFaults,
+        );
+        assert!(
+            matches!(refused, Err(OwnerOutboxError::InvalidInput(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+            entries
+        );
+        let typed = edited_elsewhere(&checkpoint, |doc| {
+            let sequence = doc.get_or_insert_text(crate::ydoc::ROOT_SEQUENCE);
+            sequence.insert(&mut doc.transact_mut(), 1, "z");
+        });
+        append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            draft_edit(&observed, enrolled.revision, "typed", typed),
+            &NoFaults,
+        )
+        .expect("a typed letter appends");
+    });
+}
+
+#[test]
+fn an_owner_draft_edit_that_splits_an_emoji_is_refused_and_the_draft_is_rebuilt() {
+    use crate::owner_outbox::draft::append_draft_cached;
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    let enrolled = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let mut cache = crate::WriterDocCache::new();
+    let local = Ydoc::wire();
+    local.apply(&checkpoint).unwrap();
+    let first = local.richdoc_append_paragraph("Before");
+    append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft_edit(&observed, enrolled.revision, "before", first.clone()),
+        &NoFaults,
+    )
+    .unwrap();
+    let writer = Ydoc::with_client_id(5);
+    writer.apply(&checkpoint).unwrap();
+    writer.apply(&first).unwrap();
+    let inserted = writer.richdoc_append_paragraph("\u{1f600}X");
+    let vector = writer.encode_state_vector();
+    assert_eq!(vector[1], 5, "client 5 sorts first");
+    let letters_end = vector[2];
+    let split = crate::merge_updates(&[inserted, vec![0, 1, 5, 1, letters_end - 3, 1]]).unwrap();
+    let refused = append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft_edit(&observed, enrolled.revision, "split", split),
+        &NoFaults,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(cache.take_owner_draft(&key).is_none());
+    append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft_edit(
+            &observed,
+            enrolled.revision,
+            "after",
+            local.richdoc_append_paragraph("After"),
+        ),
+        &NoFaults,
+    )
+    .expect("the rebuilt draft takes the next edit");
+}

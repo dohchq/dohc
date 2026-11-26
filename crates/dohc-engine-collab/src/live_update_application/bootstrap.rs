@@ -234,7 +234,7 @@ where
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
         // The baseline is a document from elsewhere. A replay returns above.
         dohc_engine_storage::count_remote_change_in_tx(tx, &binding.workspace_id).map_err(E::from)?;
-        accepted_history::initialize(tx, &held, bytes).map_err(E::from)?;
+        accepted_history::initialize(tx, &held, &base).map_err(E::from)?;
         follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if readback != (input.clone(), binding.clone(), held.coordinate.clone(), marker.head_update_seq) { return Err(E::from(ApplicationError::Corrupt)); }
@@ -1138,6 +1138,30 @@ mod tests {
         let refused = run(&mut store, &mut cache, &handle, &split, &NoFaults);
         assert!(fails_the_replay_check(&refused), "{refused:?}");
         assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+    }
+
+    #[test]
+    fn an_engine_that_does_not_read_format_two_bootstraps_nothing_from_a_format_two_baseline() {
+        let note = crate::ydoc::format_two_note_for_test("A note.\n");
+        let vector = Vector {
+            name: "format-two".into(),
+            bytes: note.encode_full_state(),
+            markdown: String::new(),
+            registration_accepted: false,
+            kept_frontmatter: None,
+            projection_refused: false,
+        };
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        let refused = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Application(ApplicationError::Collab(error)))
+                    if error.code() == "ydoc-note-uses-a-newer-body-format"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(counts(&store), (0, 0, 0, 0));
     }
 
     #[test]

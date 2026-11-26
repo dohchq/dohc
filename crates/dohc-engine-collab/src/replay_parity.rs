@@ -1099,7 +1099,7 @@ pub(crate) fn replay_validated_batch(
             !require_complete,
         ) {
             Ok(mut validation) => {
-                if let Err(error) = doc.apply(bytes) {
+                if let Err(error) = doc.apply(bytes).and_then(|()| doc.check_format_two_roots()) {
                     scratch = None;
                     frontier = None;
                     doc = Ydoc::wire();
@@ -1251,8 +1251,14 @@ pub(crate) fn validate_replay_parity_with_delta(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<IntegratedFrontierDelta, CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None, true, false)
-        .map(|validation| IntegratedFrontierDelta::from_structure(validation.candidate_structure))
+    let validation =
+        validate_replay_parity_contained(base, candidate, None, None, None, true, false)?;
+    if let Some(scratch) = &validation.scratch {
+        scratch.check_format_two_roots()?;
+    }
+    Ok(IntegratedFrontierDelta::from_structure(
+        validation.candidate_structure,
+    ))
 }
 
 struct GateValidation {
@@ -1578,7 +1584,9 @@ fn replay_gate_scratch(
 /// writer cache or use it for durable lineage bytes.
 pub(crate) fn build_remote_projection(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, CollabError> {
     let pending = base.pending_update_v1();
-    replay_gate_scratch(base, pending.as_deref(), candidate, None)
+    let projection = replay_gate_scratch(base, pending.as_deref(), candidate, None)?;
+    projection.check_format_two_roots()?;
+    Ok(projection)
 }
 
 /// `merged`, when given, receives what applying the candidate deleted.

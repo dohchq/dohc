@@ -1825,3 +1825,35 @@ it("says a chat message the server refused is set aside, and that later ones sti
   });
   expect(row!.target).toEqual({});
 });
+
+it("says a note in a newer format needs a newer dohc and that dohc kept the change", async () => {
+  const newer = (noticeId: string, path: string | null) => ({
+    noticeId,
+    originId: "member",
+    originSeq: 0,
+    refusalCoordinates: [{ originId: "member", originSeq: 0 }],
+    reason: "ydoc-note-uses-a-newer-body-format",
+    document: path
+      ? { versionId: "main", path, objectId: noticeId, lineageClaimId: "claim", conflictId: null }
+      : null,
+  });
+  const refusalNotices = async () => [
+    {
+      workspaceId: WORKSPACE,
+      notices: [newer("named", "trip/note.md"), newer("unnamed", null)],
+    },
+  ];
+  const { notices } = await (await computer(null, { refusalNotices })).store.list();
+  const shown = (noticeId: string) => notices.find((row) => row.noticeId === noticeId);
+  expect(shown("named")).toMatchObject({
+    kind: "sync-refusal",
+    title: "A note needs a newer version of dohc",
+    body: '"trip/note.md" uses a newer format than this version of dohc reads. dohc kept the change it received. Update dohc.',
+    target: { path: "trip/note.md" },
+  });
+  expect(shown("unnamed")).toMatchObject({
+    kind: "sync-refusal",
+    title: "A note needs a newer version of dohc",
+    body: "This note uses a newer format than this version of dohc reads. dohc kept the change it received. Update dohc.",
+  });
+});

@@ -744,8 +744,10 @@ pub(crate) fn retain_refused_ydoc_blob(
 ) -> Result<(), SyncError> {
     let changed = tx.execute(
         "INSERT OR IGNORE INTO replication_refused_ydoc_blobs
-         SELECT workspace_id,origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256')
-         FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND op_kind='ydoc.update'",
+         SELECT workspace_id,origin_id,origin_seq,COALESCE(json_extract(payload_json,'$.updateBlobSha256'),
+           json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256'))
+         FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3
+           AND op_kind IN ('ydoc.update','conflict.resolve')",
         params![workspace,origin,sequence],
     ).map_err(SyncError::persist)?;
     if changed == 0 {
@@ -1757,7 +1759,7 @@ fn complete_drain_cleanup(
             .chain(&cleanup.off_head_refusals)
             .chain(&cleanup.live_refusals)
         {
-            crate::apply::persist_refusal(tx, refusal)?;
+            persist_ydoc_refusal(tx, refusal)?;
         }
         for refusal in &cleanup.live_refusals {
             retain_refused_ydoc_blob(tx, &refusal.workspace_id, &refusal.origin_id, refusal.origin_seq)?;
@@ -2159,12 +2161,20 @@ fn take_lineage_rows(
         .iter()
         .position(|later| later.5.is_base_state)
         .unwrap_or(queue.len());
-    let after = queue.split_off(base);
+    let mut after = queue.split_off(base);
+    let rows = take_claim_rows(row, queue);
+    queue.append(&mut after);
+    rows
+}
+
+fn take_claim_rows(
+    row: DeferredRow,
+    queue: &mut std::collections::VecDeque<DeferredRow>,
+) -> Vec<DeferredRow> {
     let (same, other): (Vec<_>, Vec<_>) = std::mem::take(queue)
         .into_iter()
         .partition(|later| later.4 == row.4);
     queue.extend(other);
-    queue.extend(after);
     let mut rows = vec![row];
     rows.extend(same);
     rows
@@ -2544,13 +2554,9 @@ fn drain_deferred_ydoc(
                     waiting = Some(pending);
                     break;
                 }
-                Err(SyncError::InvalidInput {
-                    reason: BASE_FAILS_REPLAY_CHECK,
-                }) => {
-                    let reason = BASE_FAILS_REPLAY_CHECK;
-                    let refusal =
-                        refuse_deferred_ydoc(store, key, &origin_id, origin_seq, reason, faults)?;
-                    refusals.push(refusal);
+                Err(SyncError::InvalidInput { reason }) if base_refused_for_its_note(reason) => {
+                    let rows = lineage_coordinates(take_claim_rows(row, &mut queue));
+                    refusals.extend(refuse_deferred_ydoc(store, key, &rows, reason, faults)?);
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -2568,11 +2574,26 @@ fn drain_deferred_ydoc(
             drained_coordinates.push((origin_id, origin_seq));
             continue;
         }
-        let marker = dohc_engine_collab::read_marker(store, key)
-            .map_err(map_collab_hard_error)?
-            .ok_or(SyncError::RetryableState {
-                reason: "parked Y.Doc delta is waiting for its base",
-            })?;
+        let marker = dohc_engine_collab::read_marker(store, key).map_err(map_collab_hard_error)?;
+        if marker
+            .as_ref()
+            .and_then(|marker| marker.lineage_claim_id.as_deref())
+            != Some(lineage_claim_id.as_str())
+            && store.read_with(|conn| base_kept_as_newer(conn, key, &lineage_claim_id))?
+        {
+            let rows = lineage_coordinates(take_claim_rows(row, &mut queue));
+            refusals.extend(refuse_deferred_ydoc(
+                store,
+                key,
+                &rows,
+                NEWER_BODY_FORMAT,
+                faults,
+            )?);
+            continue;
+        }
+        let marker = marker.ok_or(SyncError::RetryableState {
+            reason: "parked Y.Doc delta is waiting for its base",
+        })?;
         let winner_claim_id = marker.lineage_claim_id.ok_or(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity",
         })?;
@@ -2750,9 +2771,8 @@ fn drain_deferred_ydoc(
             Err(error) => {
                 match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
                     SyncError::InvalidInput { reason } => {
-                        refusals.push(refuse_deferred_ydoc(
-                            store, key, &origin_id, origin_seq, reason, faults,
-                        )?);
+                        let row = [(origin_id.clone(), origin_seq)];
+                        refusals.extend(refuse_deferred_ydoc(store, key, &row, reason, faults)?);
                         continue;
                     }
                     SyncError::RetryableState {
@@ -3193,25 +3213,146 @@ fn write_final_drained_projection(
 fn refuse_deferred_ydoc(
     store: &mut EngineStore,
     key: &DocKey,
-    origin_id: &str,
-    origin_seq: i64,
-    reason: impl Into<String>,
+    rows: &[(String, i64)],
+    reason: &str,
     faults: &dyn FaultInjector,
-) -> Result<crate::ReplicationRefusal, SyncError> {
-    let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
-    match store.write_with(faults, |tx| {
-        crate::apply::persist_refusal(tx, &refusal)?;
+) -> Result<Vec<crate::ReplicationRefusal>, SyncError> {
+    let refusals: Vec<_> = rows
+        .iter()
+        .map(|(origin_id, origin_seq)| deferred_ydoc_refusal(key, origin_id, *origin_seq, reason))
+        .collect();
+    match store.write_with(faults, |tx| refuse_deferred_rows_in_tx(tx, &refusals))? {
+        TxnOutcome::Committed(()) => Ok(refusals),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+fn refuse_deferred_rows_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    refusals: &[crate::ReplicationRefusal],
+) -> Result<(), SyncError> {
+    for refusal in refusals {
+        persist_ydoc_refusal(tx, refusal)?;
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \
              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-            params![key.workspace_id, origin_id, origin_seq],
+            params![refusal.workspace_id, refusal.origin_id, refusal.origin_seq],
         )
         .map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    })? {
-        TxnOutcome::Committed(()) => Ok(refusal),
-        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
+    Ok(())
+}
+
+fn persist_ydoc_refusal(
+    tx: &rusqlite::Transaction<'_>,
+    refusal: &crate::ReplicationRefusal,
+) -> Result<(), SyncError> {
+    crate::apply::persist_refusal(tx, refusal)?;
+    if refusal.reason.message() == NEWER_BODY_FORMAT {
+        retain_refused_ydoc_blob(
+            tx,
+            &refusal.workspace_id,
+            &refusal.origin_id,
+            refusal.origin_seq,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn refuse_rows_of_a_kept_base_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    envelope: &crate::ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let field = |pointer: &str| {
+        envelope
+            .payload
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+    };
+    let kept = if envelope.op_kind == "conflict.resolve" {
+        (
+            field("/targetVersionId"),
+            field("/transition/result/objectId"),
+            field("/lineageTransition/successor/lineageClaimId"),
+            Some(true),
+        )
+    } else {
+        (
+            field("/versionId"),
+            field("/objectId"),
+            field("/lineageClaimId"),
+            envelope
+                .payload
+                .get("isBaseState")
+                .and_then(serde_json::Value::as_bool),
+        )
+    };
+    let (Some(version), Some(object), Some(claim), Some(true)) = kept else {
+        return Ok(());
+    };
+    let key = DocKey::new(envelope.workspace_id.as_str(), version, object)
+        .map_err(map_collab_hard_error)?;
+    let rows = tx
+        .prepare(
+            "SELECT origin_id,origin_seq FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(
+                    params![key.workspace_id, key.version_id, key.object_id, claim],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(SyncError::corrupt)?;
+    let refusals: Vec<_> = rows
+        .iter()
+        .map(|(origin_id, origin_seq)| {
+            deferred_ydoc_refusal(&key, origin_id, *origin_seq, NEWER_BODY_FORMAT)
+        })
+        .collect();
+    refuse_deferred_rows_in_tx(tx, &refusals)
+}
+
+fn lineage_coordinates(rows: Vec<DeferredRow>) -> Vec<(String, i64)> {
+    rows.into_iter()
+        .map(|(origin_id, origin_seq, ..)| (origin_id, origin_seq))
+        .collect()
+}
+
+fn base_kept_as_newer(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    claim: &str,
+) -> Result<bool, SyncError> {
+    let kept: Option<String> = conn
+        .query_row(
+            "SELECT k.update_sha256 FROM replication_refused_ydoc_blobs k \
+             JOIN replication_log l USING (workspace_id, origin_id, origin_seq) \
+             WHERE k.workspace_id=?1 AND k.update_sha256=?4 \
+               AND ((l.op_kind='ydoc.update' \
+                 AND json_extract(l.payload_json,'$.versionId')=?2 \
+                 AND json_extract(l.payload_json,'$.objectId')=?3 \
+                 AND json_extract(l.payload_json,'$.isBaseState')) \
+               OR (l.op_kind='conflict.resolve' \
+                 AND json_extract(l.payload_json,'$.targetVersionId')=?2 \
+                 AND json_extract(l.payload_json,'$.transition.result.objectId')=?3 \
+                 AND json_extract(l.payload_json,'$.lineageTransition.successor.lineageClaimId')=?4)) \
+             LIMIT 1",
+            params![key.workspace_id, key.version_id, key.object_id, claim],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(sha) = kept else {
+        return Ok(false);
+    };
+    let bytes = get_binary_blob(conn, &sha)
+        .map_err(SyncError::Storage)?
+        .ok_or_else(|| local_corruption("a kept Y.Doc base blob is missing"))?;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    Ok(doc.apply(&bytes).is_ok() && doc.refuse_a_newer_format().is_err())
 }
 
 fn deferred_ydoc_refusal(
@@ -6399,7 +6540,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     .or(reason)
                     .map(|reason| deferred_ydoc_refusal(&key, origin, *seq, reason));
                 if let Some(refusal) = &refusal {
-                    crate::apply::persist_refusal(tx, refusal)?;
+                    persist_ydoc_refusal(tx, refusal)?;
                     refusals.push(refusal.clone());
                 }
                 match report {
@@ -6804,6 +6945,13 @@ fn apply_inactive_batch_in_tx(
             return Err(error);
         }
         retained.push(bytes.clone());
+    }
+    if retained.len() == 1 {
+        return Ok(InactiveDeltaOutcome {
+            found: true,
+            refusal: None,
+            rejected,
+        });
     }
     let merged = dohc_engine_collab::merge_updates(&retained).map_err(map_collab_hard_error)?;
     let full_sha = dohc_engine_storage::put_binary_blob(tx, &merged).map_err(SyncError::Storage)?;
@@ -9015,6 +9163,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 envelope,
                 faults,
                 move |tx, op| {
+                    if base_kept_as_newer(tx, &deferred_key, &payload.lineage_claim_id)? {
+                        return Err(SyncError::InvalidInput {
+                            reason: NEWER_BODY_FORMAT,
+                        });
+                    }
                     if inactive_lineage_exists(tx, &deferred_key, &payload.lineage_claim_id)? {
                         hold_archived_lineage(
                             tx,
@@ -9108,6 +9261,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 envelope,
                 faults,
                 |tx, op| {
+                    if base_kept_as_newer(tx, &key, &payload.lineage_claim_id)? {
+                        return Err(SyncError::InvalidInput {
+                            reason: NEWER_BODY_FORMAT,
+                        });
+                    }
                     if let Some(lineage) = marker.lineage_claim_id.as_deref() {
                         hold_released_lineage(
                             tx,
@@ -9744,6 +9902,19 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
 
 const BASE_FAILS_REPLAY_CHECK: &str = "ydoc.update base fails the replay check";
 
+pub(crate) const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
+
+const OUTSIDE_FORMAT_TWO_ROOTS: &str = "ydoc-update-outside-format-two-roots";
+
+fn base_refused_for_its_note(reason: &str) -> bool {
+    [
+        BASE_FAILS_REPLAY_CHECK,
+        NEWER_BODY_FORMAT,
+        OUTSIDE_FORMAT_TWO_ROOTS,
+    ]
+    .contains(&reason)
+}
+
 fn map_base_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {
         CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
@@ -9771,6 +9942,12 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::ProjectionTooLarge { .. }
         | CollabError::ProjectionTooComplex { .. }
         | CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput { reason },
+        CollabError::NewerBodyFormat => SyncError::InvalidInput {
+            reason: NEWER_BODY_FORMAT,
+        },
+        CollabError::OutsideFormatTwoRoots => SyncError::InvalidInput {
+            reason: OUTSIDE_FORMAT_TWO_ROOTS,
+        },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
         CollabError::BaseRelaySequencePending => SyncError::RetryableState {
             reason: "Y.Doc base is waiting for its authenticated relay position",
