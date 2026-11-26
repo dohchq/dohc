@@ -958,7 +958,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_link",
     {
       description:
-        "Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.",
+        "Make a link to a chat, thread, message, file, app, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or an app or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.",
       inputSchema: {
         group: z.string().min(1).max(500).optional(),
         thread: z.string().min(1).max(200).optional(),

@@ -2898,7 +2898,7 @@ export const cliResultSchemas = distinct(
       .object({
         reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
         link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
-        kind: z.enum(["chat", "thread", "message", "file", "collection"]),
+        kind: z.enum(["chat", "thread", "message", "file", "app", "collection"]),
       })
       .strict(),
     shareCopy: ShareCopyResult,

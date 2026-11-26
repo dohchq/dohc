@@ -4807,18 +4807,27 @@ function WorkspaceShell(props: {
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link in a chat message opens what it names here, as a notice's
   // Open does.
-  const openWorkReference = useCallback((target: WorkReferenceOpen) => {
-    setPendingOpen(
-      target.to === "chat"
-        ? {
-            to: "chat",
-            thread: target.thread,
-            ...(target.channel ? { channel: target.channel } : {}),
-            ...(target.message ? { message: target.message } : {}),
-          }
-        : target,
-    );
-  }, []);
+  const openWorkReference = useCallback(
+    (target: WorkReferenceOpen) => {
+      if (target.to === "app") return openAppTab(target.path);
+      if (target.to === "data")
+        return openVirtualTab(
+          transactionalCollectionTabPath(target.datasetPath, target.tableId),
+          true,
+        );
+      setPendingOpen(
+        target.to === "chat"
+          ? {
+              to: "chat",
+              thread: target.thread,
+              ...(target.channel ? { channel: target.channel } : {}),
+              ...(target.message ? { message: target.message } : {}),
+            }
+          : target,
+      );
+    },
+    [openAppTab, openVirtualTab],
+  );
   const workReferenceLinks = useWorkReferenceLinks(workspaceId, {
     open: openWorkReference,
     failed: (error, retry) => reportShellError(WORK_LINK_LOOKUP_FAILED_NOTE, error, retry),

@@ -7949,6 +7949,12 @@ export type DescribeWorkReferencesPayload = z.infer<typeof DescribeWorkReference
 export const WorkReferenceOpen = z.discriminatedUnion("to", [
   z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
   z.object({ to: z.literal("collection"), path: z.string().min(1) }).strict(),
+  // An app by its folder.
+  z.object({ to: z.literal("app"), path: z.string().min(1) }).strict(),
+  // A data Collection's table, by its dataset.json.
+  z
+    .object({ to: z.literal("data"), datasetPath: z.string().min(1), tableId: z.string().min(1) })
+    .strict(),
   z.object({ to: z.literal("chat-channel"), channel: OPAQUE_ID }).strict(),
   z
     .object({

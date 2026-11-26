@@ -379,7 +379,7 @@ Returns `{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistor
 
 ### `dohc_link`
 
-Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
+Make a link to a chat, thread, message, file, app, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or an app or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1659,7 +1659,7 @@ Give exactly one flag. Put the printed @[work:...] text in a message: it shows a
 - `--group <group>`: Link a Group, DM, or agent chat, by name, #slug, or id.
 - `--thread <id>`: Link a thread.
 - `--message <id>`: Link a message.
-- `--path <path>`: Link a file, or a Collection by its folder.
+- `--path <path>`: Link a file, or an app or a Collection by its folder.
 
 With `--json`, prints `{ schemaVersion, kind, reference, link }`.
 

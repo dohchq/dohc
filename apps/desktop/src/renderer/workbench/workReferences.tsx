@@ -160,6 +160,7 @@ const FALLBACK_NAMES: Partial<Record<NonNullable<WorkReferenceView["kind"]>, str
   chat: "Chat",
   thread: "Thread",
   message: "Message",
+  app: "App",
   data: "Collection",
 };
 
@@ -196,18 +197,20 @@ export function WorkRef(props: { reference: string; interactive: boolean; testId
     );
   }
   const objectKind = OBJECT_KINDS[view.kind];
+  // A data Collection's label is its folder, when this workspace has it.
+  const named = view.kind === "data" && view.label !== "";
   const opensPath =
     view.kind === "file" ||
     view.kind === "record" ||
     view.kind === "app" ||
-    view.kind === "collection";
-  const name = opensPath
-    ? basenameOf(view.label)
-    : view.label.trim() || FALLBACK_NAMES[view.kind] || "";
+    view.kind === "collection" ||
+    named;
+  const name =
+    (opensPath ? basenameOf(view.label) : view.label.trim()) || FALLBACK_NAMES[view.kind] || "";
   return (
     <Ref
       path={opensPath ? view.label : ""}
-      {...(opensPath && view.kind !== "collection" ? {} : { title: name })}
+      {...(opensPath && view.kind !== "collection" && !named ? {} : { title: name })}
       {...(objectKind ? { objectKind } : {})}
       label={`Open ${name}`}
       testId={testId}
