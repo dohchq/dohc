@@ -36,14 +36,14 @@ import { useTheme } from "../theme";
 import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
-import { homeRows, type HomeRow } from "./homeModel";
+import { homeRows, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
 const NO_COLLECTIONS: CollectionsState = { collections: null, problem: null, failures: 0 };
 const nothing = () => () => undefined;
 
-// Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its sketches and other files, as the
-// desktop's Home lists them, then its published apps, each version under its app, then its transactional Collections.
+// Home in a signed-in build, in the desktop Home's order: the open workspace's published apps, each version under its app, then
+// its pages, in the folders that hold them, then its sketches, its transactional Collections, and last its other files.
 // A page opens to read; a folder opens in place; an app's version opens its review; a Collection opens its records. The
 // phone opens no other kind of file yet, so those rows only name it.
 // The list reads again when the feed reports a file change.
@@ -72,7 +72,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const failed = workspaceWords.filesFailed(workspace);
   useFailureNotice(`read:${workspaceId}:files`, failed, state, retry);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set(["other"]));
   const rows = useMemo(
     () => (state.value ? homeRows(state.value, expanded) : null),
     [state.value, expanded],
@@ -131,50 +131,30 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
+  const fileSection = (id: string, title: string, list: FirstFiles | undefined) => {
+    if (!list?.count) return null;
+    return (
+      <>
+        <SectionHeader
+          title={title}
+          collapsed={collapsed.has(id)}
+          unread={false}
+          first={false}
+          onToggle={() => toggle(setCollapsed, id)}
+        />
+        {collapsed.has(id)
+          ? null
+          : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
+      </>
+    );
+  };
   return (
     <>
-      <SectionHeader
-        title={workspaceWords.pages}
-        collapsed={collapsed.has("pages")}
-        unread={false}
-        first
-        onToggle={() => toggle(setCollapsed, "pages")}
-      />
-      {collapsed.has("pages") ? null : !rows ? (
-        pending
-      ) : rows.pages.length === 0 ? (
-        <EmptyLine text={workspaceWords.noPages} />
-      ) : (
-        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
-      )}
-      {rows
-        ? (
-            [
-              ["sketches", workspaceWords.sketches, rows.sketches],
-              ["other", workspaceWords.otherFiles, rows.others],
-            ] as const
-          ).map(([id, title, list]) =>
-            list.count > 0 ? (
-              <Fragment key={id}>
-                <SectionHeader
-                  title={title}
-                  collapsed={collapsed.has(id)}
-                  unread={false}
-                  first={false}
-                  onToggle={() => toggle(setCollapsed, id)}
-                />
-                {collapsed.has(id)
-                  ? null
-                  : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
-              </Fragment>
-            ) : null,
-          )
-        : null}
       <SectionHeader
         title={appWords.apps}
         collapsed={collapsed.has("apps")}
         unread={false}
-        first={false}
+        first
         onToggle={() => toggle(setCollapsed, "apps")}
       />
       {collapsed.has("apps") ? null : !appsState.apps ? (
@@ -205,6 +185,21 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           );
         })
       )}
+      <SectionHeader
+        title={workspaceWords.pages}
+        collapsed={collapsed.has("pages")}
+        unread={false}
+        first={false}
+        onToggle={() => toggle(setCollapsed, "pages")}
+      />
+      {collapsed.has("pages") ? null : !rows ? (
+        pending
+      ) : rows.pages.length === 0 ? (
+        <EmptyLine text={workspaceWords.noPages} />
+      ) : (
+        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
+      )}
+      {fileSection("sketches", workspaceWords.sketches, rows?.sketches)}
       {collectionsState.collections?.length ? (
         <SectionHeader
           title={collectionWords.collections}
@@ -236,6 +231,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
               </Text>
             </Pressable>
           ))}
+      {fileSection("other", workspaceWords.otherFiles, rows?.others)}
     </>
   );
 }
