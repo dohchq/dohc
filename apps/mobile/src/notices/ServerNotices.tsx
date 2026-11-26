@@ -5,6 +5,7 @@ import { Stack, useIsFocused, useScrollToTop } from "expo-router";
 import { Check } from "lucide-react-native";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
+import { SettingsButton } from "../account/SettingsButton";
 import { HeaderButton } from "../AndroidHeader";
 import { useTheme } from "../theme";
 import { HoldRow } from "../workspace/ListStates";
@@ -54,16 +55,28 @@ export function ServerNotices() {
         options={{
           title: noticesWords.heading,
           headerRight:
-            Platform.OS === "android" && unread > 0
-              ? () => <HeaderButton label={noticesWords.markAllRead} onPress={markAllRead} />
+            Platform.OS === "android"
+              ? () => (
+                  <View style={styles.actions}>
+                    {unread > 0 ? (
+                      <HeaderButton label={noticesWords.markAllRead} onPress={markAllRead} />
+                    ) : null}
+                    <SettingsButton />
+                  </View>
+                )
               : undefined,
         }}
       />
-      {Platform.OS === "ios" && unread > 0 ? (
+      {Platform.OS === "ios" ? (
         <Stack.Toolbar placement="right">
-          <Stack.Toolbar.Button onPress={markAllRead}>
-            {noticesWords.markAllRead}
-          </Stack.Toolbar.Button>
+          {unread > 0 ? (
+            <Stack.Toolbar.Button onPress={markAllRead}>
+              {noticesWords.markAllRead}
+            </Stack.Toolbar.Button>
+          ) : null}
+          <Stack.Toolbar.View hidesSharedBackground>
+            <SettingsButton />
+          </Stack.Toolbar.View>
         </Stack.Toolbar>
       ) : null}
       {/* A tap on Send or a choice reaches a row's answer with the keyboard up. */}
@@ -102,4 +115,5 @@ export function ServerNotices() {
 const styles = StyleSheet.create({
   empty: { alignItems: "center", gap: 12, paddingTop: 200 },
   emptyText: { fontSize: 20, fontWeight: "600" },
+  actions: { flexDirection: "row", alignItems: "center" },
 });

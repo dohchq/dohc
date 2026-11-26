@@ -23,8 +23,9 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
+import { SettingsButton } from "../account/SettingsButton";
 import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
@@ -57,7 +58,20 @@ export function ServerHome() {
       style={{ backgroundColor: theme.bg }}
       contentContainerStyle={styles.content}
     >
-      <Stack.Screen options={{ title: "Home", headerLeft: () => <WorkspaceButton /> }} />
+      <Stack.Screen
+        options={{
+          title: "Home",
+          headerLeft: () => <WorkspaceButton />,
+          headerRight: Platform.OS === "android" ? () => <SettingsButton /> : undefined,
+        }}
+      />
+      {Platform.OS === "ios" ? (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.View hidesSharedBackground>
+            <SettingsButton />
+          </Stack.Toolbar.View>
+        </Stack.Toolbar>
+      ) : null}
       <NoWorkspace />
       {current ? (
         <Files key={current.id} workspaceId={current.id} workspace={current.name} />
