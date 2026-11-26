@@ -651,6 +651,25 @@ impl Ydoc {
         .fits_a_live_note()
     }
 
+    pub(crate) fn check_format_two_roots(&self) -> Result<(), CollabError> {
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        match self.body_sequence_roots() {
+            Some((sequence, containers))
+                if !body_sequence::roots_hold_only_their_own_items(
+                    &body,
+                    &sequence,
+                    &containers,
+                ) =>
+            {
+                Err(CollabError::MalformedUpdate {
+                    reason: "an update writes outside a format-2 note's sequence and containers"
+                        .into(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn check_format_two_base(&self) -> Result<(), CollabError> {
         if self.note_schema_version() != 2 {
             return Ok(());

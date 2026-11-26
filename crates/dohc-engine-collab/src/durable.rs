@@ -822,6 +822,7 @@ pub(crate) fn append_and_index_update(
     CollabError,
 > {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+    projection.check_format_two_roots()?;
     let (seq, record_facts) = append_validated_and_index_update(
         conn,
         key,
@@ -983,6 +984,7 @@ fn append_local_update(
         Some(elsewhere) => {
             let (projection, deletions) =
                 crate::replay_parity::validate_replay_parity_seeing_deletions(&base, update)?;
+            projection.check_format_two_roots()?;
             let appended = append_validated_and_index_update(
                 conn,
                 key,
@@ -1062,6 +1064,9 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
+            if let Some(after) = validation.rebuilt_scratch.as_ref().or(scratch) {
+                after.check_format_two_roots()?;
+            }
             let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
@@ -1094,6 +1099,9 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
+            if let Some(after) = &validation.rebuilt_scratch {
+                after.check_format_two_roots()?;
+            }
             let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
