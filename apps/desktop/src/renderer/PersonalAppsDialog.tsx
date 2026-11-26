@@ -37,6 +37,7 @@ export function PersonalAppsDialog(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [review, setReview] = useState<Prepared | null>(null);
+  const [shared, setShared] = useState<string | null>(null);
   const reviewing = useRef<Prepared | null>(null);
   const alive = useRef(true);
   const titleId = useId(),
@@ -86,6 +87,7 @@ export function PersonalAppsDialog(props: {
   const run = async (key: string, fallback: string, work: () => Promise<unknown>) => {
     setBusy(key);
     setError(null);
+    setShared(null);
     try {
       await work();
     } catch (cause) {
@@ -168,6 +170,25 @@ export function PersonalAppsDialog(props: {
                     <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
                       {row.appRoot}
                     </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(
+                          `share:${row.appRoot}`,
+                          `dohc could not share ${row.appRoot}.`,
+                          async () => {
+                            const result = await api.memberAppShare({
+                              workspaceId,
+                              personalApp: row.appRoot,
+                            });
+                            if (alive.current) setShared(result.slug);
+                          },
+                        )
+                      }
+                    >
+                      {busy === `share:${row.appRoot}` ? "Sharing…" : "Share"}
+                    </SecondaryButton>
                     {row.approved ? (
                       <>
                         <SecondaryButton
@@ -241,6 +262,11 @@ export function PersonalAppsDialog(props: {
             )}
           </>
         )}
+        {shared ? (
+          <p role="status" className="m-0 text-[13px] text-success">
+            Shared {shared} with the workspace's members. They allow it in their browser.
+          </p>
+        ) : null}
         {error ? <FieldError id={errorId}>{error}</FieldError> : null}
         {review ? (
           <div className="flex justify-end gap-2">
