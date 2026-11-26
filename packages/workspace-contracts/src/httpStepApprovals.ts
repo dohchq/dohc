@@ -221,12 +221,27 @@ export function sanitizeHttpFailureReason(reason: string, secrets: readonly stri
 }
 
 function redactSecrets(text: string, secrets: readonly string[]): string {
-  const found = secrets
-    .filter((secret) => secret.length > 0 && text.includes(secret))
-    .sort((left, right) => right.length - left.length);
-  if (found.length === 0) return text;
-  const pattern = found.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
-  return text.replace(new RegExp(pattern, "gu"), "[redacted]");
+  const spans: Array<[number, number]> = [];
+  for (const secret of secrets) {
+    if (secret.length === 0) continue;
+    for (let at = text.indexOf(secret); at >= 0; at = text.indexOf(secret, at + 1)) {
+      spans.push([at, at + secret.length]);
+    }
+  }
+  if (spans.length === 0) return text;
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of spans.sort((left, right) => left[0] - right[0])) {
+    const last = merged.at(-1);
+    if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  let scrubbed = "";
+  let from = 0;
+  for (const [start, end] of merged) {
+    scrubbed += `${text.slice(from, start)}[redacted]`;
+    from = end;
+  }
+  return scrubbed + text.slice(from);
 }
 
 /** What to scrub for a secret destination URL: the URL, and its path parts and query values of 8 or more characters. */

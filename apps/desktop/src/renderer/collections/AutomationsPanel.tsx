@@ -310,7 +310,7 @@ function ReachStatus(props: {
                       ? null
                       : httpAllowText(summary.automation, step.stepOrdinal)) ??
                     `This step sends a request to ${step.target}. Sent requests cannot be undone. Allow it before dohc sends requests there.`
-                  }${step.stoppedFor ? ` It stopped before because ${step.stoppedFor} could not.` : ""}`
+                  }${step.stoppedFor ? ` It stopped before because ${step.stoppedFor} could not.` : ""}${step.fileUnread ? " dohc cannot read the automations file in one version of the workspace." : ""}`
                 : step.stoppedFor
                   ? `A step can now ${automationReachCopy(step)}. It stopped before because ${step.stoppedFor} could not.`
                   : step.fileUnread

@@ -458,11 +458,17 @@ automations:
     });
   });
 
-  it("redacts each secret once, never inside a marker it already wrote", () => {
+  it("redacts every secret span once, merging overlaps, never inside a marker it already wrote", () => {
     expect(scrubSecretsFromJson({ x: "red tape" }, ["d", "re"])).toEqual({
       ok: true,
-      value: { x: "[redacted][redacted] tape" },
+      value: { x: "[redacted] tape" },
     });
+    expect(
+      sanitizeHttpFailureReason("got Bearer sk_live_123456789 back", [
+        "sk_live_123456789",
+        "Bearer sk_live_",
+      ]),
+    ).toBe("got [redacted] back");
     expect(sanitizeHttpFailureReason("a.b and a*b", ["a.b"])).toBe("[redacted] and a*b");
   });
 });
