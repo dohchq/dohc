@@ -1,4 +1,4 @@
-import { activityPin } from "../src/testPins";
+import { activityPin, desktopPins } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -76,74 +76,25 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-my-agent")).toHaveCount(0);
     await shoot(page, "agents-not-set-up");
 
+    // Add an agent opens Settings › Agents with its Add agent sheet.
     await page.getByTestId("chats-add-agent-open").click();
-    await expect(page.getByTestId("chats-add-agent")).toBeVisible();
-    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
-    await shoot(page, "agent-tool-cards");
-    const dialogTop = async () => (await page.getByTestId("chats-add-agent").boundingBox())?.y;
-    const nameLeft = async () =>
-      (await page.getByTestId("chats-add-agent-agent-name").boundingBox())?.x;
-    const topBeforePick = await dialogTop();
-    const leftBeforePick = await nameLeft();
-    for (const tool of ["Claude Code", "Codex"]) {
-      const card = page.getByRole("button", { name: tool, exact: true });
-      await expect(card).toBeEnabled();
-      await card.click();
-      await expect(page.getByTestId("agent-tool-permissions")).toBeVisible();
-      await expect(card).toBeFocused();
-      expect(await dialogTop()).toBe(topBeforePick);
-      expect(await nameLeft()).toBe(leftBeforePick);
-      await shoot(page, `agent-profile-${tool.toLowerCase().replaceAll(" ", "-")}`);
-    }
-    await page.getByText("Advanced", { exact: true }).click();
-    await page
-      .getByTestId("chats-add-agent-command")
-      .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
-    await expect(page.getByTestId("chats-add-agent-preview")).toContainText("Nova");
-    await expect(page.getByTestId("agent-tool-using-command")).toHaveText(
-      "Using your runner command.",
-    );
-    // The tallest state, shot with its body scrolling between the title and
-    // actions bands. A window tall enough to hold it all is shortened for
-    // this shot only.
-    const body = page.getByTestId("chats-add-agent-body");
-    const overflows = () => body.evaluate((node) => node.scrollHeight > node.clientHeight);
-    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
-    try {
-      if (!(await overflows())) {
-        const form = await page.getByTestId("chats-add-agent").boundingBox();
-        if (!form) throw new Error("Expected the Add agent dialog to be laid out.");
-        await page.setViewportSize({
-          width: viewport.width,
-          height: Math.floor(form.y + form.height) - 160,
-        });
-      }
-      await expect.poll(overflows).toBe(true);
-      await expect(page.getByTestId("chats-add-agent")).toHaveAttribute("data-scrolls", "");
-      for (const [band, edge] of [
-        ["chats-add-agent-header", "bottom"],
-        ["chats-add-agent-footer", "top"],
-      ] as const) {
-        await expect(page.getByTestId(band)).toBeVisible();
-        const rule = await page.getByTestId(band).evaluate((node, side) => {
-          const style = getComputedStyle(node);
-          return {
-            width: style.getPropertyValue(`border-${side}-width`),
-            style: style.getPropertyValue(`border-${side}-style`),
-          };
-        }, edge);
-        expect(rule).toEqual({ width: "1px", style: "solid" });
-      }
-      expect(await dialogTop()).toBe(topBeforePick);
-      expect(await nameLeft()).toBe(leftBeforePick);
-      await shoot(page, "add-agent-form");
-    } finally {
-      await page.setViewportSize(viewport);
-    }
-
-    await page.getByTestId("chats-add-agent-submit").click();
-    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
+    const settings = page.getByTestId(desktopPins.settingsDialog);
+    const sheet = page.getByTestId("agent-add-sheet");
+    await expect(sheet).toBeVisible();
+    await sheet.getByTestId("agent-add-name").fill("Nova");
+    await expect(sheet.getByTestId("agent-add-confirm")).toBeEnabled();
+    await shoot(page, "add-agent-sheet");
+    await sheet.getByTestId("agent-add-confirm").click();
+    await expect(sheet).toHaveCount(0);
+    // The answered question below needs the fake runner's ask mode as Nova's command.
+    await settings.locator('[data-testid="agent-row"][aria-label="Nova"]').click();
+    await settings.getByRole("button", { name: "Use your own command" }).click();
+    const command = settings.getByLabel("Command that starts Nova", { exact: true });
+    await command.fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
+    await command.press("Enter");
+    await expect(settings.getByText(/fakeChatRunner\.mjs" ask$/u)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(settings).toHaveCount(0);
     await expect(page.getByTestId("chats-manage-agent")).toBeVisible();
 
     await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();

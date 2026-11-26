@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { activityPin } from "../src/testPins";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { installFakeAgentTools } from "./helpers/agentTools";
+import { installFakeAgentTools, seedNova } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { waitForCliEndpoint } from "./helpers/dohcCli";
 import {
@@ -204,7 +204,7 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest(temp, "reported-agent-screens");
-    const command = await writeRunner(temp);
+    await seedNova(temp, await writeRunner(temp));
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     const main = page.locator("main");
@@ -212,12 +212,7 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
     await trustOpenWorkspace(desktop);
     await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
-    await page.getByTestId("chats-add-agent-open").click();
-    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await page.getByText("Advanced", { exact: true }).click();
-    await page.getByTestId("chats-add-agent-command").fill(command);
-    await page.getByTestId("chats-add-agent-submit").click();
-    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
+    await expect(page.getByTestId("chats-my-agent")).toHaveCount(1);
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill(GROUP);
     await page.getByTestId("chats-new-channel-type-posts").click();

@@ -20,7 +20,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { AgentDispatchClaim, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { launchFrom, type AgentLaunchProfile } from "./agentToolCatalog";
+import { launchFromCommand, type AgentLaunchProfile } from "./agentToolCatalog";
 import { markRunLogEnded } from "./runLogRetention";
 import { testAgent } from "../testing/agentSettings";
 import type { Agent } from "../settings/userSettings";
@@ -584,7 +584,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
           enabled: runner.enabled,
           timeoutMinutes: runner.timeoutMinutes,
         }),
-        launch: launchFrom(runner.profile, runner.command) ?? undefined,
+        launch: runner.profile ?? launchFromCommand(runner.command) ?? undefined,
       },
       ...(options.agents ?? []),
     ],

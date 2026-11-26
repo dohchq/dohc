@@ -5,7 +5,6 @@ import {
   agentProfileArguments,
   launchCommand,
   launchCommandHint,
-  launchFrom,
   launchFromCommand,
   ownFlagsProblem,
   supportsAgentProfile,
@@ -195,11 +194,9 @@ describe("agent launch profiles", () => {
       ...agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp).slice(1),
     ]);
   });
-  it("starts a chosen tool over a typed command, and needs one of them", () => {
-    const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
-    expect(launchFrom(profile, "node agent.mjs")).toEqual(profile);
-    expect(launchFrom(undefined, " node agent.mjs ")).toEqual({ command: "node agent.mjs" });
-    expect(launchFrom(undefined, "  ")).toBeNull();
+  it("saves a typed command trimmed, and needs one", () => {
+    expect(launchFromCommand(" node agent.mjs ")).toEqual({ command: "node agent.mjs" });
+    expect(launchFromCommand("  ")).toBeNull();
     expect(AgentLaunch.safeParse({ command: "  " }).success).toBe(false);
     expect(AgentLaunch.safeParse({ command: "node agent.mjs", tool: "claude" }).success).toBe(
       false,

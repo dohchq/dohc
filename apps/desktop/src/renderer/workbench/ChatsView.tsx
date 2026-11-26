@@ -128,7 +128,6 @@ import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { channelFileCandidates } from "./chatFileMentionScope";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
-import { AddAgentForm } from "./AddAgentForm";
 import {
   agentMentionId,
   listAgents,
@@ -419,6 +418,8 @@ export function ChatsView(props: {
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // Opens Settings › Agents with its Add agent sheet.
+  onAddAgent?: () => void;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
@@ -633,7 +634,6 @@ export function ChatsView(props: {
     unreportedCreateFailure.current = null;
     setCreatingGroup(false);
   }, []);
-  const [addingAgent, setAddingAgent] = useState(false);
   // Shared channels. null means the sharing surface is unavailable (signed
   // out or listing failed) and every sharing affordance stays hidden, so the
   // solo view is unchanged.
@@ -5230,24 +5230,11 @@ export function ChatsView(props: {
                   ))}
                 </ul>
               ) : null}
-              {addingAgent && props.userSettings && props.onSaveUserSettings ? (
-                <AddAgentForm
-                  key={workspaceId}
-                  onError={props.onError}
-                  workspaceId={workspaceId}
-                  settings={props.userSettings}
-                  onSave={props.onSaveUserSettings}
-                  onDone={() => setAddingAgent(false)}
-                  onCancel={() => setAddingAgent(false)}
-                />
-              ) : null}
-              {props.userSettings && props.onSaveUserSettings ? (
+              {props.userSettings && (hasAgent ? props.onSetupAgent : props.onAddAgent) ? (
                 <button
                   type="button"
                   data-testid={hasAgent ? "chats-manage-agent" : "chats-add-agent-open"}
-                  onClick={() =>
-                    hasAgent && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
-                  }
+                  onClick={hasAgent ? props.onSetupAgent : props.onAddAgent}
                   className="dohc-focus-row mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                 >
                   {hasAgent ? (

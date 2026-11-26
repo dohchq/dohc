@@ -30,16 +30,6 @@ export function splitPath(path: string): PathParts {
   };
 }
 
-// Cuts a path after each separator, so a line can break between folders.
-// The pieces join back into the path.
-export function pathPieces(path: string): string[] {
-  const separator = separatorOf(path);
-  return path
-    .split(separator)
-    .map((piece, index, pieces) => (index < pieces.length - 1 ? piece + separator : piece))
-    .filter((piece) => piece !== "");
-}
-
 export function PathLine(props: { path: string; className?: string }) {
   const { first, middle, name } = splitPath(props.path);
   const line = useRef<HTMLSpanElement>(null);

@@ -20,7 +20,7 @@ import {
 const REPORT = "done: checked the exports";
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
 
-test("installed tool cards save profiles, Check replies through PATH, and a group mention dispatches", async () => {
+test("Add an agent in Chats opens the Settings sheet, each installed tool replies to Check, and a group mention dispatches", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -34,18 +34,31 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     // agent is the opt-in that creates it.
     await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
-    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-add-agent-open").click();
-    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    for (const name of ["Claude Code", "Codex"]) {
-      await page.getByRole("button", { name, exact: true }).click();
-      await page.getByTestId("chats-add-agent-check").click();
-      await expect(page.getByTestId("chats-add-agent-check-result")).toHaveAttribute(
-        "data-state",
-        "ok",
-      );
+    // Chats offers Add an agent until there is one, then Manage agents. Both
+    // open Settings › Agents, and Add an agent opens its Add agent sheet.
+    const settings = page.getByTestId(desktopPins.settingsDialog);
+    const sheet = page.getByTestId("agent-add-sheet");
+    for (const [tool, name] of [
+      ["claude", "Ada"],
+      ["codex", "Nova"],
+    ] as const) {
+      const chats = page.getByTestId(desktopPins.sidePanel);
+      if (tool === "claude") await chats.getByTestId("chats-add-agent-open").click();
+      else {
+        await chats.getByTestId("chats-manage-agent").click();
+        await settings.getByTestId("agent-add").click();
+      }
+      await expect(sheet).toBeVisible();
+      await sheet.getByTestId(`agent-runs-with-${tool}`).click();
+      await sheet.getByTestId("agent-add-name").fill(name);
+      await sheet.getByTestId("agent-add-confirm").click();
+      await expect(sheet).toHaveCount(0);
+      await settings.locator(`[data-testid="agent-row"][aria-label="${name}"]`).click();
+      await settings.getByTestId("agent-check").click();
+      await expect(settings.getByTestId("agent-check-state")).toContainText(/Replied in \d+ s/u);
+      await page.keyboard.press("Escape");
+      await expect(settings).toHaveCount(0);
     }
-    await page.getByTestId("chats-add-agent-submit").click();
-    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await page
       .getByTestId(desktopPins.sidePanel)
       .getByTestId("chats-channel")
