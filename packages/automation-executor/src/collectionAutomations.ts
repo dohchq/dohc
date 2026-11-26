@@ -1354,6 +1354,9 @@ const RUN_PAGE = 20;
 // The most claims one page of either ledger holds.
 const CLAIM_PAGE_LIMIT = 100;
 
+/** A held webhook step can't be allowed until its secrets are fixed in Settings; the message says how. */
+export class HttpStepSecretProblemError extends Error {}
+
 export class CollectionAutomations {
   async makeWritesDurable(claimId?: string): Promise<void> {
     const result = await this.withLiveEngine(async (engine) => {
@@ -3344,7 +3347,9 @@ export class CollectionAutomations {
         }
         const approve = options?.approveHttpStep ?? this.options.httpApprovals?.approve;
         if (!approve) return false;
-        if (httpApproval.secretProblem !== null) throw new Error(httpApproval.secretProblem);
+        if (httpApproval.secretProblem !== null) {
+          throw new HttpStepSecretProblemError(httpApproval.secretProblem);
+        }
         await approve({
           approvalDigest: httpApproval.approvalDigest,
           collectionId: httpApproval.collectionId,

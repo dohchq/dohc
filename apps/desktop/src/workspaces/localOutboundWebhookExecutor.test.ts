@@ -135,6 +135,58 @@ describe("localOutboundWebhookExecutor", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("refuses a webhook link replaced while dohc looked up its address", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-local-webhook-"));
+    dirs.push(dir);
+    let clock = 1000;
+    const secrets = createLocalWorkspaceSecretStore({
+      dir,
+      cipher: fakeCipher(),
+      nowMs: () => (clock += 1),
+    });
+    await secrets.set("ws-1", {
+      name: "SLACK_HOOK",
+      mode: "create",
+      usage: "http-url",
+      value: "https://hooks.example.com/old",
+    });
+    const approved = await secrets.list("ws-1");
+    const sendRequest = vi.fn(async () => 200);
+    const executor = createLocalOutboundWebhookExecutor({
+      workspaceId: "ws-1",
+      secrets,
+      resolveDestination: async (raw) => {
+        await secrets.set("ws-1", {
+          name: "SLACK_HOOK",
+          mode: "replace",
+          usage: "http-url",
+          value: "https://hooks.example.com/new",
+        });
+        return fakeDestination(raw);
+      },
+      sendRequest,
+    });
+
+    const result = await executor.execute({
+      collectionId: "col-1",
+      collectionPath: "Tasks",
+      automation: dummyAutomation,
+      definitionDigest: "b".repeat(64),
+      approvalDigest: "c".repeat(64),
+      codeFileHashes: [],
+      secrets: approved,
+      effect: { ...baseEffect, url: { kind: "secret", secret: "SLACK_HOOK" }, secretHeaders: [] },
+      depth: 0,
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'Secret "SLACK_HOOK" changed while dohc was sending. Try again.',
+      beforeSend: true,
+    });
+    expect(sendRequest).not.toHaveBeenCalled();
+  });
+
   it("refuses sending a header secret to a non-pinned host and enforces chain depth cap", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-local-webhook-"));
     dirs.push(dir);

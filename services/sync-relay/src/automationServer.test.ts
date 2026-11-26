@@ -8,11 +8,12 @@ import {
 } from "@dohc/automation-executor/button-presser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import type {
-  ScheduledAutomation,
-  CollectionAutomationRun,
-  CollectionAutomationsOptions,
-  CollectionAutomationHold,
+import {
+  HttpStepSecretProblemError,
+  type ScheduledAutomation,
+  type CollectionAutomationRun,
+  type CollectionAutomationsOptions,
+  type CollectionAutomationHold,
 } from "@dohc/automation-executor/collection-automations";
 import type {
   AutomationRunStore,
@@ -250,6 +251,11 @@ function fakeExecutor(
       };
     },
     confirmReach: async (input) => {
+      if (input.seq === 99) {
+        throw new HttpStepSecretProblemError(
+          "Add the secret HOOK in Settings, then allow this step.",
+        );
+      }
       asked.push(["allow", input]);
       return input.seq === HELD.seq ? "confirmed" : "changed";
     },
@@ -1372,6 +1378,10 @@ describe("the owner's routes to the server's runs", () => {
       ["allow", allow],
       ["allow", { ...allow, seq: 6 }],
     ]);
+    expect(await call(OWNER, "allow", { ...allow, seq: 99 })).toMatchObject({
+      status: 400,
+      body: { ok: false, error: "Add the secret HOOK in Settings, then allow this step." },
+    });
     expect(
       await call(OWNER, "restore", { definitions: [], again: false, retentionId: "restore-test" }),
     ).toMatchObject({ status: 200, body: { ok: true, undone: 0, errorMessage: null } });

@@ -26,6 +26,7 @@ import {
 } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
+  HttpStepSecretProblemError,
   type CollectionAutomationRun,
   type CollectionAutomationsOptions,
   type RunAdmission,
@@ -2034,39 +2035,44 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     // A closed copy runs nothing, so it holds nothing.
     holds: (scope) => ownedCopy(scope).executor.holds(),
     allow: (scope, input, allowOptions) =>
-      ownedCopy(scope).executor.confirmReach(
-        input,
-        allowOptions?.recheckDesktopHttpApproval
-          ? {
-              approveHttpStep: async (approval) => {
-                await allowOptions.recheckDesktopHttpApproval!();
-                let result;
-                try {
-                  result = storage.approveWorkspaceHttpStep({
-                    workspaceId: scope.workspaceId,
-                    ownerUserId: scope.ownerUserId,
-                    approvalDigest: approval.approvalDigest,
-                    collectionPath: approval.collectionPath,
-                    automationId: approval.automationId,
-                    stepOrdinal: approval.stepOrdinal,
-                    nowMs: nowMs(),
-                  });
-                } catch (error) {
-                  if (error instanceof SyncRelayQuotaExceededError) {
-                    throw relayError("quota_exceeded", error.message);
+      ownedCopy(scope)
+        .executor.confirmReach(
+          input,
+          allowOptions?.recheckDesktopHttpApproval
+            ? {
+                approveHttpStep: async (approval) => {
+                  await allowOptions.recheckDesktopHttpApproval!();
+                  let result;
+                  try {
+                    result = storage.approveWorkspaceHttpStep({
+                      workspaceId: scope.workspaceId,
+                      ownerUserId: scope.ownerUserId,
+                      approvalDigest: approval.approvalDigest,
+                      collectionPath: approval.collectionPath,
+                      automationId: approval.automationId,
+                      stepOrdinal: approval.stepOrdinal,
+                      nowMs: nowMs(),
+                    });
+                  } catch (error) {
+                    if (error instanceof SyncRelayQuotaExceededError) {
+                      throw relayError("quota_exceeded", error.message);
+                    }
+                    throw error;
                   }
-                  throw error;
-                }
-                if (!result.ok) {
-                  if (result.reason === "unauthorized") throw notFound();
-                  throw badRequest(
-                    `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
-                  );
-                }
-              },
-            }
-          : undefined,
-      ),
+                  if (!result.ok) {
+                    if (result.reason === "unauthorized") throw notFound();
+                    throw badRequest(
+                      `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
+                    );
+                  }
+                },
+              }
+            : undefined,
+        )
+        .catch((error: unknown) => {
+          if (error instanceof HttpStepSecretProblemError) throw badRequest(error.message);
+          throw error;
+        }),
   };
 
   const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {

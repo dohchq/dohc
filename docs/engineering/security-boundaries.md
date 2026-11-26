@@ -470,7 +470,8 @@ recreating a secret, or changing a header secret's allowed hosts holds the step 
 owner allows it again; rotating a header secret's value with the same hosts keeps the
 approval. Each run reads approvals and secrets together before it sends. Just before
 sending, the relay rereads every secret it loaded and refuses the request if one changed,
-and the desktop executor compares each secret it reads with the one the approval saw.
+and the desktop executor compares each secret it reads with the one the approval saw,
+checking a webhook link again after it looks up the link's address.
 
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
 enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),

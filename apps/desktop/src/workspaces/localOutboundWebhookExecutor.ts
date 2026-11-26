@@ -157,6 +157,16 @@ export function createLocalOutboundWebhookExecutor(options: {
         }
         if (effect.url.kind === "secret") {
           secretsToScrub.push(destination.canonicalHost);
+          const name = effect.url.secret;
+          const current = await options.secrets.list(options.workspaceId).catch(() => []);
+          const now = current.find((secret) => secret.name === name);
+          if (!now || changedSince(now)) {
+            return {
+              ok: false,
+              reason: `Secret "${name}" changed while dohc was sending. Try again.`,
+              beforeSend: true,
+            };
+          }
         }
 
         const outboundHeaders = Object.create(null) as Record<string, string>;

@@ -13,6 +13,7 @@ import {
 import { undoCollectionAutomationRuns } from "./collectionAutomationUndo";
 import {
   CollectionAutomations,
+  HttpStepSecretProblemError,
   type CollectionAutomationEngine,
   type CollectionHttpApprovalGate,
 } from "./collectionAutomations";
@@ -289,7 +290,11 @@ describe("automation http steps", () => {
           step: heldForLink!.step,
           seq: heldForLink!.seq,
         }),
-      ).rejects.toThrow("Add the secret SLACK_HOOK in Settings");
+      ).rejects.toEqual(
+        new HttpStepSecretProblemError(
+          "Add the secret SLACK_HOOK in Settings, then allow this step.",
+        ),
+      );
       secrets = withLink;
       const beforeAllow = await listedReach();
       if (beforeAllow.reach.kind !== "checked") throw Error("expected checked");
