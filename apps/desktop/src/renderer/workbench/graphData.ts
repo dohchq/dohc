@@ -1,5 +1,52 @@
-import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
+import type {
+  LinksConnectionEdge,
+  LinksConnectionNode,
+  LinksConnectionsResult,
+  LinksEdgesResult,
+} from "@dohc/workspace-contracts/links";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
+import {
+  chatTabPath,
+  collectionTabPath,
+  parseTab,
+  siteTabPath,
+  transactionalCollectionTabPath,
+} from "./workbenchState";
+
+export function graphPathForTab(path: string | null): string | null {
+  const tab = parseTab(path);
+  switch (tab?.kind) {
+    case "file":
+      return tab.path;
+    case "collection":
+      return tab.collectionPath && `collection:${tab.collectionPath}`;
+    case "transactionalCollection":
+      return `dataset:${tab.datasetPath}`;
+    case "site":
+      return tab.siteRoot && `app:${tab.siteRoot}`;
+    case "chat":
+      return tab.target.kind === "channel" ? `group:${tab.target.id}` : null;
+    default:
+      return null;
+  }
+}
+
+export function connectionTabPath(node: LinksConnectionNode): string {
+  switch (node.kind) {
+    case "document-collection":
+      return collectionTabPath(node.path);
+    case "dataset":
+      return node.firstTableId
+        ? transactionalCollectionTabPath(node.path, node.firstTableId)
+        : node.path;
+    case "app":
+      return siteTabPath(node.path);
+    case "automation":
+      return node.path;
+    case "group":
+      return chatTabPath({ kind: "channel", id: node.channelId });
+  }
+}
 
 type NodeBase = { path: string; title: string; incoming: number; outgoing: number };
 export type GraphNode = NodeBase &
@@ -15,6 +62,7 @@ export type GraphNode = NodeBase &
         channelSlug?: string;
         channelKind?: "channel" | "dm" | "agent";
       }
+    | { kind: "connection"; connection: LinksConnectionNode }
   );
 export type GraphEdge = {
   source: string;
@@ -24,7 +72,10 @@ export type GraphEdge = {
     | "markdown"
     | "chat-mentions-file"
     | "chat-mentions-heading"
-    | "heading-in-file";
+    | "heading-in-file"
+    | "record-in-collection"
+    | LinksConnectionEdge["kind"];
+  approval?: LinksConnectionEdge["approval"];
 };
 export type GraphData = {
   nodes: GraphNode[];
@@ -42,6 +93,16 @@ export const emptyGraph = (): GraphData => ({
   mountsCovered: true,
   unchecked: [],
 });
+
+const fileNode = (path: string): GraphNode => ({
+  path,
+  filePath: path,
+  kind: "file",
+  title: path.split("/").at(-1) ?? path,
+  incoming: 0,
+  outgoing: 0,
+});
+const edgeKey = (edge: GraphEdge) => JSON.stringify([edge.source, edge.target, edge.kind]);
 
 export function degrees(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
   const byPath = new Map(nodes.map((node) => [node.path, { ...node, incoming: 0, outgoing: 0 }]));
@@ -66,14 +127,7 @@ export function graphWalk() {
   const ensure = (path: string) => {
     let node = nodes.get(path);
     if (!node) {
-      node = {
-        path,
-        filePath: path,
-        kind: "file",
-        title: path.split("/").at(-1) ?? path,
-        incoming: 0,
-        outgoing: 0,
-      };
+      node = fileNode(path);
       nodes.set(path, node);
     }
     return node;
@@ -107,20 +161,18 @@ export function graphWalk() {
 }
 export function withChatMentions(graph: GraphData, mentions: ChatFileMentionRecord[]): GraphData {
   const nodes = new Map(graph.nodes.map((node) => [node.path, node]));
-  const edges = new Map(
-    graph.edges.map((edge) => [JSON.stringify([edge.source, edge.target, edge.kind]), edge]),
-  );
-  const add = (edge: GraphEdge) =>
-    edges.set(JSON.stringify([edge.source, edge.target, edge.kind]), edge);
+  const edges = new Map(graph.edges.map((edge) => [edgeKey(edge), edge]));
+  const add = (edge: GraphEdge) => edges.set(edgeKey(edge), edge);
   for (const row of mentions) {
     const file = row.attachment.pathHint;
-    if (!file || !nodes.has(file)) continue;
-    const base = nodes.get(file);
+    if (!file) continue;
+    const base = nodes.get(file) ?? fileNode(file);
     if (
-      base?.kind !== "file" ||
+      base.kind !== "file" ||
       (row.attachment.objectId && base.objectId && base.objectId !== row.attachment.objectId)
     )
       continue;
+    nodes.set(file, base);
     const thread = "chat-thread:" + encodeURIComponent(row.thread.id);
     nodes.set(thread, {
       path: thread,
@@ -163,4 +215,48 @@ export function withChatMentions(graph: GraphData, mentions: ChatFileMentionReco
   }
   const visible = [...edges.values()];
   return { ...graph, nodes: degrees([...nodes.values()], visible), edges: visible };
+}
+
+export function withConnections(
+  graph: GraphData,
+  connections: LinksConnectionsResult | undefined,
+  showRecords: boolean,
+): GraphData {
+  if (connections?.scope !== "workspace") return graph;
+  const nodes = new Map(graph.nodes.map((node) => [node.path, node]));
+  const collectionOf = new Map(
+    connections.records.flatMap(({ collection, paths }) => paths.map((path) => [path, collection])),
+  );
+  const at = (path: string) => (showRecords ? path : (collectionOf.get(path) ?? path));
+  if (!showRecords) for (const path of collectionOf.keys()) nodes.delete(path);
+  for (const connection of connections.nodes)
+    nodes.set(connection.id, {
+      path: connection.id,
+      kind: "connection",
+      connection,
+      title: connection.title,
+      incoming: 0,
+      outgoing: 0,
+    });
+  const edges = new Map<string, GraphEdge>();
+  const add = (edge: GraphEdge) => {
+    if (edge.source !== edge.target) edges.set(edgeKey(edge), edge);
+  };
+  for (const edge of graph.edges)
+    add({ ...edge, source: at(edge.source), target: at(edge.target) });
+  for (const edge of connections.edges) {
+    if (!nodes.has(edge.target)) nodes.set(edge.target, fileNode(edge.target));
+    add(edge);
+  }
+  if (showRecords)
+    for (const [path, collection] of collectionOf)
+      if (nodes.has(path)) add({ source: path, target: collection, kind: "record-in-collection" });
+  const visible = [...edges.values()];
+  return {
+    ...graph,
+    nodes: degrees([...nodes.values()], visible),
+    edges: visible,
+    complete: graph.complete && connections.complete,
+    mountsCovered: graph.mountsCovered && connections.mountsCovered,
+  };
 }

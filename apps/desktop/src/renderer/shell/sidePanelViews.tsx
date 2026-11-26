@@ -120,7 +120,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
       <Suspense fallback={<SkeletonRows layout="panel" label="Loading Graph…" />}>
         <LazyGraphView
           workspaceId={context.workspaceId}
-          activePath={context.activeDocumentPath}
+          activePath={context.focusedTabPath}
           refreshKey={context.graphKey}
           onOpenPath={context.openPathWithHeading}
           onOpenChatThread={context.openGraphChatThread}

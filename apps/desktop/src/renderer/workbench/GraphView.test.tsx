@@ -2,14 +2,39 @@
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { ipcWireError } from "../../ipc/errorWords";
 import * as graphData from "./graphData";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderView,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
-import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
+import { SHARE_OMITTED_CONNECTIONS, type LinksEdgesResult } from "@dohc/workspace-contracts/links";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { GraphView, searchMatches } from "./GraphView";
 import type { GraphNode } from "./graphData";
+import { collectionTabPath, siteTabPath } from "./workbenchState";
 import { deferred } from "../../testing/deferred";
+
+const render = (ui: ReactNode) =>
+  renderView(ui, {
+    wrapper: ({ children }) => (
+      <WorkspaceSessionProvider workspaceId="ws">{children}</WorkspaceSessionProvider>
+    ),
+  });
+
+function stubDesktop(desktop: object) {
+  vi.stubGlobal("dohcDesktop", {
+    linksConnections: vi.fn(async () => SHARE_OMITTED_CONNECTIONS),
+    ...desktop,
+  });
+}
 
 function stubAnimationFrames() {
   let nextHandle = 1;
@@ -48,8 +73,13 @@ function rowPaths(): string[] {
   return screen.getAllByTestId("graph-file-row").map((row) => row.dataset.path ?? "");
 }
 
-function stubPages(paths: readonly string[], links: readonly (readonly [string, string])[]) {
-  vi.stubGlobal("dohcDesktop", {
+function stubPages(
+  paths: readonly string[],
+  links: readonly (readonly [string, string])[],
+  desktop: object = {},
+) {
+  stubDesktop({
+    ...desktop,
     linksEdges: vi.fn(async () => ({
       ...page(""),
       files: paths.map((path) => ({ path, objectId: path, title: path })),
@@ -69,6 +99,95 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
+  it("centres the side panel on an open Collection with its records, and opens an app in its tab", async () => {
+    stubPages(
+      ["Tasks/one.md", "notes.md", "far.md"],
+      [
+        ["notes.md", "Tasks/one.md"],
+        ["far.md", "notes.md"],
+      ],
+      {
+        linksConnections: vi.fn(async () => ({
+          scope: "workspace" as const,
+          nodes: [
+            {
+              id: "collection:Tasks",
+              kind: "document-collection" as const,
+              path: "Tasks",
+              title: "Tasks",
+              recordCount: 1,
+            },
+            {
+              id: "app:board",
+              kind: "app" as const,
+              path: "board",
+              title: "Board",
+              entryPath: null,
+            },
+          ],
+          edges: [
+            {
+              source: "app:board",
+              target: "collection:Tasks",
+              kind: "app-uses-data" as const,
+              approval: "approved" as const,
+            },
+          ],
+          records: [{ collection: "collection:Tasks", paths: ["Tasks/one.md"] }],
+          complete: true,
+          mountsCovered: true,
+        })),
+      },
+    );
+    const onOpenPath = vi.fn();
+    render(
+      <GraphView
+        workspaceId="ws"
+        activePath={collectionTabPath("Tasks")}
+        refreshKey="0"
+        onOpenPath={onOpenPath}
+      />,
+    );
+    await waitFor(() =>
+      expect(rowPaths()).toEqual(["app:board", "collection:Tasks", "Tasks/one.md"]),
+    );
+    expect(screen.getByTestId("graph-local-badge")).toBeTruthy();
+    fireEvent.click(screen.getByText("Board"));
+    expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("board"));
+  });
+
+  it("asks again for connections while the workspace is still updating, without an error", async () => {
+    const linksConnections = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:links-connections': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+        ),
+      )
+      .mockResolvedValue({
+        scope: "workspace",
+        nodes: [{ id: "app:board", kind: "app", path: "board", title: "Board", entryPath: null }],
+        edges: [],
+        records: [],
+        complete: true,
+        mountsCovered: true,
+      });
+    stubPages(["a.md"], [], { linksConnections });
+    const onError = vi.fn();
+    render(
+      <GraphView
+        workspaceId="ws"
+        activePath={null}
+        refreshKey="0"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(rowPaths()).toContain("app:board"));
+    expect(linksConnections).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("shows the open page's local graph in the side panel, in title order", async () => {
     stubPages(
       ["alpha.md", "beta.md", "gamma.md", "delta.md", "sketch.excalidraw"],
@@ -375,7 +494,7 @@ describe("GraphView", () => {
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue(page("a.md"));
     const onError = vi.fn();
-    vi.stubGlobal("dohcDesktop", { linksEdges });
+    stubDesktop({ linksEdges });
     render(
       <GraphView
         workspaceId="ws"
@@ -401,7 +520,7 @@ describe("GraphView", () => {
       .fn()
       .mockResolvedValueOnce(page("a.md", "next"))
       .mockImplementation(() => second.promise);
-    vi.stubGlobal("dohcDesktop", { linksEdges });
+    stubDesktop({ linksEdges });
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
     expect(linksEdges).toHaveBeenCalledOnce();
@@ -438,7 +557,7 @@ describe("GraphView", () => {
         workspaceId === "a" ? late.promise : Promise.resolve(page("b.md")),
       );
     const onError = vi.fn();
-    vi.stubGlobal("dohcDesktop", { linksEdges });
+    stubDesktop({ linksEdges });
     const props = { activePath: null, refreshKey: "0", onOpenPath: vi.fn(), onError };
     const view = render(<GraphView {...props} workspaceId="a" />);
     view.rerender(<GraphView {...props} workspaceId="b" />);
@@ -460,7 +579,7 @@ describe("GraphView", () => {
       complete: false,
       unchecked: ["a.md"],
     }));
-    vi.stubGlobal("dohcDesktop", { linksEdges });
+    stubDesktop({ linksEdges });
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
     expect(screen.queryByText("Gathering linked mentions…")).toBeNull();
@@ -478,7 +597,7 @@ describe("GraphView", () => {
         complete: false,
         indexBuilding: true,
       }));
-      vi.stubGlobal("dohcDesktop", { linksEdges });
+      stubDesktop({ linksEdges });
       const view = render(
         <GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />,
       );
@@ -505,7 +624,7 @@ describe("GraphView", () => {
       for (let refusal = 0; refusal < 5; refusal++) linksEdges.mockRejectedValueOnce(busy());
       linksEdges.mockResolvedValue(page("a.md"));
       const onError = vi.fn();
-      vi.stubGlobal("dohcDesktop", { linksEdges });
+      stubDesktop({ linksEdges });
       render(
         <GraphView
           workspaceId="ws"
@@ -543,7 +662,7 @@ describe("GraphView", () => {
           "Error invoking remote method 'desktop:links-edges': DaemonRefusalError [OVERLOADED]: engine-store-busy",
         );
       });
-      vi.stubGlobal("dohcDesktop", { linksEdges });
+      stubDesktop({ linksEdges });
       const view = render(
         <GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />,
       );
@@ -564,7 +683,7 @@ describe("GraphView", () => {
     const linksEdges = vi.fn(async () => page("a.md"));
     const chatFileMentionsPage = vi.fn(() => chat.promise);
     const onError = vi.fn();
-    vi.stubGlobal("dohcDesktop", { linksEdges, chatFileMentionsPage });
+    stubDesktop({ linksEdges, chatFileMentionsPage });
     render(
       <GraphView
         workspaceId="ws"
@@ -594,7 +713,7 @@ describe("GraphView", () => {
       .mockResolvedValueOnce(page("old.md"))
       .mockResolvedValueOnce(page("replacement.md", "next"))
       .mockReturnValueOnce(next.promise);
-    vi.stubGlobal("dohcDesktop", { linksEdges });
+    stubDesktop({ linksEdges });
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
     await screen.findAllByText("old.md");
     fireEvent.click(screen.getByLabelText("Refresh graph"));
@@ -620,7 +739,7 @@ describe("GraphView", () => {
       if (repeated) linksEdges.mockRejectedValueOnce(changed);
       else linksEdges.mockResolvedValueOnce(page("last.md"));
       const onError = vi.fn();
-      vi.stubGlobal("dohcDesktop", { linksEdges });
+      stubDesktop({ linksEdges });
       render(
         <GraphView
           workspaceId="ws"
@@ -662,7 +781,7 @@ describe("GraphView", () => {
       entries: [{ source: "a.md", target: "picture.svg", kind: "markdown" as const, ordinal: 0 }],
     }));
     const chatFileMentionsPage = vi.fn(async () => ({ entries: [mention] }));
-    vi.stubGlobal("dohcDesktop", { linksEdges, chatFileMentionsPage });
+    stubDesktop({ linksEdges, chatFileMentionsPage });
     const { rerender } = render(
       <GraphView
         workspaceId="ws"
@@ -704,7 +823,7 @@ describe("GraphView", () => {
         } as ChatFileMentionRecord,
       ],
     }));
-    vi.stubGlobal("dohcDesktop", { linksEdges, chatFileMentionsPage });
+    stubDesktop({ linksEdges, chatFileMentionsPage });
     render(
       <GraphView
         workspaceId="ws"
@@ -755,7 +874,7 @@ it("paints the first chat page, continues once, and deduplicates attachments acr
       .fn()
       .mockResolvedValueOnce({ entries: [first], nextCursor: "next" })
       .mockReturnValueOnce(later.promise);
-    vi.stubGlobal("dohcDesktop", {
+    stubDesktop({
       linksEdges: vi.fn(async () => page("a.md")),
       chatFileMentionsPage,
     });
@@ -792,7 +911,7 @@ it("discards a continuation after the chat toggle is disabled", async () => {
     .fn()
     .mockResolvedValueOnce({ entries: [], nextCursor: "next" })
     .mockReturnValueOnce(later.promise);
-  vi.stubGlobal("dohcDesktop", {
+  stubDesktop({
     linksEdges: vi.fn(async () => page("a.md")),
     chatFileMentionsPage,
   });
@@ -839,7 +958,7 @@ it.each(["chat-mention-access-changed", "chat-mention-version-changed"])(
       .mockReturnValueOnce(changed.promise)
       .mockReturnValueOnce(restarted.promise);
     const onError = vi.fn();
-    vi.stubGlobal("dohcDesktop", {
+    stubDesktop({
       linksEdges: vi.fn(async () => page("a.md")),
       chatFileMentionsPage,
     });

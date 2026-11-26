@@ -39,6 +39,7 @@
   "collectionRulesChanged",
   "confirmCollectionAutomationStep",
   "crashReportChanged",
+  "localAppsChanged",
   "workspaceTrustChanged",
   "createChatChannel",
   "createCollectionRecord",
