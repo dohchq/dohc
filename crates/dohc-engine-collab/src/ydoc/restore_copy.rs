@@ -368,6 +368,24 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_format_two_point_over_a_format_one_note_is_refused() {
+        reading_body_sequence_here(|| {
+            let point = Ydoc::wire();
+            let meta = point.doc.get_or_insert_map(ROOT_META);
+            meta.insert(&mut point.doc.transact_mut(), "schemaVersion", 2.0);
+            let older = Ydoc::wire();
+            older
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "A format one note\n")
+                .unwrap();
+            let before = older.encode_full_state();
+            assert!(older
+                .restore_held_content(ContentKind::Richdoc, &point)
+                .is_err());
+            assert_eq!(older.encode_full_state(), before);
+        });
+    }
+
+    #[test]
     fn restore_copy_preserves_crlf_and_clears_stale_crlf() {
         for source in ["# Point\r\n\r\nText.\r\n", "# Point\n\nText.\n"] {
             let point = Ydoc::wire();
