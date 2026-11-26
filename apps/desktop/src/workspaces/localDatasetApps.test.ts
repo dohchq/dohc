@@ -660,7 +660,8 @@ describe("local approved dataset apps", () => {
   });
 
   it("approves outside calls only where this computer can make them", async () => {
-    let blocked: string | null = "Apps in synced workspaces can't call outside services yet.";
+    let blocked: string | null =
+      "Sync is paused for this workspace. Resume sync before this app calls outside services.";
     const f = await fixture(undefined, unguardedCollections, {
       external: { unavailable: () => blocked, call: vi.fn() },
     });
@@ -673,7 +674,7 @@ describe("local approved dataset apps", () => {
       },
     });
     await expect(f.host.apps.activate(withCalls, new AbortController().signal)).rejects.toThrow(
-      "synced workspaces",
+      "Sync is paused",
     );
     expect(f.host.apps.browserPublication(f.published.publicationId).authorityRevision).toBe(
       f.published.authorityRevision,

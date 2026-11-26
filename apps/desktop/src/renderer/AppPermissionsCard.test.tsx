@@ -219,6 +219,20 @@ describe("AppAccessSummary outside calls", () => {
     expect(get!.textContent).toContain("New");
   });
 
+  it("says a synced workspace's calls run on the server", () => {
+    render(
+      <AppAccessSummary
+        capabilities={[]}
+        approved={null}
+        external={[usage!]}
+        onServer
+        failed={false}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("app-access-external").textContent).toContain("Your dohc server");
+  });
+
   it("says a shared call runs on the server, and who can start it", () => {
     render(<ExternalCallsCard operations={[{ ...usage!, access: "viewers" }]} />);
     const row = screen.getByTestId("app-access-external");

@@ -29,6 +29,7 @@ export interface ServedExternalApp {
   publicationId: string;
   workspaceId: string;
   authorityRevision: number;
+  local: boolean;
   external: AppExternalOperation[];
   caller: DatasetAuthority["caller"];
 }
@@ -141,7 +142,7 @@ export function createAppExternalCalls(options: {
             served.publicationId,
             served.authorityRevision,
           )[name];
-          if (approved !== workspaceSecretApprovalBinding(stored.summary))
+          if (!served.local && approved !== workspaceSecretApprovalBinding(stored.summary))
             throw unavailable(
               `Secret ${name} was replaced after you shared this app. Stop sharing it, then share it again to approve the new secret.`,
             );

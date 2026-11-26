@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serveFetchHandler } from "@dohc/service-http";
+import { serveFetchHandler, type DeclaredHttpsTransport } from "@dohc/service-http";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture, limits } from "../../../../services/sync-relay/src/datasetTestFixture";
@@ -118,7 +118,9 @@ export function unanswered(limitMs: number, signal: AbortSignal | null | undefin
   });
 }
 
-export async function startTestRelay() {
+export async function startTestRelay(
+  options: { appExternalTransport?: DeclaredHttpsTransport } = {},
+) {
   const f = fixture(),
     directory = await mkdtemp(join(tmpdir(), "desktop-server-collections-"));
   const host = await f.storage.createDatasetHost({
@@ -138,6 +140,7 @@ export async function startTestRelay() {
     nowMs: () => Date.now(),
     // Only the owner calls in these tests.
     resolveActor: (_request, workspaceId) => ({ workspaceId, userId: "owner" }),
+    ...options,
   });
   const server = serveFetchHandler({
     handler,
@@ -159,6 +162,7 @@ export async function startTestRelay() {
   };
   return {
     origin,
+    storage: f.storage,
     host: new URL(origin).host,
     /** The server's latest revision of an app approved on the owner's computer, which the app's requests name. */
     appRevision: (appId: string) =>

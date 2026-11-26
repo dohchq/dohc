@@ -289,8 +289,8 @@ Where the calls run:
 
 - An app approved on this computer, in a workspace that isn't synced, runs them on this computer with the secret in Settings > Secrets.
 - A shared app runs them on your dohc server, with the server's copy of the secret. This covers share links, the people the app is shared with, and the phone, which opens shared apps only. Sharing is refused until the secret is on the server as a header secret for the call's host. Sharing binds the secret as it is then: you can replace its value, but if you delete the secret and add it again, or change its usage or websites, stop sharing the app and share it again.
+- In a synced workspace, an app approved on this computer runs them on your dohc server, for you alone, with the server's copy of the secret. They stop while sync is paused. An app that creates Collection files can't call outside services there.
 - A shared app that creates Collection files can't declare `external`.
-- Synced workspaces refuse calls from apps approved on this computer for now.
 
 The server allows each workspace 120 calls in a row, then 1 each second, and each share link 30 in a row, then 1 every 2 seconds. A workspace runs at most 8 calls at once, and 2 of those are kept for the owner. A busy or rate-limit refusal names the limit, for visitors too. For any other refusal, visitors see only that the service isn't available, and the owner sees what to fix.
 

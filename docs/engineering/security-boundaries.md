@@ -595,8 +595,11 @@ so.
 Only the owner approves outside calls, and only in the desktop window. The CLI and MCP
 doors, staged approval, and Personal apps refuse them, because an agent could otherwise
 approve an app that spends a secret. Member apps refuse them too. The desktop runs
-approved operations for local-only workspaces, at most 8 at a time per workspace. Synced
-workspaces refuse them for now.
+approved operations for local-only workspaces, at most 8 at a time per workspace. In a
+synced workspace it sends them to the relay, which runs them for the owner alone, as the
+app the owner approved on their computer, under the relay's limits. Those approvals don't
+record the secret's identity, because only the owner can start them. The desktop refuses
+them while sync is paused.
 
 The relay runs a published app's operations with its own sealed secret vault. Publishing
 never copies a local secret to the server. The relay accepts publishing or reactivating such

@@ -1421,6 +1421,7 @@ function PublicationDialog(
                 approved={changed && approval ? approvedCapabilities(approval) : null}
                 external={boxExternal}
                 approvedExternal={changed && approval ? (approval.external ?? null) : null}
+                onServer={synced === true}
                 failed={localReview.status === "failed" || candidateState === "failed"}
                 onRetry={() =>
                   localReview.status === "failed"

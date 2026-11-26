@@ -26,6 +26,9 @@ import {
   selectDatasetCapability,
 } from "./localDatasetApps";
 
+const serverCapabilities = (candidate: AppPublicationCandidate) =>
+  candidate.capabilities.length === 0 && candidate.external ? [] : datasetCapabilitiesOf(candidate);
+
 /** The owner's server, which holds a syncing workspace's Collections. */
 export interface ServerCollectionsTransport {
   /** Creates a Collection with rules approved on this computer. The same rules again return the same Collection. */
@@ -47,7 +50,7 @@ export interface ServerCollectionsTransport {
   /** One of the app's requests, which the server runs as the app. */
   request(
     publicationId: string,
-    action: "invoke" | "attempt" | "upload" | "file",
+    action: "invoke" | "attempt" | "upload" | "file" | "external",
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown>;
@@ -83,11 +86,11 @@ export function createServerCollectionsTransport(
     },
     async approve(candidate, signal) {
       if (
-        candidate.capabilities.length === 0 ||
+        (candidate.capabilities.length === 0 && !candidate.external) ||
         candidate.capabilities.some((capability) => capability.kind !== "dataset")
       )
         throw new Error("Choose an app connected to a Collection.");
-      const capabilities = datasetCapabilitiesOf(candidate);
+      const capabilities = serverCapabilities(candidate);
       const path =
         capabilities.length === 1
           ? binding(capabilities[0]!.datasetId)
@@ -158,10 +161,17 @@ export function createServerDatasetApps(options: {
   datasetRevision?(datasetId: string): number;
   subscribeDatasets?(datasetIds: readonly string[], onWake: () => void): () => void;
   onDatasetRevision?(datasetId: string, revision: number): void;
-}): ReturnType<typeof createLocalDatasetApps> & { close(): Promise<void> } {
+}): ReturnType<typeof createLocalDatasetApps> & {
+  close(): Promise<void>;
+  external(
+    publicationId: string,
+    input: { authorityRevision: number; operation: string; input: unknown },
+    signal: AbortSignal,
+  ): Promise<unknown>;
+} {
   // The server's approval revision for each app this computer approved, once the server has it.
   const approvals = new Map<string, Promise<number>>();
-  const declared = (row: LocalAppRow) => datasetCapabilitiesOf(row.candidate);
+  const declared = (row: LocalAppRow) => serverCapabilities(row.candidate);
   // Each app's approvals and withdrawal on their way to the server. The server keeps whichever reaches it last, so
   // an approval and a withdrawal of the same app never go at once:
   // - `approving` holds each approval until the server has answered it and this computer has committed it or given
@@ -291,7 +301,7 @@ export function createServerDatasetApps(options: {
   async function send(
     publicationId: string,
     expected: number,
-    action: "invoke" | "attempt" | "upload" | "file",
+    action: "invoke" | "attempt" | "upload" | "file" | "external",
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ) {
@@ -431,6 +441,14 @@ export function createServerDatasetApps(options: {
         );
       });
     },
+    external: (publicationId, input, signal) =>
+      send(
+        publicationId,
+        input.authorityRevision,
+        "external",
+        { operation: input.operation, input: input.input },
+        signal,
+      ),
     withdrawBinding(value: LocalAppRow, commit: () => void) {
       commit();
       if (!options.preview) withdraw(value);

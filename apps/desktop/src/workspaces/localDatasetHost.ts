@@ -1975,6 +1975,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           () => notifyChange(null),
           () => !options.collectionsServer?.(),
           preview ? undefined : options.external,
+          () => (options.collectionsServer?.() ? onServer : null),
         ),
       };
     };
