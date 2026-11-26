@@ -4,6 +4,8 @@ import {
   FileText,
   Hash,
   ListChecks,
+  LoaderCircle,
+  Paperclip,
   Plus,
   type LucideIcon,
 } from "lucide-react";
@@ -15,12 +17,14 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent,
   type ReactNode,
   type Ref,
 } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  extractChatFileReferences,
   formatChatFileReferenceToken,
   matchMentionCandidates,
   type MentionCandidate,
@@ -31,7 +35,11 @@ import {
   type AgentAddressedOffer,
   type AgentRosterPick,
 } from "../offers/agentAddressed";
-import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import {
+  CHAT_FILE_REFERENCES_MAX,
+  type ActorPresentation,
+  type WorkspaceHeadingRecord,
+} from "../../ipc/bridgeContract";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation } from "./actorPresentation";
@@ -65,6 +73,7 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import { isComposingKey, isOptionReturn, isSendKey } from "../ui/keys";
+import { dragCarriesFiles } from "../editor/imagePaste";
 import { useToastsAbove } from "./toastClearance";
 
 // What a control outside the composer can ask of it. Neither sends.
@@ -76,6 +85,11 @@ export interface MentionComposerHandle {
   // the @ menu, and puts the caret after it.
   mention(candidateId: string): void;
 }
+
+export type AddMessageFiles = (
+  link: (paths: readonly string[]) => number,
+  files?: readonly File[],
+) => Promise<void>;
 
 export interface FileMentionCandidate {
   path: string;
@@ -193,6 +207,7 @@ export function MentionComposer(props: {
   noMentions?: boolean;
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
+  onAddFiles?: AddMessageFiles;
   onChange: (value: string) => void;
   onSend: () => void;
   onRosterPick?: (pick: AgentRosterPick | null) => void;
@@ -271,6 +286,15 @@ export function MentionComposer(props: {
     loading: boolean;
   } | null>(null);
   const fileRequest = useRef(0);
+  const [adding, setAdding] = useState(0);
+  const [dropping, setDropping] = useState(false);
+  const addRequest = useRef(0);
+  const latest = useRef(props);
+  latest.current = props;
+  const sendNow = useCallback(() => {
+    addRequest.current += 1;
+    latest.current.onSend();
+  }, []);
   const currentFileLoader = useRef(props.loadFileHeadings);
   currentFileLoader.current = props.loadFileHeadings;
   // When we complete a mention we must reposition the caret after React commits
@@ -655,7 +679,7 @@ export function MentionComposer(props: {
       // Matches the shared ChatComposer contract.
       if (isSendKey(event)) {
         event.preventDefault();
-        props.onSend();
+        if (adding === 0) sendNow();
         return;
       }
       if (event.key === "Escape" && props.onEscape) {
@@ -664,6 +688,8 @@ export function MentionComposer(props: {
       }
     },
     [
+      adding,
+      sendNow,
       catalogQuery,
       catalogRows,
       chooseFile,
@@ -718,6 +744,47 @@ export function MentionComposer(props: {
     openMenuFromCaret();
   };
 
+  useEffect(
+    () => () => {
+      addRequest.current += 1;
+      setAdding(0);
+    },
+    [props.composerId, props.onAddFiles],
+  );
+
+  const linkFiles = (request: number) => (paths: readonly string[]) => {
+    if (request !== addRequest.current) return 0;
+    const { value, onChange } = latest.current;
+    const room = CHAT_FILE_REFERENCES_MAX - extractChatFileReferences(value).length;
+    const linked = paths.slice(0, Math.max(0, room));
+    if (linked.length === 0) return paths.length;
+    const at = Math.min(textareaRef.current?.selectionEnd ?? value.length, value.length);
+    const before = value.slice(0, at);
+    const links = linked.map((path) => formatChatFileReferenceToken({ path })).join(" ");
+    const text = `${before === "" || /\s$/u.test(before) ? "" : " "}${links} `;
+    pendingCaret.current = at + text.length;
+    onChange(`${before}${text}${value.slice(at)}`);
+    return paths.length - linked.length;
+  };
+
+  const addFiles = (files?: readonly File[]) => {
+    const add = props.onAddFiles;
+    if (!add) return;
+    const request = addRequest.current;
+    const done = () => {
+      if (request === addRequest.current) setAdding((count) => count - 1);
+    };
+    setAdding((count) => count + 1);
+    void add(linkFiles(request), files).then(done, done);
+  };
+
+  const acceptFileDrag = (event: DragEvent<HTMLFormElement>) => {
+    if (!props.onAddFiles || !dragCarriesFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDropping(true);
+  };
+
   const isPost = props.surface === "post";
   useToastsAbove(formRef, props.pinned === true);
   const locked = props.sending || props.disabled === true;
@@ -725,7 +792,7 @@ export function MentionComposer(props: {
   // A poll sends once it has a question and two choices the engine accepts.
   const pollUnready =
     poll !== null && (props.value.trim().length === 0 || pollChoicesToSend(poll) === null);
-  const sendDisabled = props.disabled === true || empty || pollUnready;
+  const sendDisabled = props.disabled === true || empty || pollUnready || adding > 0;
   const pollBlock =
     poll !== null && props.onPollChange ? (
       <ComposerPoll
@@ -742,8 +809,19 @@ export function MentionComposer(props: {
         onFocusQuestion={() => textareaRef.current?.focus()}
       />
     ) : null;
-  // A chat's "+": attach a page, or start or remove a poll.
+  // A chat's "+": add files, attach a page, or start or remove a poll.
   const addItems: MenuItem[] = [
+    ...(props.onAddFiles
+      ? [
+          {
+            id: "add-files",
+            label: "Add files",
+            icon: <Paperclip size={14} aria-hidden />,
+            testId: `${props.testIdPrefix}-add-files`,
+            onSelect: () => addFiles(),
+          },
+        ]
+      : []),
     ...(hasFiles
       ? [
           {
@@ -800,16 +878,32 @@ export function MentionComposer(props: {
       data-expanded={isPost ? expanded : undefined}
       className={
         isPost
-          ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
+          ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 data-dropping:border-accent! ${
               expanded
                 ? "border-line px-4 pb-2 pt-3"
                 : "border-line px-3 py-2 hover:border-muted/50"
             }`
-          : `relative flex shrink-0 flex-col overflow-hidden rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
+          : `relative flex shrink-0 flex-col overflow-hidden rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 data-dropping:border-accent! ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
+      data-dropping={dropping || undefined}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
       onSubmit={(event) => {
         event.preventDefault();
-        props.onSend();
+        if (adding === 0) sendNow();
+      }}
+      onDragEnter={acceptFileDrag}
+      onDragOver={acceptFileDrag}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropping(false);
+      }}
+      onDrop={(event) => {
+        setDropping(false);
+        const files = Array.from(event.dataTransfer.files);
+        if (!props.onAddFiles || files.length === 0) return;
+        event.preventDefault();
+        addFiles(files);
       }}
     >
       {!isPost && props.above ? <div ref={aboveRef}>{props.above}</div> : null}
@@ -1074,6 +1168,13 @@ export function MentionComposer(props: {
           setHighlight(0);
           props.onChange(nextValue);
         }}
+        onPaste={(event) => {
+          const files = Array.from(event.clipboardData.files);
+          if (!props.onAddFiles || files.length === 0) return;
+          if (event.clipboardData.getData("text/plain") !== "") return;
+          event.preventDefault();
+          addFiles(files);
+        }}
         onKeyDown={onKeyDown}
         onKeyUp={syncCaret}
         onClick={() => {
@@ -1086,7 +1187,6 @@ export function MentionComposer(props: {
           fileRequest.current += 1;
           setMenuOpen(false);
           setFileStage(null);
-          setFocused(false);
         }}
         className={
           isPost
@@ -1102,6 +1202,16 @@ export function MentionComposer(props: {
             : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
         }
       />
+      {adding > 0 ? (
+        <div
+          role="status"
+          data-testid={`${props.testIdPrefix}-adding-files`}
+          className={`flex items-center gap-1.5 text-[12px] text-muted ${isPost ? "pt-1" : "px-3 pt-1"}`}
+        >
+          <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
+          Adding files
+        </div>
+      ) : null}
       {!isPost || expanded ? pollBlock : null}
       {isPost ? (
         expanded ? (
@@ -1138,6 +1248,19 @@ export function MentionComposer(props: {
               >
                 <FileText size={14} strokeWidth={1.9} aria-hidden />
                 <span className="@max-[29rem]/composer:hidden">File</span>
+              </button>
+            ) : null}
+            {props.onAddFiles ? (
+              <button
+                type="button"
+                data-testid={`${props.testIdPrefix}-add-files`}
+                aria-label="Add files"
+                title="Add files"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => addFiles()}
+                className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
+              >
+                <Paperclip size={14} strokeWidth={1.9} aria-hidden />
               </button>
             ) : null}
             {pollButton}

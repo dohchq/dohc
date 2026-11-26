@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { channelFileCandidates } from "./chatFileMentionScope";
+import { channelFileCandidates, channelFileFolder } from "./chatFileMentionScope";
 
 const files = [
   { path: "team/plan.md", label: "plan" },
@@ -39,5 +39,23 @@ describe("channelFileCandidates", () => {
     expect(channelFileCandidates(files, group, { mountLabel: null })).toEqual([]);
     const noFolder = { fileLinks: { kind: "shared" as const, shares: [[]] } };
     expect(channelFileCandidates(files, noFolder, { mountLabel: "ana" })).toEqual([]);
+  });
+});
+
+describe("channelFileFolder", () => {
+  it("saves a Group's files in its folder, and an agent's chat's at the root", () => {
+    expect(channelFileFolder({ kind: "channel", folderPath: "team", ...group }, false)).toBe(
+      "team",
+    );
+    expect(channelFileFolder({ kind: "agent", fileLinks: { kind: "any" } }, false)).toBe("");
+  });
+
+  it("saves no file where the chat's readers could not open it", () => {
+    expect(channelFileFolder(null, false)).toBeNull();
+    expect(channelFileFolder({ kind: "dm" }, false)).toBeNull();
+    expect(channelFileFolder({ kind: "channel", fileLinks: { kind: "none" } }, false)).toBeNull();
+    expect(channelFileFolder({ kind: "channel", folderPath: "team", ...group }, true)).toBeNull();
+    expect(channelFileFolder({ kind: "channel", folderPath: "docs", ...group }, false)).toBeNull();
+    expect(channelFileFolder({ kind: "channel", ...group }, false)).toBeNull();
   });
 });

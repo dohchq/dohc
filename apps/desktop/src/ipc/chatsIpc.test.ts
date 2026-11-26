@@ -270,7 +270,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       },
     }) as unknown as DesktopLinkedChatStore);
   const captureMethods = {
-    fileObjectIdForPath: vi.fn(async () => "object" as string | null),
+    fileObjectIdForPath: vi.fn(async (_path: string) => "object" as string | null),
+    captureUnreported: vi.fn(async () => {}),
     resolveFileForPath: vi.fn<WorkspaceEngineCapture["resolveFileForPath"]>(async () => ({
       objectId: "object",
       path: "notes/a.md",
@@ -935,6 +936,33 @@ describe("registered chat writes", () => {
     });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
     expect(test.scanChatDispatch).toHaveBeenCalledWith("workspace");
+  });
+
+  it("captures a file saved just before Send that the watcher has not reported", async () => {
+    const test = fixture();
+    let onDisk = false;
+    test.captureMethods.captureUnreported.mockImplementation(async () => {
+      onDisk = true;
+    });
+    test.captureMethods.fileObjectIdForPath.mockImplementation(async (path: string) =>
+      path === "team/image.png" && !onDisk ? null : "object",
+    );
+    await test.invoke(chatOperations.sendChatMessage.channel, {
+      workspaceId: "workspace",
+      threadId: "thread",
+      body: "Look",
+      fileReferences: [{ path: "notes/a.md" }, { path: "team/image.png" }, { path: "b.pdf" }],
+    });
+    expect(test.captureMethods.captureUnreported).toHaveBeenCalledTimes(1);
+    expect(test.storeMethods.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [
+          { objectId: "object", pathHint: "notes/a.md" },
+          { objectId: "object", pathHint: "team/image.png" },
+          { objectId: "object", pathHint: "b.pdf" },
+        ],
+      }),
+    );
   });
 
   it("says when Restricted Mode holds the agent a sent message asks, and answers a failed trust read with the saved message", async () => {

@@ -1410,6 +1410,7 @@ export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload
 // re-checks. Bounded like the text write path so a huge paste can't stream
 // unbounded bytes through IPC.
 export const WRITE_ASSET_MAX_BYTES = 20 * 1024 * 1024;
+export const CHAT_FILE_REFERENCES_MAX = 20;
 const WORKSPACE_ASSET_BYTES = z.custom<Uint8Array>(
   (value) =>
     value instanceof Uint8Array &&
@@ -2883,7 +2884,7 @@ export const SendChatMessagePayload = z.object({
   needsDecision: z.boolean().optional(),
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
-  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  fileReferences: z.array(ChatFileReferenceInput).max(CHAT_FILE_REFERENCES_MAX).optional(),
   // The question or poll this message answers, and the choice it picks.
   resolves: z
     .object({
@@ -3297,7 +3298,7 @@ export const StartChannelThreadPayload = z.object({
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
   lane: z.enum(["posts", "chat"]).optional(),
-  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  fileReferences: z.array(ChatFileReferenceInput).max(CHAT_FILE_REFERENCES_MAX).optional(),
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
 

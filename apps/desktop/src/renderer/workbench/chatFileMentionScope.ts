@@ -27,3 +27,16 @@ export function channelFileCandidates(
     return chatFileLinkCovers(scope, path) ? [{ ...file, path, readPath: file.path }] : [];
   });
 }
+
+export function channelFileFolder(
+  channel: Pick<ChatChannelRecord, "kind" | "folderPath" | "fileLinks"> | null,
+  joined: boolean,
+): string | null {
+  if (!channel || joined || channel.kind === "dm") return null;
+  const scope = channel.fileLinks;
+  const folder = channel.folderPath ?? "";
+  if (scope?.kind === "none") return null;
+  const fileInFolder = folder === "" ? "file" : `${folder}/file`;
+  if (scope?.kind === "shared" && !chatFileLinkCovers(scope, fileInFolder)) return null;
+  return folder;
+}

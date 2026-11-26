@@ -15,12 +15,16 @@ import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import type { Root as HastRoot } from "hast";
 import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx-runtime";
 import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
 import { highlightCodeTree, type HighlightHastNode } from "../editor/codeHighlight";
 import { normalizeLanguage } from "../editor/pmHelpers";
 import { stripMarkdown } from "../markdown/stripMarkdown";
+import { assetUrl } from "../editor/imageSrc";
+import { basenameOf } from "../path";
 import { CopyButton } from "../ui/CopyButton";
+import { useShownWorkspaceId } from "../workspace/workspaceSession";
 import { Ref } from "../ui/Ref";
 import { WorkRef } from "./workReferences";
 import {
@@ -63,15 +67,66 @@ function ChipView(props: { index: number; children?: ReactNode }) {
   if (chip.kind === "work")
     return <WorkRef reference={chip.reference} interactive={!inLink} testId={scope.testId} />;
   const onOpenPath = inLink ? undefined : scope.onOpenPath;
-  return (
+  const onOpen = onOpenPath
+    ? () => onOpenPath(chip.target.path, chip.target.headingAnchor)
+    : undefined;
+  const ref = (
     <Ref
       path={chip.path}
       heading={chip.heading}
       testId={scope.testId ? `${scope.testId}-file-mention` : undefined}
-      onOpen={
-        onOpenPath ? () => onOpenPath(chip.target.path, chip.target.headingAnchor) : undefined
-      }
+      onOpen={onOpen}
     />
+  );
+  return !chip.heading && fileKindForPath(chip.target.path).displayKind === "image" ? (
+    <ChatImage path={chip.target.path} onOpen={onOpen} testId={scope.testId} fallback={ref} />
+  ) : (
+    ref
+  );
+}
+
+function ChatImage(props: {
+  path: string;
+  onOpen?: () => void;
+  testId?: string;
+  fallback: ReactNode;
+}) {
+  const workspaceId = useShownWorkspaceId();
+  const [failed, setFailed] = useState<string | null>(null);
+  const src = workspaceId ? assetUrl(workspaceId, props.path) : null;
+  if (!src || failed === src) return props.fallback;
+  const name = basenameOf(props.path);
+  const picture = (
+    <img
+      src={src}
+      alt={name}
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+      onError={() => setFailed(src)}
+      className="max-h-full max-w-full rounded-md border border-line object-contain"
+    />
+  );
+  const frame = "my-1 flex h-48 max-w-full items-start";
+  return props.onOpen ? (
+    <button
+      type="button"
+      title={props.path}
+      aria-label={`Open ${name}`}
+      data-testid={props.testId ? `${props.testId}-image` : undefined}
+      onClick={props.onOpen}
+      className={`${frame} cursor-zoom-in`}
+    >
+      {picture}
+    </button>
+  ) : (
+    <span
+      title={props.path}
+      data-testid={props.testId ? `${props.testId}-image` : undefined}
+      className={frame}
+    >
+      {picture}
+    </span>
   );
 }
 
