@@ -228,7 +228,8 @@ fn finish_note(
     let refused = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
          replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
          AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
-         AND r.origin_seq=k.origin_seq AND k.rowid IN (SELECT value FROM json_each(?1))";
+         AND r.origin_seq=k.origin_seq AND r.reason_message<>'markdown-write-held' \
+         AND k.rowid IN (SELECT value FROM json_each(?1))";
     let note = claims
         .iter()
         .flat_map(|(_, _, kept)| kept.iter().map(|(rowid, _)| rowid))
