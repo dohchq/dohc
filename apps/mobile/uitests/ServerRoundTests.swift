@@ -208,7 +208,6 @@ final class ServerRoundTests: XCTestCase {
     let app = XCUIApplication()
     app.launch()
     tab(app, "Chats")
-    // Each tab's header has Settings, and the tabs out of sight keep theirs.
     let settings = app.buttons.matching(NSPredicate(format: "label == %@", "Settings"))
     XCTAssertTrue(settings.firstMatch.waitForExistence(timeout: 30), "Chats should show Settings")
     let shown = settings.allElementsBoundByIndex.first { $0.isHittable }

@@ -5,7 +5,6 @@ import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
 import { useSignIn } from "./AccountProvider";
 
-// Your mark, at the right of each tab's header, as in Slack. It opens Settings.
 export function SettingsButton() {
   const theme = useTheme();
   const router = useRouter();
