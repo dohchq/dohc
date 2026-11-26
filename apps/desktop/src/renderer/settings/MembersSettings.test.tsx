@@ -11,6 +11,8 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
+import type { ReactNode } from "react";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { LEVEL_WORDS, MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (
@@ -97,6 +99,10 @@ const bridge = {
       view: ownerView(),
     }),
   ),
+  listWorkspaceFiles: vi.fn(async () => ({
+    files: [{ path: "Design/Research/notes.md" }, { path: ".dohc/state.json" }],
+    folders: ["Drafts"],
+  })),
 };
 
 function renderMembers(overrides: Partial<Parameters<typeof MembersSettings>[0]> = {}) {
@@ -109,7 +115,10 @@ function renderMembers(overrides: Partial<Parameters<typeof MembersSettings>[0]>
     onClearError: vi.fn(),
     ...overrides,
   };
-  const view = render(<MembersSettings {...props} />);
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>
+  );
+  const view = render(<MembersSettings {...props} />, { wrapper });
   return {
     props,
     view,
@@ -172,10 +181,31 @@ describe("Folder access", () => {
     const access = within(await section());
     await user.click(access.getByRole("button", { name: "Add" }));
     const dialog = within(screen.getByRole("dialog", { name: "Add folder access" }));
-    await user.type(dialog.getByLabelText("Folder path"), "Design/Research");
-    await user.selectOptions(dialog.getByLabelText("Member level"), "edit");
+    // The folder list offers the workspace's folders, not dohc's own.
+    await user.type(dialog.getByLabelText("Folder path"), "res");
+    const folders = within(await dialog.findByRole("listbox", { name: "Folders" }));
+    expect(folders.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Design/Research",
+    ]);
+    await user.click(folders.getByRole("option", { name: "Design/Research" }));
+    expect((dialog.getByLabelText("Folder path") as HTMLInputElement).value).toBe(
+      "Design/Research",
+    );
+    await user.click(
+      within(dialog.getByRole("radiogroup", { name: "Member level" })).getByRole("radio", {
+        name: "Edit",
+      }),
+    );
     await user.click(dialog.getByRole("button", { name: "Add person" }));
-    await user.type(dialog.getByLabelText("Email address"), "bo@test");
+    // People offers members by name, and leaves out the owner and admins.
+    await user.keyboard("{ArrowDown}");
+    const people = within(dialog.getByRole("listbox", { name: "People" }));
+    expect(people.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Bobo@test",
+      "cy@test",
+    ]);
+    await user.keyboard("{Enter}");
+    expect((dialog.getByLabelText("Email address") as HTMLInputElement).value).toBe("bo@test");
     await user.click(dialog.getByRole("button", { name: "Save" }));
     expect(await access.findByText("Design/Research")).toBeTruthy();
     expect(access.getByText("Covered")).toBeTruthy();
@@ -188,7 +218,11 @@ describe("Folder access", () => {
 
     await user.click(access.getByRole("button", { name: "Change" }));
     const change = within(screen.getByRole("dialog", { name: "Change folder access" }));
-    await user.selectOptions(change.getByLabelText("Member level"), "none");
+    await user.click(
+      within(change.getByRole("radiogroup", { name: "Member level" })).getByRole("radio", {
+        name: "None",
+      }),
+    );
     await user.click(change.getByRole("button", { name: "Save" }));
     const confirm = within(screen.getByRole("dialog", { name: "Limit access to this folder?" }));
     expect(confirm.getByText("Copies already on people's computers stay.")).toBeTruthy();
