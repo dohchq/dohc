@@ -3832,6 +3832,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("merge_bases_bidirectional.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 115,
+        id: "v2-kept-format-two-replay",
+        sql: include_str!("kept_format_two_replay.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -6091,6 +6097,10 @@ mod tests {
             (
                 "v2-merge-bases-bidirectional",
                 "72a93ceffe4dc0030240dc969356f91c6001884671531c1b003852eb93033ce9",
+            ),
+            (
+                "v2-kept-format-two-replay",
+                "5295c22c23a75e6b746d091503e8f268b067794ea8cab93a5dd17385b8ea50cd",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

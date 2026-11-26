@@ -1343,8 +1343,20 @@ fn worker_main(
     if matches!(mode, ActorOpenMode::ReadWrite) {
         close_stranded_owner_bindings(&mut store, now_ms);
     }
+    // The writer thread's cache of live Y.Docs serves the replay-parity gate
+    // base on the local append path only. It lives and dies with this thread,
+    // exactly the single-writer scope its validity proof (`doc_cache.rs`,
+    // CACHE-VALID) assumes.
+    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
         replay_retained_owner_private(&mut store);
+        if let Err(error) = dohc_engine_sync::replay_kept_format_two(
+            &mut store,
+            &mut doc_cache,
+            &dohc_engine_storage::NoFaults,
+        ) {
+            eprintln!("engine: kept format-2 notes stay kept: {error}");
+        }
     }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the
@@ -1374,11 +1386,6 @@ fn worker_main(
     // batch per idle slot.
     let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
-    // The writer thread's cache of live Y.Docs serves the replay-parity gate
-    // base on the local append path only. It lives and dies with this thread,
-    // exactly the single-writer scope its validity proof (`doc_cache.rs`,
-    // CACHE-VALID) assumes.
-    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     let mut live_applications = live_application::Registry::default();
 
     // Blocking recv on the tokio channel keeps the SQLite work on this
