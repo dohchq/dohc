@@ -968,16 +968,14 @@ describe("SitePreviewPage", () => {
       })),
       onAppViewEvent: vi.fn(() => () => undefined),
       publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
-      getSitePackage: vi.fn(
-        async (): Promise<SitePackageInfo> => ({
-          ...site,
-          root: "workouts",
-          title: "Workouts",
-          entryPath: "workouts/index.html",
-          sourceFiles: ["workouts/index.html", "workouts/app.publish.json"],
-          shareManifest: noRunnableArtifact,
-        }),
-      ),
+      getSitePackage: vi.fn(async (): Promise<SitePackageInfo> => ({
+        ...site,
+        root: "workouts",
+        title: "Workouts",
+        entryPath: "workouts/index.html",
+        sourceFiles: ["workouts/index.html", "workouts/app.publish.json"],
+        shareManifest: noRunnableArtifact,
+      })),
     };
     vi.stubGlobal("dohcDesktop", appViewBridge);
     const onShareSite = vi.fn();
