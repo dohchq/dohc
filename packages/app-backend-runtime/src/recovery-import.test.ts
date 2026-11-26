@@ -953,3 +953,25 @@ it("keeps who approved each revision's rules through export and recovery install
     await valid.dispose();
   }
 });
+
+it("keeps reading a checkpoint while the Owner confirms who approved it", async () => {
+  const f = await fixture();
+  const migrated = await f.migrate();
+  recordDatasetApprover(f.db, f.scope, migrated.approvedRevisionHash, {
+    userId: "ana",
+    role: "admin",
+    approvedAtMs: 1,
+  });
+  const [record] = f.journal
+    .exportPage({ scope: f.scope, through: f.head(), afterRevision: -1, authorize: f.authorize })
+    .filter((item) => item.kind === "checkpoint" && item.cursor.revision === migrated.revision);
+  recordDatasetApprover(f.db, f.scope, migrated.approvedRevisionHash, {
+    userId: "owner",
+    role: "owner",
+    approvedAtMs: 2,
+  });
+  expect(
+    f.journal.exportBlob({ scope: f.scope, record: record!, offset: 0, authorize: f.authorize })
+      .byteLength,
+  ).toBeGreaterThan(0);
+});

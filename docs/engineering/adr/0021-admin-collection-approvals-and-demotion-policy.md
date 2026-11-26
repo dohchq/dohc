@@ -6,7 +6,7 @@ status: accepted
 
 A team workspace needs more than one person who can create a transactional Collection or change its rules. [ADR 0020](0020-collection-workspace-defaults-live-on-the-server.md) let Admins manage grants and defaults on Collections the Owner approved, but only the Owner could approve `schema.sql`, `operations.ts`, and migrations. This ADR lets an active Admin approve them too, on Collections the relay hosts.
 
-An Admin approves as themselves. The dataset host takes a governance authority, separate from the data authority that operations run under. An Owner's governance authority is their owner authority. An Admin's names their member entry, member grant, and that grant's generation. The host records this authority when an approval starts and checks it again inside the commit's transaction. An Admin who is demoted, removed, or fenced between preparing a migration and approving it fails at commit. Governance authority never reaches data, invoke, or app paths, so an Admin who approves rules gains no new data access.
+An Admin approves as themselves. The dataset host takes a governance authority, separate from the data authority that operations run under. An Owner's governance authority is their owner authority. An Admin's names their member entry, member grant, and that grant's generation. The host records this authority when an approval starts and checks it again inside the commit's transaction. An Admin who is demoted, removed, or fenced between preparing a migration and approving it fails at commit. Governance authority never reaches invoke or app paths: an Admin still runs operations under their own grants and defaults. Approving rules is still a trust in the Collection's data. A migration's SQL and its preview read and change every row, and the operations an Admin approves decide what every caller can do. Make someone an Admin only if you trust them with every Collection the server hosts.
 
 Admins can create and activate a Collection, read its approved artifacts, and prepare, preview, approve, and discard a migration. Deletion, raw SQL, recovery import and export, bulk changes, archive and restore, and approvals for secrets and outside calls stay with the Owner.
 
@@ -24,5 +24,5 @@ When an Admin who approved the live revision stops being one, the Collection kee
 ## Consequences
 
 - An approval always names a real person and role. A deleted account shows as "a former Admin".
-- Demoting an Admin takes effect at the next commit check, including approvals already running.
+- Demoting an Admin takes effect at the next commit check, including approvals already running. A preview lasts ten minutes. Someone promoted back to Admin inside that time can still approve the preview they prepared, because they hold the role again when it commits.
 - Confirming an approval changes no rules and invalidates no app bindings.

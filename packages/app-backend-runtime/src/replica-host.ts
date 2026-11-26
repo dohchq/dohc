@@ -4,6 +4,7 @@ import type {
   DatasetScope,
   JournalExportRecord,
 } from "./journal.js";
+import { sameJournalRecord } from "./journal.js";
 import {
   equalRecoveryCursor,
   parseRecoveryCursor,
@@ -86,8 +87,10 @@ export function createDatasetReplicaHost<Context>(options: {
       });
       if (
         !record ||
-        JSON.stringify(parseRecoveryJournalRecord(record)) !==
-          JSON.stringify(parseRecoveryJournalRecord(input.record))
+        !sameJournalRecord(
+          parseRecoveryJournalRecord(record),
+          parseRecoveryJournalRecord(input.record),
+        )
       )
         throw Error("The Collection record changed.");
       const bytes = options.journal.exportBlob({

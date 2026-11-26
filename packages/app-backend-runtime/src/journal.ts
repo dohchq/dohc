@@ -126,6 +126,13 @@ export function recordDatasetApprover(
     approver.approvedAtMs,
   );
 }
+/** Whether two exports name the same record. Who approved a revision can change while it is read. */
+export function sameJournalRecord(a: JournalExportRecord, b: JournalExportRecord): boolean {
+  return (
+    JSON.stringify({ ...a, approvedBy: undefined }) ===
+    JSON.stringify({ ...b, approvedBy: undefined })
+  );
+}
 export interface JournalOptions {
   db: JournalDb;
   /** Must run the synchronous callback inside the host's authoritative transaction. */
@@ -1166,7 +1173,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(() => {
         callback(input.authorize);
         const current = exportRecord(key, revision);
-        if (JSON.stringify(current) !== JSON.stringify(record))
+        if (!sameJournalRecord(current, record))
           return corrupt("The Collection changed during export. Try again.");
         const checkpoint =
           record.kind === "checkpoint"
