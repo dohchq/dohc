@@ -10,3 +10,19 @@ export function msSinceStartup(): number | null {
     ?.startTime;
   return typeof start === "number" ? performance.now() - start : null;
 }
+
+export type LaunchStep = "keychain" | "databases" | "chosen" | "chats";
+
+export function createLaunchTimings(since: () => number | null = msSinceStartup) {
+  const marks = new Map<LaunchStep, { readonly ms: number; readonly from?: string }>();
+  return {
+    mark(step: LaunchStep, from?: string) {
+      const ms = since();
+      if (ms !== null && !marks.has(step)) marks.set(step, { ms: Math.round(ms), from });
+    },
+    marks: (): ReadonlyMap<LaunchStep, { readonly ms: number; readonly from?: string }> => marks,
+  };
+}
+
+export const launchTimings =
+  process.env.EXPO_PUBLIC_DOHC_TIMINGS === "1" ? createLaunchTimings() : null;

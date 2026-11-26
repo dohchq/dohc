@@ -46,6 +46,14 @@ export class ChatWakeAnswerError extends Error {
   }
 }
 
+/** The relay refused the body: from an older relay, a declaration with a field it doesn't know, or past its size limit. */
+class ChatWakeBadRequestError extends Error {
+  constructor() {
+    super("The server refused this computer's runner declaration.");
+    this.name = "ChatWakeBadRequestError";
+  }
+}
+
 export interface ChatWakePageAnswer {
   cursor: number;
   wakes: WaitingChatWake[];
@@ -76,14 +84,18 @@ export function createChatWakeClient(input: {
   timeout?: (ms: number) => AbortSignal;
 }): ChatWakeClient {
   const timeout = input.timeout ?? ((ms: number) => AbortSignal.timeout(ms));
-  const request = async (path: string, init: RequestInit, label: string): Promise<unknown> => {
-    const response = await relayRequest({
-      relay: input.relay,
-      path,
-      init,
-      errors: { 404: () => new ChatWakeMissingError(), 503: () => new ChatWakeBusyError() },
-      label,
-    });
+  const request = async (
+    path: string,
+    init: RequestInit,
+    label: string,
+    badRequest?: () => Error,
+  ): Promise<unknown> => {
+    const errors: Record<number, () => Error> = {
+      404: () => new ChatWakeMissingError(),
+      503: () => new ChatWakeBusyError(),
+    };
+    if (badRequest) errors[400] = errors[413] = badRequest;
+    const response = await relayRequest({ relay: input.relay, path, init, errors, label });
     try {
       return await response.json();
     } catch (error) {
@@ -108,18 +120,29 @@ export function createChatWakeClient(input: {
 
   return {
     async replaceRunners(workspaceId, declaration, signal) {
-      const answer = ChatRunnersReply.safeParse(
-        await request(
+      const put = (body: ChatRunnerDeclaration) =>
+        request(
           `/sync/workspaces/${encodeURIComponent(workspaceId)}/runners`,
           {
             method: "PUT",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify(declaration),
+            body: JSON.stringify(body),
             signal: AbortSignal.any([signal, timeout(CHAT_WAKE_MUTATION_MS)]),
           },
           "Runner declaration",
-        ),
-      );
+          () => new ChatWakeBadRequestError(),
+        );
+      let reply: unknown;
+      try {
+        reply = await put(declaration);
+      } catch (error) {
+        if (!(error instanceof ChatWakeBadRequestError) || declaration.agents === undefined)
+          throw error;
+        // An older relay takes only the wake roster.
+        const { agents: _agents, ...runners } = declaration;
+        reply = await put(runners);
+      }
+      const answer = ChatRunnersReply.safeParse(reply);
       if (
         !answer.success ||
         answer.data.workspaceId !== workspaceId ||

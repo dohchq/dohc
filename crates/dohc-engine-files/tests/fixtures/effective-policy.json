@@ -1274,6 +1274,47 @@
       }
     },
     {
+      "name": "secret-floor-dotted-env-folder-template",
+      "path": ".env./.env.sample",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": ".env./.env.sample",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "secret"
+      }
+    },
+    {
       "name": "blanket-then-directory-rule",
       "path": "docs/guide.md",
       "filesPolicy": [

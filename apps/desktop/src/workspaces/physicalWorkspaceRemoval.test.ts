@@ -8,7 +8,7 @@ import { createWorkspaceTrust } from "./workspaceTrust";
 
 function harness(
   registeredInitially = true,
-  confirmDraftRemoval?: (workspaceId: string) => Promise<boolean>,
+  confirmRemoval?: (workspaceId: string) => Promise<boolean>,
 ) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace",
@@ -26,6 +26,7 @@ function harness(
     registered = null;
   });
   const removeDrafts = vi.fn(async (_workspaceId: string) => {});
+  const removeSecrets = vi.fn(async (_workspaceId: string) => {});
   const onError = vi.fn();
   const clearNotices = vi.fn();
   const notifyRenderer = vi.fn();
@@ -34,8 +35,9 @@ function harness(
     findWorkspace: () => registered,
     removeWorkspace,
     removeDrafts,
+    removeSecrets,
     onError,
-    confirmDraftRemoval,
+    confirmRemoval,
   });
   const files = new Map<string, string>();
   const writeText = vi.fn(async (file: string, text: string) => {
@@ -69,6 +71,7 @@ function harness(
     forget,
     removeWorkspace,
     removeDrafts,
+    removeSecrets,
     onError,
     trust,
     restrict,
@@ -120,7 +123,24 @@ it("still rejects registry removal failures and does not report them as draft cl
   expect(h.notifyRenderer).not.toHaveBeenCalled();
 });
 
-it("takes a failed join's entry out of the list without asking, and keeps its typing", async () => {
+it("deletes a forgotten workspace's saved secrets only once its row is gone, and reports a failed delete", async () => {
+  const h = harness();
+  const refused = new Error("registry removal refused");
+  h.removeWorkspace.mockImplementationOnce(() => {
+    throw refused;
+  });
+  await expect(h.forget(h.workspace.workspaceId)).rejects.toBe(refused);
+  expect(h.removeSecrets).not.toHaveBeenCalled();
+
+  const busy = new Error("vault is busy");
+  h.removeSecrets.mockRejectedValueOnce(busy);
+  await h.forget(h.workspace.workspaceId);
+  expect(h.current()).toBeNull();
+  expect(h.removeSecrets).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId);
+  expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, busy);
+});
+
+it("takes a failed join's entry out of the list without asking, and keeps its typing and secrets", async () => {
   const confirm = vi.fn(async () => false);
   const h = harness(false, confirm);
   const joinError = new Error("join failed");
@@ -135,7 +155,7 @@ it("takes a failed join's entry out of the list without asking, and keeps its ty
         rollback: () => h.setRegistered(null),
       }),
     remove: async (binding, cleanup) => {
-      await h.remove(binding, cleanup, undefined, { keepDrafts: true });
+      await h.remove(binding, cleanup, undefined, { keepLocalData: true });
     },
     release: (reservation, finalize) => h.owner.releaseReservation(reservation, finalize),
     closeRelay: vi.fn(async () => {}),
@@ -159,6 +179,7 @@ it("takes a failed join's entry out of the list without asking, and keeps its ty
   expect(h.owner.workspaceIds()).toEqual([]);
   expect(confirm).not.toHaveBeenCalled();
   expect(h.removeDrafts).not.toHaveBeenCalled();
+  expect(h.removeSecrets).not.toHaveBeenCalled();
   expect(h.notifyRenderer).toHaveBeenCalledOnce();
   expect(logError).toHaveBeenCalledOnce();
   expect(logError.mock.calls[0]?.[1]).toBe(joinError);

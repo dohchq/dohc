@@ -114,6 +114,15 @@ export interface StepBackend {
   collectionsOf(step: StoredStep): StoredRun["collections"];
   /** The record the Add record step at `ordinal` added, from what the run recorded. */
   added(run: StoredRun, ordinal: number): RunRef | null;
+  /**
+   * Whether the owner allowed the web request at `ordinal` with the code
+   * files as they are now, `file` being the bytes `sha256` names.
+   */
+  fetchAllowed?(
+    ordinal: number,
+    file: string,
+    sha256: string,
+  ): Promise<"approved" | "unapproved" | "unavailable">;
   /** Lands one effect and says what it did, or how the run ends instead. */
   apply(
     run: StoredRun,
@@ -121,7 +130,13 @@ export interface StepBackend {
     place: { index: number; ordinal: number; part: number; mode: EffectMode; recorded?: boolean },
     chat: ChatDirectory | null,
   ): Promise<
-    RunWrite[] | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
+    | RunWrite[]
+    | {
+        writes: RunWrite[];
+        response: JsonValue;
+        code: Array<{ file: string; sha256: string }>;
+      }
+    | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
   >;
 }
 
@@ -414,6 +429,19 @@ async function walkSteps(
       if (typeof read !== "string") return { outcome: failed(read.problem) };
       source = read;
       codeFileSha256 = createHash("sha256").update(read).digest("hex");
+      const changed = run.applied.filter((applied) =>
+        applied.code?.some((code) => code.file === step.file && code.sha256 !== codeFileSha256),
+      );
+      for (const fetch of changed) {
+        const allowed = await backend.fetchAllowed?.(fetch.ordinal, step.file, codeFileSha256);
+        if (allowed === "approved") continue;
+        if (allowed === "unapproved") return { outcome: { kind: "wait", reason: "held" } };
+        return {
+          outcome: failed(
+            `Code file "${step.file}" changed after you allowed this run's web request, so step ${ordinal + 1} did not run.`,
+          ),
+        };
+      }
     }
     enter("planMs");
     const names = namesUsed(step);
@@ -589,6 +617,7 @@ async function walkSteps(
             ? "may-have-landed"
             : "resumed";
       let writes: RunWrite[];
+      let fetched: Pick<StoredRun["applied"][number], "response" | "code"> | null = null;
       const writeStarted = dependencies.nowMs();
       try {
         dependencies.beforeEffect?.(run, effect);
@@ -605,10 +634,16 @@ async function walkSteps(
           }
           return applied.outcome;
         }
+        const appliedWrites = Array.isArray(applied) ? applied : applied.writes;
+        if (!Array.isArray(applied))
+          fetched = {
+            response: applied.response,
+            ...(applied.code.length > 0 ? { code: applied.code } : {}),
+          };
         writes =
           receipt === null
-            ? applied
-            : [...receipt.writes.filter((write) => !engineWrite(write)), ...applied];
+            ? appliedWrites
+            : [...receipt.writes.filter((write) => !engineWrite(write)), ...appliedWrites];
       } catch (error) {
         if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
@@ -622,6 +657,7 @@ async function walkSteps(
         writes,
         writeMs: Math.max(0, dependencies.nowMs() - writeStarted),
         writeCount: 1,
+        ...fetched,
       };
       const appendStarted = dependencies.nowMs();
       if (recorded) {
@@ -744,6 +780,10 @@ async function walkSteps(
       } else if (entry.step.kind === "run" || entry.step.kind === "run-file") {
         if (output?.kind !== "code") return end(failed(UNREADABLE_RUN_ERROR));
         done.set(as, { kind: "code", value: output.value });
+      } else if (entry.step.kind === "http") {
+        const fetched = run.applied.find((applied) => applied.ordinal === ordinal);
+        if (fetched?.response === undefined) return end(failed(UNREADABLE_RUN_ERROR));
+        done.set(as, { kind: "code", value: fetched.response });
       }
     }
     return null;

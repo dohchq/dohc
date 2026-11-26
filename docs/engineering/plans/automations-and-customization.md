@@ -157,7 +157,7 @@ Items 5 to 12 can run in parallel once item 3 lands. The app experience work run
 
 ## After launch
 
-- Outgoing webhooks, with a sealed store for outside secrets.
+- Outgoing webhooks, with a sealed store for outside secrets. Shipped: an `http` step sends `POST` webhooks and, with `as`, fetches JSON with `GET` or `POST` for later steps to write into records. See [security boundaries](../security-boundaries.md#automation-http-steps). Still to come: pagination and a no-code way to upsert rows from an array.
 - Incoming webhooks through the dohc server, with a security review. A workspace with no server connection cannot receive them.
 - Personal steps in shared Collections.
 - System pop-ups, email, and phone alerts for notices.

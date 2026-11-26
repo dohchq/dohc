@@ -245,7 +245,22 @@ pub fn segments_are_secret<S: AsRef<str>>(segments: &[S]) -> bool {
     let basename = segments.last().map(AsRef::as_ref).unwrap_or_default();
     segments.iter().any(|segment| segment.as_ref() == ".env")
         || basename.ends_with(".env")
-        || basename.starts_with(".env.")
+        || (basename.starts_with(".env.") && !ENV_TEMPLATE_NAMES.contains(&basename))
+}
+
+const ENV_TEMPLATE_NAMES: [&str; 3] = [".env.example", ".env.template", ".env.sample"];
+
+/// Whether `path`'s basename, folded like the write floor folds it, is an env
+/// template name such as `.env.example`, whatever its folders.
+pub fn has_env_template_basename(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or_default();
+    ENV_TEMPLATE_NAMES.contains(&strip_windows_alias_suffix(basename).to_lowercase().as_str())
+}
+
+/// Whether `path` is an env template such as `.env.example`, which older
+/// builds kept as a protected file and which is now an ordinary file.
+pub fn names_env_template(path: &str) -> bool {
+    has_env_template_basename(path) && !normalized_path_is_secret(path)
 }
 
 fn classify_normalized_secret(path: &str) -> PathClassification {
@@ -294,14 +309,42 @@ mod tests {
                 ".env.production",
                 "apps/site/.env.development",
                 "config/.ENV.LOCAL",
-                ".env.example",
+                ".env.example.local",
+                ".env/.env.example",
                 "secrets/.env",
             ],
         );
         assert_cases(
             PathClassification::Tracked,
-            &["notes/envelope.md", "environments.md"],
+            &[
+                "notes/envelope.md",
+                "environments.md",
+                ".env.example",
+                "apps/site/.ENV.Template",
+                "config/.env.sample",
+                ".env.example ",
+                ".env.sample.",
+            ],
         );
+    }
+
+    #[test]
+    fn env_templates_are_named_only_outside_the_secret_family() {
+        for path in [
+            ".env.example",
+            "apps/site/.ENV.Template",
+            "config/.env.sample ",
+        ] {
+            assert!(names_env_template(path), "{path}");
+        }
+        for path in [
+            ".env",
+            ".env.local",
+            ".env/.env.example",
+            "notes/example.md",
+        ] {
+            assert!(!names_env_template(path), "{path}");
+        }
     }
 
     #[test]

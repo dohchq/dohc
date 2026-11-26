@@ -54,11 +54,14 @@ function setup(...lists: Answer[]) {
   const list = createWorkspaceList(signIn);
   const cache = createReadCache();
   const switched: ((workspaceId: string | null) => void)[] = [];
+  const listReads = () => server.paths().filter((path) => path === "GET /sync/account/workspaces");
+  const gone: [string, number][] = [];
   const open = createOpenWorkspace({
     signIn,
     list,
     cache,
     beforeSwitch: (workspaceId) => switched.forEach((hear) => hear(workspaceId)),
+    onGone: (workspaceId) => gone.push([workspaceId, listReads().length]),
   });
   open.subscribe(() => {});
   open.resume();
@@ -71,6 +74,7 @@ function setup(...lists: Answer[]) {
     open,
     gap,
     switched,
+    gone,
     list,
     scope: (workspaceId: string) => cacheScope(signIn, workspaceId),
   };
@@ -148,6 +152,7 @@ describe("a 404 for a workspace the list still shows", () => {
       ).toHaveLength(2),
     );
     await vi.waitFor(() => expect(context.open.state().data).toBe(a));
+    expect(context.gone).toEqual([["ws-a", 1]]);
     expect(context.open.state().currentWorkspaceId).toBe("ws-a");
     expect(a.state(views.files)).toMatchObject({ value: null, problem: "refused" });
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);

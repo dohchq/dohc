@@ -7,7 +7,7 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 import { SyncRelayQuotaExceededError } from "./storage/errors";
-import { sealWorkspaceSecret, WORKSPACE_SECRET_KEY_ID } from "./workspaceSecretCrypto";
+import { sealWorkspaceSecret, type WorkspaceSecretKeyring } from "./workspaceSecretCrypto";
 
 export const WORKSPACE_SECRET_MAX_BODY_BYTES = 16 * 1024;
 export const WORKSPACE_SECRET_BUCKET_CAPACITY = 20;
@@ -35,9 +35,10 @@ export function createWorkspaceSecretRoutes(options: {
     SyncRelayStorage,
     "listWorkspaceSecrets" | "upsertWorkspaceSecret" | "deleteWorkspaceSecret"
   >;
-  readonly linkKey: string | Uint8Array | undefined;
+  readonly keyring: WorkspaceSecretKeyring | null;
   readonly nowMs: () => number;
   readonly rateLimiter: TokenBucketLimiter;
+  readonly secretsChanged: (workspaceId: string) => void;
 }) {
   return async function respondToWorkspaceSecrets(
     request: Request,
@@ -55,7 +56,7 @@ export function createWorkspaceSecretRoutes(options: {
 
     if (route.route === "workspace-secrets") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
-      if (!options.linkKey) {
+      if (!options.keyring) {
         return secretErrorResponse(
           "secrets_unavailable",
           503,
@@ -75,7 +76,7 @@ export function createWorkspaceSecretRoutes(options: {
     const name = parsedName.data;
 
     if (request.method === "PUT") {
-      if (!options.linkKey) {
+      if (!options.keyring) {
         return secretErrorResponse(
           "secrets_unavailable",
           503,
@@ -100,7 +101,7 @@ export function createWorkspaceSecretRoutes(options: {
       await recheckAuthority();
       const input = parsed.data;
       const allowedHosts = input.usage === "http-header" ? input.allowedHosts : [];
-      const linkKey = options.linkKey;
+      const keyring = options.keyring;
       try {
         const result = options.storage.upsertWorkspaceSecret({
           workspaceId: route.workspaceId,
@@ -109,19 +110,19 @@ export function createWorkspaceSecretRoutes(options: {
           mode: input.mode,
           usage: input.usage,
           allowedHosts,
-          keyId: WORKSPACE_SECRET_KEY_ID,
+          keyId: keyring.activeId,
           nowMs: options.nowMs(),
           seal: (generation) =>
             sealWorkspaceSecret({
               plaintext: input.value,
-              linkKey,
+              keyring,
               workspaceId: route.workspaceId,
               ownerUserId,
               name: input.name,
               usage: input.usage,
               allowedHosts,
               generation,
-              keyId: WORKSPACE_SECRET_KEY_ID,
+              keyId: keyring.activeId,
             }),
         });
         if (!result.ok) {
@@ -148,6 +149,7 @@ export function createWorkspaceSecretRoutes(options: {
               );
           }
         }
+        options.secretsChanged(route.workspaceId);
         return jsonResponse(
           {
             ok: true,
@@ -167,7 +169,7 @@ export function createWorkspaceSecretRoutes(options: {
     }
 
     if (request.method === "DELETE") {
-      if (!options.linkKey) {
+      if (!options.keyring) {
         return secretErrorResponse(
           "secrets_unavailable",
           503,
@@ -176,6 +178,7 @@ export function createWorkspaceSecretRoutes(options: {
       }
       const result = options.storage.deleteWorkspaceSecret(route.workspaceId, ownerUserId, name);
       if (!result.ok) throw notFound();
+      options.secretsChanged(route.workspaceId);
       return jsonResponse(
         {
           ok: true,

@@ -241,12 +241,22 @@ export function createAccountOperationRoute(options: {
         : badRequest("request body must be valid JSON");
     }
     await authorize();
-    // Synchronous on the relay's tables, so nothing changes between the check above and the answer.
-    if (app)
+    // Synchronous on the relay's tables, so nothing changes between the check above and the answer. A read that shows
+    // authors' names looks them up first, then checks the sign-in again.
+    if (app) {
+      const names = await options.phoneApps!.names(route.workspaceId, route.operation, args);
+      if (names) await authorize();
       return jsonResponse({
         ok: true,
-        result: options.phoneApps!.run(caller, route.workspaceId, route.operation, args),
+        result: options.phoneApps!.run(
+          caller,
+          route.workspaceId,
+          route.operation,
+          args,
+          names ?? undefined,
+        ),
       });
+    }
     // A read checks the sign-in, the owner and Show on phone again after its wait, and before it answers.
     if (collection)
       return await options.phoneCollections!.respond({

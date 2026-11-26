@@ -358,6 +358,38 @@ describe("workspace members actions", () => {
     ]);
   });
 
+  it("answers what became of an invite's email beside the view", async () => {
+    const h = harness();
+    const invite = () =>
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "invite", email: "bo@test" },
+      });
+    h.relay.mockResolvedValueOnce(json({ ...view(), invitationEmail: "sent" }));
+    await expect(invite()).resolves.toEqual({
+      status: "ready",
+      view: view(),
+      invitation: { invitationEmail: "sent" },
+    });
+    const limit = { limit: 50, windowHours: 24, sent: 50 };
+    h.relay.mockResolvedValueOnce(
+      json({ ...view(), invitationEmail: "limit", invitationEmailLimit: limit }),
+    );
+    await expect(invite()).resolves.toMatchObject({
+      invitation: { invitationEmail: "limit", invitationEmailLimit: limit },
+    });
+    for (const unreadable of [
+      { invitationEmail: "queued" },
+      { invitationEmail: "limit" },
+      { invitationEmail: "sent", invitationEmailLimit: limit },
+    ]) {
+      h.relay.mockResolvedValueOnce(json({ ...view(), ...unreadable }));
+      await expect(invite()).rejects.toThrow(
+        "dohc could not read Members from your server. Try again.",
+      );
+    }
+  });
+
   it("sends each change to its route and answers the view the relay returns", async () => {
     const h = harness();
     const requests = [

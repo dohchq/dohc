@@ -397,7 +397,8 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       )
         return null;
       parsed.stageId = stageId;
-      parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS);
+      if (parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS).external)
+        return null;
       if (
         sha256(JSON.stringify(parsed.app.candidate)) !== parsed.app.candidateDigest ||
         computeReviewDigest({
@@ -794,6 +795,10 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       );
       deps.assertCurrent();
       input.signal.throwIfAborted();
+      if (preparedApp.candidate.external)
+        throw new Error(
+          "This app calls outside services with a workspace secret, so it can't be staged. Approve it in the dohc window.",
+        );
       const compiledManifest = preparedApp.candidate.inputs.find(
         (entry) => entry.path === manifestPath,
       );

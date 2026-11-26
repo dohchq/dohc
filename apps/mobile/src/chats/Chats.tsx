@@ -14,6 +14,7 @@ import {
 import { View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { phoneWrites } from "../server/phoneWrites";
+import { launchTimings } from "../startup";
 import { views } from "../server/workspaceData";
 import type { ChatGroup } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
@@ -49,11 +50,14 @@ export function ServerChats() {
   );
 }
 
-const SECTIONS: readonly { key: ChatGroup["kind"]; title: string }[] = [
+const SECTIONS: readonly { key: ChatGroup["kind"] | "archived"; title: string }[] = [
   { key: "group", title: workspaceWords.groups },
   { key: "dm", title: workspaceWords.people },
   { key: "agent", title: workspaceWords.agents },
+  // Last and folded, as the desktop's sidebar has it.
+  { key: "archived", title: workspaceWords.archived },
 ];
+const sectionOf = (group: ChatGroup) => (group.archived ? "archived" : group.kind);
 
 // The server keeps no colour for a person, so their mark takes a fill by their chat's ID, as a workspace's does. As on
 // the desktop, an unread chat's name is bold, and a person or an agent also shows its count; a group shows none.
@@ -92,7 +96,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
       groups &&
       SECTIONS.map((section) => ({
         ...section,
-        rows: groups.filter((group) => group.kind === section.key).map(chatRow),
+        rows: groups.filter((group) => sectionOf(group) === section.key).map(chatRow),
       })).filter((section) => section.rows.length > 0),
     [groups],
   );
@@ -110,8 +114,9 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
     void data.refresh(views.chats).finally(() => setPulling(false));
   }, [data]);
   useEffect(() => {
+    if (sections) launchTimings?.mark("chats", state.fromCache ? "cache" : "server");
     if (sections && data) warmUnread(data, sections);
-  }, [sections, data, warmUnread]);
+  }, [sections, state.fromCache, data, warmUnread]);
   return (
     <ChatsScreen
       current={workspace}
@@ -157,7 +162,7 @@ export function ChatsScreen({
   const listRef = list ?? own;
   useScrollToTop(listRef as RefObject<LegendListRef>);
   const [scrolled, setScrolled] = useState(false);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set(["archived"]));
   const items = useMemo<Item[]>(() => {
     if (!sections?.length) return [{ type: "state", key: "state" }];
     return sections.flatMap((section, index) => {

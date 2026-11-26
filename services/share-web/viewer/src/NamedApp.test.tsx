@@ -283,6 +283,27 @@ it("drops a launch issued for a previous route after the target changes", async 
   expect(button("Open app")?.disabled).toBe(false);
 });
 
+it("says how an app opens only once its summary says what kind of app it is", async () => {
+  let answer: (response: Response) => void = () => {};
+  const summary = new Promise<Response>((resolve) => (answer = resolve));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/apps/summary"
+        ? summary
+        : jsonResponse({ user: { id: "alice", name: "Alice" } }),
+    ),
+  );
+  await render();
+  expect(button("Open app")).toBeDefined();
+  expect(container.textContent).not.toContain("the owner gave your account");
+  await act(async () =>
+    answer(jsonResponse({ subjectName: "Trip", sharerName: null, access: "view" })),
+  );
+  await settle(() => container.textContent?.includes("Trip") ?? false);
+  expect(container.textContent).toContain("It opens with the access the owner gave your account.");
+});
+
 it("keeps the complete account email when the sender label exceeds the subject limit", async () => {
   const sharerName =
     "Ana (" + "a".repeat(64) + "@" + "b".repeat(63) + "." + "c".repeat(63) + ".test)";

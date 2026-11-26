@@ -58,6 +58,7 @@ export async function startSelfHostOnboardingStack(
     refuse?: (method: string, path: string) => boolean;
     linkBoundary?: SyncRelayLinkBoundary;
     shareWeb?: boolean;
+    relayMail?: boolean;
   },
 ) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
@@ -98,10 +99,24 @@ export async function startSelfHostOnboardingStack(
         : undefined);
     const port = ca && boundary ? await reserveRelayPort() : 0;
     const link = ca && boundary ? { ...boundary, innerHost: `127.0.0.1:${port}` } : undefined;
+    // The relay's invitation emails land in the account server's capture sink.
+    const relayMail = options.relayMail
+      ? {
+          DOHC_SMTP_HOST: "127.0.0.1",
+          DOHC_SMTP_PORT: String(account.mail.port),
+          DOHC_SMTP_SECURE: "false",
+          DOHC_SMTP_USER: undefined,
+          DOHC_SMTP_PASSWORD: undefined,
+          DOHC_SMTP_FROM: "dohc <noreply@example.test>",
+        }
+      : {};
     relay = await startAuthenticatedRelay(
       directory,
       proxy.origin,
-      ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {},
+      {
+        ...(ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {}),
+        ...relayMail,
+      },
       port,
     );
     proxy.routeRelayTo(relay.url);

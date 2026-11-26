@@ -2879,6 +2879,7 @@ describe("the owner's page", () => {
     );
     expect(text()).toContain("Use the account that owns this workspace.");
     expect(text()).not.toContain("invited");
+    expect(container.querySelector('a[href^="/account/sign-up"]')).toBeNull();
   });
 
   it("refuses an account that does not own the workspace and offers Switch account", async () => {
@@ -2941,7 +2942,11 @@ describe("the list of workspaces", () => {
     expect(container.querySelector(".state-message h1")?.textContent).toBe(
       "Sign in to see your workspaces",
     );
-    expect(container.querySelector(".state-message p")).toBeNull();
+    expect(container.querySelector(".state-message p:not(.join-aside)")).toBeNull();
+    // An invitation email opens this page, so someone new can create an account and come back.
+    expect(container.querySelector('a[href^="/account/sign-up"]')?.getAttribute("href")).toBe(
+      "/account/sign-up?next=%2Fworkspaces",
+    );
     await act(async () => {
       setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
       setControlValue(container.querySelector('input[name="password"]')!, "secret");

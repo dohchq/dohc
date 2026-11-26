@@ -137,6 +137,7 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       requestedAt: new Date().toISOString(),
       startedAt: new Date().toISOString(),
     })),
+    items: [],
   });
   t3.tools.t3_thread_wait = (args) => {
     const run = runs.find((entry) => entry.runId === args.runId);
@@ -292,7 +293,8 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
 
     await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(2);
     const forwarded = String(sends()[1]!.args.message);
-    expect(sends()[1]!.args).toMatchObject({ threadId: "t-chief", mode: "queue" });
+    // A message in the agent's own chat goes right away unless Settings say otherwise.
+    expect(sends()[1]!.args).toMatchObject({ threadId: "t-chief", mode: "auto" });
     expect(forwarded).toContain('From "Sam" in dohc.');
     expect(forwarded).toContain("Can you check the Mac build?");
     expect(forwarded).toContain('Note from "Sam": Post decisions and a daily status here.');

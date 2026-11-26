@@ -237,6 +237,33 @@ environment. [App compiler containment](app-compiler.md) states what each
 platform bounds. Arbitrary build scripts need a separate, credential-free sandbox before
 they can run.
 
+## A person allows a Member app in their browser or on their phone
+
+A Member app runs within both its author's and its viewer's reach
+([ADR 0018](adr/0018-member-apps-cap-every-viewer-to-both-reaches.md)). Before
+it runs for anyone but its author, that person allows the operations it uses.
+The relay records that choice only from a browser sign-in that came through the
+viewer, with the viewer's origin and exchange key, or from the person's paired
+phone. The relay looks up the session's kind itself, so a request can't claim to
+be a person.
+
+The desktop's sign-in serves the person and their local agents alike, and the
+relay can't tell them apart. So the desktop, the CLI and MCP never allow a
+Member app. The desktop sends the person to the review page in their browser.
+The `agent` label on a share records provenance and grants nothing.
+
+This stops an agent that holds only the desktop's sign-in. It doesn't stop
+software that drives the person's signed-in browser or reads its cookies.
+
+The author's reach already bounds their own app, so it opens for them without
+review, even when their agent shared it.
+
+A Member app's source comes with its upload and never from the synced tree
+([ADR 0019](adr/0019-member-app-source-stays-off-the-synced-tree.md)). The
+relay refuses a share whose source sits outside the app's folder. It doesn't
+apply folder rules to that folder's name, because a Personal app's folder is
+not a workspace folder.
+
 ## A phone runs an app in a locked web view
 
 The phone posts a one-use handoff to the app's bootstrap on a random host under
@@ -372,6 +399,21 @@ Every read rechecks current authority and uses bounded history scans.
 See [share reads](../../services/sync-relay/src/shareReadQueries.ts) and the
 [named recipient tests](../../services/sync-relay/src/namedShareHistory.test.ts).
 
+## Protected `.env` files
+
+`.env`, `.env.local`, `.env.production` and every other `.env.*` name, any `*.env` file,
+and everything under a `.env/` folder are protected files. The engine stores them only
+encrypted with `.dohc/engine/secret.key`, and they never reach shares, app publication,
+or agents through dohc. Search never indexes them. The desktop text search can read some
+of them in the main process, but it drops their matches before results reach the window.
+The templates `.env.example`, `.env.template` and `.env.sample` are ordinary files, so a
+project can share its settings without values. The Rust floor
+(`crates/dohc-engine-files/src/policy.rs`) and the TypeScript floor
+(`packages/security-contract/src/enginePathFloor.ts`) decide this the same way, which the
+shared fixtures test. Older builds kept templates as protected files. An engine migration
+deletes those encrypted rows once and leaves the file on disk and its ordinary history
+alone. Sync still skips template operations that older peers send.
+
 ## Workspace secrets and outbound HTTPS
 
 Workspace automation secrets are separate from `.env` secret files. They stay write-only
@@ -401,26 +443,60 @@ Storage follows the workspace's sync mode:
 - **Local-only workspaces** seal secrets in the desktop profile's `workspace-secrets/`
   folder (`0700` directory, `0600` file) with Electron `safeStorage`. On Linux, dohc
   checks that `safeStorage.getSelectedStorageBackend()` is neither `basic_text` nor
-  `unknown` and refuses to store secrets when no OS keyring is active. An unreadable or
-  schema-invalid local vault fails closed instead of appearing empty, so existing
-  ciphertext cannot be overwritten. OS keychain storage keeps values out of workspace
-  files and API responses; it does not defend against arbitrary code running as the same
-  OS user. Turning on sync later does not copy local secrets to the server; the owner
-  enters them on the server directly. Pausing sync on a synced workspace keeps its server
-  binding and refuses secret reads or changes until sync resumes instead of switching to
-  local keychain storage.
+  `unknown` and refuses to store secrets when no OS keyring is active. Each vault file
+  seals its whole record (values, usages, allowed hosts, generations, and dates) with
+  AES-256-GCM under a random data key that `safeStorage` wraps, with the workspace ID as
+  additional data. An edited, swapped, or copied vault, or one an older dohc wrote, fails
+  closed instead of appearing empty, so existing ciphertext cannot be overwritten; the
+  owner can delete it in Settings and add the secrets again. The local HTTP step approval
+  file is sealed the same way, and an edited or unreadable one reads as no approvals.
+  `safeStorage` on macOS and Linux encrypts without a MAC, and Windows DPAPI does not stop
+  other code running as the same user, so the GCM seal is what detects edits. OS keychain
+  storage keeps values out of workspace files and API responses; it does not defend
+  against arbitrary code running as the same OS user, and it does not detect a rollback to
+  an older copy of a vault or approval file. Turning on sync later does not copy local
+  secrets to the server; the owner enters them on the server directly, and Settings offers
+  to delete the copies left on this computer. Removing or forgetting a workspace deletes
+  its vault and approval file after the owner confirms and the workspace leaves the list;
+  a failed delete is logged and leaves only an unused file. Pausing sync on a
+  synced workspace keeps its server binding and refuses secret reads or changes until sync
+  resumes instead of switching to local keychain storage.
 - **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
-  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 from
-  `DOHC_RELAY_LINK_KEY` with info `dohc-workspace-secret-seal-v1`, recorded `key_id`, and
-  AAD binding workspace, owner, secret name, usage, allowed hosts, generation, and key ID). The relay
+  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 with info
+  `dohc-workspace-secret-seal-v1`, recorded `key_id`, and AAD binding workspace, owner,
+  secret name, usage, allowed hosts, generation, and key ID). The keyring comes from
+  `DOHC_RELAY_SECRET_KEYS` (`id:key,id:key`, each key at least 32 bytes): its first key
+  seals, and every listed key opens. `DOHC_RELAY_LINK_KEY` always opens rows sealed under
+  `relay-link-v1`, and seals only when `DOHC_RELAY_SECRET_KEYS` is unset. At startup with
+  `DOHC_RELAY_SECRET_KEYS` set, the relay reseals every readable row under the active key
+  with a guarded update and logs how many rows it resealed, found current, could not open,
+  or found changed. The relay
   accepts only cookie-less desktop owner Bearer sessions (`resolveAccountSession` with
   `clientKind === "desktop"`), refusing browser sessions (cookie or Bearer), phone
   sessions, personal agents, share links, and non-owners, and rechecks session authority,
   account fencing, and workspace ownership at commit time. Because the server holds the
   sealing key in its environment, the server operator (dohc Drive or a self-hoster) has
-  technical capability to unseal stored secrets at runtime; rotating `DOHC_RELAY_LINK_KEY`
-  invalidates previously sealed secrets until re-entered. Account deletion purges all
-  workspace secret rows automatically.
+  technical capability to unseal stored secrets at runtime. Removing a key from the
+  keyring before its rows are resealed leaves those secrets unreadable until re-entered.
+  Account deletion purges all workspace secret rows automatically.
+
+An owner's approval of an HTTP step binds the step's destination as well as its
+definition. For a step that names secrets, the approval digest includes each named
+secret's usage and creation time, plus its allowed hosts for an `http-header` secret and
+its generation for an `http-url` secret. Replacing a webhook link, deleting and
+recreating a secret, or changing a header secret's allowed hosts holds the step until the
+owner allows it again; rotating a header secret's value with the same hosts keeps the
+approval. Each run reads approvals and secrets together before it sends. Just before
+sending, the relay rereads every secret it loaded and refuses the request if one changed,
+and the desktop executor compares each secret it reads with the one the approval saw,
+checking a webhook link again after it looks up the link's address.
+
+An HTTP step runs only while nobody but the owner can edit its Collection, its
+automations file, or code it runs. A workspace member counts only when their access
+reaches Edit on one of those paths: members at the default Comment level or at View don't
+hold the step. A pending member invite counts the same way, by its invited level and the
+folder rules, because it becomes that access as soon as someone claims it. See the
+[outbound webhook route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
 
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
 enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),
@@ -440,6 +516,71 @@ cannot tell whether a public-looking IP routes to an internal network service.
 See the [outbound HTTPS tests](../../packages/service-http/src/safeOutboundHttps.test.ts),
 [relay secret route tests](../../services/sync-relay/src/workspaceSecretRoutes.test.ts),
 and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceSecretStore.test.ts).
+
+### Automation `http` steps
+
+An automation's `http` step sends `POST` (the default) or `GET` to a static HTTPS URL or an
+`http-url` secret, with optional `http-header` secrets. It runs only while no one else can
+edit the Collection. The owner must Allow it in Desktop. That approval is a digest of
+the Collection, the step's place, its URL target, method, header names, secret names and
+prefixes, the whole automation definition, and the hash of each code file it runs. Any edit
+to the automation or its code files holds the step until the owner allows it again. A
+synced workspace sends through the relay. The relay reads the method and the destination
+from the committed definition, never from the request, and checks the committed definition,
+the approval, and that no one else can edit the Collection again right before it sends.
+
+Without `as`, the step reads only the status, and the response cap is 64 KiB. With
+`as: name`, the step fetches data: it reads up to 192 KiB of uncompressed, strict UTF-8
+JSON (`application/json` or `application/*+json`, charset absent or `utf-8`, at most 64
+levels deep) from a 2xx response. Later steps read the answer in formulas and code, so it
+reaches records only through the normal write path, with its permissions, undo, and write
+caps. Before the answer reaches the run, every string in it is scrubbed of the attached
+secret header values (also trimmed), a secret URL, and that URL's path parts and query
+values of 8 or more characters (also decoded). A number equal to a secret becomes
+`[redacted]`. An answer over 192 KiB once scrubbed is refused, and so is one with a secret
+in a field name, unless that secret is a plain lowercase word such as a REST path part. The answer lives in the run's private state until
+the run is done or replaced. A failed run keeps it, so Try again resumes without fetching
+again, until run retention removes the run. If a code file changed since the fetch, the run
+continues only once the owner has allowed the step with the current code. Run history, the
+CLI, and the renderer see only the target, method, and status.
+
+A `POST` is sent at most once per claim: the relay reserves its delivery id, and a run
+that stopped while sending fails instead of sending again. A `GET` skips that reservation,
+so a run that stopped mid-request fetches again when it resumes. A `GET` with a body is
+refused when the file is read. See the [executor fetch tests](../../packages/automation-executor/src/automationHttpStep.test.ts),
+[local executor tests](../../apps/desktop/src/workspaces/localOutboundWebhookExecutor.test.ts),
+and [relay route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
+
+## Apps call outside services only as declared
+
+An app can send a request that carries a workspace secret only as an operation in its
+`app.publish.json` `external` map. The owner's approval binds each operation's method
+(GET or POST), HTTPS host, path, query, fixed headers, body template, typed inputs,
+secret name and header, response limit, and access. The app sends only an operation name
+and typed inputs. Inputs fill whole path segments, query values, or body values, never a
+host, header, or part of a text. A path input can't hold `/`, `.`, or `..`. Changing any
+declared field changes the candidate digest, so it needs a new approval. Until then, the
+app keeps the approved operations.
+
+The host runs the operation. The secret never enters the bundle, the app frame, or the
+renderer. The host reads the secret right before it sends, after the address passes the
+outbound HTTPS checks above. The secret must be an `http-header` secret whose allowed
+hosts include the operation's host. The host refuses an answer that repeats the secret
+in raw, JSON-escaped, URL-encoded, or decoded form. It also refuses an answer that is not
+uncompressed UTF-8 JSON or is over the operation's limit (at most 192 KiB). Each call has a 10-second
+timeout. The app gets `{ status, data }` and can send that data elsewhere. Approval says
+so.
+
+Only the owner approves outside calls, and only in the desktop window. The CLI and MCP
+doors, staged approval, and Personal apps refuse them, because an agent could otherwise
+approve an app that spends a secret. The desktop runs approved operations for local-only
+workspaces, at most 8 at a time per workspace. Synced workspaces and published apps refuse
+them until the relay runs them with its own secret vault. Publishing never copies a local
+secret to the server.
+
+See the [declaration tests](../../packages/security-contract/src/appExternal.test.ts),
+[declared HTTPS tests](../../packages/service-http/src/declaredHttps.test.ts), and
+[desktop executor tests](../../apps/desktop/src/workspaces/localAppExternal.test.ts).
 
 ## Incoming webhooks
 

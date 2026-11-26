@@ -74,6 +74,7 @@ import {
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import {
   addressDatasets,
+  datasetPathOf,
   invalidateDatasetAddresses,
   isDatasetDescriptor,
   unclaimedDatasetFolders,
@@ -166,7 +167,10 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
-import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
+import {
+  createLocalOwnerAppPublicationHandler,
+  localOwnerCliCaller,
+} from "./ipc/localOwnerAppPublication";
 import { verifyLocalAppFrontend } from "./workspaces/appFrontendVerifier";
 import { runAppFrontendBrowserVerification } from "./window/appFrontendVerifyBrowser";
 import {
@@ -473,9 +477,15 @@ import {
   createLocalHttpApprovalStore,
   type LocalHttpApprovalStore,
 } from "./workspaces/localHttpApprovalStore";
-import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
 import {
-  HttpStepApprovalDigest,
+  createLocalAppExternal,
+  loopbackAppExternalTransport,
+  type LocalAppExternal,
+} from "./workspaces/localAppExternal";
+import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
+import { readBoundedJson } from "@dohc/service-http";
+import { MAX_HTTP_RESPONSE_BYTES } from "@dohc/workspace-contracts/automations";
+import {
   OutboundWebhookDispatchResponse,
   type HttpStepApprovalWriteInput,
 } from "@dohc/workspace-contracts/http-step-approvals";
@@ -734,7 +744,12 @@ import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notic
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
-import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
+import { z } from "zod";
+import {
+  createCloudCredentialStore,
+  mayUseKeychain,
+  type TokenCipher,
+} from "./workspaces/cloudCredentialStore";
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
@@ -1818,34 +1833,35 @@ let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
 let cachedLocalWorkspaceSecrets: LocalWorkspaceSecretStore | null = null;
 let cachedLocalHttpApprovals: LocalHttpApprovalStore | null = null;
-function localHttpApprovals(): LocalHttpApprovalStore {
-  if (!cachedLocalHttpApprovals) {
-    cachedLocalHttpApprovals = createLocalHttpApprovalStore({ dir: stateDir() });
+function systemKeyCipher(): TokenCipher | undefined {
+  if (
+    !mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env })
+  ) {
+    return undefined;
   }
+  return {
+    isAvailable: () =>
+      safeStorage.isEncryptionAvailable() &&
+      encryptsWithSystemKey(
+        process.platform,
+        process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
+      ),
+    encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+    decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+  };
+}
+function localHttpApprovals(): LocalHttpApprovalStore {
+  cachedLocalHttpApprovals ??= createLocalHttpApprovalStore({
+    dir: stateDir(),
+    cipher: systemKeyCipher(),
+  });
   return cachedLocalHttpApprovals;
 }
 function localWorkspaceSecrets(): LocalWorkspaceSecretStore {
-  if (!cachedLocalWorkspaceSecrets) {
-    cachedLocalWorkspaceSecrets = createLocalWorkspaceSecretStore({
-      dir: stateDir(),
-      cipher: mayUseKeychain({
-        isPackaged: app.isPackaged,
-        platform: process.platform,
-        env: process.env,
-      })
-        ? {
-            isAvailable: () =>
-              safeStorage.isEncryptionAvailable() &&
-              encryptsWithSystemKey(
-                process.platform,
-                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
-              ),
-            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-          }
-        : undefined,
-    });
-  }
+  cachedLocalWorkspaceSecrets ??= createLocalWorkspaceSecretStore({
+    dir: stateDir(),
+    cipher: systemKeyCipher(),
+  });
   return cachedLocalWorkspaceSecrets;
 }
 function t3Code(): T3CodeConnection {
@@ -1856,25 +1872,7 @@ function t3Code(): T3CodeConnection {
     home,
     // T3 Code's own program, which makes dohc's sign-in code after the person says yes in dohc.
     codes: createT3CodeCodeMaker({ home }),
-    store: createT3CodeSignInStore({
-      dir: stateDir(),
-      cipher: mayUseKeychain({
-        isPackaged: app.isPackaged,
-        platform: process.platform,
-        env: process.env,
-      })
-        ? {
-            isAvailable: () =>
-              safeStorage.isEncryptionAvailable() &&
-              encryptsWithSystemKey(
-                process.platform,
-                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
-              ),
-            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-          }
-        : undefined,
-    }),
+    store: createT3CodeSignInStore({ dir: stateDir(), cipher: systemKeyCipher() }),
   });
   return cachedT3Code;
 }
@@ -3261,6 +3259,14 @@ function registerReservedPhysicalWorkspace(
 
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
+  removeSecrets: async (workspaceId) => {
+    const [secrets, approvals] = await Promise.allSettled([
+      localWorkspaceSecrets().clearWorkspace(workspaceId),
+      localHttpApprovals().clearWorkspace(workspaceId),
+    ]);
+    if (secrets.status === "rejected") throw secrets.reason;
+    if (approvals.status === "rejected") throw approvals.reason;
+  },
   findWorkspace,
   removeWorkspace: (workspaceId) => {
     removeWorkspace(workspaceId);
@@ -3272,16 +3278,21 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     forwardProblems.delete(workspaceId);
     chatDispatchNotices.clear(workspaceId, "forward-stuck");
   },
-  confirmDraftRemoval: async (workspaceId) => {
+  confirmRemoval: async (workspaceId) => {
     await flushTypingCheckpoints(workspaceId);
-    if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId)))
-      return true;
+    const drafts = await hasWorkspaceLiveDrafts(
+      join(stateDir(), "live-draft-recovery"),
+      workspaceId,
+    );
+    const secrets = await localWorkspaceSecrets().hasSaved(workspaceId);
+    if (!drafts && !secrets) return true;
     const answer = await showMessageBox({
       type: "warning",
       title: "Remove this workspace from the list?",
-      message: "This workspace has typing waiting to recover.",
-      detail:
-        "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
+      message: `This workspace has ${[drafts && "typing waiting to recover", secrets && "secrets saved on this computer"].filter(Boolean).join(" and ")}.`,
+      detail: secrets
+        ? "Removing it deletes them from this computer. The folder stays. This cannot be undone."
+        : "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
       buttons: ["Remove from list", "Cancel"],
       defaultId: 1,
       cancelId: 1,
@@ -3323,7 +3334,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   register: registerReservedPhysicalWorkspace,
   // Notices then offers the typing the failed join kept.
   remove: async (binding, cleanup) => {
-    await removePhysicalWorkspace(binding, cleanup, undefined, { keepDrafts: true });
+    await removePhysicalWorkspace(binding, cleanup, undefined, { keepLocalData: true });
     notifyNoticesChanged();
   },
   release: (reservation, cleanup) => workspaceAuthorities.releaseReservation(reservation, cleanup),
@@ -6175,12 +6186,46 @@ const serverRuns = createServerRuns(async (workspaceId, request) => {
   };
 });
 
+type WorkspaceSecretsMutation =
+  | { kind: "set"; secret: WorkspaceSecretWriteInput }
+  | { kind: "delete"; name: string }
+  | { kind: "clear-local" };
+
+async function changeWorkspaceSecrets(
+  workspaceId: string,
+  mutation: WorkspaceSecretsMutation,
+): Promise<WorkspaceSecretsState> {
+  const state = await workspaceSecretsState(workspaceId, mutation);
+  collectionAutomationsOf(workspaceId)?.rosterChanged();
+  return state;
+}
+
 async function workspaceSecretsState(
   workspaceId: string,
-  mutation?: { kind: "set"; secret: WorkspaceSecretWriteInput } | { kind: "delete"; name: string },
+  mutation?: WorkspaceSecretsMutation,
+): Promise<WorkspaceSecretsState> {
+  const state = await readWorkspaceSecrets(workspaceId, mutation);
+  if (state.kind !== "ready") return state;
+  const uses = collectionAutomationsOf(workspaceId)?.secretUses();
+  const localCopies =
+    state.storage === "server" && (await localWorkspaceSecrets().hasSaved(workspaceId));
+  return {
+    ...state,
+    ...(uses ? { uses: Object.fromEntries(uses) } : {}),
+    ...(localCopies ? { localCopies: true as const } : {}),
+  };
+}
+
+async function readWorkspaceSecrets(
+  workspaceId: string,
+  mutation?: WorkspaceSecretsMutation,
 ): Promise<WorkspaceSecretsState> {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return { kind: "none" };
+  if (mutation?.kind === "clear-local") {
+    await localWorkspaceSecrets().clearWorkspace(workspaceId);
+    return readWorkspaceSecrets(workspaceId);
+  }
   if (entry.remote === undefined && entry.pausedRemote !== undefined) {
     const message =
       "Sync is paused for this workspace. Resume sync to view or change its server secrets.";
@@ -6208,7 +6253,7 @@ async function workspaceSecretsState(
       return { kind: "ready", storage: "local", secrets, limit: MAX_WORKSPACE_SECRETS };
     } catch (error) {
       if (!mutation && error instanceof WorkspaceSecretVaultCorruptError) {
-        return { kind: "unavailable", storage: "local", message: error.message };
+        return { kind: "unavailable", storage: "local", message: error.message, canDelete: true };
       }
       throw error;
     }
@@ -6594,13 +6639,26 @@ async function incomingWebhookShareStops(
     }));
 }
 
+const RelayHttpApprovals = z.object({
+  approvals: z.array(z.string()),
+  secrets: z.array(WorkspaceSecretSummary).optional(),
+});
+
 function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalGate {
-  const readApprovedDigests = async (): Promise<ReadonlySet<string> | null> => {
+  const read: CollectionHttpApprovalGate["read"] = async () => {
     const entry = findWorkspace(workspaceId);
-    if (entry === null || entry.shareView !== undefined) return new Set();
+    if (entry === null || entry.shareView !== undefined) {
+      return { approved: new Set(), secrets: [] };
+    }
     if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
     if (entry.remote === undefined) {
-      return null;
+      const [approved, secrets] = await Promise.all([
+        localHttpApprovals().approved(workspaceId),
+        localWorkspaceSecrets()
+          .list(workspaceId)
+          .catch(() => null),
+      ]);
+      return { approved, secrets };
     }
     let credentials: CloudSessionCredentials;
     let credentialGeneration: number;
@@ -6625,38 +6683,12 @@ function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalG
     ) {
       return null;
     }
-    const body = (await response.json().catch(() => undefined)) as
-      | { approvals?: unknown }
-      | undefined;
-    if (!body || !Array.isArray(body.approvals)) return null;
-    return new Set(body.approvals.filter((item): item is string => typeof item === "string"));
+    const body = RelayHttpApprovals.safeParse(await response.json().catch(() => undefined));
+    if (!body.success) return null;
+    return { approved: new Set(body.data.approvals), secrets: body.data.secrets ?? null };
   };
   return {
-    isApproved: async (digest) => {
-      const parsedDigest = HttpStepApprovalDigest.safeParse(digest);
-      if (!parsedDigest.success) return "unapproved";
-      const entry = findWorkspace(workspaceId);
-      if (entry === null || entry.shareView !== undefined) return "unapproved";
-      if (entry.remote === undefined && entry.pausedRemote !== undefined) return "unavailable";
-      if (entry.remote === undefined) {
-        return localHttpApprovals().isApproved(workspaceId, parsedDigest.data);
-      }
-      const digests = await readApprovedDigests();
-      if (digests === null) return "unavailable";
-      return digests.has(parsedDigest.data) ? "approved" : "unapproved";
-    },
-    readApprovedDigests: async () => {
-      const entry = findWorkspace(workspaceId);
-      if (entry === null || entry.shareView !== undefined) return new Set();
-      if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
-      if (entry.remote === undefined) {
-        return localHttpApprovals()
-          .list(workspaceId)
-          .then((listed) => new Set(listed))
-          .catch(() => null);
-      }
-      return readApprovedDigests();
-    },
+    read,
     approve: async (input) => {
       await approveWorkspaceHttpStep(workspaceId, input);
     },
@@ -6709,6 +6741,26 @@ async function approveWorkspaceHttpStep(
           : "dohc could not save this webhook confirmation on your server.";
     throw new Error(message);
   }
+}
+
+function localAppExternalFor(workspaceId: string): LocalAppExternal {
+  const origin =
+    process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged
+      ? process.env.DOHC_TEST_APP_EXTERNAL_ORIGIN
+      : undefined;
+  return createLocalAppExternal({
+    workspaceId,
+    secrets: localWorkspaceSecrets(),
+    unavailable: () => {
+      const entry = findWorkspace(workspaceId);
+      if (entry === null || entry.shareView !== undefined)
+        return "Apps can call outside services only in your own workspaces.";
+      if (entry.remote !== undefined || entry.pausedRemote !== undefined)
+        return "Apps in synced workspaces can't call outside services yet.";
+      return null;
+    },
+    ...(origin ? { transport: loopbackAppExternalTransport(origin) } : {}),
+  });
 }
 
 function workspaceHttpWebhookExecutorFor(workspaceId: string): AutomationHttpWebhookExecutor {
@@ -6806,11 +6858,18 @@ function workspaceHttpWebhookExecutorFor(workspaceId: string): AutomationHttpWeb
           beforeSend: true,
         };
       }
-      const rawBody: unknown = await response.json().catch(() => undefined);
+      const rawBody: unknown = await readBoundedJson(
+        response,
+        MAX_HTTP_RESPONSE_BYTES + 16 * 1024,
+        input.signal,
+      ).catch(() => undefined);
       const parsed = OutboundWebhookDispatchResponse.safeParse(rawBody);
       if (parsed.success) {
         if (parsed.data.ok) {
-          return { ok: true, status: parsed.data.status };
+          const { status, response: fetched } = parsed.data;
+          return fetched === undefined
+            ? { ok: true, status }
+            : { ok: true, status, response: fetched };
         }
         return {
           ok: false,
@@ -7900,6 +7959,7 @@ const localDatasetHostFor = async (
           if (entry) sendCollectionsUpFor({ ...entry, attachmentId: attachment.attachmentId });
         },
         trashItem: (path) => shell.trashItem(path),
+        external: localAppExternalFor(workspace.workspaceId),
         runtime: {
           launch: createDesktopAppRuntimeLauncher(utilityProcess, true),
           entryPath: join(runtimePath, "child.mjs"),
@@ -11814,7 +11874,7 @@ function registerIpcHandlers(): void {
     personalPublication,
     resolveDatasetRevision,
     resolveDatasetArtifacts,
-    callerKey: (workspaceId) => `local-owner-cli:${workspaceId}`,
+    callerKey: localOwnerCliCaller,
     withWorkspaceOperation: (_caller, workspaceId, work) =>
       workspaceAuthorities.withOperation(workspaceId, work),
   });
@@ -12606,16 +12666,28 @@ function registerIpcHandlers(): void {
         operation.workspace,
         async (adapter) =>
           await Promise.all(
-            references.map(async (reference) =>
-              workReferenceView(
+            references.map(async (reference) => {
+              const resolution = await adapter.resolveWorkReference({
+                workspaceId,
                 reference,
-                await adapter.resolveWorkReference({
-                  workspaceId,
-                  reference,
-                  signal: operation.signal,
-                }),
-              ),
-            ),
+                signal: operation.signal,
+              });
+              if (
+                resolution?.status !== "found" ||
+                resolution.target.kind !== "transactionalCollection"
+              )
+                return workReferenceView(reference, resolution);
+              // A data Collection opens at its dataset.json. One this
+              // workspace can't place shows, but opens nothing. A failed
+              // lookup fails the read, so a click reports it.
+              const datasetPath = await datasetPathOf(
+                adapter,
+                workspaceId,
+                resolution.target.datasetId,
+                operation.signal,
+              );
+              return workReferenceView(reference, resolution, datasetPath);
+            }),
           ),
       );
       if (views === null) throw new Error("The workspace engine is not running.");
@@ -12920,9 +12992,11 @@ function registerIpcHandlers(): void {
       currentRendererSession: (sender) => rendererWorkspaceSessions.current(sender),
       listWorkspaceSecrets: (workspaceId) => workspaceSecretsState(workspaceId),
       setWorkspaceSecret: (workspaceId, secret) =>
-        workspaceSecretsState(workspaceId, { kind: "set", secret }),
+        changeWorkspaceSecrets(workspaceId, { kind: "set", secret }),
       deleteWorkspaceSecret: (workspaceId, name) =>
-        workspaceSecretsState(workspaceId, { kind: "delete", name }),
+        changeWorkspaceSecrets(workspaceId, { kind: "delete", name }),
+      clearLocalWorkspaceSecrets: (workspaceId) =>
+        changeWorkspaceSecrets(workspaceId, { kind: "clear-local" }),
     }),
   );
 

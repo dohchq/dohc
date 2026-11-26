@@ -236,7 +236,8 @@ test("a workspace member reviews another member's app, reads its source, allows 
   const { storage, host, revision } = await memberWorkspace(root);
   const exchangeKey = "member-app-relay-exchange-key-with-more-than-thirty-two-bytes";
   const account = getCookies({ baseURL: viewer }),
-    sessionCookie = `${account.sessionToken.name}=ben-account-secret`;
+    sessionCookie = `${account.sessionToken.name}=ben-account-secret`,
+    desktopCookie = `${account.sessionToken.name}=ben-desktop-secret`;
   let signedIn = false;
   const relay = createSyncRelayHandler({
     storage,
@@ -245,11 +246,24 @@ test("a workspace member reviews another member's app, reads its source, allows 
     relayExchangeKey: exchangeKey,
     shareWebOrigin: viewer,
     lookupUserDisplayName: async (userId: string) => (userId === "ana" ? "Ana Reyes" : null),
+    lookupUserEmail: async (userId: string) => `${userId}@example.test`,
     resolveActor: (request, workspaceId) => {
-      if (request.headers.get("cookie") === sessionCookie) return { userId: "ben", workspaceId };
-      if (request.headers.get("authorization") === "Bearer session-ana")
-        return { userId: "ana", workspaceId };
+      const cookie = request.headers.get("cookie");
+      if (cookie === sessionCookie || cookie === desktopCookie)
+        return { userId: "ben", workspaceId };
+      const bearer = /^Bearer session-(ana|ben)$/.exec(request.headers.get("authorization") ?? "");
+      if (bearer) return { userId: bearer[1]!, workspaceId };
       throw Error("Unknown account");
+    },
+    resolveAccountSession: async (request) => {
+      const cookie = request.headers.get("cookie");
+      if (cookie !== sessionCookie && cookie !== desktopCookie) throw Error("Unknown account");
+      return {
+        userId: "ben",
+        sessionId: cookie,
+        expiresAtMs: Number.MAX_SAFE_INTEGER,
+        clientKind: cookie === sessionCookie ? "browser" : "desktop",
+      };
     },
   });
   const upload = memberAppUpload(revision);
@@ -262,6 +276,35 @@ test("a workspace member reviews another member's app, reads its source, allows 
   );
   expect(published.status).toBe(200);
   const { publicationId } = (await published.json()) as { publicationId: string };
+  const listed = await relay(
+    new Request("https://relay.example.org/sync/w/member-apps?cursor=m", {
+      headers: { authorization: "Bearer session-ben" },
+    }),
+  );
+  expect(await listed.json()).toMatchObject({
+    apps: [{ publicationId, authorName: "Ana Reyes" }],
+  });
+  for (const headers of <Array<Record<string, string>>>[
+    { authorization: "Bearer session-ben" },
+    {
+      cookie: desktopCookie,
+      origin: viewer,
+      "x-dohc-relay-exchange-key": exchangeKey,
+    },
+  ]) {
+    const refused = await relay(
+      new Request(
+        `https://relay.example.org/sync/w/app-publications/${publicationId}/backend/consent`,
+        {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ scopeDigest: "0".repeat(64) }),
+        },
+      ),
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ code: "member_app_person_only" });
+  }
   const application = createShareWebApplication({
     publicHosts: new Set(["viewer.example.com"]),
     relayUrl: "https://relay.example.org",

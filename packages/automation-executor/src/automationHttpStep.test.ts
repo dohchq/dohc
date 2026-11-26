@@ -13,14 +13,35 @@ import {
 import { undoCollectionAutomationRuns } from "./collectionAutomationUndo";
 import {
   CollectionAutomations,
+  HttpStepSecretProblemError,
   type CollectionAutomationEngine,
   type CollectionHttpApprovalGate,
 } from "./collectionAutomations";
 import { AutomationRunWait } from "./automationRunWait";
 import { createTestScratch, testStoreFolder } from "./testScratch";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const everyDigest = { has: () => true } as unknown as ReadonlySet<string>;
+const HOOK_SECRETS: WorkspaceSecretSummary[] = [
+  {
+    name: "API_TOKEN",
+    usage: "http-header",
+    allowedHosts: ["hooks.slack.com"],
+    generation: 1,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  },
+  {
+    name: "SLACK_HOOK",
+    usage: "http-url",
+    allowedHosts: [],
+    generation: 1,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  },
+];
 
 const HOOK_YAML = `version: 1
 automations:
@@ -126,8 +147,9 @@ describe("automation http steps", () => {
       ["Tasks/helper.js", 'export default () => "v1";'],
     ]);
     const approvedDigests = new Set<string>();
+    let secrets = HOOK_SECRETS;
     const httpApprovals: CollectionHttpApprovalGate = {
-      isApproved: async (digest) => (approvedDigests.has(digest) ? "approved" : "unapproved"),
+      read: async () => ({ approved: approvedDigests, secrets }),
       approve: async (input) => {
         approvedDigests.add(input.approvalDigest);
       },
@@ -233,6 +255,63 @@ describe("automation http steps", () => {
         steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
       });
 
+      const listedReach = async () => {
+        const listed = await afterTamper.automationsIn("Tasks");
+        if (listed.status !== "read" || !listed.automations[0]?.valid)
+          throw Error("expected valid");
+        return listed.automations[0];
+      };
+      const replaceSecret = (name: string, change: Partial<WorkspaceSecretSummary>) => {
+        secrets = secrets.map((secret) =>
+          secret.name === name ? { ...secret, ...change } : secret,
+        );
+      };
+      replaceSecret("API_TOKEN", { generation: 5 });
+      expect((await listedReach()).reach).toEqual({
+        kind: "checked",
+        steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
+      });
+      replaceSecret("SLACK_HOOK", { generation: 2 });
+      const afterNewLink = await listedReach();
+      if (afterNewLink.reach.kind !== "checked") throw Error("expected checked");
+      expect(afterNewLink.reach.steps.find((s) => s.verdict === "held")).toMatchObject({
+        verdict: "held",
+        action: "send-http",
+      });
+      const withLink = secrets;
+      secrets = secrets.filter((secret) => secret.name !== "SLACK_HOOK");
+      const withoutLink = await listedReach();
+      if (withoutLink.reach.kind !== "checked") throw Error("expected checked");
+      const heldForLink = withoutLink.reach.steps.find((s) => s.verdict === "held");
+      await expect(
+        afterTamper.confirmReach({
+          automationId: withoutLink.automationId,
+          definitionHash: withoutLink.definitionHash,
+          step: heldForLink!.step,
+          seq: heldForLink!.seq,
+        }),
+      ).rejects.toEqual(
+        new HttpStepSecretProblemError(
+          "Add the secret SLACK_HOOK in Settings, then allow this step.",
+        ),
+      );
+      secrets = withLink;
+      const beforeAllow = await listedReach();
+      if (beforeAllow.reach.kind !== "checked") throw Error("expected checked");
+      const heldAgain = beforeAllow.reach.steps.find((s) => s.verdict === "held");
+      expect(
+        await afterTamper.confirmReach({
+          automationId: beforeAllow.automationId,
+          definitionHash: beforeAllow.definitionHash,
+          step: heldAgain!.step,
+          seq: heldAgain!.seq,
+        }),
+      ).toBe("confirmed");
+      expect((await listedReach()).reach).toEqual({
+        kind: "checked",
+        steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
+      });
+
       files.set("Tasks/helper.js", 'export default () => "v2-tampered";');
       afterTamper.handleWatcherEvents([{ operation: "update", path: "Tasks/helper.js" }]);
       const listed4 = await afterTamper.automationsIn("Tasks");
@@ -316,7 +395,7 @@ automations:
       postNotice: async () => {},
       readMessageBody: async () => null,
       recipientVerdicts: async () => [],
-      isHttpStepApproved: async () => "approved",
+      readHttpApprovals: async () => ({ approved: everyDigest, secrets: HOOK_SECRETS }),
       httpWebhook: { execute: executeMock },
     };
 
@@ -572,6 +651,277 @@ automations:
     }
   });
 
+  it("fetches JSON with GET, writes a field from it, keeps it out of history, and fetches again after an unrecorded GET", async () => {
+    const dir = await createTestScratch("dohc-http-fetch-");
+    const store = createAutomationRunStore(testStoreFolder(dir));
+    const evaluator = createAutomationFormulaEvaluator();
+    const yaml = `version: 1
+automations:
+  - id: pull-stats
+    name: Pull stats
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        secret-headers:
+          Authorization:
+            secret: STATS_KEY
+            prefix: 'Bearer '
+        as: stats
+      - set:
+          Count: '=stats.results[0].count'
+`;
+    const parsed = parseAutomationsFile(yaml);
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("bad yaml");
+    const automation = parsed.entries[0].automation;
+    const roster: Exclude<ReachRoster, { kind: "unknown" }> = {
+      kind: "owner",
+      ownerUserId: "owner",
+      grants: [],
+    };
+    const written: Array<Record<string, unknown>> = [];
+    let busyWrites = 0;
+    let failedWrites = 0;
+    const execute = vi.fn(async (_input: { method: string; readResponse: boolean }) => ({
+      ok: true as const,
+      status: 200,
+      response: { results: [{ count: 42 }] },
+    }));
+    const deps: CollectionAutomationRunDependencies = {
+      makeDurable: async () => {},
+      isButtonField: async () => false,
+      withReads: async (work) =>
+        work({
+          getCollectionRecord: async () =>
+            ({
+              record: {
+                id: "rec-1",
+                path: "Tasks/one.md",
+                values: [{ field: "Count", value: null }],
+              },
+            }) as never,
+          queryCollectionRecords: async () => ({ records: [] }) as never,
+        }),
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async ({ fields }) => {
+            if (busyWrites > 0) {
+              busyWrites -= 1;
+              throw new AutomationRunWait("Engine busy.", "busy");
+            }
+            if (failedWrites > 0) {
+              failedWrites -= 1;
+              throw new Error("The disk is full.");
+            }
+            written.push(fields);
+            return { replaced: { Count: null }, kept: {} };
+          },
+          create: async () => ({ path: "Tasks/x.md", recordId: "x" }),
+        }),
+      collectionIdOf: (path) => (path === "Tasks" ? "Tasks" : null),
+      collectionPathOf: (id) => (id === "Tasks" ? "Tasks" : null),
+      targets: createAutomationTargets({
+        revisionOf: () => 0,
+        isCollection: (path) => path === "Tasks",
+        readText: async () => null,
+        readSchemaFields: async () => new Set(["Count"]),
+        withHost: async () => null,
+      }),
+      readCode: async () => null,
+      personName: (id) => id,
+      evaluator: evaluator.forWorkspace("ws-1"),
+      store,
+      nowMs: () => 1_000,
+      chat: { hasMessage: async () => false, directory: async () => null, write: async () => {} },
+      postNotice: async () => {},
+      readMessageBody: async () => null,
+      recipientVerdicts: async () => [],
+      readHttpApprovals: async () => ({ approved: everyDigest, secrets: HOOK_SECRETS }),
+      httpWebhook: { execute },
+    };
+    const claim: AutomationClaim = {
+      claimId: "claim-fetch-1",
+      automationId: "collection:Tasks#pull-stats",
+      trigger: { historyId: 1 },
+      recordId: "rec-1",
+      collectionPath: "Tasks",
+      depth: 0,
+      change: {
+        kind: "added",
+        authorOriginId: null,
+        onBehalfOf: null,
+        actorKind: "human",
+        sharedAuthor: null,
+        liveCursor: null,
+        fields: [],
+        fieldsOmitted: 0,
+      },
+      state: "running",
+      attempts: 1,
+      run: 1,
+      createdAtMs: 1_000,
+      updatedAtMs: 1_000,
+    };
+    const run = (
+      overrides: Partial<AutomationClaim>,
+      runDeps = deps,
+      stop = new AbortController(),
+    ) =>
+      runCollectionAutomation(runDeps, {
+        claim: { ...claim, ...overrides },
+        automation,
+        collection: { path: "Tasks", name: "Tasks" },
+        roster,
+        signal: stop.signal,
+        stopped: stop.signal,
+      });
+
+    try {
+      busyWrites = 1;
+      expect(await run({})).toEqual({ kind: "wait", reason: "busy" });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0]?.[0]).toMatchObject({ method: "GET", readResponse: true });
+
+      expect(await run({ attempts: 2 })).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(written).toEqual([{ Count: 42 }]);
+
+      const [savedRun] = (await store.runsOf(claim.automationId, claim.claimId)).runs;
+      expect(savedRun?.applied[0]).not.toHaveProperty("response");
+      expect(savedRun?.applied[0]?.writes).toEqual([
+        {
+          kind: "http-sent",
+          target: "api.example.com",
+          status: 200,
+          deliveryId: expect.stringMatching(/^[0-9a-f]{64}$/),
+          method: "GET",
+          fetched: true,
+        },
+      ]);
+      expect(JSON.stringify(savedRun)).not.toContain("results");
+      const { undone } = await undoCollectionAutomationRuns(
+        {
+          withReads: deps.withReads,
+          withRecordWrites: deps.withRecordWrites,
+          trash: async () => {},
+          collectionPathOf: deps.collectionPathOf,
+        },
+        [savedRun!],
+        new AbortController().signal,
+      );
+      expect(undone.webhooksSent).toBeUndefined();
+
+      const interrupted = vi.fn(async () => ({
+        ok: false as const,
+        reason: "Waiting for a session.",
+        waitReason: "session" as const,
+      }));
+      expect(
+        await run(
+          { claimId: "claim-fetch-interrupted" },
+          { ...deps, httpWebhook: { execute: interrupted } },
+        ),
+      ).toEqual({ kind: "wait", reason: "session" });
+      expect(await run({ claimId: "claim-fetch-interrupted", attempts: 2 })).toEqual({
+        kind: "done",
+      });
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      const silent = vi.fn(async () => ({ ok: true as const, status: 204 }));
+      const noJson = await run(
+        { claimId: "claim-fetch-no-json" },
+        { ...deps, httpWebhook: { execute: silent } },
+      );
+      expect(noJson).toMatchObject({ kind: "failed" });
+      if (noJson.kind === "failed") expect(noJson.error).toContain("without the JSON");
+
+      execute.mockClear();
+      written.length = 0;
+      failedWrites = 1;
+      expect(await run({ claimId: "claim-fetch-retry" })).toMatchObject({ kind: "failed" });
+      expect(await run({ claimId: "claim-fetch-retry", run: 2, attempts: 2 })).toEqual({
+        kind: "done",
+      });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(written).toEqual([{ Count: 42 }]);
+      const [retried] = (await store.runsOf(claim.automationId, "claim-fetch-retry")).runs;
+      expect(JSON.stringify(retried)).not.toContain("results");
+
+      const stop = new AbortController();
+      const paused = vi.fn(async () => {
+        stop.abort();
+        return { ok: false as const, reason: "Outbound HTTPS request failed." };
+      });
+      expect(
+        await run(
+          { claimId: "claim-fetch-paused" },
+          { ...deps, httpWebhook: { execute: paused } },
+          stop,
+        ),
+      ).toEqual({ kind: "wait", reason: "stopped" });
+      expect(await run({ claimId: "claim-fetch-paused", attempts: 2 })).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      const codeParsed = parseAutomationsFile(`version: 1
+automations:
+  - id: pull-code
+    name: Pull with code
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        as: stats
+      - run-file: rows.js
+`);
+      if (codeParsed.status !== "read" || codeParsed.entries[0]?.status !== "valid")
+        throw Error("bad yaml");
+      const codeAutomation = codeParsed.entries[0].automation;
+      let reads = 0;
+      let approvals = 0;
+      let allowNewCode = false;
+      const checked: string[][] = [];
+      const codeDeps: CollectionAutomationRunDependencies = {
+        ...deps,
+        readCode: async () => ({
+          text: reads++ === 0 ? "return { output: 1 };" : "return { output: 2 };",
+          truncated: false,
+        }),
+        readHttpApprovals: async () => ({
+          approved: {
+            has: () => approvals++ === 0 || allowNewCode,
+          } as unknown as ReadonlySet<string>,
+          secrets: HOOK_SECRETS,
+        }),
+        checkReach: async (steps) => {
+          checked.push(steps.map((step) => step.kind));
+          return false;
+        },
+      };
+      const codeRun = (attempts: number) =>
+        runCollectionAutomation(codeDeps, {
+          claim: {
+            ...claim,
+            claimId: "claim-fetch-code",
+            automationId: "collection:Tasks#pull-code",
+            attempts,
+          },
+          automation: codeAutomation,
+          collection: { path: "Tasks", name: "Tasks" },
+          roster,
+          signal: new AbortController().signal,
+          stopped: new AbortController().signal,
+        });
+      execute.mockClear();
+      expect(await codeRun(1)).toEqual({ kind: "wait", reason: "held" });
+      expect(checked.filter((kinds) => kinds.join() === "http")).toHaveLength(2);
+      allowNewCode = true;
+      expect(await codeRun(2)).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally {
+      await evaluator.close();
+    }
+  });
+
   it("refuses stale or unreadable Allow without saving approval, refuses replacement Collections at the same path, and supports atomic server-side Allow", async () => {
     const dir = await createTestScratch("dohc-http-stale-allow-");
     const evaluator = createAutomationFormulaEvaluator();
@@ -645,7 +995,7 @@ automations:
         ["Tasks/helper.js", "return { output: 'v1' };"],
       ]);
       const executor = makeExecutorFor(dir, files, {
-        isApproved: async (digest) => (approved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved, secrets: HOOK_SECRETS }),
         approve: approveSpy,
       });
       try {
@@ -698,7 +1048,7 @@ automations:
       currentCollectionObjectId = "col-obj-v2";
       const replacedDir = await createTestScratch("dohc-http-replaced-col-");
       const replacedExecutor = makeExecutorFor(replacedDir, files, {
-        isApproved: async (digest) => (approved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved, secrets: HOOK_SECRETS }),
         approve: approveSpy,
       });
       try {
@@ -717,7 +1067,7 @@ automations:
         serverApproved.add(input.approvalDigest);
       });
       const serverExecutor = makeExecutorFor(serverDir, files, {
-        isApproved: async (digest) => (serverApproved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved: serverApproved, secrets: HOOK_SECRETS }),
       });
       try {
         await serverExecutor.open();
@@ -845,7 +1195,10 @@ automations:
       postNotice: async () => {},
       readMessageBody: async () => null,
       recipientVerdicts: async () => [],
-      isHttpStepApproved: async () => (approved ? "approved" : "unapproved"),
+      readHttpApprovals: async () => ({
+        approved: approved ? everyDigest : new Set<string>(),
+        secrets: HOOK_SECRETS,
+      }),
       httpWebhook: { execute: executeMock },
     };
 
@@ -921,14 +1274,24 @@ automations:
     const store = createAutomationRunStore(testStoreFolder(dir));
     const evaluator = createAutomationFormulaEvaluator();
     const files = new Map<string, string>([
-      ["Tasks/automations.yaml", HOOK_YAML],
+      [
+        "Tasks/automations.yaml",
+        `${HOOK_YAML}  - id: stale-field
+    name: Send on a removed field
+    when: {field-changed: Removed}
+    do:
+      - http:
+          secret: SLACK_HOOK
+`,
+      ],
+      ["Tasks/collection.yaml", "fields: {Title: {type: text}}"],
       ["Tasks/helper.js", 'export default () => "v1";'],
     ]);
     const approvedDigests = new Set<string>();
     let lookupAvailable = true;
     const httpApprovals: CollectionHttpApprovalGate = {
-      isApproved: async (digest) =>
-        !lookupAvailable ? "unavailable" : approvedDigests.has(digest) ? "approved" : "unapproved",
+      read: async () =>
+        lookupAvailable ? { approved: approvedDigests, secrets: HOOK_SECRETS } : null,
       approve: async (input) => {
         approvedDigests.add(input.approvalDigest);
       },
@@ -979,8 +1342,19 @@ automations:
       nowMs: () => 1_000,
     });
     try {
+      expect(executor.secretUses()).toBeNull();
       await executor.open();
       await executor.automationsIn("Tasks");
+      const sendWebhook = { collectionPath: "Tasks", automationName: "Send webhook" };
+      expect(executor.secretUses()).toEqual(
+        new Map([
+          ["API_TOKEN", [sendWebhook]],
+          [
+            "SLACK_HOOK",
+            [sendWebhook, { collectionPath: "Tasks", automationName: "Send on a removed field" }],
+          ],
+        ]),
+      );
       const initialHold = executor.holds()[0];
       expect(initialHold).toBeDefined();
       expect(

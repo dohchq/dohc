@@ -199,7 +199,10 @@ function bindingsOf(steps: readonly OrderedStep[]): Map<string, Binding> {
     if (step.kind === "add-record" && step.as !== null) {
       bindings.set(step.as, { kind: "add", ordinal, collection: step.collection });
     }
-    if ((step.kind === "run" || step.kind === "run-file") && step.as !== null) {
+    if (
+      (step.kind === "run" || step.kind === "run-file" || step.kind === "http") &&
+      step.as !== null
+    ) {
       bindings.set(step.as, { kind: "code", ordinal, collection: null });
     }
   }

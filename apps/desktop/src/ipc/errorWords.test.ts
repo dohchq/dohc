@@ -181,6 +181,17 @@ it.each([
   expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
 });
 
+it("asks for a newer dohc when the engine does not read a note's body format", () => {
+  const received = acrossIpc(
+    refusal("INVALID_PARAMS", "ydoc-note-uses-a-newer-body-format"),
+    "desktop:resolve-workspace-version-conflict",
+  );
+  expect(readError(received)).toMatchObject({
+    words: "It needs a newer version of dohc. Update dohc to open it.",
+    canRetry: false,
+  });
+});
+
 it.each([
   ["disk-full: need 4096 bytes, 512 available", "The disk is full. Free up space, then try again."],
   [

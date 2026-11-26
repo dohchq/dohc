@@ -186,6 +186,11 @@ export type WorkspaceSecretWriteInput = z.output<typeof WorkspaceSecretWriteInpu
 
 const WorkspaceSecretsStorageKind = z.enum(["local", "server"]);
 
+export const WorkspaceSecretUse = z
+  .object({ collectionPath: z.string().min(1), automationName: z.string() })
+  .strict();
+export type WorkspaceSecretUse = z.output<typeof WorkspaceSecretUse>;
+
 export const WorkspaceSecretsState = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }).strict(),
   z
@@ -193,6 +198,7 @@ export const WorkspaceSecretsState = z.discriminatedUnion("kind", [
       kind: z.literal("unavailable"),
       storage: WorkspaceSecretsStorageKind,
       message: z.string().min(1),
+      canDelete: z.literal(true).optional(),
     })
     .strict(),
   z
@@ -201,6 +207,8 @@ export const WorkspaceSecretsState = z.discriminatedUnion("kind", [
       storage: WorkspaceSecretsStorageKind,
       secrets: z.array(WorkspaceSecretSummary),
       limit: z.number().int().min(1),
+      uses: z.record(z.string(), z.array(WorkspaceSecretUse)).optional(),
+      localCopies: z.literal(true).optional(),
     })
     .strict(),
 ]);

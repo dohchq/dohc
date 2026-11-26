@@ -2,10 +2,6 @@ import { utf8ByteLength } from "@dohc/live-session-contract/limits";
 import type { MarkType, NodeType, Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  MAX_SEQUENCE_DEPTH,
   allowedChildren,
   flattenBody,
   keepsMarkup,
@@ -17,6 +13,12 @@ import {
   type SequenceAttrs,
   type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  MAX_SEQUENCE_DEPTH,
+} from "./bodySequenceStore.js";
 import type { NewNoteCounts } from "./liveValidationPolicy.js";
 
 /**

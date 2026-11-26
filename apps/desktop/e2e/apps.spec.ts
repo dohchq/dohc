@@ -270,7 +270,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication
         .getByRole("combobox", { name: "Publication share link" })
-        .selectOption({ index: 1 });
+        .selectOption({ index: 2 });
       await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
       await expect(
         publication.getByRole("heading", { name: "Review app publication", exact: true }),
@@ -448,7 +448,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await page.getByTestId("site-preview-review").click();
     await publication
       .getByRole("combobox", { name: "Publication share link" })
-      .selectOption({ index: 1 });
+      .selectOption({ index: 2 });
     await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
     await expect(
       publication.getByRole("heading", { name: "Review app publication", exact: true }),

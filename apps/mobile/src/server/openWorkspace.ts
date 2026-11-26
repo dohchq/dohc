@@ -35,8 +35,9 @@ export function createOpenWorkspace(options: {
   readonly onMessages?: (workspaceId: string, messages: readonly ChatMessage[]) => void;
   /** The open workspace becomes `workspaceId`, before the open store stops (appTeardown). */
   readonly beforeSwitch?: (workspaceId: string | null) => void;
+  readonly onGone?: (workspaceId: string) => void;
 }): OpenWorkspace {
-  const { signIn, list, cache, onMessages, beforeSwitch } = options;
+  const { signIn, list, cache, onMessages, beforeSwitch, onGone } = options;
   const listeners = new Set<() => void>();
   const saved = cache.savedList(signIn);
   let chosen: string | null = null;
@@ -54,7 +55,10 @@ export function createOpenWorkspace(options: {
       signIn,
       workspaceId,
       cache,
-      onGone: () => list.reload(),
+      onGone: () => {
+        onGone?.(workspaceId);
+        list.reload();
+      },
       onMessages: onMessages && ((messages) => onMessages(workspaceId, messages)),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {
@@ -95,18 +99,17 @@ export function createOpenWorkspace(options: {
   }
 
   update();
+  void saved?.loadChosen().then((found) => {
+    if (stopped || !signIn.isCurrent()) return;
+    chosen ??= found;
+    endChoosing();
+  });
   return {
     state: () => state,
     subscribe(listener) {
       listeners.add(listener);
-      // The list is followed from the first subscriber, so making this starts nothing.
       if (!unsubscribe) {
         unsubscribe = list.subscribe(update);
-        void saved?.loadChosen().then((found) => {
-          if (stopped || !signIn.isCurrent()) return;
-          chosen ??= found;
-          endChoosing();
-        });
         update();
       }
       return () => void listeners.delete(listener);

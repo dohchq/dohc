@@ -1,6 +1,6 @@
 import type { ScopedEnds } from "../pages/pageLive";
 import type { SignIn } from "../server/account";
-import { requestGenerations, shownProblem } from "../server/client";
+import { requestGenerations, ServerError, shownProblem } from "../server/client";
 import {
   collectionOperations,
   type ChangeAnswer,
@@ -17,9 +17,11 @@ import {
   type RecordValue,
   type WriteRefusal,
 } from "../server/phoneCollections";
-import type { ReadProblem } from "../server/workspaceData";
+import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
 
-// The open workspace's transactional Collections, and the one Collection on screen, in memory only.
+// The open workspace's transactional Collections, and the one Collection on screen. The list is kept in the read
+// cache with the workspace's views. Each Collection opened stays in memory, so opening it again shows it at once while
+// it reads again, its tables first whatever table is chosen meanwhile. One the server refuses shows as refused.
 //
 // One store per sign-in and workspace. Its answers land only while its sign-in is current and it hasn't stopped, and
 // each read only while it is the latest of its kind, so a late answer never paints another workspace or table. The
@@ -155,9 +157,10 @@ export interface WorkspaceCollections {
 const NO_LIST: CollectionsState = { collections: null, problem: null, failures: 0 };
 
 export function createWorkspaceCollections(
-  signIn: Pick<SignIn, "client" | "isCurrent">,
+  signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">,
   workspaceId: string,
   ends: Pick<ScopedEnds, "add">,
+  cache: ReadCache,
 ): WorkspaceCollections {
   let controller = new AbortController();
   let operations = collectionOperations(signIn.client, workspaceId, controller.signal);
@@ -166,8 +169,11 @@ export function createWorkspaceCollections(
   const viewReads = requestGenerations();
   const recordReads = requestGenerations();
   const listeners = new Set<() => void>();
-  let list = NO_LIST;
+  const listed = cachedList(cache, signIn, workspaceId, views.collections);
+  let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
   let view: CollectionView | null = null;
+  const held = new Map<string, CollectionView>();
+  let described: string | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
   const isLive = () => !stopped && signIn.isCurrent();
@@ -192,11 +198,18 @@ export function createWorkspaceCollections(
     recordReads.next();
     list = NO_LIST;
     view = null;
+    held.clear();
     changes = new Map();
     actions = new Map();
     emit();
   };
   const remove = ends.add({ signIn, workspaceId }, { end: clear });
+  void listed.restored.then(() => {
+    const collections = listed.value();
+    if (!isLive() || list.collections !== null || !collections) return;
+    list = { ...list, collections };
+    emit();
+  });
 
   const setChange = (key: string, next: RecordChange | null) => {
     const copy = new Map(changes);
@@ -323,8 +336,9 @@ export function createWorkspaceCollections(
     const request = listReads.next();
     const lands = () => isLive() && listReads.isLatest(request);
     try {
-      const collections = await operations.list();
+      const [collections] = await Promise.all([operations.list(), listed.restored]);
       if (!lands()) return;
+      listed.save(collections);
       list = { collections, problem: null, failures: list.failures };
       emit();
     } catch (error) {
@@ -347,7 +361,9 @@ export function createWorkspaceCollections(
     update(datasetId, { reading: mode });
     try {
       const description =
-        describe || !now.description ? await operations.describe(datasetId) : now.description;
+        describe || !now.description || described !== datasetId
+          ? await operations.describe(datasetId)
+          : now.description;
       if (!lands()) return;
       const table =
         description.tables.find((table) => table.tableId === now.tableId) ?? description.tables[0];
@@ -368,33 +384,41 @@ export function createWorkspaceCollections(
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
           : undefined;
+      described = datasetId;
       update(datasetId, {
         description,
         tableId: table?.tableId ?? null,
         // A record added here can come again in a later page.
-        rows: more
-          ? [
-              ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
-              ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
-            ]
-          : rows,
+        rows:
+          more && ready
+            ? [
+                ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
+                ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
+              ]
+            : rows,
         files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
         next: ready?.next ?? null,
         refused: page?.status === "refused",
         reading: null,
         problem: null,
         opened:
-          opened && fresh && ready && newest(fresh, opened.record) === fresh
-            ? { ...opened, record: fresh, files: ready.files }
-            : opened,
+          page?.status === "refused" && opened?.tableId === table?.tableId
+            ? null
+            : opened && fresh && ready && newest(fresh, opened.record) === fresh
+              ? { ...opened, record: fresh, files: ready.files }
+              : opened,
       });
     } catch (error) {
       const cause = shownProblem(error);
-      if (lands())
-        update(datasetId, {
-          reading: null,
-          problem: cause ? { cause, more } : (view?.problem ?? null),
-        });
+      if (!lands()) return;
+      const refused =
+        cause === "refused" && !(error instanceof ServerError && error.status === 413);
+      if (refused) held.delete(datasetId);
+      update(datasetId, {
+        ...(refused ? { description: null, rows: [], files: {}, next: null, opened: null } : {}),
+        reading: null,
+        problem: cause ? { cause, more } : (view?.problem ?? null),
+      });
     }
   }
 
@@ -410,24 +434,30 @@ export function createWorkspaceCollections(
     refresh,
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
-      view = {
-        datasetId,
-        description: null,
-        tableId: null,
-        rows: [],
-        files: {},
-        next: null,
-        reading: null,
-        refused: false,
-        problem: null,
-        opened: null,
-      };
+      const last = held.get(datasetId);
+      described = null;
+      view = last
+        ? { ...last, problem: null, opened: null }
+        : {
+            datasetId,
+            description: null,
+            tableId: null,
+            rows: [],
+            files: {},
+            next: null,
+            reading: null,
+            refused: false,
+            problem: null,
+            opened: null,
+          };
       emit();
       return read("first", true);
     },
     close(datasetId) {
       if (view?.datasetId !== datasetId) return;
       viewReads.next();
+      if (view.refused) held.delete(datasetId);
+      else held.set(datasetId, { ...view, reading: null });
       view = null;
       emit();
     },

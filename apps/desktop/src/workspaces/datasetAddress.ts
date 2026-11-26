@@ -144,6 +144,18 @@ export async function resolveDatasetAddress(
   return id;
 }
 
+/** The one dataset.json that names this Collection, or null when none or several do. */
+export async function datasetPathOf(
+  adapter: Adapter,
+  workspaceId: string,
+  datasetId: string,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const catalog = await addresses(adapter, workspaceId, "main", signal);
+  const paths = [...catalog].filter(([, value]) => value.datasetId === datasetId);
+  return paths.length === 1 ? paths[0]![0] : null;
+}
+
 /**
  * The folders whose dataset.json names a Collection that `kept` leaves out,
  * as one deleted permanently leaves behind. `kept` lists the ids the store

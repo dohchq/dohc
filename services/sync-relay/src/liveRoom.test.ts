@@ -32,7 +32,7 @@ import type { LiveRoomAuthority } from "./storage/types.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
-import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
+import { liveJournalSeedClientIds } from "./storage/liveUpdateJournal.js";
 import {
   readRetiredJournalPage,
   retirementJournalEvidence,
@@ -1369,19 +1369,46 @@ it("refuses an edit under an editor id tied to someone else and writes nothing",
   expect(unsaved(f)).toHaveLength(1);
 });
 
-it("refuses an edit under the note's own editor id, and the owner's under its seed", async () => {
+function engineSeedClient(fields: readonly string[], schemaVersion: 1 | 2) {
+  const domain =
+    schemaVersion === 2 ? "dohc:ydoc-seed-client:v1-format2" : "dohc:ydoc-seed-client:v1";
+  const digest = createHash("sha256").update(domain);
+  for (const field of fields) {
+    const bytes = Buffer.from(field),
+      length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.length));
+    digest.update(length).update(bytes);
+  }
+  return Math.max(1, digest.digest().readUInt32BE(0));
+}
+
+it("names the seed client the engine names, in each format", () => {
+  const fields = ["workspace", "main", "object", "richdoc", "moment", "blob"];
+  expect(engineSeedClient(fields, 1)).toBe(3_076_933_556);
+  expect(engineSeedClient(fields, 2)).toBe(963_707_788);
+});
+
+it("refuses an edit under the note's own editor id, and the owner's under either seed the engine writes it with", async () => {
   const f = note();
   const room = rooms(f);
-  const seed = liveJournalSeedClientId(f.storage as StorageContext, f.input.evidence.document);
-  expect(seed).not.toBeNull();
+  const { workspaceId, mainVersionId, objectId } = f.input.evidence.document;
+  const fields = [
+    workspaceId,
+    mainVersionId,
+    objectId,
+    "richdoc",
+    "moment-1",
+    f.input.evidence.projectedMarkdownSha256,
+  ];
+  const seeds = ([1, 2] as const).map((schemaVersion) => engineSeedClient(fields, schemaVersion));
   const noteIds = Y.decodeStateVector(Y.encodeStateVector(f.doc)).keys();
   const tries = [
-    ...[...new Set([seed!, ...noteIds])].map((clientId) => ({
+    ...[...new Set([...seeds, ...noteIds])].map((clientId) => ({
       clientId,
       sender: readerAuthor,
       access: readerAccess,
     })),
-    { clientId: seed!, sender: olu, access: owner },
+    ...seeds.map((clientId) => ({ clientId, sender: olu, access: owner })),
   ];
   for (const { clientId, sender, access } of tries) {
     const a = editor(f, room, sender, access);
@@ -1442,8 +1469,9 @@ it("takes the owner's edit under the editor id the note's base was written with,
   const base = markdownToYDoc("Draft\n");
   const f = note(Y.encodeStateAsUpdate(base));
   const room = rooms(f);
-  const seed = liveJournalSeedClientId(f.storage as StorageContext, f.input.evidence.document);
-  expect(seed).not.toBe(base.clientID);
+  expect(
+    liveJournalSeedClientIds(f.storage as StorageContext, f.input.evidence.document),
+  ).not.toContain(base.clientID);
   const shared = editor(f, room, readerAuthor, readerAccess);
   await shared.open();
   shared.doc.clientID = base.clientID;

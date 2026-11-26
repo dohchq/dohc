@@ -223,6 +223,8 @@ export function createOwnerAppPublicationRoutes(options: {
     } catch {
       throw badRequest("Invalid publication candidate.");
     }
+    if (candidate.external)
+      throw badRequest("Apps that call outside services run only on the owner's computer for now.");
     if (
       workspace &&
       candidate.capabilities.some((capability) => capability.kind === "collection-create")

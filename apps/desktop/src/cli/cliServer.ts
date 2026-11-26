@@ -3044,8 +3044,8 @@ async function dispatch(
   }
 }
 
-// A work link for a chat message. A path names a Collection by its folder,
-// or else a file. A read-only workspace makes none: its references would not
+// A work link for a chat message. A path names a Collection or an app by its
+// folder, or else a file. A read-only workspace makes none: its references would not
 // reach the owner's server.
 async function makeLink(
   target: CliLinkTarget,
@@ -3085,23 +3085,66 @@ async function makeLink(
       if (!found.rootMessage) throw new CliCommandError(`no such message: ${target.message}`);
       return made("message", { kind: "message", messageId: found.rootMessage.id });
     }
-    case "path":
+    case "path": {
       try {
         return await made("collection", { kind: "documentCollection", path: target.path });
       } catch {
-        // Not a Collection: try the path as a file. Only a file the engine
-        // cannot find is missing; another failure, such as a cancelled
-        // workspace, says what it is.
-        try {
-          return await made("file", { kind: "file", path: target.path });
-        } catch (error) {
-          if (!(error instanceof Error && error.message === "work-target-not-found")) throw error;
-          throw new CliCommandError(
-            `dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`,
-          );
-        }
+        // Not a document Collection: try the path as a file, then as an
+        // app's or a data Collection's folder.
       }
+      // Only a file the engine cannot find is missing; another failure, such
+      // as a cancelled workspace, says what it is.
+      const file = await missingAsNull(() => made("file", { kind: "file", path: target.path }));
+      if (file) return file;
+      const inFolder = (name: string) => (target.path ? `${target.path}/${name}` : name);
+      // An app link names a file that marks its folder as an app, so it
+      // moves with the folder.
+      for (const marker of APP_MARKERS) {
+        const app = await missingAsNull(() => made("app", { kind: "app", path: inFolder(marker) }));
+        if (app) return app;
+      }
+      const table = await dataCollectionTable(context, target.path, inFolder("dataset.json"));
+      if (table) return made("collection", { kind: "transactionalCollection", ...table });
+      throw new CliCommandError(
+        `dohc could not find ${target.path}. Link a tracked file, or an app or a Collection by its folder.`,
+      );
+    }
   }
+}
+
+// The files that make a folder an app, as discoverSites reads them. A
+// dohc.json alone may name a workflow rather than an app.
+const APP_MARKERS = ["app.publish.json", "index.html"] as const;
+
+async function missingAsNull<T>(make: () => Promise<T>): Promise<T | null> {
+  try {
+    return await make();
+  } catch (error) {
+    if (error instanceof Error && error.message === "work-target-not-found") return null;
+    throw error;
+  }
+}
+
+// The table of the data Collection a dataset.json names, or null when the
+// path names none. A dataset with several tables is several Collections, so
+// its folder alone names none of them.
+async function dataCollectionTable(
+  context: CliWorkspaceContext,
+  folder: string,
+  datasetPath: string,
+): Promise<{ datasetId: string; tableId: string } | null> {
+  if (!context.dataset) return null;
+  const described = await context
+    .dataset({ action: "describe", workspaceId: context.workspaceId, datasetPath }, null)
+    .catch(() => null);
+  if (described?.kind !== "description") return null;
+  const [table, ...others] = described.dataset.tables;
+  if (!table) return null;
+  if (others.length > 0)
+    throw new CliCommandError(
+      `${folder || "This folder"} holds ${described.dataset.tables.length} Collections, and a link names one. Name them in the message instead.`,
+    );
+  return { datasetId: described.dataset.datasetId, tableId: table.tableId };
 }
 
 type DeclaredWriteRequest = Extract<CliRequest, { verb: DeclaredWriteVerb }>;

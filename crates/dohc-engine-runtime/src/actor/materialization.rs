@@ -7,6 +7,7 @@ use dohc_engine_domain::{
     decode_binary_rollback_job_identity,
 };
 use dohc_engine_files::materialize::PreparedTemps;
+use dohc_engine_files::policy::names_env_template;
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
     complete_secret_job_unrun, materialize_one, materialize_secret_delete_one,
@@ -1246,6 +1247,12 @@ fn replay_materializations(
             }
             let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
             let ordinary_secret = job.job_id.starts_with("secret-mat_");
+            if (switch_secret || ordinary_secret) && names_env_template(&job.target_path) {
+                if complete_secret_job_unrun(store, root_dir, job, now_ms).is_err() {
+                    summary.failed += 1;
+                }
+                continue;
+            }
             if switch_secret || ordinary_secret {
                 let coordinates = if switch_secret {
                     match switch_projection_matches_active(store, job, true)? {

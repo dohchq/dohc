@@ -7,9 +7,11 @@ import {
   MAX_HTTP_BODY_BYTES,
   MAX_HTTP_HEADERS,
   MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_RESPONSE_BYTES,
   isForbiddenHttpHeader,
   type AutomationHttpStep,
 } from "./automations";
+import type { WorkspaceSecretSummary } from "./workspaceSecrets";
 
 export const AUTOMATION_CHAIN_DEPTH_CAP = 4;
 export const MAX_WORKSPACE_HTTP_APPROVALS = 500;
@@ -77,6 +79,7 @@ export const OutboundWebhookDispatchResponse = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       status: z.number().int().min(200).max(299),
       deduplicated: z.boolean().optional(),
+      response: z.json().optional(),
     })
     .strict(),
   z
@@ -96,10 +99,64 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export function httpStepSecretNames(
+  step: Pick<AutomationHttpStep, "url" | "secretHeaders">,
+): string[] {
+  const names = new Set(step.secretHeaders.map((header) => header.secret));
+  if (step.url.kind === "secret") names.add(step.url.secret);
+  return [...names].sort(compareCodeUnits);
+}
+
+/**
+ * What an approval remembers about a secret: a header secret's websites and
+ * when it was first added, so rotating its value keeps the approval; a link
+ * secret's exact version, so any new link needs a new approval.
+ */
+export function workspaceSecretApprovalBinding(secret: {
+  readonly usage: "http-header" | "http-url";
+  readonly allowedHosts: readonly string[];
+  readonly createdAtMs: number;
+  readonly generation: number;
+}): string {
+  return JSON.stringify(
+    secret.usage === "http-header"
+      ? [secret.usage, [...secret.allowedHosts].sort(compareCodeUnits), secret.createdAtMs]
+      : [secret.usage, secret.createdAtMs, secret.generation],
+  );
+}
+
+export function httpStepSecretProblem(
+  step: Pick<AutomationHttpStep, "url" | "secretHeaders">,
+  secrets: readonly WorkspaceSecretSummary[],
+): string | null {
+  const uses = [
+    ...(step.url.kind === "secret" ? [{ name: step.url.secret, usage: "http-url" as const }] : []),
+    ...step.secretHeaders.map((header) => ({ name: header.secret, usage: "http-header" as const })),
+  ];
+  for (const use of uses) {
+    const secret = secrets.find((candidate) => candidate.name === use.name);
+    if (!secret) return `Add the secret ${use.name} in Settings, then allow this step.`;
+    if (secret.usage !== use.usage) {
+      return `${use.name} is saved as ${secret.usage === "http-url" ? "a webhook link" : "an API key"}, but this step uses it as ${use.usage === "http-url" ? "a webhook link" : "an API key"}. Fix it in Settings, then allow this step.`;
+    }
+  }
+  return null;
+}
+
+export function workspaceSecretApprovalBindings(
+  secrets: readonly WorkspaceSecretSummary[] | null,
+): Map<string, string> | null {
+  return secrets === null
+    ? null
+    : new Map(secrets.map((secret) => [secret.name, workspaceSecretApprovalBinding(secret)]));
+}
+
 /**
  * Deterministic SHA-256 digest binding an owner's Desktop UI approval of one
  * outbound HTTP step to its Collection id and path, automation definition, step
- * ordinal, destination, header declarations, and every referenced code file.
+ * ordinal, destination, header declarations, every referenced code file, and
+ * each named secret's approval binding. Null when the step names a secret and
+ * the secret bindings could not be read.
  */
 export function computeHttpStepApprovalDigest(input: {
   readonly collectionId: string;
@@ -109,7 +166,8 @@ export function computeHttpStepApprovalDigest(input: {
   readonly step: Pick<AutomationHttpStep, "url" | "method" | "headers" | "secretHeaders">;
   readonly definitionDigest: string;
   readonly codeFileHashes: ReadonlyArray<{ readonly file: string; readonly sha256: string }>;
-}): string {
+  readonly secretBindings: ReadonlyMap<string, string> | null;
+}): string | null {
   const urlBinding =
     input.step.url.kind === "literal"
       ? ["literal", input.step.url.url]
@@ -123,20 +181,32 @@ export function computeHttpStepApprovalDigest(input: {
   const codeFiles = [...input.codeFileHashes]
     .map((entry) => [entry.file, entry.sha256] as const)
     .sort((left, right) => compareCodeUnits(left[0], right[0]));
+  const fields = [
+    input.collectionId,
+    input.collectionPath,
+    input.automationId,
+    input.stepOrdinal,
+    urlBinding,
+    input.step.method,
+    headerNames,
+    secretHeaderRefs,
+    input.definitionDigest,
+    codeFiles,
+  ];
+  const secretNames = httpStepSecretNames(input.step);
+  if (secretNames.length === 0) {
+    return createHash("sha256")
+      .update(JSON.stringify(["dohc-http-step-approval-v1", ...fields]))
+      .digest("hex");
+  }
+  const bindings = input.secretBindings;
+  if (bindings === null) return null;
   return createHash("sha256")
     .update(
       JSON.stringify([
-        "dohc-http-step-approval-v1",
-        input.collectionId,
-        input.collectionPath,
-        input.automationId,
-        input.stepOrdinal,
-        urlBinding,
-        input.step.method,
-        headerNames,
-        secretHeaderRefs,
-        input.definitionDigest,
-        codeFiles,
+        "dohc-http-step-approval-v2",
+        ...fields,
+        secretNames.map((name) => [name, bindings.get(name) ?? null]),
       ]),
     )
     .digest("hex");
@@ -147,11 +217,120 @@ export function computeHttpStepApprovalDigest(input: {
  * before persisting or returning it.
  */
 export function sanitizeHttpFailureReason(reason: string, secrets: readonly string[]): string {
-  let scrubbed = reason;
-  for (const secret of secrets) {
-    if (secret.length > 0 && scrubbed.includes(secret)) {
-      scrubbed = scrubbed.split(secret).join("[redacted]");
+  return redactSecrets(reason, secrets).slice(0, 500);
+}
+
+function secretForms(secrets: readonly string[]): string[] {
+  return [...new Set(secrets.flatMap((secret) => [secret, secret.trim()]))].filter(
+    (secret) => secret.length > 0,
+  );
+}
+
+function redactSecrets(text: string, secrets: readonly string[]): string {
+  const spans: Array<[number, number]> = [];
+  for (const secret of secretForms(secrets)) {
+    for (let at = text.indexOf(secret); at >= 0; at = text.indexOf(secret, at + 1)) {
+      spans.push([at, at + secret.length]);
     }
   }
-  return scrubbed.slice(0, 500);
+  if (spans.length === 0) return text;
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of spans.sort((left, right) => left[0] - right[0])) {
+    const last = merged.at(-1);
+    if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  let scrubbed = "";
+  let from = 0;
+  for (const [start, end] of merged) {
+    scrubbed += `${text.slice(from, start)}[redacted]`;
+    from = end;
+  }
+  return scrubbed + text.slice(from);
+}
+
+function decoded(part: string): string {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+}
+
+/**
+ * What to scrub for a secret destination URL: the URL, and its path parts
+ * and query values of 8 or more characters, as sent and decoded.
+ */
+export function secretUrlScrubValues(rawUrl: string): string[] {
+  const url = URL.parse(rawUrl);
+  if (url === null) return [rawUrl];
+  const parts = url.pathname.split("/").filter((part) => part.length >= 8);
+  const raw = url.search
+    .slice(1)
+    .split("&")
+    .map((pair) => pair.slice(pair.indexOf("=") + 1));
+  const values = [...url.searchParams.values(), ...raw].filter((value) => value.length >= 8);
+  return [...new Set([rawUrl, url.href, ...parts, ...parts.map(decoded), ...values])];
+}
+
+function isWord(secret: string): boolean {
+  return secret.length < 24 && /^[a-z]+(?:[-_][a-z]+)*$/u.test(secret);
+}
+
+export type HttpJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | HttpJsonValue[]
+  | { [key: string]: HttpJsonValue };
+
+function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonValue | null {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (typeof value === "number" && secrets.includes(String(value))) return "[redacted]";
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const items: HttpJsonValue[] = [];
+    for (const item of value) {
+      const scrubbed = scrubJson(item, secrets);
+      if (scrubbed === null && item !== null) return null;
+      items.push(scrubbed);
+    }
+    return items;
+  }
+  const entries: Array<[string, HttpJsonValue]> = [];
+  for (const [key, item] of Object.entries(value)) {
+    if (secrets.some((secret) => !isWord(secret) && key.includes(secret))) return null;
+    const scrubbed = scrubJson(item, secrets);
+    if (scrubbed === null && item !== null) return null;
+    entries.push([key, scrubbed]);
+  }
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Replaces every secret value in a fetched JSON answer. Refuses an answer
+ * with a secret in a field name, unless that secret is a plain word such as
+ * a REST path part, or one over MAX_HTTP_RESPONSE_BYTES once written back out
+ * as JSON.
+ */
+export function scrubSecretsFromJson(
+  value: HttpJsonValue,
+  secrets: readonly string[],
+): { ok: true; value: HttpJsonValue } | { ok: false; reason: string } {
+  const scrubbed = scrubJson(value, secretForms(secrets));
+  if (scrubbed === null && value !== null) {
+    return {
+      ok: false,
+      reason: "The answer has a secret in a field name, so dohc did not keep it.",
+    };
+  }
+  const bytes = Buffer.byteLength(JSON.stringify(scrubbed), "utf8");
+  if (bytes > MAX_HTTP_RESPONSE_BYTES) {
+    return {
+      ok: false,
+      reason: `The answer is ${Math.ceil(bytes / 1024)} KiB as JSON, over the ${MAX_HTTP_RESPONSE_BYTES / 1024} KiB limit.`,
+    };
+  }
+  return { ok: true, value: scrubbed };
 }

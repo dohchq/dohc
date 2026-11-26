@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -11,6 +11,8 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
+import type { ReactNode } from "react";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { LEVEL_WORDS, MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (
@@ -97,6 +99,10 @@ const bridge = {
       view: ownerView(),
     }),
   ),
+  listWorkspaceFiles: vi.fn(async () => ({
+    files: [{ path: "Design/Research/notes.md" }, { path: ".dohc/state.json" }],
+    folders: ["Drafts"],
+  })),
 };
 
 function renderMembers(overrides: Partial<Parameters<typeof MembersSettings>[0]> = {}) {
@@ -109,7 +115,10 @@ function renderMembers(overrides: Partial<Parameters<typeof MembersSettings>[0]>
     onClearError: vi.fn(),
     ...overrides,
   };
-  const view = render(<MembersSettings {...props} />);
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>
+  );
+  const view = render(<MembersSettings {...props} />, { wrapper });
   return {
     props,
     view,
@@ -172,10 +181,41 @@ describe("Folder access", () => {
     const access = within(await section());
     await user.click(access.getByRole("button", { name: "Add" }));
     const dialog = within(screen.getByRole("dialog", { name: "Add folder access" }));
-    await user.type(dialog.getByLabelText("Folder path"), "Design/Research");
-    await user.selectOptions(dialog.getByLabelText("Member level"), "edit");
+    // The folder list offers the workspace's folders, not dohc's own.
+    await user.type(dialog.getByLabelText("Folder path"), "res");
+    const folders = within(await dialog.findByRole("listbox", { name: "Folders" }));
+    expect(folders.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Design/Research",
+    ]);
+    await user.click(folders.getByRole("option", { name: "Design/Research" }));
+    expect((dialog.getByLabelText("Folder path") as HTMLInputElement).value).toBe(
+      "Design/Research",
+    );
+    await user.click(
+      within(dialog.getByRole("radiogroup", { name: "Member level" })).getByRole("radio", {
+        name: "Edit",
+      }),
+    );
     await user.click(dialog.getByRole("button", { name: "Add person" }));
-    await user.type(dialog.getByLabelText("Email address"), "bo@test");
+    // Enter keeps what was typed until a row is chosen, so a match never
+    // replaces it.
+    await user.keyboard("bo");
+    expect(dialog.getByRole("listbox", { name: "People" })).toBeTruthy();
+    await user.keyboard("{Enter}");
+    expect((dialog.getByLabelText("Email address") as HTMLInputElement).value).toBe("bo");
+    expect(
+      dialog.getByText("Enter a different, valid email address for each person."),
+    ).toBeTruthy();
+    await user.clear(dialog.getByLabelText("Email address"));
+    // People offers members by name, and leaves out the owner and admins.
+    await user.keyboard("{ArrowDown}");
+    const people = within(dialog.getByRole("listbox", { name: "People" }));
+    expect(people.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Bobo@test",
+      "cy@test",
+    ]);
+    await user.keyboard("{Enter}");
+    expect((dialog.getByLabelText("Email address") as HTMLInputElement).value).toBe("bo@test");
     await user.click(dialog.getByRole("button", { name: "Save" }));
     expect(await access.findByText("Design/Research")).toBeTruthy();
     expect(access.getByText("Covered")).toBeTruthy();
@@ -188,7 +228,11 @@ describe("Folder access", () => {
 
     await user.click(access.getByRole("button", { name: "Change" }));
     const change = within(screen.getByRole("dialog", { name: "Change folder access" }));
-    await user.selectOptions(change.getByLabelText("Member level"), "none");
+    await user.click(
+      within(change.getByRole("radiogroup", { name: "Member level" })).getByRole("radio", {
+        name: "None",
+      }),
+    );
     await user.click(change.getByRole("button", { name: "Save" }));
     const confirm = within(screen.getByRole("dialog", { name: "Limit access to this folder?" }));
     expect(confirm.getByText("Copies already on people's computers stay.")).toBeTruthy();
@@ -235,6 +279,45 @@ describe("Folder access", () => {
     await user.click(dialog.getByRole("button", { name: "Reload Members" }));
     expect(await screen.findByText("Members · View")).toBeTruthy();
     expect(requests().map(({ action }) => action)).toEqual(["list", "folder", "list"]);
+  });
+
+  it("chooses no folder for Enter while the folders load, and ArrowUp starts at the last", async () => {
+    const listing = deferred<{ files: { path: string }[]; folders: string[] }>();
+    bridge.listWorkspaceFiles.mockReturnValueOnce(listing.promise);
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: adminView() });
+    renderMembers();
+    const user = userEvent.setup();
+    await user.click(within(await section()).getByRole("button", { name: "Add" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add folder access" }));
+    const field = dialog.getByLabelText("Folder path");
+    await user.type(field, "Research");
+    await user.keyboard("{ArrowDown}");
+    await act(async () =>
+      listing.resolve({ files: [], folders: ["Archive/Research", "Research/Old"] }),
+    );
+    expect(dialog.getByRole("listbox", { name: "Folders" })).toBeTruthy();
+    expect(field.getAttribute("aria-activedescendant")).toBeNull();
+    await user.keyboard("{Escape}{ArrowUp}");
+    const options = within(dialog.getByRole("listbox", { name: "Folders" })).getAllByRole("option");
+    expect(options.at(-1)!.textContent).toBe("Research/Old");
+    expect(field.getAttribute("aria-activedescendant")).toBe(options.at(-1)!.id);
+  });
+
+  it("says when the folder list failed, and Try again loads it", async () => {
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("engine stopped"));
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: adminView() });
+    renderMembers();
+    const user = userEvent.setup();
+    await user.click(within(await section()).getByRole("button", { name: "Remove marker" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Remove an unknown marker" }));
+    const failed = await dialog.findByTestId("folder-access-folders-retry");
+    expect(failed.textContent).toContain("dohc could not list this workspace's folders.");
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(dialog.queryByTestId("folder-access-folders-retry")).toBeNull());
+    await user.type(dialog.getByLabelText("Folder path"), "dra");
+    expect(
+      within(dialog.getByRole("listbox", { name: "Folders" })).getByRole("option").textContent,
+    ).toBe("Drafts");
   });
 
   it("keeps folder rules and marker removal out of the member view", async () => {
@@ -645,9 +728,10 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "letBackIn", person: "m-dee" });
   });
 
-  it("says dohc sends no email, then names the invited address and how that person gets in", async () => {
+  it("says dohc emails the invite, then names the invited address and how that person gets in", async () => {
     bridge.workspaceMembers.mockImplementation(async ({ request }) => ({
       status: "ready",
+      ...(request.action === "invite" ? { invitation: { invitationEmail: "sent" as const } } : {}),
       view:
         request.action === "invite"
           ? ownerView({
@@ -673,11 +757,11 @@ describe("Members page", () => {
     const sent = await screen.findByTestId("settings-members-invite-sent");
     expect(
       within(screen.getByTestId("settings-members-invite")).getByText(
-        /^dohc doesn't send email\. /u,
+        /^dohc emails them an invitation when your server sends email\. /u,
       ),
     ).toBeTruthy();
     expect(sent.textContent).toContain(
-      "Invited eve@test. Once they sign in with this address, the workspace shows in their Sharing",
+      "Emailed the invitation to eve@test. Once they sign in with this address, the workspace shows in their Sharing",
     );
     expect(sent.textContent).not.toContain("invite link");
     expect(sent.closest('[role="status"]')).not.toBeNull();
@@ -685,6 +769,249 @@ describe("Members page", () => {
     expect(screen.queryByRole("button", { name: "Turn on invite link" })).toBeNull();
     expect(screen.queryByTestId("settings-members-invite-sent-copy")).toBeNull();
     expect(within(row("m-eve")).getByText(/^Joins when they sign in · Invited /u)).toBeTruthy();
+  });
+
+  it.each([
+    [
+      { invitationEmail: "unavailable" as const },
+      "Invited eve@test. This server does not send email. Tell them to sign in to dohc with this address",
+    ],
+    [
+      { invitationEmail: "recent" as const },
+      "eve@test already has an invite. Sent recently. Wait a minute before trying again.",
+    ],
+    [
+      {
+        invitationEmail: "limit" as const,
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      "Invited eve@test. No email sent: 50 of 50 invitation emails used in the last 24 hours. Tell them",
+    ],
+  ])("says what became of the invite's email: %o", async (invitation, words) => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: ownerView(),
+      invitation,
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      words,
+    );
+    expect(props.onError).not.toHaveBeenCalled();
+    // A recent attempt may have failed, so it leaves a failure notice standing.
+    if (invitation.invitationEmail === "recent")
+      expect(props.onClearError).not.toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      );
+    else
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      );
+  });
+
+  const eve = person({ memberId: "m-eve", state: "invited", email: "eve@test", joinedAtMs: null });
+  const withEve = () => ownerView({ people: [owner, ana, bo, cy, dee, eve] });
+
+  it("reports an invite whose email failed, and Try again invites the same address again", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const failed = {
+      status: "ready" as const,
+      view: withEve(),
+      invitation: { invitationEmail: "failed" as const },
+    };
+    bridge.workspaceMembers.mockResolvedValueOnce(failed);
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "Eve@test{Enter}");
+    const shown = await screen.findByTestId("settings-members-invite-email-failed");
+    expect(shown.textContent).toContain(
+      "Invited Eve@test, but dohc could not email them the invitation.",
+    );
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const [message, , retry, , identity] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc could not email Eve@test their invitation.");
+    expect(identity).toBe("settings-members:ws-1:invite-email:eve@test");
+
+    bridge.workspaceMembers.mockResolvedValueOnce(failed);
+    await userEvent.click(within(shown).getByRole("button", { name: "Try again" }));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "Eve@test" });
+
+    // Notices' Try again checks the invite still stands, then invites again.
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      ...failed,
+      invitation: { invitationEmail: "sent" },
+    });
+    await act(async () => retry!());
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "Eve@test" });
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      "Emailed the invitation to Eve@test.",
+    );
+    expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1:invite-email:eve@test");
+  });
+
+  it("keeps a failed email's Try again working after Settings closes", async () => {
+    const { props, view } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(requests().slice(-2)).toEqual([
+      { action: "list" },
+      { action: "invite", email: "eve@test" },
+    ]);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+
+    // When the list can't be read, the notice comes back and nothing is invited.
+    bridge.workspaceMembers.mockRejectedValueOnce(new Error("offline"));
+    await act(async () => onError.mock.calls[1]![2]!());
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(onError).toHaveBeenCalledTimes(3);
+
+    // Once the invite is gone, Try again invites no one.
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await act(async () => onError.mock.calls[2]![2]!());
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a failed email failed when Try again comes too soon", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const shown = await screen.findByTestId("settings-members-invite-email-failed");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "recent" },
+    });
+    await userEvent.click(within(shown).getByRole("button", { name: "Try again" }));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(String(onError.mock.calls[1]![1])).toContain("No email went out.");
+    expect(await screen.findByTestId("settings-members-invite-email-failed")).toBeTruthy();
+    expect(props.onClearError).not.toHaveBeenCalledWith(
+      "settings-members:ws-1:invite-email:eve@test",
+    );
+  });
+
+  it("takes back a failed email's notice and Try again when the invite is removed", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await screen.findByTestId("settings-members-invite-email-failed");
+    expect(props.onClearError).not.toHaveBeenCalledWith(
+      "settings-members:ws-1:invite-email:eve@test",
+    );
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await openMenu("m-eve");
+    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Remove invite" }));
+    await vi.waitFor(() =>
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      ),
+    );
+    expect(screen.queryByTestId("settings-members-invite-email-failed")).toBeNull();
+  });
+
+  it("takes back a failed email's notice when the invite is removed after Settings reopens", async () => {
+    const first = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await vi.waitFor(() => expect(first.props.onError).toHaveBeenCalledTimes(1));
+    first.view.unmount();
+
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: withEve() });
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView() });
+    await openMenu("m-eve");
+    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Remove invite" }));
+    await vi.waitFor(() =>
+      expect(props.onClearError).toHaveBeenCalledWith(
+        "settings-members:ws-1:invite-email:eve@test",
+      ),
+    );
+  });
+
+  it("drops a failed email's Try again when the workspace changes while it checks the invite", async () => {
+    const { props, rerender } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: withEve(),
+      invitation: { invitationEmail: "failed" },
+    });
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    const listed = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(listed.promise);
+    let retried: Promise<void> | undefined;
+    act(() => {
+      retried = onError.mock.calls[0]![2]!() as Promise<void>;
+    });
+    rerender({ workspaceId: "ws-2" });
+    await act(async () => {
+      listed.resolve({ status: "ready", view: withEve() });
+      await retried;
+    });
+    expect(requests().filter((request) => request.action === "invite")).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("resends an invite from its row", async () => {
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    expect(await openMenu("m-cy")).toEqual(["Resend invitation", "Remove invite"]);
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: ownerView(),
+      invitation: { invitationEmail: "sent" },
+    });
+    await userEvent.click(
+      screen.getByRole("menuitem", { hidden: true, name: "Resend invitation" }),
+    );
+    expect(requests().at(-1)).toEqual({ action: "invite", email: "cy@test" });
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain(
+      "Emailed the invitation to cy@test.",
+    );
   });
 
   it("keeps an address typed while the invite runs", async () => {

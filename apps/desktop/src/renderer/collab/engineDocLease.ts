@@ -12,6 +12,7 @@ import { authorCapacityMessage } from "./authorCapacityMessage";
 import { DOCUMENT_TOO_DENSE_WORDS } from "../../ipc/errorWords";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
 import { declareSceneRoots, exportPortableScene, stableJson } from "@dohc/excalidraw-scene";
+import { declareBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent, ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
@@ -188,7 +189,7 @@ function makeTransport(
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
-    ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
+    initializeDoc: kind === "scene" ? declareSceneRoots : declareBodySequence,
     async open() {
       const result = await bridge().openEngineYDocSession({
         ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),

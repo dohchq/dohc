@@ -437,6 +437,62 @@ describe("automation notices", () => {
     await userEvent.click(within(onServer).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenLastCalledWith({ ...hold, onServer: true });
   });
+
+  it("sends a held web request to its Collection's card instead of allowing it unseen", async () => {
+    renderNotices({
+      automationHolds: [
+        {
+          automationId: "collection:Stats#pull",
+          automationName: "Pull stats",
+          definitionHash: "0123456789abcdef",
+          step: "0",
+          seq: 1,
+          collection: "Stats",
+          collectionPath: "Stats",
+          target: "us.posthog.com",
+          action: "send-http" as const,
+          stoppedFor: null,
+          fileUnread: false,
+          onServer: false,
+        },
+      ],
+      onAllowAutomationHold: vi.fn(),
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Stats#pull-0");
+    expect(notice.textContent).toContain(
+      "A step in Stats can send a request to us.posthog.com. Open Stats's Automations to see what it sends and saves, and allow it there.",
+    );
+    expect(within(notice).queryByRole("button", { name: "Allow" })).toBeNull();
+  });
+
+  it("keeps Allow on a held web request waiting on the server, which the card cannot allow", async () => {
+    const onAllowAutomationHold = vi.fn();
+    const hold = {
+      automationId: "collection:Stats#pull",
+      automationName: "Pull stats",
+      definitionHash: "0123456789abcdef",
+      step: "0",
+      seq: 1,
+      collection: "Stats",
+      collectionPath: "Stats",
+      target: "us.posthog.com",
+      action: "send-http" as const,
+      stoppedFor: null,
+      fileUnread: false,
+      onServer: true,
+    };
+    renderNotices({ automationHolds: [hold], onAllowAutomationHold });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId(
+      "notice-automation-hold-server-collection:Stats#pull-0",
+    );
+    expect(notice.textContent).toContain(
+      "Open Stats's Automations to see what it sends and saves, then allow it here.",
+    );
+    await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
+    expect(onAllowAutomationHold).toHaveBeenLastCalledWith(hold);
+  });
 });
 
 describe("notice center", () => {

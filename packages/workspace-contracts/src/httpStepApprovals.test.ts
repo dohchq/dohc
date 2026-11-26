@@ -7,7 +7,14 @@ import {
   writeAutomationsFile,
   type AutomationHttpStep,
 } from "./automations";
-import { computeHttpStepApprovalDigest, sanitizeHttpFailureReason } from "./httpStepApprovals";
+import { createHash } from "node:crypto";
+import {
+  computeHttpStepApprovalDigest,
+  sanitizeHttpFailureReason,
+  workspaceSecretApprovalBinding,
+  scrubSecretsFromJson,
+  secretUrlScrubValues,
+} from "./httpStepApprovals";
 
 describe("http automation steps", () => {
   it("parses and round-trips literal URL, secret URL, headers, secret headers, JSON body, and text body", () => {
@@ -113,7 +120,7 @@ automations:
 `,
       ],
       [
-        "GET method",
+        "DELETE method",
         `version: 1
 automations:
   - id: a
@@ -121,7 +128,7 @@ automations:
     when: record-added
     do:
       - http: https://hooks.example.com/events
-        method: GET
+        method: DELETE
 `,
       ],
       [
@@ -224,6 +231,7 @@ automations:
       headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
       secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
       body: { kind: "text", template: "Added {record.Title}" },
+      as: null,
     };
 
     const base = computeHttpStepApprovalDigest({
@@ -233,6 +241,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "ä.js", sha256: "3".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -246,6 +255,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -261,6 +271,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -276,6 +287,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "9".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -291,6 +303,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -298,6 +311,103 @@ automations:
       ],
     });
     expect(movedCollection).not.toBe(base);
+  });
+
+  it("keeps the first digest format for steps that name no secret", () => {
+    const step: AutomationHttpStep = {
+      kind: "http",
+      url: { kind: "literal", url: "https://hooks.example.com/notify" },
+      method: "POST",
+      headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
+      secretHeaders: [],
+      body: null,
+      as: null,
+    };
+    const digest = computeHttpStepApprovalDigest({
+      collectionId: "col-obj-1",
+      collectionPath: "Tasks",
+      automationId: "notify",
+      stepOrdinal: 0,
+      step,
+      definitionDigest: "a".repeat(64),
+      codeFileHashes: [],
+      secretBindings: null,
+    });
+    expect(digest).toBe(
+      createHash("sha256")
+        .update(
+          JSON.stringify([
+            "dohc-http-step-approval-v1",
+            "col-obj-1",
+            "Tasks",
+            "notify",
+            0,
+            ["literal", "https://hooks.example.com/notify"],
+            "POST",
+            ["x-event"],
+            [],
+            "a".repeat(64),
+            [],
+          ]),
+        )
+        .digest("hex"),
+    );
+  });
+
+  it("ties a secret step's approval to each secret's identity", () => {
+    const step: AutomationHttpStep = {
+      kind: "http",
+      url: { kind: "secret", secret: "HOOK_URL" },
+      method: "POST",
+      headers: [],
+      secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
+      body: null,
+      as: null,
+    };
+    const digestWith = (
+      urlSecret: Parameters<typeof workspaceSecretApprovalBinding>[0] | null,
+      token: Parameters<typeof workspaceSecretApprovalBinding>[0],
+    ) => {
+      const bindings = new Map([["HOOK_TOKEN", workspaceSecretApprovalBinding(token)]]);
+      if (urlSecret) bindings.set("HOOK_URL", workspaceSecretApprovalBinding(urlSecret));
+      return computeHttpStepApprovalDigest({
+        collectionId: "col-obj-1",
+        collectionPath: "Tasks",
+        automationId: "notify",
+        stepOrdinal: 0,
+        step,
+        definitionDigest: "a".repeat(64),
+        codeFileHashes: [],
+        secretBindings: bindings,
+      });
+    };
+    const url = { usage: "http-url" as const, allowedHosts: [], createdAtMs: 10, generation: 1 };
+    const token = {
+      usage: "http-header" as const,
+      allowedHosts: ["api.example.com"],
+      createdAtMs: 20,
+      generation: 1,
+    };
+    const approved = digestWith(url, token);
+    expect(approved).toMatch(/^[0-9a-f]{64}$/u);
+    expect(digestWith(url, { ...token, generation: 7 })).toBe(approved);
+    expect(digestWith({ ...url, generation: 2 }, token)).not.toBe(approved);
+    expect(digestWith({ ...url, createdAtMs: 11 }, token)).not.toBe(approved);
+    expect(digestWith(url, { ...token, createdAtMs: 21 })).not.toBe(approved);
+    expect(digestWith(url, { ...token, allowedHosts: ["evil.example.com"] })).not.toBe(approved);
+    expect(digestWith(null, token)).not.toBe(approved);
+    expect(
+      computeHttpStepApprovalDigest({
+        collectionId: "col-obj-1",
+        collectionPath: "Tasks",
+        automationId: "notify",
+        stepOrdinal: 0,
+        step,
+        definitionDigest: "a".repeat(64),
+        codeFileHashes: [],
+        secretBindings: null,
+      }),
+    ).toBeNull();
   });
 
   it("scrubs secrets from failure reasons", () => {
@@ -308,5 +418,104 @@ automations:
     expect(scrubbed).not.toContain("SECRET");
     expect(scrubbed).not.toContain("sk_live_123456");
     expect(scrubbed).toContain("[redacted]");
+  });
+
+  it("scrubs secret values anywhere in a fetched JSON response and keeps its keys and other values", () => {
+    expect(
+      scrubSecretsFromJson(
+        {
+          headers: { Authorization: "Bearer sk_live_123456" },
+          echoed: ["sk_live_123456", 3, true, null],
+          empty: null,
+        },
+        ["sk_live_123456"],
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        headers: { Authorization: "Bearer [redacted]" },
+        echoed: ["[redacted]", 3, true, null],
+        empty: null,
+      },
+    });
+    expect(scrubSecretsFromJson(null, ["sk_live_123456"])).toEqual({ ok: true, value: null });
+  });
+
+  it("refuses a fetched answer with a secret in a field name, or one over the size limit as JSON", () => {
+    expect(
+      scrubSecretsFromJson({ list: [{ "Bearer sk_live_123456": 1 }] }, ["sk_live_123456"]),
+    ).toEqual({
+      ok: false,
+      reason: "The answer has a secret in a field name, so dohc did not keep it.",
+    });
+    const grown = scrubSecretsFromJson(
+      Array.from({ length: 50_000 }, () => "sk"),
+      ["sk"],
+    );
+    expect(grown).toEqual({
+      ok: false,
+      reason: "The answer is 635 KiB as JSON, over the 192 KiB limit.",
+    });
+    expect(scrubSecretsFromJson({ "[redacted]": 1 }, ["[redacted]"])).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("redacts every secret span once, merging overlaps, never inside a marker it already wrote", () => {
+    expect(scrubSecretsFromJson({ x: "red tape" }, ["d", "re"])).toEqual({
+      ok: true,
+      value: { x: "[redacted] tape" },
+    });
+    expect(
+      sanitizeHttpFailureReason("got Bearer sk_live_123456789 back", [
+        "sk_live_123456789",
+        "Bearer sk_live_",
+      ]),
+    ).toBe("got [redacted] back");
+    expect(sanitizeHttpFailureReason("a.b and a*b", ["a.b"])).toBe("[redacted] and a*b");
+  });
+
+  it("scrubs a secret echoed trimmed, decoded, or as a number", () => {
+    const secrets = [
+      "tok_123456 ",
+      "84720193",
+      ...secretUrlScrubValues("https://hooks.example.com/services/T01%2FB02xyz?key=sk_live_abcdef"),
+    ];
+    expect(
+      scrubSecretsFromJson(
+        { auth: "Bearer tok_123456", pin: 84720193, path: "/services/T01/B02xyz", count: 3 },
+        secrets,
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        auth: "Bearer [redacted]",
+        pin: "[redacted]",
+        path: "/[redacted]/[redacted]",
+        count: 3,
+      },
+    });
+  });
+
+  it("scrubs every path part of a secret URL but refuses a field name only for a token", () => {
+    const scrubValues = secretUrlScrubValues(
+      "https://api.example.com/v1/customers/qdfrgkmwnpvbzstx?api_key=sk_live_12345678",
+    );
+    expect(
+      scrubSecretsFromJson(
+        { customers: [{ path: "/v1/customers/qdfrgkmwnpvbzstx", key: "sk_live_12345678" }] },
+        scrubValues,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { customers: [{ path: "/v1/[redacted]/[redacted]", key: "[redacted]" }] },
+    });
+    expect(scrubSecretsFromJson({ sk_live_12345678: 1 }, scrubValues)).toMatchObject({ ok: false });
+    expect(
+      scrubSecretsFromJson(
+        { raw: "sk%2Flive%2F12345678", plain: "sk/live/12345678" },
+        secretUrlScrubValues("https://api.example.com/v1?api_key=sk%2Flive%2F12345678"),
+      ),
+    ).toEqual({ ok: true, value: { raw: "[redacted]", plain: "[redacted]" } });
   });
 });

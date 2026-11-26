@@ -26,6 +26,8 @@ mod chat_cancellation;
 mod fts_mutation_paths;
 #[path = "fts_sync_and_conflict_paths.rs"]
 mod fts_sync_and_conflict_paths;
+#[path = "legacy_env_template.rs"]
+mod legacy_env_template;
 #[path = "live_settlement.rs"]
 mod live_settlement;
 #[path = "live_update_application.rs"]

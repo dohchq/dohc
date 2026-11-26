@@ -20,29 +20,32 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
+import { SettingsButton } from "../account/SettingsButton";
 import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
+import { memberAppState } from "../apps/reviewControls";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
-import { homeRows, type HomeRow } from "./homeModel";
+import { homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
 const NO_COLLECTIONS: CollectionsState = { collections: null, problem: null, failures: 0 };
 const nothing = () => () => undefined;
 
-// Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its sketches and other files, as the
-// desktop's Home lists them, then its published apps, each version under its app, then its transactional Collections.
+// Home in a signed-in build, in the desktop Home's order: the open workspace's published apps, each version under its app, then
+// its pages, in the folders that hold them, then its sketches, its transactional Collections, and last its other files.
 // A page opens to read; a folder opens in place; an app's version opens its review; a Collection opens its records. The
 // phone opens no other kind of file yet, so those rows only name it.
 // The list reads again when the feed reports a file change.
@@ -56,7 +59,20 @@ export function ServerHome() {
       style={{ backgroundColor: theme.bg }}
       contentContainerStyle={styles.content}
     >
-      <Stack.Screen options={{ title: "Home", headerLeft: () => <WorkspaceButton /> }} />
+      <Stack.Screen
+        options={{
+          title: "Home",
+          headerLeft: () => <WorkspaceButton />,
+          headerRight: Platform.OS === "android" ? () => <SettingsButton /> : undefined,
+        }}
+      />
+      {Platform.OS === "ios" ? (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.View hidesSharedBackground>
+            <SettingsButton />
+          </Stack.Toolbar.View>
+        </Stack.Toolbar>
+      ) : null}
       <NoWorkspace />
       {current ? (
         <Files key={current.id} workspaceId={current.id} workspace={current.name} />
@@ -71,7 +87,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const failed = workspaceWords.filesFailed(workspace);
   useFailureNotice(`read:${workspaceId}:files`, failed, state, retry);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set(["other"]));
   const rows = useMemo(
     () => (state.value ? homeRows(state.value, expanded) : null),
     [state.value, expanded],
@@ -94,9 +110,11 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
   const { data, apps, collections } = useAccount();
   const pagesShown = !collapsed.has("pages");
+  const passed = useRef<{ data: unknown; paths: Set<string> }>({ data: null, paths: new Set() });
   useEffect(() => {
-    if (rows && pagesShown)
-      data?.prefetchPages(rows.pages.flatMap((row) => (row.kind === "page" ? [row.path] : [])));
+    if (!data || !rows || !pagesShown) return;
+    if (passed.current.data !== data) passed.current = { data, paths: new Set() };
+    data.prefetchPages(revealedPages(rows.pages, passed.current.paths));
   }, [data, rows, pagesShown]);
 
   // The workspace's apps and Collections read each time Home shows, and its apps after an approval or a revoke.
@@ -130,50 +148,30 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
+  const fileSection = (id: string, title: string, list: FirstFiles | undefined) => {
+    if (!list?.count) return null;
+    return (
+      <>
+        <SectionHeader
+          title={title}
+          collapsed={collapsed.has(id)}
+          unread={false}
+          first={false}
+          onToggle={() => toggle(setCollapsed, id)}
+        />
+        {collapsed.has(id)
+          ? null
+          : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
+      </>
+    );
+  };
   return (
     <>
-      <SectionHeader
-        title={workspaceWords.pages}
-        collapsed={collapsed.has("pages")}
-        unread={false}
-        first
-        onToggle={() => toggle(setCollapsed, "pages")}
-      />
-      {collapsed.has("pages") ? null : !rows ? (
-        pending
-      ) : rows.pages.length === 0 ? (
-        <EmptyLine text={workspaceWords.noPages} />
-      ) : (
-        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
-      )}
-      {rows
-        ? (
-            [
-              ["sketches", workspaceWords.sketches, rows.sketches],
-              ["other", workspaceWords.otherFiles, rows.others],
-            ] as const
-          ).map(([id, title, list]) =>
-            list.count > 0 ? (
-              <Fragment key={id}>
-                <SectionHeader
-                  title={title}
-                  collapsed={collapsed.has(id)}
-                  unread={false}
-                  first={false}
-                  onToggle={() => toggle(setCollapsed, id)}
-                />
-                {collapsed.has(id)
-                  ? null
-                  : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
-              </Fragment>
-            ) : null,
-          )
-        : null}
       <SectionHeader
         title={appWords.apps}
         collapsed={collapsed.has("apps")}
         unread={false}
-        first={false}
+        first
         onToggle={() => toggle(setCollapsed, "apps")}
       />
       {collapsed.has("apps") ? null : !appsState.apps ? (
@@ -188,7 +186,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
         appGroups(appsState.apps).map(([root, versions]) => {
           const name = appName(versions[0]!);
           if (versions.length === 1)
-            return <AppRow key={root} app={versions[0]!} name={name} label={name} depth={0} />;
+            return <AppRow key={root} app={versions[0]!} name={name} depth={0} />;
           return (
             <Fragment key={root}>
               <View style={[styles.row, styles.app]} accessible accessibilityRole="header">
@@ -198,18 +196,27 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
                 </Text>
               </View>
               {versions.map((app) => (
-                <AppRow
-                  key={app.publicationId}
-                  app={app}
-                  name={name}
-                  label={appWords.version(shortVersion(app))}
-                  depth={1}
-                />
+                <AppRow key={app.publicationId} app={app} name={name} depth={1} />
               ))}
             </Fragment>
           );
         })
       )}
+      <SectionHeader
+        title={workspaceWords.pages}
+        collapsed={collapsed.has("pages")}
+        unread={false}
+        first={false}
+        onToggle={() => toggle(setCollapsed, "pages")}
+      />
+      {collapsed.has("pages") ? null : !rows ? (
+        pending
+      ) : rows.pages.length === 0 ? (
+        <EmptyLine text={workspaceWords.noPages} />
+      ) : (
+        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
+      )}
+      {fileSection("sketches", workspaceWords.sketches, rows?.sketches)}
       {collectionsState.collections?.length ? (
         <SectionHeader
           title={collectionWords.collections}
@@ -241,23 +248,41 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
               </Text>
             </Pressable>
           ))}
+      {fileSection("other", workspaceWords.otherFiles, rows?.others)}
     </>
   );
 }
 
-/** The apps by identity, their root folder, each with its published versions in the catalog's order. */
+/**
+ * The apps by identity, each with its published versions in the catalog's order: the owner's by root folder, and each
+ * Member app alone, as its one current version.
+ */
 function appGroups(apps: readonly PhoneApp[]) {
   const groups = new Map<string, PhoneApp[]>();
-  for (const app of apps) groups.set(app.appRoot, [...(groups.get(app.appRoot) ?? []), app]);
+  for (const app of apps) {
+    const key = app.member ? `member:${app.publicationId}` : app.appRoot;
+    groups.set(key, [...(groups.get(key) ?? []), app]);
+  }
   return [...groups];
 }
 
-/** One version of an app, which opens its review. Alone, it shows its app's name and its version beside it. */
-function AppRow(props: { app: PhoneApp; name: string; label: string; depth: number }) {
-  const { app, name, label, depth } = props;
+/**
+ * One version of an app, which opens its review. Alone, it shows its app's name and its version beside it; a Member
+ * app shows who made it and whether it waits for a review.
+ */
+function AppRow(props: { app: PhoneApp; name: string; depth: number }) {
+  const { app, name, depth } = props;
   const theme = useTheme();
   const router = useRouter();
   const version = appWords.version(shortVersion(app));
+  const label = depth === 0 ? name : version;
+  const state = memberAppState(app);
+  const made = app.member
+    ? app.member.author
+      ? appWords.sharedBy(app.member.author)
+      : appWords.sharedByMember
+    : null;
+  const detail = made ? (state ?? "") : depth === 0 ? version : "";
   return (
     <Pressable
       onPress={() => router.push({ pathname: "/app-review", params: { id: app.publicationId } })}
@@ -268,14 +293,31 @@ function AppRow(props: { app: PhoneApp; name: string; label: string; depth: numb
         pressed ? { backgroundColor: theme.panel2 } : null,
       ]}
       accessibilityRole="button"
-      accessibilityLabel={[name, version, ...(app.approved ? [appWords.approved] : [])].join(", ")}
+      accessibilityLabel={[
+        name,
+        ...(made ? [made] : [version]),
+        ...(state ? [state] : app.approved ? [appWords.approved] : []),
+      ].join(", ")}
     >
       {depth === 0 ? <AppWindow size={18} color={theme.ink} strokeWidth={1.9} /> : null}
-      <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
-        {label}
-      </Text>
-      <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>
-        {depth === 0 ? version : ""}
+      <View style={styles.names}>
+        <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+          {label}
+        </Text>
+        {made ? (
+          <Text style={[styles.made, { color: theme.subtle }]} numberOfLines={1}>
+            {made}
+          </Text>
+        ) : null}
+      </View>
+      <Text
+        style={[
+          made ? styles.state : styles.detail,
+          { color: state ? theme.accent : theme.subtle },
+        ]}
+        numberOfLines={made ? 2 : 1}
+      >
+        {detail}
       </Text>
       {app.approved ? <ShieldCheck size={16} color={theme.accent} strokeWidth={2} /> : null}
     </Pressable>
@@ -350,5 +392,8 @@ const styles = StyleSheet.create({
   chevron: { width: 16, alignItems: "center" },
   name: { flexShrink: 1, fontSize: 17 },
   detail: { flex: 1, fontSize: 15, textAlign: "right" },
+  names: { flex: 1, paddingVertical: 4 },
+  state: { maxWidth: "45%", fontSize: 15, textAlign: "right" },
+  made: { fontSize: 15 },
   app: { paddingLeft: 32 },
 });

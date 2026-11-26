@@ -17,9 +17,9 @@ export type ChatRunnerRefusal =
 
 /**
  * The `PUT /sync/workspaces/:id/runners` body for this computer: each agent
- * dohc can start, on or off. An agent the person runs on their own is left
- * out, and so is every command, environment, and timeout. An empty list
- * withdraws the computer.
+ * dohc can start, on or off, and the name of each agent the person runs on
+ * their own. No command, environment, or timeout goes. No runners and no
+ * `agents` withdraws the computer.
  */
 export function chatRunnerDeclaration(input: {
   installId: string;
@@ -43,6 +43,16 @@ export function chatRunnerDeclaration(input: {
       return { ok: false, reason: "same-name", agentId: agent.id };
     handles.add(handle);
   }
+  // The agents the person runs: only their names, so the phone can show their chats. One the relay can't take
+  // sends the list as unknown rather than holding back the wake roster.
+  const others = input.agents.filter((agent) => agent.launch === undefined);
+  const known =
+    others.length <= CHAT_RUNNER_AGENTS &&
+    others.every(
+      (agent) =>
+        isChatRunnerAgentId(agent.id) &&
+        isChatWakeLine(agent.name, CHAT_RUNNER_DISPLAY_NAME_MAX_CHARS),
+    );
   return {
     ok: true,
     declaration: {
@@ -53,6 +63,9 @@ export function chatRunnerDeclaration(input: {
         displayName: agent.name,
         enabled: agent.enabled,
       })),
+      agents: known
+        ? others.map((agent) => ({ agentId: agent.id, displayName: agent.name }))
+        : null,
     },
   };
 }

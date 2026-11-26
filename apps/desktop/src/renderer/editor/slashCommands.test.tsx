@@ -3,11 +3,26 @@ import { createElement, useEffect, useRef, useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AnyExtension, Editor, Extension } from "@tiptap/core";
-import { DohcRawInline } from "@dohc/ydoc-projection/markdown-extensions";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import * as yTiptap from "@tiptap/y-tiptap";
 import * as Y from "yjs";
+import { bodySequencePositions, yTiptapPositions } from "./collabPositions";
+import { TableKit } from "@tiptap/extension-table";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import {
+  DohcMarkdownTable,
+  DohcRawInline,
+  DohcTaskItem,
+  MarkdownBulletList,
+  MarkdownListItem,
+  MarkdownOrderedList,
+  MarkdownTaskList,
+} from "@dohc/ydoc-projection/markdown-extensions";
+import * as bodySequenceEditor from "@dohc/ydoc-projection/body-sequence-editor";
+import { BodySequence } from "@dohc/ydoc-projection/body-sequence-tiptap";
+import { declareBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   CLOSED_SLASH_COMMAND_STATE,
   dismissSlashCommand,
@@ -173,7 +188,7 @@ function makeSlashEditor(ydoc?: Y.Doc, extra: AnyExtension[] = []) {
                 stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
               },
               runCommandRef: { current: () => {} },
-              yTiptap: ydoc ? yTiptap : null,
+              positions: ydoc ? yTiptapPositions(yTiptap) : null,
             }),
           ];
         },
@@ -627,6 +642,168 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     editor.destroy();
     ydoc.destroy();
     peerDoc.destroy();
+  });
+});
+
+function sequenceDoc(seed: Uint8Array): Y.Doc {
+  const doc = new Y.Doc();
+  declareBodySequence(doc);
+  Y.applyUpdate(doc, seed);
+  return doc;
+}
+
+function sequenceIndexWhere(text: Y.Text, found: (insert: string | object) => number): number {
+  let index = 0;
+  for (const { insert } of text.toDelta() as Array<{ insert: string | object }>) {
+    const at = found(insert);
+    if (at >= 0) return index + at;
+    index += typeof insert === "string" ? insert.length : 1;
+  }
+  throw new Error("The sequence holds nothing like that.");
+}
+
+function makeSequenceSlashEditor(markdown: string) {
+  const seed = Y.encodeStateAsUpdate(markdownToYDoc(markdown, { bodySequence: true }));
+  const ydoc = sequenceDoc(seed);
+  const peer = sequenceDoc(seed);
+  ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== "relay") Y.applyUpdate(peer, update, "relay");
+  });
+  peer.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== "relay") Y.applyUpdate(ydoc, update, "relay");
+  });
+  const stateRef: { current: SlashCommandState } = { current: CLOSED_SLASH_COMMAND_STATE };
+  const editor = new Editor({
+    element: document.createElement("div"),
+    extensions: [
+      ...desktopMarkdownExtensions,
+      StarterKit.configure({
+        trailingNode: false,
+        undoRedo: false,
+        bulletList: false,
+        orderedList: false,
+        listItem: false,
+      }),
+      MarkdownBulletList,
+      MarkdownListItem,
+      MarkdownOrderedList,
+      MarkdownTaskList,
+      DohcTaskItem,
+      TableKit.configure({ table: false }),
+      DohcMarkdownTable,
+      BodySequence.configure({
+        sequence: ydoc.getText("sequence"),
+        containers: ydoc.getMap("containers"),
+      }),
+      Extension.create({
+        name: "dohcTestSlash",
+        addProseMirrorPlugins() {
+          return [
+            makeSlashCommandPlugin({
+              stateRef,
+              setState: (next) => {
+                stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+              },
+              runCommandRef: { current: () => {} },
+              positions: bodySequencePositions(ydoc, { BodySequence, editor: bodySequenceEditor }),
+            }),
+          ];
+        },
+      }),
+    ],
+  });
+  const peerText = peer.getText("sequence");
+  const editLead = () =>
+    peerText.insert(
+      sequenceIndexWhere(peerText, (insert) =>
+        typeof insert === "string" && insert.includes("Lead") ? insert.indexOf("Lead") + 4 : -1,
+      ),
+      " edited",
+    );
+  const run = (id: SlashCommandId) =>
+    runSlashCommand(editor, id, stateRef.current, (next) => {
+      stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+    });
+  const destroy = () => {
+    editor.destroy();
+    ydoc.destroy();
+    peer.destroy();
+  };
+  return { editor, stateRef, peerText, editLead, run, destroy };
+}
+
+describe("gutter '+' on a format-2 note", () => {
+  it.each([
+    ["a paragraph after the first", "Lead\n\nMiddle\n\nTail", "paragraph"],
+    ["a list", "Lead\n\n- one\n- two\n\nTail", "bulletList"],
+    ["a table", "Lead\n\n| a | b |\n| --- | --- |\n| c | d |\n\nTail", "table"],
+    ["a rule", "Lead\n\n---\n\nTail", "horizontalRule"],
+  ])("follows %s through a peer's edit before it", (_name, markdown, type) => {
+    const { editor, stateRef, editLead, run, destroy } = makeSequenceSlashEditor(markdown);
+    expect(editor.state.doc.child(1).type.name).toBe(type);
+    const blockPos = editor.state.doc.child(0).nodeSize;
+    insertBlockAfter(editor, blockPos);
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos } });
+
+    editLead();
+    expect(editor.state.doc.child(0).textContent).toBe("Lead edited");
+    const moved = editor.state.doc.child(0).nodeSize;
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos: moved } });
+
+    run("heading-1");
+    expect(editor.state.doc.child(0).textContent).toBe("Lead edited");
+    expect(editor.state.doc.child(1).type.name).toBe(type);
+    expect(editor.state.doc.child(2).type.name).toBe("heading");
+    destroy();
+  });
+
+  it("closes when a peer deletes the divider it was opened on", () => {
+    const { editor, stateRef, peerText, editLead, destroy } =
+      makeSequenceSlashEditor("Lead\n\n---\n\nTail");
+    insertBlockAfter(editor, editor.state.doc.child(0).nodeSize);
+    editLead();
+    expect(stateRef.current.open).toBe(true);
+    peerText.delete(
+      sequenceIndexWhere(peerText, (insert) =>
+        insert instanceof Y.XmlElement && insert.getAttribute("type") === "horizontalRule" ? 0 : -1,
+      ),
+      1,
+    );
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(stateRef.current.open).toBe(false);
+    destroy();
+  });
+
+  it("closes when a peer lifts the first line of the list it was opened on out of the list", () => {
+    const { editor, stateRef, peerText, destroy } = makeSequenceSlashEditor(
+      "Lead\n\n- one\n- two\n\nTail",
+    );
+    insertBlockAfter(editor, editor.state.doc.child(0).nodeSize);
+    expect(stateRef.current.open).toBe(true);
+    const delta = peerText.toDelta() as Array<{ insert: string | object }>;
+    const one = delta.findIndex(({ insert }) => insert === "one");
+    (delta[one - 1]!.insert as Y.XmlElement).setAttribute("path", [] as never);
+    expect(editor.state.doc.child(1).toJSON()).toMatchObject({ type: "paragraph" });
+    expect(editor.state.doc.child(1).textContent).toBe("one");
+    expect(editor.state.doc.child(2).type.name).toBe("bulletList");
+    expect(stateRef.current.open).toBe(false);
+    destroy();
+  });
+
+  it("keeps a dismissed '/' closed through a peer's edit before it", () => {
+    const { editor, stateRef, editLead, destroy } = makeSequenceSlashEditor("Lead\n\nTail");
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+    editor.commands.insertContent(" /he");
+    expect(stateRef.current.open).toBe(true);
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(stateRef.current.open).toBe(false);
+    editLead();
+    expect(editor.state.doc.child(0).textContent).toBe("Lead edited");
+    expect(editor.state.doc.child(1).textContent).toBe("Tail /he");
+    expect(stateRef.current.open).toBe(false);
+    destroy();
   });
 });
 

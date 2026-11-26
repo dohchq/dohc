@@ -115,37 +115,57 @@ export function PollOptions(props: {
   const options = props.decision.options ?? [];
   if (options.length === 0) return null;
   const chosen = props.decision.chosenOption;
+  const choose = props.onChoose;
   return (
     <ol
       data-testid={`${props.testIdPrefix}-poll-options`}
-      className="m-0 mt-2 flex max-w-sm list-none flex-col gap-1 p-0"
+      className="m-0 -mx-2 mt-1 flex w-full max-w-md list-none flex-col p-0"
+      onKeyDown={(event) => {
+        if (!choose || event.metaKey || event.ctrlKey || event.altKey) return;
+        const option = /^[1-9]$/.test(event.key) ? options[Number(event.key) - 1] : undefined;
+        if (option === undefined) return;
+        event.preventDefault();
+        choose(option);
+      }}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const taken = chosen === option;
+        const key = choose && index < 9 ? String(index + 1) : undefined;
         return (
           <li key={option}>
             <button
               type="button"
               data-testid={`${props.testIdPrefix}-poll-option`}
               data-chosen={taken ? "true" : "false"}
-              disabled={!props.onChoose}
+              disabled={!choose}
               aria-pressed={taken}
-              onClick={() => props.onChoose?.(option)}
-              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
+              aria-keyshortcuts={key}
+              onClick={() => choose?.(option)}
+              className={`dohc-focus-row flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-[13px] leading-5 transition-colors duration-75 ${
                 taken
-                  ? "border-success/50 bg-success/10 text-ink"
-                  : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
+                  ? "font-medium text-ink"
+                  : choose
+                    ? "cursor-pointer text-ink hover:bg-hover"
+                    : "text-muted"
               }`}
             >
-              <span
-                aria-hidden
-                className={`grid size-3.5 shrink-0 place-items-center rounded-full border ${
-                  taken ? "border-success bg-success text-bg" : "border-subtle"
-                }`}
-              >
-                {taken ? <CircleCheck size={10} strokeWidth={3} /> : null}
+              <span aria-hidden className="flex h-5 shrink-0 items-center">
+                <span
+                  className={`grid size-4 place-items-center rounded-full border ${
+                    taken ? "border-accent bg-accent" : "border-subtle bg-bg"
+                  }`}
+                >
+                  {taken ? <span className="size-1.5 rounded-full bg-bg" /> : null}
+                </span>
               </span>
-              <span className="min-w-0 flex-1 truncate">{option}</span>
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{option}</span>
+              {key ? (
+                <kbd
+                  aria-hidden
+                  data-key={key}
+                  className="mt-0.5 shrink-0 rounded border border-line bg-bg px-1 font-sans text-[11px] leading-4 text-subtle tabular-nums before:content-[attr(data-key)]"
+                />
+              ) : null}
             </button>
           </li>
         );

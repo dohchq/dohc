@@ -928,6 +928,30 @@ describe("PageIdentity", () => {
         expect(folded()).toBe(false);
       });
 
+      it("follows a format-2 note's first block, and renders only when the answer changes", () => {
+        const doc = markdownToYDoc("# Plan\n\nBody\n", { bodySequence: true });
+        const sequence = doc.getText("sequence");
+        const heading = sequence.toDelta()[0].insert as Y.XmlElement;
+        let renders = 0;
+        render(
+          <Profiler id="identity" onRender={() => (renders += 1)}>
+            <PageIdentity ydoc={doc} filenameStem="plan" />
+          </Profiler>,
+        );
+        expect(folded()).toBe(true);
+        const before = renders;
+
+        act(() => sequence.insert(5, " more"));
+        expect(renders).toBe(before);
+
+        act(() => heading.setAttribute("level", 2 as never));
+        expect(folded()).toBe(false);
+        act(() => heading.setAttribute("level", 1 as never));
+        expect(folded()).toBe(true);
+        act(() => sequence.insert(0, "Intro"));
+        expect(folded()).toBe(false);
+      });
+
       it("shows a title property instead of folding", () => {
         const doc = markdownToYDoc("---\ntitle: Plan\n---\n\n# Plan\n");
         render(<PageIdentity ydoc={doc} filenameStem="plan" />);

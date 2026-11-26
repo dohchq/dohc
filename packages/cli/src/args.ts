@@ -704,7 +704,11 @@ const DOCUMENT_VERBS = {
         text: "Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.",
       },
     ],
-    notes: [stdinNote, "The first message allows at most 64 KiB of UTF-8."],
+    notes: [
+      stdinNote,
+      "The first message allows at most 64 KiB of UTF-8.",
+      "Start the first message with a Markdown quote of a passage, as in > the passage, to comment on that passage. The file's editor highlights it.",
+    ],
     parse: (input) => {
       const [path, body, ...extra] = input.operands;
       if (!path) fail("document requires a path");
@@ -948,7 +952,11 @@ const CHAT_VERBS = {
       },
       { name: "--thread", value: "id", text: "Link a thread." },
       { name: "--message", value: "id", text: "Link a message." },
-      { name: "--path", value: "path", text: "Link a file, or a Collection by its folder." },
+      {
+        name: "--path",
+        value: "path",
+        text: "Link a file, or an app or a Collection by its folder.",
+      },
     ],
     notes: [
       "Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names.",
@@ -1941,6 +1949,8 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     notes: [
       "appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view.",
       "Generate operationId as a UUID for this creation. Reuse operationId for retries.",
+      'createLink, prepare, and approve need a workspace that syncs with a server. Without one, they fail with "Sync this workspace before sharing." The synced field in .dohc/sync-history.json does not show whether the workspace syncs now.',
+      "After approve, link holders' reads and writes run on that server, so the app works while this computer is off.",
       "A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink.",
       agentLabelNote,
     ],
@@ -2499,7 +2509,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
       invite: {
         capabilityId: "members.invite",
         summary:
-          "Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.",
+          "Invite someone by email. dohc emails them an invitation when the server sends email, and inviting the same address again emails it again. They join when they sign in to dohc with that address.",
         operands: "<email>",
         parse: (input) => {
           const [email, ...extra] = input.operands;

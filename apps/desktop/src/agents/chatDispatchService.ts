@@ -460,7 +460,7 @@ function buildRunnerPrompt(
       : "Report outcomes, not tool logs. ";
   const links =
     form === "mcp" && dohcTools === "all"
-      ? "To link a chat, thread, message, or Collection, call `dohc_link` and write the `link` it returns. "
+      ? "To link a chat, thread, message, app, or Collection, call `dohc_link` and write the `link` it returns. "
       : "";
   const replyInstruction =
     form === "mcp"

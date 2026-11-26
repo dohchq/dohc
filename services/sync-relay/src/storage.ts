@@ -1296,6 +1296,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return chatWakeStorage.enabledChatRunners(this, input);
   }
 
+  declaredAgentNames(input: { accountId: string; workspaceId: string }) {
+    return chatWakeStorage.declaredAgentNames(this, input);
+  }
+
   chatWakeHead(accountId: string) {
     return chatWakeStorage.chatWakeHead(this, accountId);
   }
@@ -2834,6 +2838,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   deleteWorkspaceSecret(workspaceId: string, ownerUserId: string, name: string) {
     return workspaceSecretStorage.deleteWorkspaceSecret(this, workspaceId, ownerUserId, name);
+  }
+
+  listWorkspaceSecretSeals() {
+    return workspaceSecretStorage.listWorkspaceSecretSeals(this);
+  }
+
+  replaceWorkspaceSecretSeal(
+    seal: workspaceSecretStorage.WorkspaceSecretSeal,
+    next: { readonly keyId: string; readonly sealedValue: string },
+  ) {
+    return workspaceSecretStorage.replaceWorkspaceSecretSeal(this, seal, next);
   }
 
   listWorkspaceHttpStepApprovals(workspaceId: string) {

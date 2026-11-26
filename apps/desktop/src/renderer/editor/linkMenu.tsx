@@ -1,5 +1,6 @@
 import { hasPrimaryModifier, shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { isEditableEditor } from "./pmHelpers";
+import type { CollabPositions } from "./collabPositions";
 import { isComposingKey, isMacContextClick } from "../ui/keys";
 // Link editing UI: the StarterKit Link mark + autolink are already active in
 // the schema (round-trips as `[text](url)` via @tiptap/markdown) — this file
@@ -211,10 +212,10 @@ export function makeLinkMenuExtension({
   });
 }
 
-export function makeDocumentChangeAutolinkGuard(yTiptap: typeof import("@tiptap/y-tiptap")) {
+export function makeDocumentChangeAutolinkGuard(positions: CollabPositions) {
   return new Plugin({
     filterTransaction(tr) {
-      if (tr.getMeta(yTiptap.ySyncPluginKey)?.isChangeOrigin) tr.setMeta("preventAutolink", true);
+      if (positions.isShownChange(tr)) tr.setMeta("preventAutolink", true);
       return true;
     },
   });

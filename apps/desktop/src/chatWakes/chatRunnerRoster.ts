@@ -33,6 +33,10 @@ import type { ChatWakeSession } from "./chatWakeLifetime";
 // the current session when something is due. A computer that quits after
 // signing out, or never comes back, drops out when its lease ends.
 
+/** Whether a declaration names anything here: a runner, or this computer's list of agents, even an empty one. */
+const declares = (declaration: ChatRunnerDeclaration) =>
+  declaration.runners.length > 0 || declaration.agents !== undefined;
+
 /** How long a sign-out's or account change's withdrawals may take, all together. */
 export const CHAT_RUNNER_WITHDRAW_MS = 15_000;
 /** How old a confirmed declaration may be, in wall-clock time, before it is sent again: well inside the relay's lease. */
@@ -139,7 +143,7 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   ): Promise<boolean> {
     const key = keyOf(entry);
     const body = JSON.stringify(declaration);
-    const declaring = declaration.runners.length > 0;
+    const declaring = declares(declaration);
     const confirmed = sent.get(key);
     if (confirmed?.body === body && fresh(confirmed)) {
       // The server already confirmed this withdrawal; only the ledger row may be left, if removing it failed.
@@ -251,13 +255,15 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
       if (abort.signal.aborted || !session.isCurrent()) return settled;
       const entry = { account, installId, workspaceId };
       // Refused: nothing of this computer's stays declared there, so no old list wakes an agent it no longer has.
-      const declaration =
-        wanted.has(workspaceId) && declared.ok
+      // Refused here: no runner, and the list unknown, so the phone archives no agent's chat for want of it.
+      const declaration = !wanted.has(workspaceId)
+        ? withdrawal(session, computerLabel)
+        : declared.ok
           ? declared.declaration
-          : withdrawal(session, computerLabel);
+          : { ...withdrawal(session, computerLabel), agents: null };
       if (wanted.has(workspaceId)) show(workspaceId, declared.ok ? null : declared);
       else show(workspaceId, null);
-      if (declaration.runners.length === 0 && !ledgered.has(workspaceId)) continue;
+      if (!declares(declaration) && !ledgered.has(workspaceId)) continue;
       try {
         if (!(await put(session, client, entry, declaration, abort.signal))) settled = false;
       } catch (error) {

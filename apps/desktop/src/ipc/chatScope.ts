@@ -124,13 +124,18 @@ export function createChatScopeCapability<State>(dependencies: {
   }
 
   async function resolveChatFileReferences(
-    workspace: RegistryEntry,
-    // The path resolver, not a capture: a share view has no capture and its
-    // files still resolve. Everything below only ever asked the
-    // capture this one question.
-    fileObjectIdForPath: (path: string) => Promise<string | null>,
+    scope: ChatScope,
     references: readonly ChatFileReferenceInput[] | undefined,
   ) {
+    const { workspace } = scope;
+    let captured = false;
+    const fileObjectIdForPath = async (path: string) => {
+      const objectId = await chatFileObjectId(scope, path);
+      if (objectId || captured || scope.kind !== "workspace") return objectId;
+      captured = true;
+      await scope.capture.captureUnreported();
+      return await chatFileObjectId(scope, path);
+    };
     const resolved: Array<{
       objectId: Awaited<ReturnType<WorkspaceEngineCapture["fileObjectIdForPath"]>> & string;
       pathHint: string;

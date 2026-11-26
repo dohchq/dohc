@@ -147,6 +147,13 @@ const api = {
 };
 const actions = (action: OwnerAppPublicationRequest["action"]) =>
   api.publishOwnerApp.mock.calls.map(([input]) => input).filter((input) => input.action === action);
+const audiences = (card: HTMLElement, action: string) => {
+  const row = Array.from(card.querySelectorAll("tbody tr")).find(
+    (tr) => tr.querySelector("th[scope=row]")?.textContent === action,
+  );
+  if (!row) throw Error(`No row for ${action} in ${card.textContent}`);
+  return Array.from(row.querySelectorAll("td"), (cell) => cell.textContent);
+};
 
 // The page owns whether the dialog is open.
 function OwnerAppPublication(
@@ -226,6 +233,48 @@ describe("owner app publication", () => {
     });
   });
 
+  it("publishes for workspace members without a link or link reads", async () => {
+    const read = {
+      operationId: "00000000-0000-4000-8000-000000000003",
+      name: "records.list",
+      access: "helper" as const,
+      readOnly: true,
+      fields: [{ fieldId: "00000000-0000-4000-8000-000000000004", name: "Name" }],
+    };
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({
+            ...prepared,
+            capabilities: [
+              { ...datasetCapability, operationIds: [read.operationId], operations: [read] },
+            ],
+          })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent
+      .setup()
+      .selectOptions(screen.getByLabelText("Publication share link"), "Workspace members");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByRole("heading", { name: "Review app publication" });
+    expect(actions("prepare")).toEqual([
+      { action: "prepare", workspaceId: "ws-trip", appRoot: "trip", audience: "workspace" },
+    ]);
+    expect(screen.getByText("Who can open it")).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /^Let anyone with the link use / })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    await screen.findByText("App published for workspace members.");
+    expect(actions("approve")).toEqual([
+      {
+        action: "approve",
+        workspaceId: "ws-trip",
+        approvalId: prepared.approvalId,
+        candidateDigest: prepared.candidateDigest,
+      },
+    ]);
+  });
+
   it.each([approvedCollection, "unavailable" as const])(
     "confirms revocation of %s, sends the displayed revision, and keeps the app published",
     async (currentCapability) => {
@@ -265,7 +314,7 @@ describe("owner app publication", () => {
       render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
       await open();
       if (currentCapability !== "unavailable") {
-        expect(screen.getByText("Shown in the app: destination")).toBeTruthy();
+        expect(screen.getByText("destination (required)")).toBeTruthy();
         expect(
           screen.getByText(
             "People with this share can read every response file and all its fields.",
@@ -547,7 +596,7 @@ describe("owner app publication", () => {
       }),
     );
     const card = screen.getByTestId("app-publication-capability");
-    expect(card.textContent).toContain("Link actions: submit (changes data)");
+    expect(audiences(card, "submit")).toEqual(["Yes", "Yes", "Yes"]);
     await act(async () =>
       historyPending.resolve({
         kind: "history-revision",
@@ -565,7 +614,7 @@ describe("owner app publication", () => {
         generatedSources: true,
       }),
     );
-    expect(card.textContent).toContain("Link actions: Adds records with Item · submit");
+    expect(audiences(card, "Adds recordsItem · submit")).toEqual(["Yes", "Yes", "Yes"]);
   });
 
   it("does not make field-level claims on published cards when schema triggers make sources custom", async () => {
@@ -647,9 +696,7 @@ describe("owner app publication", () => {
         'Runs "Submit"',
       ),
     );
-    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain(
-      "Adds records with Item",
-    );
+    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain("Item");
   });
 
   it("shows plain-English dataset action summaries and surfaces address warnings in the share-link review card", async () => {
@@ -706,12 +753,9 @@ describe("owner app publication", () => {
     expect(card.textContent).toContain(
       "Multiple dataset.json files name this Collection. Remove the duplicate file.",
     );
-    expect(card.textContent).toContain("Link actions: Adds records with Item, Quantity · submit");
-    expect(card.textContent).toContain("Helper actions: Reads Item, Status · list");
-    expect(card.textContent).not.toContain("(reads only)");
-    expect(card.textContent).toContain(
-      'Owner actions: Runs "Cancel order" · cancel (changes data)',
-    );
+    expect(audiences(card, "Adds recordsItem, Quantity · submit")).toEqual(["Yes", "Yes", "Yes"]);
+    expect(audiences(card, "Reads recordsItem, Status · list")).toEqual(["No", "Yes", "Yes"]);
+    expect(audiences(card, 'Runs "Cancel order"cancel')).toEqual(["No", "No", "Yes"]);
     expect(card.textContent).toContain(
       "This app uses only this Collection's approved actions. Its responses appear in the same Collection, and approving this app does not change the Collection's rules.",
     );
@@ -741,9 +785,9 @@ describe("owner app publication", () => {
     await review();
     const scope = screen.getByTestId("app-publication-capability");
     expect(scope.textContent).toContain("Creates records only in trip/responses");
-    expect(scope.textContent).toContain("Fields it can create: name, place");
-    expect(scope.textContent).toContain("Required fields: place");
-    expect(scope.textContent).toContain("Fields shown in the app: place");
+    expect(scope.textContent).toContain("Adds recordsname, place (required)");
+    expect(scope.textContent).toContain("Reads only");
+    expect(scope.textContent).toContain("Reads recordsplace");
     expect(scope.textContent).toContain(
       "People with this share can read every response file and all its fields.",
     );
@@ -1006,13 +1050,11 @@ describe("owner app publication", () => {
     const stateText = async () => (await screen.findByTestId("app-review-state")).textContent;
     const approveButton = () => screen.getByTestId("app-publication-approve") as HTMLButtonElement;
     const ready = () => waitFor(() => expect(approveButton().disabled).toBe(false));
-    const reach = (term: "Reads" | "Changes") =>
-      within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.textContent;
-    const lines = (term: "Reads" | "Changes") =>
+    const lines = (term: "Reads only" | "Changes data") =>
       Array.from(
-        within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.children ?? [],
+        within(screen.getByTestId("app-access")).getByText(term).parentElement?.children ?? [],
         (line) => line.textContent,
-      );
+      ).slice(1);
     const dialog = () => screen.queryByTestId("app-publication-dialog");
 
     it("asks for a first approval, shows what the app reaches, and approves and opens it", async () => {
@@ -1036,8 +1078,8 @@ describe("owner app publication", () => {
       ]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
-      expect(reach("Reads")).toBe("Item, Status");
-      expect(reach("Changes")).toBe("Adds records with Item, Quantity");
+      expect(lines("Reads only")).toEqual(["Reads recordsItem, Status"]);
+      expect(lines("Changes data")).toEqual(["Adds recordsItem, Quantity"]);
       expect(within(access).queryByText("New")).toBeNull();
       expect(screen.getByTestId("app-access-boundary").textContent).toBe(
         "Uses only this Collection's approved actions. It cannot read other workspace files.",
@@ -1111,7 +1153,7 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       await ready();
-      expect(lines("Changes")).toEqual(["Adds records with Item, QuantityNew"]);
+      expect(lines("Changes data")).toEqual(["Adds recordsItem, QuantityNew"]);
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
     });
 
@@ -1136,7 +1178,7 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       await ready();
-      expect(lines("Changes")).toEqual(["RecordsNew"]);
+      expect(lines("Changes data")).toEqual(["RecordsNew"]);
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
     });
 
@@ -1151,9 +1193,9 @@ describe("owner app publication", () => {
       );
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
-      expect(reach("Reads")).toBe("Item, Status");
-      expect(lines("Changes")).toEqual([
-        "Adds records with Item, Quantity",
+      expect(lines("Reads only")).toEqual(["Reads recordsItem, Status"]);
+      expect(lines("Changes data")).toEqual([
+        "Adds recordsItem, Quantity",
         'Runs "Cancel order"New',
       ]);
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
@@ -1544,19 +1586,19 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   );
   render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
   await review();
-  const choice = screen.getByRole("checkbox", { name: /records.list/ }) as HTMLInputElement;
+  const choice = screen.getByRole("checkbox", {
+    name: "Let anyone with the link use records.list",
+  }) as HTMLInputElement;
   expect(choice.checked).toBe(false);
-  expect(screen.getByText("Fields: Record ID, Email, Name")).toBeTruthy();
+  const card = screen.getByTestId("app-publication-capability");
+  expect(audiences(card, "records.listRecord ID, Email, Name")).toEqual(["", "Yes", "Yes"]);
   expect(
     screen.getByText(
-      "Selected reads are added to this app's link access and show current records and later changes. Unpublish to withdraw access.",
+      "Ticked reads show anyone with the link current records and later changes. Unpublish to withdraw access.",
     ),
   ).toBeTruthy();
   fireEvent.click(choice);
   expect(choice.checked).toBe(true);
-  expect(screen.getByTestId("app-publication-capability").textContent).toContain(
-    "Selected link reads: records.list (Record ID, Email, Name). People with the link can use these once published.",
-  );
   fireEvent.click(choice);
   expect(choice.checked).toBe(false);
   fireEvent.click(choice);
@@ -1575,6 +1617,49 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   api.publishOwnerApp.mockImplementation(answer);
   api.dataset.mockImplementation(datasetAnswer);
   api.listRelayShareLinks.mockResolvedValue(page);
+});
+
+it("refuses a link read on an action two Collections share, and says why", async () => {
+  vi.stubGlobal("dohcDesktop", api);
+  const read = {
+    operationId: "00000000-0000-4000-8000-000000000003",
+    name: "records.list",
+    access: "helper" as const,
+    readOnly: true,
+    fields: [{ fieldId: "00000000-0000-4000-8000-000000000004", name: "Name" }],
+  };
+  const first = { ...datasetCapability, operationIds: [read.operationId], operations: [read] };
+  const second = {
+    ...first,
+    datasetId: "00000000-0000-4000-8000-000000000020",
+    name: "Volunteers",
+  };
+  api.publishOwnerApp.mockImplementation(async (request) =>
+    request.action === "prepare" ? { ...prepared, capabilities: [first, second] } : answer(request),
+  );
+  try {
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    const choices = screen.getAllByRole("checkbox", {
+      name: "Let anyone with the link use records.list",
+    }) as HTMLInputElement[];
+    expect(choices).toHaveLength(2);
+    expect(choices.every((choice) => choice.disabled)).toBe(true);
+    for (const choice of choices)
+      expect(
+        document.getElementById(choice.getAttribute("aria-describedby") ?? "")?.textContent,
+      ).toContain("the same ID");
+    expect(
+      screen.getAllByText(
+        "dohc can't open records.list to the link, because another of this app's Collections has an action with the same ID.",
+      ),
+    ).toHaveLength(2);
+    expect(screen.queryByText(/^Ticked reads/)).toBeNull();
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
 });
 
 it.each([false, true])(

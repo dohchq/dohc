@@ -64,6 +64,11 @@ import {
   type LazyExoticComponent,
 } from "react";
 import * as Y from "yjs";
+import {
+  bodySequenceReading,
+  declareBodySequence,
+  readsBodySequence,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
@@ -223,7 +228,9 @@ type NoteContent = { body: string; frontmatter: Record<string, unknown> };
 function noteContent(doc: Y.Doc | null): NoteContent | null {
   return doc
     ? {
-        body: doc.getXmlFragment("body").toString(),
+        body: readsBodySequence(doc)
+          ? bodySequenceReading(doc)
+          : doc.getXmlFragment("body").toString(),
         frontmatter: frontmatterMapValues(doc.getMap("frontmatter")),
       }
     : null;
@@ -762,6 +769,7 @@ export function MarkdownView(props: {
     }
     // Commit owns the display copy. Discarded renders keep only bytes.
     const doc = new Y.Doc();
+    declareBodySequence(doc);
     Y.applyUpdate(doc, endedSnapshot.update);
     lastLiveDoc.current = null;
     setEndedCopy({ key: endedSnapshot.key, doc });
@@ -2537,6 +2545,7 @@ export function MarkdownView(props: {
               onDirty={() => undefined}
               workspaceId={props.workspaceId}
               path={props.path}
+              comments={!props.recordBody}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
               onOpenWorkspaceLink={openWorkspaceLink}
@@ -2801,6 +2810,7 @@ export function MarkdownView(props: {
               onFocus={onLocalEditorFocus}
               workspaceId={props.workspaceId}
               path={props.path}
+              comments={!props.recordBody}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
               onOpenWorkspaceLink={openWorkspaceLink}

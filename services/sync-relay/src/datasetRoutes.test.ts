@@ -1,3 +1,4 @@
+import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -632,6 +633,18 @@ it("runs an app on the owner's computer as that app, within its approval, for th
       })
     ).status,
   ).toBe(400);
+  const [external] = parseAppExternalDeclaration({
+    events: {
+      method: "GET",
+      url: "https://us.posthog.com/api/events/",
+      secret: { name: "POSTHOG_KEY", header: "Authorization" },
+    },
+  });
+  const outside = await f.http(`${f.path}/binding`, {
+    localApp: { ...candidate, external: [external] },
+  });
+  expect(outside.status).toBe(400);
+  expect(await outside.text()).toContain("outside services");
   expect((await f.http(`${f.path}/binding`, { publicationId: appId, enabled: false })).status).toBe(
     200,
   );

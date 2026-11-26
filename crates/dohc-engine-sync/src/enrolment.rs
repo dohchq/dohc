@@ -3149,6 +3149,59 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_uploads_no_env_template_an_older_build_kept_as_a_secret() {
+        let (_scratch, path, mut store) = open_store();
+        seed_main(&mut store);
+        let key = secret_key();
+        write_secret(
+            &mut store,
+            &key,
+            "main",
+            "older-template",
+            "TOKEN=
+",
+            10,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                for table in ["secret_files", "secret_moments"] {
+                    tx.execute(
+                        &format!("UPDATE {table} SET path='.env.example' WHERE path='.env'"),
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                tx.execute(
+                    "DELETE FROM engine_migrations WHERE id='v2-legacy-env-template-secrets'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("store the template as an older build did");
+        write_secret(
+            &mut store,
+            &key,
+            "main",
+            "real-secret",
+            "TOKEN=1
+",
+            11,
+        );
+        drop(store);
+        let mut store = EngineStore::open(&path, 2_000).expect("reopen");
+
+        enroll(&mut store).expect("enroll");
+
+        let uploaded: Vec<serde_json::Value> = local_ops(&store)
+            .into_iter()
+            .filter(|(kind, _)| kind.starts_with("secret."))
+            .map(|(_, payload)| payload["path"].clone())
+            .collect();
+        assert_eq!(uploaded, [serde_json::json!(".env")]);
+    }
+
+    #[test]
     fn imported_secret_coordinates_cannot_hide_an_unrelated_local_moment() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);

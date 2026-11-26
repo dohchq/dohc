@@ -3,11 +3,18 @@ import type { AppPublicationLimits } from "@dohc/security-contract/app-publicati
 import { readBoundedJson } from "@dohc/service-http";
 import type { AccountSession, AccountSessions } from "@dohc/workspace-auth/session";
 import { hiddenFile } from "./accountFeed";
-import type { PhoneAppLaunchGuard } from "./appBackendAuthority";
+import type { AppBackendAuth, PhoneAppLaunchGuard } from "./appBackendAuthority";
+import type { RelayDatasetHost } from "./datasetHost";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
+import {
+  memberAppPage,
+  memberAppRow,
+  MemberAppRefusal,
+  recordMemberAppConsent,
+} from "./storage/memberApps";
 import {
   approvePhoneApp,
   endPhoneAppLaunches,
@@ -32,6 +39,7 @@ const LAUNCH_HOST = /^[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63}){1,8}$/;
 
 const OPERATIONS = new Set([
   "apps",
+  "memberApps",
   "appReview",
   "appSource",
   "appApprove",
@@ -67,13 +75,17 @@ function revision(value: unknown): number {
   return Number(value);
 }
 
+type Served = ReturnType<RelayDatasetHost["servedPublication"]>;
+
 /**
- * The owner's published apps for the phone: the catalog, each version's
- * review and declared source, the phone's approval, and launch grants that
- * share-web redeems for an app session. Only a publication row is ever
- * listed or launched, so an app approved to run only on a computer is absent.
- * So far the phone opens only an app over one transactional Collection or one
- * that requests nothing in the workspace; any other app is absent too.
+ * The owner's published apps and the workspace's Member apps for the phone:
+ * the catalogs, each version's review and declared source, the phone's
+ * approval, and launch grants that share-web redeems for an app session. Only
+ * a publication row is ever listed or launched, so an app approved to run only
+ * on a computer is absent. The phone opens only apps over transactional
+ * Collections or that request nothing in the workspace. A Member app runs for
+ * the owner as for any viewer: within both its author's and the owner's reach,
+ * and only once the owner allowed what it can do.
  */
 export function createPhoneApps(options: {
   storage: SyncRelayStorage;
@@ -85,16 +97,28 @@ export function createPhoneApps(options: {
   /** Ends share-web's app sessions for these launch IDs' hashes, which the relay has already deleted. */
   endShareWebLaunches?(launchHashes: readonly string[]): void;
   /**
-   * Whether the app backend would serve this publication to its owner: its Collection is installed here at a
-   * compatible revision. It starts no worker and runs no app code. Throws when it would refuse.
+   * The app backend's own lookup, as it runs on every launch call: its Collections are installed here at compatible
+   * revisions and, for a Member app, both reaches hold. It starts no worker and runs no app code. Throws when it
+   * would refuse; while `reviewing`, a Member app the person hasn't allowed is still answered.
    */
-  servable(userId: string, workspaceId: string, publicationId: string): void;
+  served(auth: AppBackendAuth, publicationId: string, reviewing: boolean): Served;
+  authorName?(userId: string): Promise<string | null>;
 }) {
   const { storage } = options;
+  const context = storage as StorageContext;
+  function served(userId: string, workspaceId: string, id: string, reviewing: boolean): Served {
+    try {
+      return options.served({ kind: "named", workspaceId, userId }, id, reviewing);
+    } catch (error) {
+      if (error instanceof MemberAppRefusal) throw relayError("conflict", error.message);
+      if (storage.unavailable.aborted) throw error;
+      throw notFound();
+    }
+  }
   function servable(userId: string, workspaceId: string, id: string): boolean {
     try {
-      options.servable(userId, workspaceId, id);
-      return true;
+      const published = served(userId, workspaceId, id, false);
+      return !!published && !published.local;
     } catch (error) {
       if (storage.unavailable.aborted) throw error;
       return false;
@@ -129,6 +153,21 @@ export function createPhoneApps(options: {
     return row;
   }
 
+  function memberApp(userId: string, workspaceId: string, id: string, reviewing: boolean) {
+    const row = memberAppRow(context, id);
+    if (!row || row.workspaceId !== workspaceId || !options.limits) throw notFound();
+    const published = served(userId, workspaceId, id, reviewing);
+    if (!published?.member || published.local || hiddenFile(published.candidate.appRoot))
+      throw notFound();
+    return { ...published, member: published.member, createdAtMs: row.createdAtMs };
+  }
+  const allowed = (
+    approval: ReturnType<typeof phoneAppApproval>,
+    app: ReturnType<typeof memberApp>,
+  ) => approval?.authorityRevision === app.authorityRevision && app.member.consent === "current";
+  const isMemberApp = (workspaceId: string, id: string) =>
+    memberAppRow(context, id)?.workspaceId === workspaceId;
+
   function ended(launchHashes: readonly string[]): void {
     if (launchHashes.length) options.endShareWebLaunches?.(launchHashes);
   }
@@ -157,23 +196,103 @@ export function createPhoneApps(options: {
       throw notFound();
     }
     holds(binding, launchHash);
-    if (
-      publication(userId, workspaceId, binding.publicationId).authorityRevision !==
-      binding.authorityRevision
-    )
-      throw notFound();
+    const current = isMemberApp(workspaceId, binding.publicationId)
+      ? memberApp(userId, workspaceId, binding.publicationId, false)
+      : publication(userId, workspaceId, binding.publicationId);
+    if (current.authorityRevision !== binding.authorityRevision) throw notFound();
+  }
+
+  function authors(workspaceId: string, operation: string, input: unknown): string[] {
+    if (operation === "memberApps") {
+      const cursor = (input as { cursor?: unknown } | null)?.cursor;
+      return [
+        ...new Set(
+          memberAppPage(context, workspaceId, typeof cursor === "string" ? cursor : "").rows.map(
+            (row) => row.publisherUserId,
+          ),
+        ),
+      ];
+    }
+    const id = (input as { publicationId?: unknown } | null)?.publicationId;
+    if (operation !== "appReview" || typeof id !== "string") return [];
+    const row = memberAppRow(context, id);
+    return row?.workspaceId === workspaceId ? [row.publisherUserId] : [];
   }
 
   return {
     end,
 
     /**
+     * The names of the authors a read shows. Null when it shows none, so the route answers with no wait; otherwise
+     * the route checks the sign-in again after this wait and before `run`.
+     */
+    async names(
+      workspaceId: string,
+      operation: string,
+      input: unknown,
+    ): Promise<Map<string, string | null> | null> {
+      const ids = authors(workspaceId, operation, input);
+      if (!ids.length) return null;
+      return new Map(
+        await Promise.all(
+          ids.map(
+            async (id) => [id, (await options.authorName?.(id).catch(() => null)) ?? null] as const,
+          ),
+        ),
+      );
+    },
+
+    /**
      * One app operation for `caller` in a workspace it owns while it shows on
      * the phone. The route has checked both. Approving and launching take a
      * phone sign-in.
      */
-    run(caller: AccountSession, workspaceId: string, operation: string, input: unknown): unknown {
+    run(
+      caller: AccountSession,
+      workspaceId: string,
+      operation: string,
+      input: unknown,
+      names: ReadonlyMap<string, string | null> = new Map(),
+    ): unknown {
       const userId = caller.userId;
+      if (operation === "memberApps") {
+        const { cursor } = args(input, [], ["cursor"]);
+        if (cursor !== undefined && (typeof cursor !== "string" || !PUBLICATION.test(cursor)))
+          throw badRequest("Invalid app cursor.");
+        if (!options.limits) return { memberApps: [], nextCursor: null };
+        const page = memberAppPage(context, workspaceId, cursor ?? "");
+        return {
+          memberApps: page.rows.flatMap((row) => {
+            let app;
+            try {
+              app = memberApp(userId, workspaceId, row.publicationId, true);
+            } catch (error) {
+              if (error instanceof RelayError) return [];
+              throw error;
+            }
+            return [
+              {
+                publicationId: row.publicationId,
+                authorityRevision: app.authorityRevision,
+                appRoot: app.candidate.appRoot,
+                sourceRevision: app.candidate.sourceRevision,
+                approved: allowed(
+                  phoneAppApproval(storage, {
+                    userId,
+                    workspaceId,
+                    publicationId: row.publicationId,
+                  }),
+                  app,
+                ),
+                name: row.slug,
+                author: { name: names.get(row.publisherUserId) ?? null },
+                consent: app.member.consent,
+              },
+            ];
+          }),
+          nextCursor: page.nextCursor,
+        };
+      }
       if (operation === "apps") {
         const { cursor } = args(input, [], ["cursor"]);
         if (cursor !== undefined && (typeof cursor !== "string" || !PUBLICATION.test(cursor)))
@@ -222,8 +341,11 @@ export function createPhoneApps(options: {
           : operation === "appApprove" || operation === "appLaunch"
             ? ["publicationId", "authorityRevision"]
             : ["publicationId"],
+        operation === "appApprove" ? ["scopeDigest"] : [],
       );
       const id = publicationId(body.publicationId);
+      const member = isMemberApp(workspaceId, id);
+      if (!member && body.scopeDigest !== undefined) throw badRequest("Invalid app arguments.");
       if (operation === "appRevoke") {
         const { revoked, launchHashes } = revokePhoneApp(storage, {
           userId,
@@ -233,27 +355,61 @@ export function createPhoneApps(options: {
         ended(launchHashes);
         return { revoked };
       }
-      const row = publication(userId, workspaceId, id);
+      const row = member
+        ? memberApp(userId, workspaceId, id, operation !== "appLaunch")
+        : publication(userId, workspaceId, id);
+      const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
+      const approved =
+        "member" in row
+          ? allowed(approval, row)
+          : approval?.authorityRevision === row.authorityRevision;
       if (operation === "appReview") {
-        const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
+        const { candidate } = row;
+        const provenance = "member" in row ? undefined : row.approvalProvenance;
         return {
           publicationId: id,
           authorityRevision: row.authorityRevision,
           createdAtMs: row.createdAtMs,
-          appRoot: row.candidate.appRoot,
-          entryPath: row.candidate.entryPath,
-          sourceRevision: row.candidate.sourceRevision,
+          appRoot: candidate.appRoot,
+          entryPath: candidate.entryPath,
+          sourceRevision: candidate.sourceRevision,
           // Shown to the owner; approval binds the publication and revision, not these.
-          candidateDigest: row.approvalProvenance?.committedCandidateDigest ?? null,
-          publishedByAgent: row.approvalProvenance?.agent ?? null,
-          capabilities: row.candidate.capabilities,
-          sources: row.candidate.inputs
+          candidateDigest: provenance?.committedCandidateDigest ?? null,
+          publishedByAgent: provenance?.agent ?? null,
+          sources: candidate.inputs
             .filter((file) => !hiddenFile(file.path))
             .map(({ path, byteLength }) => ({ path, byteLength })),
+          revocable: "member" in row ? approved || row.member.consent !== "none" : approved,
           approval:
-            approval?.authorityRevision === row.authorityRevision
+            approval && approved
               ? { approvalId: approval.approvalId, approvedAtMs: approval.approvedAtMs }
               : null,
+          ...("member" in row
+            ? {
+                name: row.member.slug,
+                author: { name: names.get(row.member.publisherUserId) ?? null },
+                consent: row.member.consent,
+                scopeDigest: row.member.digest,
+                capabilities: row.capabilities.map((capability) => {
+                  const { operationIds, access } = row.member.scope.find(
+                    (value) => value.datasetId === capability.datasetId,
+                  )!;
+                  return {
+                    ...capability,
+                    access,
+                    operationIds,
+                    operations: capability.operations.filter((value) =>
+                      operationIds.includes(value.operationId),
+                    ),
+                  };
+                }),
+              }
+            : {
+                author: null,
+                consent: null,
+                scopeDigest: null,
+                capabilities: candidate.capabilities,
+              }),
         };
       }
       if (operation === "appSource") {
@@ -274,18 +430,38 @@ export function createPhoneApps(options: {
       const authorityRevision = revision(body.authorityRevision);
       if (row.authorityRevision !== authorityRevision)
         throw relayError("conflict", "This app changed. Review it again.");
-      if (operation === "appApprove")
-        return approvePhoneApp(storage, {
-          userId,
-          workspaceId,
-          publicationId: id,
-          authorityRevision,
-          newApprovalId: randomBytes(16).toString("hex"),
-          nowMs: options.nowMs(),
+      if (operation === "appApprove") {
+        if ("member" in row && body.scopeDigest !== row.member.digest)
+          throw "scopeDigest" in body
+            ? relayError("conflict", "This app changed. Review it again.")
+            : badRequest("Invalid app arguments.");
+        if ("member" in row && row.member.consent !== "current")
+          end({ userId, workspaceId, publicationId: id });
+        return context.tx(() => {
+          if ("member" in row)
+            recordMemberAppConsent(context, {
+              workspaceId,
+              viewerUserId: userId,
+              publicationId: id,
+              scopeDigest: row.member.digest,
+              scope: row.member.scope.map(({ datasetId, operationIds }) => ({
+                datasetId,
+                operationIds,
+              })),
+              nowMs: options.nowMs(),
+            });
+          return approvePhoneApp(storage, {
+            userId,
+            workspaceId,
+            publicationId: id,
+            authorityRevision,
+            newApprovalId: randomBytes(16).toString("hex"),
+            nowMs: options.nowMs(),
+          });
         });
+      }
       if (!options.launchable || !options.sessions) throw notFound();
-      const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
-      if (approval?.authorityRevision !== authorityRevision)
+      if (!approval || !approved)
         throw relayError("conflict", "Approve this version of the app first.");
       const grant = secret(),
         now = options.nowMs();

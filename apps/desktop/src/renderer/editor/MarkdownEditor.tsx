@@ -36,6 +36,7 @@ import {
   Code,
   Highlighter,
   Italic,
+  MessageSquarePlus,
   RemoveFormatting,
   Strikethrough,
   Underline as UnderlineIcon,
@@ -143,10 +144,25 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { RedoKeys } from "./redoKeys";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
+import { findQuote, quoteForSelection } from "./commentAnchors";
+import { makeCommentHighlightPlugin, setCommentAnchors } from "./commentHighlights";
+import {
+  requestFileComment,
+  useFileCommentReveal,
+  useFileComments,
+  type CommentAnchor,
+} from "../workbench/fileComments";
 import {
   CollaborationHistoryInput,
   createCollaborationHistoryHandle,
+  sharedBodySequenceHistory,
 } from "./sharedCollaborationHistory";
+import { bodySequencePositions, yTiptapPositions } from "./collabPositions";
+import {
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  readsBodySequence,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -157,7 +173,8 @@ export type MarkdownEditorHandle = {
   caret: () => number | null;
   getMarkdown: () => string;
   replaceMarkdown: (markdown: string) => void;
-  insertTypedText: (text: string, caret: number) => void;
+  /** False when the editor refused the text, so the caller keeps it elsewhere. */
+  insertTypedText: (text: string, caret: number) => boolean;
 };
 
 type MarkdownEditorCollab = {
@@ -201,6 +218,7 @@ export type MarkdownEditorProps = {
   onFocus?: () => void;
   workspaceId: string;
   path: string;
+  comments?: boolean;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
   onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
@@ -339,7 +357,11 @@ function BubbleButton(props: {
 // transaction, so the toolbar reads the block and marks under the selection
 // from the editor's state; a render-time read showed the previous
 // selection's. selectionFormat keeps that read cheap on every keystroke.
-function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuState) => void }) {
+function SelectionToolbar(props: {
+  editor: Editor;
+  onOpenLink: (state: LinkMenuState) => void;
+  onComment?: () => void;
+}) {
   const { editor } = props;
   const active = useEditorState({
     editor,
@@ -404,9 +426,19 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       >
         <RemoveFormatting size={14} aria-hidden />
       </BubbleButton>
+      {props.onComment ? (
+        <>
+          <span className="dohc-bubble-menu__divider" aria-hidden="true" />
+          <BubbleButton label="Comment" onClick={props.onComment}>
+            <MessageSquarePlus size={14} aria-hidden />
+          </BubbleButton>
+        </>
+      ) : null}
     </>
   );
 }
+
+const NO_ANCHORS: readonly CommentAnchor[] = [];
 
 /** Reveal the block `target` names, clamped to the last block — the caller's
  *  index comes from Markdown that can have drifted from the live document,
@@ -495,9 +527,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       collaborationExtensions,
       workspaceId,
       path,
+      comments,
     },
     ref,
   ) {
+    const fileComments = useFileComments(workspaceId, comments ? path : null);
+    const anchors = fileComments?.anchors ?? NO_ANCHORS;
+    const anchorsRef = useRef(anchors);
+    anchorsRef.current = anchors;
+    const commentFileRef = useRef({ workspaceId, path });
+    commentFileRef.current = { workspaceId, path };
     const [acState, setAcState] = useState<AutocompleteState>({ active: false });
     const [mentionState, setMentionState] = useState<AutocompleteState>({
       active: false,
@@ -557,6 +596,18 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const reportError = useContext(ShellErrorReporter);
     const reportErrorRef = useRef(reportError);
     reportErrorRef.current = reportError;
+    const pathRef = useRef(path);
+    pathRef.current = path;
+    const noteFormat = useMemo(
+      () => (collab?.ydoc ? (readsBodySequence(collab.ydoc) ? 2 : 1) : null),
+      [collab?.ydoc],
+    );
+    const positions = useMemo(() => {
+      if (!collab?.ydoc || !collaborationExtensions) return null;
+      return noteFormat === 2
+        ? bodySequencePositions(collab.ydoc, collaborationExtensions.bodySequence)
+        : yTiptapPositions(collaborationExtensions.yTiptap);
+    }, [collab?.ydoc, collaborationExtensions, noteFormat]);
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -673,7 +724,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 stateRef: slashStateRef,
                 setState: publishSlashState,
                 runCommandRef: slashCommandRunnerRef,
-                yTiptap: collaborationExtensions?.yTiptap ?? null,
+                positions,
               }),
               makeBlockControlsPlugin({
                 onInsertRef: blockInsertRef,
@@ -688,6 +739,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeEmojiPlugin((state) => setEmojiState(state)),
               wikilinkClickPlugin,
               makeHeadingFlashPlugin(),
+              makeCommentHighlightPlugin({
+                anchors: () => anchorsRef.current,
+                onOpen: (threadIds) => {
+                  const file = commentFileRef.current;
+                  requestFileComment(file.workspaceId, file.path, { kind: "open", threadIds });
+                },
+              }),
               makeLinkMenuPlugin({
                 stateRef: linkMenuStateRef,
                 setState: setLinkMenuState,
@@ -708,14 +766,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeTableControlsPlugin({
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
-              makeUrlPasteOfferPlugin(setUrlOffer, collaborationExtensions?.yTiptap ?? null),
-              ...(collaborationExtensions
-                ? [makeDocumentChangeAutolinkGuard(collaborationExtensions.yTiptap)]
-                : []),
+              makeUrlPasteOfferPlugin(setUrlOffer, positions),
+              ...(positions ? [makeDocumentChangeAutolinkGuard(positions)] : []),
             ];
           },
         }),
-      [collab?.ydoc, collaborationExtensions, publishSlashState],
+      [collab?.ydoc, positions, publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
@@ -727,13 +783,18 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
 
     const collaborationHistory = useMemo(() => {
       if (!collab?.ydoc || !collaborationExtensions) return null;
+      if (noteFormat === 2)
+        return sharedBodySequenceHistory(
+          collab.ydoc,
+          collaborationExtensions.bodySequence.editor.createBodySequenceHistory,
+        );
       const protectedNodes = new Set(["paragraph"]);
       return createCollaborationHistoryHandle(collab.ydoc, {
         trackedOrigin: collaborationExtensions.yTiptap.ySyncPluginKey,
         deleteFilter: (item) =>
           collaborationExtensions.yTiptap.defaultDeleteFilter(item, protectedNodes),
       });
-    }, [collab?.ydoc, collaborationExtensions]);
+    }, [collab?.ydoc, collaborationExtensions, noteFormat]);
 
     const extensions = useMemo(() => {
       const collabYDoc = collab?.ydoc ?? null;
@@ -747,11 +808,26 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
         ...(isCollab
           ? [
-              collaborationExtensions!.Collaboration.configure({
-                document: collabYDoc,
-                field: "body",
-                yUndoOptions: { undoManager: collaborationHistory! },
-              }),
+              noteFormat === 2
+                ? collaborationExtensions!.bodySequence.BodySequence.configure({
+                    sequence: collabYDoc!.getText(BODY_SEQUENCE_FIELD),
+                    containers: collabYDoc!.getMap(BODY_CONTAINERS_FIELD),
+                    history: collaborationHistory!,
+                    unwritten: (why) =>
+                      reportErrorRef.current?.({
+                        message:
+                          why === "overtaken"
+                            ? "Someone else's change reached the note first, so dohc put it back as it was. Make your change again."
+                            : "dohc can't save this change in a live note yet, so it put the note back as it was.",
+                        retry: null,
+                        identity: `unwritten-note-change:${pathRef.current}`,
+                      }),
+                  })
+                : collaborationExtensions!.Collaboration.configure({
+                    document: collabYDoc,
+                    field: "body",
+                    yUndoOptions: { undoManager: collaborationHistory! },
+                  }),
               CollaborationHistoryInput,
               // Only wired when the caller hands us an Awareness
               // bound to this same ydoc (docPresence.ts's bindDocPresence).
@@ -759,7 +835,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               // off the presence channel) means no carets, never a crash —
               // the calm "N editing" indicator above the editor is
               // unaffected either way.
-              ...(awareness
+              ...(awareness && noteFormat !== 2
                 ? [
                     collaborationExtensions!.CollaborationCaret.configure({
                       provider: { awareness },
@@ -780,6 +856,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       collaborationHistory,
       dohcPlugins,
       linkMenuExtension,
+      noteFormat,
     ]);
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
@@ -791,8 +868,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     // time, recreating the invalid-selection bug on a doc whose leading
     // structure has since changed to a taskList.
     const collabInitialContent = useMemo(
-      () => (collab?.ydoc ? getDohcYDocSelectionSeed(collab.ydoc) : undefined),
-      [collab?.ydoc, extensions, collabActive],
+      () => (collab?.ydoc && noteFormat !== 2 ? getDohcYDocSelectionSeed(collab.ydoc) : undefined),
+      [collab?.ydoc, extensions, collabActive, noteFormat],
     );
 
     const editor = useEditor(
@@ -830,6 +907,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           attributes: {
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
+            ...(noteFormat ? { "data-note-format": String(noteFormat) } : {}),
           },
           handlePaste: (view, event) => handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
@@ -1096,6 +1174,32 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       };
     }, [editor, blockTarget?.index, blockTarget?.nonce, onBlockTargetConsumed]);
 
+    useEffect(() => {
+      if (editor && !editor.isDestroyed)
+        editor.view.dispatch(setCommentAnchors(editor.state, anchors));
+    }, [editor, anchors]);
+
+    const reveal = useFileCommentReveal(workspaceId, path);
+    const shownReveal = useRef(reveal?.token);
+    useEffect(() => {
+      if (!editor || !reveal || !comments || shownReveal.current === reveal.token) return;
+      shownReveal.current = reveal.token;
+      const range = findQuote(editor.state.doc, reveal.quote);
+      if (!range) return;
+      revealDocPosition(editor, range, () =>
+        editor.view.dom.querySelector<HTMLElement>(`.${FLASH_CLASS}`),
+      );
+    }, [comments, editor, reveal]);
+
+    const commentOnSelection = useCallback(() => {
+      if (!editor) return;
+      const { from, to } = editor.state.selection;
+      const picked = quoteForSelection(editor.state.doc, from, to);
+      if (!picked) return;
+      editor.commands.setTextSelection(to);
+      requestFileComment(workspaceId, path, { kind: "comment", quote: picked.quote });
+    }, [editor, path, workspaceId]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -1147,7 +1251,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // paragraph at the start, and the caret lands where it stood in
         // `text` (a UTF-16 offset, as a textarea counts).
         insertTypedText(text, caret) {
-          if (!editor || editor.isDestroyed || text === "") return;
+          if (!editor || editor.isDestroyed) return false;
+          if (text === "") return true;
           const { view } = editor;
           const { doc, schema, tr } = view.state;
           const paragraphs = text
@@ -1164,6 +1269,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           const lines = text.slice(0, caret).split("\n");
           const position = lines.reduce((sum, line) => sum + line.length + 2, 1) - 2;
           view.dispatch(tr.setSelection(TextSelection.create(tr.doc, position)));
+          return view.state.doc.eq(tr.doc);
         },
       }),
       [collabActive, editor, value],
@@ -1220,7 +1326,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               !linkMenuStateRef.current.open && hasFormattableSelection(instance.state.selection)
             }
           >
-            <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
+            <SelectionToolbar
+              editor={editor}
+              onOpenLink={setLinkMenuState}
+              {...(fileComments?.canComment ? { onComment: commentOnSelection } : {})}
+            />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (

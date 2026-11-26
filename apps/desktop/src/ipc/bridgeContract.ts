@@ -1410,6 +1410,7 @@ export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload
 // re-checks. Bounded like the text write path so a huge paste can't stream
 // unbounded bytes through IPC.
 export const WRITE_ASSET_MAX_BYTES = 20 * 1024 * 1024;
+export const CHAT_FILE_REFERENCES_MAX = 20;
 const WORKSPACE_ASSET_BYTES = z.custom<Uint8Array>(
   (value) =>
     value instanceof Uint8Array &&
@@ -2619,6 +2620,7 @@ export const ChatThreadRecord = z.object({
   title: z.string().min(1).max(200),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
+  quote: z.string().min(1).optional(),
 });
 export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;
 
@@ -2882,7 +2884,7 @@ export const SendChatMessagePayload = z.object({
   needsDecision: z.boolean().optional(),
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
-  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  fileReferences: z.array(ChatFileReferenceInput).max(CHAT_FILE_REFERENCES_MAX).optional(),
   // The question or poll this message answers, and the choice it picks.
   resolves: z
     .object({
@@ -3296,7 +3298,7 @@ export const StartChannelThreadPayload = z.object({
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
   lane: z.enum(["posts", "chat"]).optional(),
-  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  fileReferences: z.array(ChatFileReferenceInput).max(CHAT_FILE_REFERENCES_MAX).optional(),
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
 
@@ -7954,6 +7956,12 @@ export type DescribeWorkReferencesPayload = z.infer<typeof DescribeWorkReference
 export const WorkReferenceOpen = z.discriminatedUnion("to", [
   z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
   z.object({ to: z.literal("collection"), path: z.string().min(1) }).strict(),
+  // An app by its folder.
+  z.object({ to: z.literal("app"), path: z.string().min(1) }).strict(),
+  // A data Collection's table, by its dataset.json.
+  z
+    .object({ to: z.literal("data"), datasetPath: z.string().min(1), tableId: z.string().min(1) })
+    .strict(),
   z.object({ to: z.literal("chat-channel"), channel: OPAQUE_ID }).strict(),
   z
     .object({

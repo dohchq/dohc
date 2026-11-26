@@ -51,6 +51,11 @@ export interface LocalAppLaunchBackend {
     signal?: AbortSignal,
     activated?: boolean,
   ): Promise<unknown>;
+  external?(
+    publicationId: string,
+    input: { authorityRevision: number; operation: string; input: unknown },
+    signal: AbortSignal,
+  ): Promise<unknown>;
   readBrowserFile(
     publicationId: string,
     input: {
@@ -748,6 +753,21 @@ export async function createLocalAppLaunchHost(options: {
                 input,
                 activeSignal,
                 activated,
+              );
+            } else if (
+              row.op === "backend.external" &&
+              exact(row, ["id", "op", "operation", "input"]) &&
+              options.backend.external
+            ) {
+              if (
+                typeof row.operation !== "string" ||
+                !/^[a-z][A-Za-z0-9_-]{0,63}$/.test(row.operation)
+              )
+                return reply(response, 400);
+              result = await options.backend.external(
+                publicationId,
+                { authorityRevision, operation: row.operation, input: row.input },
+                activeSignal,
               );
             } else if (
               row.op === "backend.file" &&

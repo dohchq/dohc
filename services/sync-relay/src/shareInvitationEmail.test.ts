@@ -500,3 +500,169 @@ it("keeps the count when the relay opens its database again", async () => {
 
   expect(attempts(reopened, "owner")).toBe(1);
 });
+
+async function memberFixture(overrides: HandlerOverrides = {}) {
+  const f = await fixture({
+    lookupUserDisplayName: (userId) => (userId === "owner" ? "Sam Rivera" : null),
+    ...overrides,
+  });
+  const inviteMember = async (email: string, inviter = "owner") => {
+    const response = await f.handler(
+      request(
+        inviter,
+        "/sync/workspace/members/invites",
+        jsonBody({ email, workspaceName: "Community" }),
+      ),
+    );
+    return { status: response.status, body: await json(response) };
+  };
+  return { ...f, inviteMember };
+}
+
+it("emails a member invite the way a share's invite is emailed, and opens the person's workspaces", async () => {
+  const { sent, inviteMember } = await memberFixture();
+
+  const account = await inviteMember("friend@dohc.test");
+  const pending = await inviteMember("Pending@Example.TEST");
+
+  expect(account).toMatchObject({ status: 200, body: { invitationEmail: "sent" } });
+  expect(pending).toMatchObject({ status: 200, body: { invitationEmail: "sent" } });
+  expect(pending.body).toHaveProperty("people");
+
+  expect(sent.map((message) => message.to)).toEqual(["friend@dohc.test", "pending@example.test"]);
+  const { html, ...first } = sent[0]!;
+  expect(first).toEqual({
+    to: "friend@dohc.test",
+    subject: 'Sam Rivera invited you to "Community"',
+    fromName: "Sam Rivera",
+    text: [
+      'Sam Rivera (owner@dohc.test) invited you to "Community". You can comment on it.',
+      "",
+      "Open in browser:",
+      `${SHARE_WEB_ORIGIN}/workspaces`,
+      "Sign in or create an account with friend@dohc.test.",
+      "",
+      "Using the dohc app? Sign in with friend@dohc.test. Choose Sharing, then Shared with me. Or choose Open a share and paste this code:",
+      `dohc-share:share-0:${RELAY_ORIGIN}`,
+      "",
+      "You got this because Sam Rivera (owner@dohc.test) invited friend@dohc.test. If you do not know them, ignore this email. Nothing happens if you do.",
+      "",
+    ].join("\n"),
+  });
+  expect(html).toContain(`href="${SHARE_WEB_ORIGIN}/workspaces"`);
+  // Only the inviter's address and the recipient's own appear; no other member's.
+  expect(sent[1]!.text).not.toContain("friend@dohc.test");
+  expect(sent[1]!.html).not.toContain("friend@dohc.test");
+});
+
+it("emails an invite again when the same address is invited again, once a minute at most", async () => {
+  const { sent, clock, inviteMember } = await memberFixture();
+
+  expect((await inviteMember("pending@example.test")).body).toMatchObject({
+    invitationEmail: "sent",
+  });
+  expect((await inviteMember("pending@example.test")).body).toMatchObject({
+    invitationEmail: "recent",
+  });
+  clock.nowMs += 61_000;
+  const again = await inviteMember("PENDING@example.test");
+  expect(again.body).toMatchObject({ invitationEmail: "sent" });
+  expect(
+    (again.body as { people: Array<{ state: string }> }).people.filter(
+      (person) => person.state === "invited",
+    ),
+  ).toHaveLength(1);
+  expect(sent.map((message) => message.to)).toEqual([
+    "pending@example.test",
+    "pending@example.test",
+  ]);
+
+  // An account is in the workspace at once, and inviting it again emails it again.
+  expect((await inviteMember("friend@dohc.test")).body).toMatchObject({ invitationEmail: "sent" });
+  expect((await inviteMember("friend@dohc.test")).body).toMatchObject({
+    invitationEmail: "recent",
+  });
+  clock.nowMs += 61_000;
+  const member = await inviteMember("friend@dohc.test");
+  expect(member.body).toMatchObject({ invitationEmail: "sent" });
+  expect(
+    (member.body as { people: Array<{ state: string }> }).people.filter(
+      (person) => person.state === "active",
+    ),
+  ).toHaveLength(2);
+  expect(sent).toHaveLength(4);
+});
+
+it("tells an admin invited again what an admin can do", async () => {
+  const { handler, sent, clock, inviteMember } = await memberFixture();
+  const joined = await inviteMember("friend@dohc.test");
+  const friend = (
+    joined.body as { people: Array<{ memberId: string; email: string | null }> }
+  ).people.find((person) => person.email === "friend@dohc.test")!.memberId;
+  const promoted = await handler(
+    request("owner", `/sync/workspace/members/${friend}/role`, jsonBody({ role: "admin" })),
+  );
+  expect(promoted.status).toBe(200);
+  clock.nowMs += 61_000;
+
+  expect((await inviteMember("friend@dohc.test")).body).toMatchObject({ invitationEmail: "sent" });
+  expect(sent[0]!.text).toContain("You can comment on it.");
+  expect(sent[1]!.text).toContain("You can edit it.");
+});
+
+it("emails the same invite again once the address has an account it hasn't used yet", async () => {
+  const accounts = new Map<string, string>();
+  const { sent, clock, inviteMember } = await memberFixture({
+    resolveUserIdByEmail: async (email) => accounts.get(email) ?? null,
+  });
+
+  await inviteMember("new@example.test");
+  accounts.set("new@example.test", "new-account");
+  clock.nowMs += 61_000;
+  const again = await inviteMember("new@example.test");
+
+  expect(again.body).toMatchObject({ invitationEmail: "sent" });
+  expect(
+    (again.body as { people: Array<{ state: string }> }).people.map((person) => person.state),
+  ).toEqual(["active", "invited"]);
+  expect(sent.map((message) => message.to)).toEqual(["new@example.test", "new@example.test"]);
+});
+
+it("keeps a member invite and says so when the relay has no mail server", async () => {
+  const { storage, inviteMember } = await memberFixture({ sendShareInvitationEmail: undefined });
+
+  const reply = await inviteMember("pending@example.test");
+
+  expect(reply).toMatchObject({ status: 200, body: { invitationEmail: "unavailable" } });
+  expect(
+    (reply.body as { people: Array<{ state: string; email: string | null }> }).people.find(
+      (person) => person.state === "invited",
+    )?.email,
+  ).toBe("pending@example.test");
+  expect(storage.hasPendingInvite("pending@example.test")).toBe(true);
+  expect(attempts(storage, "owner")).toBe(0);
+});
+
+it("leaves the browser link out of a member invite when people can't sign in on the share site", async () => {
+  const { sent, inviteMember } = await memberFixture({ namedBrowserSessionLimits: undefined });
+
+  await inviteMember("pending@example.test");
+
+  expect(sent[0]!.text).not.toContain("Open in browser");
+  expect(sent[0]!.text).toContain("Open in the dohc app:");
+});
+
+it("counts member invites in the inviter's 50 a day, with share invites", async () => {
+  const { storage, invite, inviteMember } = await memberFixture();
+  for (let index = 0; index < SHARE_INVITATION_EMAIL_DAILY_LIMIT - 1; index++)
+    await invite({ recipientEmail: `person-${index}@example.test` });
+
+  expect((await inviteMember("member-0@example.test")).body).toMatchObject({
+    invitationEmail: "sent",
+  });
+  expect((await inviteMember("member-1@example.test")).body).toMatchObject({
+    invitationEmail: "limit",
+    invitationEmailLimit: LIMIT,
+  });
+  expect(storage.hasPendingInvite("member-1@example.test")).toBe(true);
+});

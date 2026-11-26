@@ -12,11 +12,13 @@ describe("workspaceSecretsHandlers", () => {
     }));
     const setWorkspaceSecret = vi.fn(listWorkspaceSecrets);
     const deleteWorkspaceSecret = vi.fn(listWorkspaceSecrets);
+    const clearLocalWorkspaceSecrets = vi.fn(listWorkspaceSecrets);
     const handlers = workspaceSecretsHandlers({
       currentRendererSession: () => ({ workspaceId: "ws-active" }),
       listWorkspaceSecrets,
       setWorkspaceSecret,
       deleteWorkspaceSecret,
+      clearLocalWorkspaceSecrets,
     });
 
     expect(() =>
@@ -42,6 +44,13 @@ describe("workspaceSecretsHandlers", () => {
         { event: { sender: "win-1" } },
       ),
     ).toThrow("This workspace is no longer active.");
+    expect(() =>
+      handlers.clearLocalWorkspaceSecrets(
+        { workspaceId: "ws-other" },
+        { event: { sender: "win-1" } },
+      ),
+    ).toThrow("This workspace is no longer active.");
+    expect(clearLocalWorkspaceSecrets).not.toHaveBeenCalled();
     expect(listWorkspaceSecrets).not.toHaveBeenCalled();
     expect(setWorkspaceSecret).not.toHaveBeenCalled();
     expect(deleteWorkspaceSecret).not.toHaveBeenCalled();
@@ -57,11 +66,13 @@ describe("workspaceSecretsHandlers", () => {
     const listWorkspaceSecrets = vi.fn(async () => ready);
     const setWorkspaceSecret = vi.fn(async () => ready);
     const deleteWorkspaceSecret = vi.fn(async () => ready);
+    const clearLocalWorkspaceSecrets = vi.fn(async () => ready);
     const handlers = workspaceSecretsHandlers({
       currentRendererSession: () => ({ workspaceId: "ws-active" }),
       listWorkspaceSecrets,
       setWorkspaceSecret,
       deleteWorkspaceSecret,
+      clearLocalWorkspaceSecrets,
     });
 
     await expect(
@@ -87,5 +98,12 @@ describe("workspaceSecretsHandlers", () => {
         { event: { sender: "win-1" } },
       ),
     ).resolves.toEqual(ready);
+    await expect(
+      handlers.clearLocalWorkspaceSecrets(
+        { workspaceId: "ws-active" },
+        { event: { sender: "win-1" } },
+      ),
+    ).resolves.toEqual(ready);
+    expect(clearLocalWorkspaceSecrets).toHaveBeenCalledWith("ws-active");
   });
 });

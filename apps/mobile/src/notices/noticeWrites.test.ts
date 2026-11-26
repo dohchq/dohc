@@ -14,6 +14,7 @@ import {
   targetKey,
   type TargetRead,
 } from "./noticeWrites";
+import { readLane } from "../server/readLane";
 
 const mention: NoticeRecord = {
   noticeId: "n1",
@@ -223,6 +224,24 @@ describe("the reads behind Reply", () => {
     expect(
       actionFor({ ...mention, target: { thread: "t1", message: "m3" } }, reads.get(KEY)).kind,
     ).toBe("open");
+  });
+
+  it("abort the sign-in's read-ahead, and hold more until they settle", async () => {
+    const signIn = { isCurrent: () => true };
+    const shown = deferred<Read<ChatThread | MissingChat>>();
+    const targets = createNoticeTargets({ signIn, read: () => shown.promise });
+    const lane = readLane(signIn);
+    const ahead = lane.ahead(
+      new AbortController().signal,
+      (signal) =>
+        new Promise<boolean>((done) => signal.addEventListener("abort", () => done(true))),
+    );
+    targets.want([T1]);
+    expect(await ahead).toBe(true);
+    expect(lane.free()).toBe(false);
+    shown.resolve(answer(thread([message()])));
+    await settle();
+    expect(lane.free()).toBe(true);
   });
 
   it("reads another workspace's thread of the same ID on its own", () => {

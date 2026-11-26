@@ -2,9 +2,6 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
   leavesOfSequence,
   readBodyLeaves,
   type SequenceAttrs,
@@ -33,6 +30,7 @@ import {
 } from "./bodySequenceWriter.js";
 import { piecesOfSequence, readBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
+import { BLOCK_ELEMENT, BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const SEQUENCE = BODY_SEQUENCE_FIELD;

@@ -1006,3 +1006,81 @@ it("reports malformed app.publish.json on one line without disclosing input cont
   expect(spoofed).toBe("app/app.publish.json is not valid JSON. Check its syntax.");
   expect(spoofed).not.toContain("8675309");
 });
+
+describe("outside calls in app.publish.json", () => {
+  const external = {
+    usage: {
+      method: "GET",
+      url: "https://api.example.com/v1/usage",
+      secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+    },
+    events: {
+      method: "POST",
+      url: "https://api.example.com/v1/events",
+      body: { limit: 10 },
+      secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+      maxResponseBytes: 4096,
+    },
+  };
+  const local = (h: ReturnType<typeof harness>) =>
+    prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        deferredWrites: [],
+        compile: h.compile,
+      },
+    );
+
+  it("binds the declared calls, in name order, into what the owner approves", async () => {
+    const h = harness();
+    h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, external });
+    const prepared = await local(h);
+    expect(prepared.candidate.external?.map((operation) => operation.name)).toEqual([
+      "events",
+      "usage",
+    ]);
+    expect(prepared.candidate.external?.[0]).toMatchObject({
+      method: "POST",
+      host: "api.example.com",
+      path: "/v1/events",
+      access: "owner",
+      response: { maxBytes: 4096 },
+    });
+  });
+
+  it("refuses to publish an app that calls outside services, before capturing it", async () => {
+    const h = harness();
+    h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, external });
+    await expect(h.prepare()).rejects.toThrow(
+      "Apps that call outside services run only on this computer for now.",
+    );
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("names the manifest when a call is not fixed", async () => {
+    const h = harness();
+    h.setDeclaration({
+      entryPath: "main.ts",
+      inputs: ["main.ts"],
+      packageMap: {},
+      external: { usage: { ...external.usage, url: "https://127.0.0.1/v1/usage" } },
+    });
+    await expect(local(h)).rejects.toThrow(
+      'app/app.publish.json external: Operation "usage" host must be a lowercase public hostname.',
+    );
+  });
+
+  it("refuses a call shared with viewers until shared calls can run", async () => {
+    const h = harness();
+    h.setDeclaration({
+      entryPath: "main.ts",
+      inputs: ["main.ts"],
+      packageMap: {},
+      external: { usage: { ...external.usage, access: "viewers" } },
+    });
+    await expect(local(h)).rejects.toThrow('Operation "usage" can run only for you for now.');
+  });
+});

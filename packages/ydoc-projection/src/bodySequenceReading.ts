@@ -10,7 +10,8 @@ import {
   type SequenceBoundary,
   type SequenceInline,
 } from "./bodySequenceGrammar.js";
-import { boundaryOf, storedValue, visitPieces } from "./bodySequenceYjs.js";
+import { boundaryOf, visitPieces } from "./bodySequenceYjs.js";
+import { storedValue } from "./bodySequenceStore.js";
 
 /**
  * A letter run or an inline item the editor shows. `index` is its sequence position counted from

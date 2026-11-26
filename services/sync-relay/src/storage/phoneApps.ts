@@ -95,9 +95,9 @@ export function phoneAppApproval(
 }
 
 /**
- * Approves a publication at one revision. A retry at the same revision returns
- * the same approval; approving a new revision replaces the old one and ends its
- * launches.
+ * Approves a publication at one revision, inside the caller's transaction. A
+ * retry at the same revision returns the same approval; approving a new
+ * revision replaces the old one and ends its launches.
  */
 export function approvePhoneApp(
   storage: SyncRelayStorage,
@@ -110,33 +110,34 @@ export function approvePhoneApp(
     nowMs: number;
   },
 ): { approvalId: string; authorityRevision: number; approvedAtMs: number } {
-  return context(storage).tx(() => {
-    const current = phoneAppApproval(storage, input);
-    if (current?.authorityRevision === input.authorityRevision) return current;
-    db(storage)
-      .prepare(
-        `DELETE FROM ${PHONE_APP_APPROVALS} WHERE user_id = ? AND workspace_id = ? AND publication_id = ?`,
-      )
-      .run(input.userId, input.workspaceId, input.publicationId);
-    db(storage)
-      .prepare(`INSERT INTO ${PHONE_APP_APPROVALS} VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(
-        input.newApprovalId,
-        input.userId,
-        input.workspaceId,
-        input.publicationId,
-        input.authorityRevision,
-        input.nowMs,
-      );
-    return {
-      approvalId: input.newApprovalId,
-      authorityRevision: input.authorityRevision,
-      approvedAtMs: input.nowMs,
-    };
-  });
+  const current = phoneAppApproval(storage, input);
+  if (current?.authorityRevision === input.authorityRevision) return current;
+  db(storage)
+    .prepare(
+      `DELETE FROM ${PHONE_APP_APPROVALS} WHERE user_id = ? AND workspace_id = ? AND publication_id = ?`,
+    )
+    .run(input.userId, input.workspaceId, input.publicationId);
+  db(storage)
+    .prepare(`INSERT INTO ${PHONE_APP_APPROVALS} VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(
+      input.newApprovalId,
+      input.userId,
+      input.workspaceId,
+      input.publicationId,
+      input.authorityRevision,
+      input.nowMs,
+    );
+  return {
+    approvalId: input.newApprovalId,
+    authorityRevision: input.authorityRevision,
+    approvedAtMs: input.nowMs,
+  };
 }
 
-/** Deletes the account's approval of a publication, and with it every grant and launch. */
+/**
+ * Deletes the account's approval of a publication, with every grant and launch, and the account's allowing of it
+ * as a Member app, which holds on every device.
+ */
 export function revokePhoneApp(
   storage: SyncRelayStorage,
   input: { userId: string; workspaceId: string; publicationId: string },
@@ -150,13 +151,15 @@ export function revokePhoneApp(
         )
         .all(input.userId, input.workspaceId, input.publicationId),
     );
-    const revoked =
-      db(storage)
-        .prepare(
-          `DELETE FROM ${PHONE_APP_APPROVALS} WHERE user_id = ? AND workspace_id = ? AND publication_id = ?`,
-        )
-        .run(input.userId, input.workspaceId, input.publicationId).changes > 0;
-    return { revoked, launchHashes: ended };
+    const revoked = [
+      `DELETE FROM ${PHONE_APP_APPROVALS} WHERE user_id = ? AND workspace_id = ? AND publication_id = ?`,
+      `DELETE FROM sync_relay_app_viewer_consents WHERE viewer_user_id = ? AND workspace_id = ? AND publication_id = ?`,
+    ].map(
+      (sql) =>
+        db(storage).prepare(sql).run(input.userId, input.workspaceId, input.publicationId).changes >
+        0,
+    );
+    return { revoked: revoked.some(Boolean), launchHashes: ended };
   });
 }
 
@@ -228,8 +231,9 @@ export function redeemPhoneAppGrant(
 
 /**
  * An unexpired launch whose approval still stands at the launch's revision,
- * for the account's publication while it is active at that revision. One
- * statement and no transaction of its own, so it runs inside a commit.
+ * for the account's publication or a Member app in its workspace, while it is
+ * active at that revision. One statement and no transaction of its own, so it
+ * runs inside a commit.
  */
 export function phoneAppLaunch(
   storage: SyncRelayStorage,
@@ -242,9 +246,10 @@ export function phoneAppLaunch(
        JOIN sync_relay_app_publications p ON p.publication_id = l.publication_id
        WHERE l.token_hash = ? AND l.launch_host IS NOT NULL AND l.expires_at_ms > ?
          AND a.authority_revision = l.authority_revision
-         AND p.workspace_id = l.workspace_id AND p.owner_user_id = l.user_id
+         AND p.workspace_id = l.workspace_id
          AND p.active = 1 AND p.authority_revision = l.authority_revision
-         AND NOT EXISTS (SELECT 1 FROM sync_relay_member_apps m WHERE m.publication_id = p.publication_id)`,
+         AND (p.owner_user_id = l.user_id OR EXISTS (SELECT 1 FROM sync_relay_member_apps m
+           WHERE m.publication_id = p.publication_id AND m.workspace_id = l.workspace_id))`,
     )
     .get(launchHash, nowMs);
   return row ? binding(row) : null;
@@ -260,20 +265,25 @@ export function endPhoneAppLaunches(
   storage: SyncRelayStorage,
   scope: PhoneAppLaunchScope,
 ): string[] {
-  return context(storage).tx(() =>
-    launchHashes(
-      db(storage)
-        .prepare(
-          `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE user_id = ?1
-         AND (?2 IS NULL OR session_id = ?2) AND (?3 IS NULL OR workspace_id = ?3) AND (?4 IS NULL OR publication_id = ?4)
-         RETURNING token_hash, launch_host`,
-        )
-        .all(
-          scope.userId,
-          scope.sessionId ?? null,
-          scope.workspaceId ?? null,
-          scope.publicationId ?? null,
-        ),
-    ),
+  return context(storage).tx(() => deletePhoneAppLaunches(storage, scope));
+}
+
+export function deletePhoneAppLaunches(
+  storage: SyncRelayStorage,
+  scope: PhoneAppLaunchScope,
+): string[] {
+  return launchHashes(
+    db(storage)
+      .prepare(
+        `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE user_id = ?1
+       AND (?2 IS NULL OR session_id = ?2) AND (?3 IS NULL OR workspace_id = ?3) AND (?4 IS NULL OR publication_id = ?4)
+       RETURNING token_hash, launch_host`,
+      )
+      .all(
+        scope.userId,
+        scope.sessionId ?? null,
+        scope.workspaceId ?? null,
+        scope.publicationId ?? null,
+      ),
   );
 }

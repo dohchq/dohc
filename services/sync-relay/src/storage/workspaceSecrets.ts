@@ -121,6 +121,82 @@ export function readWorkspaceSecretForExecution(
   };
 }
 
+export interface WorkspaceSecretSeal {
+  readonly workspaceId: string;
+  readonly ownerUserId: string;
+  readonly name: string;
+  readonly usage: WorkspaceSecretUsage;
+  readonly allowedHosts: string[];
+  readonly generation: number;
+  readonly keyId: string;
+  readonly sealedValue: string;
+}
+
+export function listWorkspaceSecretSeals(storage: StorageContext): WorkspaceSecretSeal[] {
+  return storage.db
+    .prepare(
+      `SELECT s.workspace_id, w.owner_user_id, s.name, s.usage, s.allowed_hosts_json,
+              s.generation, s.key_id, s.sealed_value
+         FROM sync_relay_workspace_secrets s
+         JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id
+         ORDER BY s.workspace_id, s.name`,
+    )
+    .all()
+    .map((row) => ({
+      workspaceId: String(row.workspace_id),
+      ownerUserId: String(row.owner_user_id),
+      name: String(row.name),
+      usage: String(row.usage) as WorkspaceSecretUsage,
+      allowedHosts: JSON.parse(String(row.allowed_hosts_json)) as string[],
+      generation: Number(row.generation),
+      keyId: String(row.key_id),
+      sealedValue: String(row.sealed_value),
+    }));
+}
+
+function secretStorageBytes(input: {
+  readonly name: string;
+  readonly usage: string;
+  readonly allowedHostsJson: string;
+  readonly sealedValue: string;
+  readonly keyId: string;
+}): number {
+  return (
+    Buffer.byteLength(input.name, "utf8") +
+    Buffer.byteLength(input.usage, "utf8") +
+    Buffer.byteLength(input.allowedHostsJson, "utf8") +
+    Buffer.byteLength(input.sealedValue, "utf8") +
+    Buffer.byteLength(input.keyId, "utf8")
+  );
+}
+
+/** Moves one secret to a new seal, unless it changed since `seal` was read. */
+export function replaceWorkspaceSecretSeal(
+  storage: StorageContext,
+  seal: WorkspaceSecretSeal,
+  next: { readonly keyId: string; readonly sealedValue: string },
+): boolean {
+  const allowedHostsJson = JSON.stringify(seal.allowedHosts);
+  const result = storage.db
+    .prepare(
+      `UPDATE sync_relay_workspace_secrets
+          SET sealed_value = ?, key_id = ?, storage_bytes = ?
+        WHERE workspace_id = ? AND name = ? AND generation = ? AND key_id = ?
+          AND sealed_value = ?`,
+    )
+    .run(
+      next.sealedValue,
+      next.keyId,
+      secretStorageBytes({ ...seal, allowedHostsJson, ...next }),
+      seal.workspaceId,
+      seal.name,
+      seal.generation,
+      seal.keyId,
+      seal.sealedValue,
+    );
+  return Number(result.changes) === 1;
+}
+
 function ownerMayMutateWorkspace(
   storage: StorageContext,
   workspaceId: string,
@@ -189,12 +265,7 @@ export function upsertWorkspaceSecret(
     }
 
     const sealedValue = input.seal(generation);
-    const storageBytes =
-      Buffer.byteLength(input.name, "utf8") +
-      Buffer.byteLength(input.usage, "utf8") +
-      Buffer.byteLength(allowedHostsJson, "utf8") +
-      Buffer.byteLength(sealedValue, "utf8") +
-      Buffer.byteLength(input.keyId, "utf8");
+    const storageBytes = secretStorageBytes({ ...input, allowedHostsJson, sealedValue });
 
     const previousBytes = existing ? Number(existing.storage_bytes) : 0;
     if (storageBytes > previousBytes) {

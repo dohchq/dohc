@@ -1,35 +1,19 @@
 import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
   leavesOfSequence,
   readBodyLeaves,
   type SequenceAttrs,
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
+import {
+  storedValue,
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+} from "./bodySequenceStore.js";
 
-export const BODY_SEQUENCE_SCHEMA_VERSION = 2;
-
-type StoredKeys = { readonly _map: Map<string, Y.Item> };
 type StoredList = { readonly _start: Y.Item | null };
-
-/**
- * The value stored under a key of a shared type: the last value of a live item that holds plain
- * values. An item of any other kind holds none, because Yjs and yrs read such an item differently.
- */
-export function storedValue(holder: StoredKeys | undefined, key: string): unknown {
-  const item = holder?._map.get(key);
-  return item && !item.deleted && item.content instanceof Y.ContentAny
-    ? item.content.arr.at(-1)
-    : undefined;
-}
-
-/** Whether a note's body is one sequence. Reads the stored marker, and declares no root. */
-export function holdsBodySequence(doc: Y.Doc): boolean {
-  return storedValue(doc.share.get("meta"), "schemaVersion") === BODY_SEQUENCE_SCHEMA_VERSION;
-}
 
 function attributesOf(element: Y.XmlElement): SequenceAttrs {
   return Object.fromEntries(

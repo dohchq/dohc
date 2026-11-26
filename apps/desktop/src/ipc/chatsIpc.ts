@@ -397,7 +397,10 @@ export function registerChatsIpcHandlers<
         : [];
       return {
         fileObjectId,
-        threads: threads.map(chatThreadForIpc),
+        threads: threads.map((thread) => ({
+          ...chatThreadForIpc(thread),
+          ...(thread.quote ? { quote: thread.quote } : {}),
+        })),
       };
     });
   };
@@ -582,12 +585,7 @@ export function registerChatsIpcHandlers<
       const scope = await requireChatScope(input.workspaceId);
       const host = chatWrites.host(chatWritePlace(scope), {
         writer: RENDERER,
-        resolveAttachments: () =>
-          resolveChatFileReferences(
-            scope.workspace,
-            (path) => chatFileObjectId(scope, path),
-            input.fileReferences,
-          ),
+        resolveAttachments: () => resolveChatFileReferences(scope, input.fileReferences),
         onSaved,
       });
       const reply = {
@@ -1205,12 +1203,7 @@ export function registerChatsIpcHandlers<
       const { workspace, store } = scope;
       const host = chatWrites.host(chatWritePlace(scope), {
         writer: RENDERER,
-        resolveAttachments: () =>
-          resolveChatFileReferences(
-            workspace,
-            (path) => chatFileObjectId(scope, path),
-            input.fileReferences,
-          ),
+        resolveAttachments: () => resolveChatFileReferences(scope, input.fileReferences),
         onSaved,
       });
       // No title, ever, on this path: the thread displays its first-message

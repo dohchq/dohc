@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS push_registrations (
 ) STRICT`;
 
 /** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */
-export const CACHE_FORMAT = 1;
+export const CACHE_FORMAT = 2;
 
 /** `views`: each workspace's saved views, as JSON, and their size. `lists`: each account's workspace list. */
 export const CACHE_SCHEMA = `CREATE TABLE IF NOT EXISTS views (
@@ -104,6 +104,11 @@ export async function deleteAccountRows(sql: Sql, account: { origin: string; use
       account.origin,
       account.userId,
     ]);
+}
+
+export async function openNow(stores: readonly Pick<KeptStore, "read">[]): Promise<boolean> {
+  const opened = await Promise.allSettled(stores.map((store) => store.read("SELECT 1", [])));
+  return opened.every((open) => open.status === "fulfilled");
 }
 
 type Setting = readonly [name: string, value: string, readBack: string | number];

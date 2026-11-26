@@ -533,6 +533,51 @@ describe("the ⚡ panel", () => {
       onServer: false,
     });
   });
+
+  it("says what a held web request sends and saves, even when it stopped before for an editor", async () => {
+    const pull: Automation = {
+      ...nudge,
+      id: "pull",
+      name: "Pull stats",
+      do: [
+        {
+          kind: "http",
+          url: { kind: "literal", url: "https://us.posthog.com/api/projects/1/query/" },
+          method: "GET",
+          headers: [],
+          secretHeaders: [{ name: "Authorization", secret: "POSTHOG_KEY", prefix: "Bearer " }],
+          body: null,
+          as: "stats",
+        },
+      ],
+    };
+    makeBridge(
+      read([
+        summary(pull, {
+          reach: {
+            kind: "checked",
+            steps: [
+              {
+                verdict: "held",
+                step: "0",
+                stepOrdinal: 0,
+                stoppedFor: "bob@dohc.test",
+                fileUnread: false,
+                seq: 2,
+                target: "us.posthog.com",
+                action: "send-http",
+              },
+            ],
+          },
+        }),
+      ]),
+    );
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-pull");
+    expect(row.textContent).toContain(
+      "This step fetches data from us.posthog.com with secret POSTHOG_KEY in its Authorization header, and saves the answer as stats. No later step uses it yet. Allow it before dohc sends requests there. It stopped before because bob@dohc.test could not.",
+    );
+  });
 });
 
 describe("the builder's triggers", () => {

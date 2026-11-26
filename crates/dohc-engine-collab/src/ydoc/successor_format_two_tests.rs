@@ -283,3 +283,80 @@ fn each_shared_note_a_successor_takes_gives_the_pinned_bytes() {
         )
     );
 }
+
+#[test]
+fn a_seed_in_format_two_has_its_own_client_and_format_one_keeps_its_client() {
+    let key = crate::DocKey::new("workspace", "main", "object").unwrap();
+    let seed = |kind, version| seed_client_id(&key, kind, version, "moment", "blob");
+    assert_eq!(seed(ContentKind::Richdoc, 1), 3_076_933_556);
+    assert_eq!(seed(ContentKind::Plaintext, 1), 1_708_819_307);
+    assert_eq!(seed(ContentKind::Richdoc, 2), 963_707_788);
+}
+
+#[test]
+fn only_a_rich_document_on_an_engine_that_reads_format_two_is_new_in_format_two() {
+    let version = || {
+        [
+            ContentKind::Richdoc,
+            ContentKind::Plaintext,
+            ContentKind::Scene,
+        ]
+        .map(new_note_schema_version)
+    };
+    assert_eq!(writing_new_notes_in_format_two_here(version), [1, 1, 1]);
+    reading_body_sequence_here(|| {
+        assert_eq!(version(), [1, 1, 1]);
+        assert_eq!(writing_new_notes_in_format_two_here(version), [2, 1, 1]);
+    });
+}
+
+#[test]
+fn a_collection_relation_seed_is_written_in_the_new_note_format() {
+    let markdown = "# Title\n\nOne **bold** line\n\n- a\n- b\n";
+    let many_lines = format!("{}a\n", "a\n\n".repeat(26_000));
+    let seeded = |markdown: &str| {
+        let doc = Ydoc::wire();
+        doc.seed_collection_relation_markdown(markdown)
+            .expect("seed");
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let txn = doc.doc.transact();
+        let (body_items, sequence_items) = (body.len(&txn) > 0, sequence.len(&txn) > 0);
+        drop(txn);
+        let projection = doc.project_richdoc().expect("projection");
+        (
+            doc.note_schema_version(),
+            body_items,
+            sequence_items,
+            projection == markdown,
+        )
+    };
+    reading_body_sequence_here(|| {
+        assert_eq!(seeded(markdown), (1, true, false, true));
+        writing_new_notes_in_format_two_here(|| {
+            assert_eq!(seeded(markdown), (2, false, true, true));
+            assert_eq!(seeded(&many_lines), (1, true, false, true));
+        });
+    });
+}
+
+#[test]
+fn a_collection_relation_seed_format_two_cannot_hold_is_written_in_format_one() {
+    let linked_code = "Run [`npm install`](https://example.com) first\n";
+    reading_body_sequence_here(|| {
+        writing_new_notes_in_format_two_here(|| {
+            let doc = Ydoc::wire();
+            doc.seed_collection_relation_markdown(linked_code)
+                .expect("seed");
+            let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+            let sequence_length = sequence.len(&doc.doc.transact());
+            assert_eq!((doc.note_schema_version(), sequence_length), (1, 0));
+            let projection = doc.project_richdoc().expect("projection");
+            assert_eq!(
+                doc.preserved_markdown_source(&projection)
+                    .unwrap_or(projection),
+                linked_code
+            );
+        });
+    });
+}

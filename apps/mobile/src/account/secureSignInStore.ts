@@ -1,4 +1,5 @@
 import * as SecureStore from "expo-secure-store";
+import { launchTimings } from "../startup";
 import type { SignInStore, StoredSignIn } from "../server/account";
 
 // The phone's sign-in, in the keychain: readable only while the phone is unlocked, and never copied to a backup or
@@ -28,6 +29,7 @@ function parse(value: string): StoredSignIn | null {
 export const secureSignInStore: SignInStore = {
   async load() {
     const value = await SecureStore.getItemAsync(KEY, OPTIONS);
+    launchTimings?.mark("keychain");
     return value === null ? null : parse(value);
   },
   save: (signIn) => SecureStore.setItemAsync(KEY, JSON.stringify(signIn), OPTIONS),

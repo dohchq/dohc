@@ -30,6 +30,9 @@ import { MAIN_ONLY_SCHEMA_CHANGES } from "../workspaces/localPreviewStore";
 
 type SourceAdapter = AppPublicationPreparationDependencies["adapter"];
 
+/** The CLI's caller key. Agents use this door, so it can't approve an app that spends a workspace secret. */
+export const localOwnerCliCaller = (workspaceId: string) => `local-owner-cli:${workspaceId}`;
+
 export function createLocalOwnerAppPublicationHandler<
   Workspace extends { workspaceId: string; rootPath?: string; attachmentId?: symbol },
   Operation extends {
@@ -505,6 +508,10 @@ export function createLocalOwnerAppPublicationHandler<
       if (!prepared)
         throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const candidate = prepared.candidate;
+      if (candidate.external && callerKey === localOwnerCliCaller(input.workspaceId))
+        throw new Error(
+          "This app calls outside services with a workspace secret. Approve it in the dohc window: open the app and choose Review.",
+        );
       const approvalId = randomUUID(),
         digest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const clear = () => {
@@ -545,6 +552,7 @@ export function createLocalOwnerAppPublicationHandler<
         sourceRevision: candidate.sourceRevision,
         sourcePaths: candidate.inputs.map((file) => file.path),
         capabilities: shown,
+        ...(candidate.external ? { external: candidate.external } : {}),
         externalNetwork: true,
         local: true,
       });

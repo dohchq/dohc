@@ -9,7 +9,7 @@ const MAX_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_HEADER_SIZE = 8192;
 const MAX_HEADER_SIZE_CAP = 16 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 8192;
-const MAX_RESPONSE_BYTES_CAP = 64 * 1024;
+const MAX_RESPONSE_BYTES_CAP = 192 * 1024;
 
 interface VerifiedDestination {
   readonly href: string;
@@ -60,7 +60,9 @@ export type SafeOutboundErrorCode =
   | "redirect_refused"
   | "response_too_large"
   | "response_interrupted"
-  | "transport_failed";
+  | "transport_failed"
+  | "unsupported_response"
+  | "invalid_json";
 
 export class SafeOutboundError extends Error {
   constructor(
@@ -105,6 +107,13 @@ export interface SafeOutboundRequest {
   readonly maxHeaderSize?: number;
   readonly maxResponseBytes?: number;
   readonly rejectRedirects?: boolean;
+}
+
+export interface SafeOutboundResponse {
+  readonly status: number;
+  readonly contentType: string | null;
+  readonly contentEncoding: string | null;
+  readonly body: Buffer;
 }
 
 export function isPublicInternetAddress(address: string): boolean {
@@ -266,10 +275,31 @@ export async function resolveSafeOutboundDestination(
   return destination;
 }
 
-export function sendSafeOutboundHttps(
+export async function sendSafeOutboundHttps(
   prepared: SafeOutboundRequest,
   signal?: AbortSignal,
 ): Promise<number> {
+  return (await exchangeSafeOutboundHttps(prepared, signal, false)).status;
+}
+
+/** Sends like sendSafeOutboundHttps and keeps the response body, up to maxResponseBytes. */
+export function readSafeOutboundHttps(
+  prepared: SafeOutboundRequest,
+  signal?: AbortSignal,
+): Promise<SafeOutboundResponse> {
+  return exchangeSafeOutboundHttps(prepared, signal, true);
+}
+
+function headerText(value: string | string[] | undefined): string | null {
+  if (value === undefined) return null;
+  return Array.isArray(value) ? value.join(", ") : value;
+}
+
+function exchangeSafeOutboundHttps(
+  prepared: SafeOutboundRequest,
+  signal: AbortSignal | undefined,
+  keepBody: boolean,
+): Promise<SafeOutboundResponse> {
   const verified = verifiedDestinations.get(prepared.destination);
   if (!verified) {
     return Promise.reject(
@@ -322,7 +352,8 @@ export function sendSafeOutboundHttps(
   normalizedHeaders["accept-encoding"] = "identity";
 
   return new Promise((resolve, reject) => {
-    let completedStatus: number | undefined;
+    let completed: SafeOutboundResponse | undefined;
+    const chunks: Buffer[] = [];
     let failure: Error | undefined;
     const requestOptions: RequestOptions & { autoSelectFamily: boolean } = {
       method: prepared.method ?? "POST",
@@ -381,10 +412,17 @@ export function sendSafeOutboundHttps(
             );
             failure ??= overflow;
             request.destroy(overflow);
+          } else if (keepBody) {
+            chunks.push(chunk);
           }
         });
         response.on("end", () => {
-          completedStatus = status;
+          completed = {
+            status,
+            contentType: headerText(response.headers["content-type"]),
+            contentEncoding: headerText(response.headers["content-encoding"]),
+            body: Buffer.concat(chunks),
+          };
         });
       });
     } catch {
@@ -409,15 +447,70 @@ export function sendSafeOutboundHttps(
     request.on("close", () => {
       clearTimeout(timer);
       if (failure) reject(failure);
-      else if (completedStatus === undefined) {
+      else if (completed === undefined) {
         reject(
           new SafeOutboundError("response_interrupted", "Outbound HTTPS response interrupted."),
         );
       } else {
-        resolve(completedStatus);
+        resolve(completed);
       }
     });
     if (body && body.length > 0) request.end(body);
     else request.end();
   });
+}
+
+const JSON_MEDIA_TYPE = /^application\/(?:[a-z0-9.-]+\+)?json$/u;
+
+function nestsWithin(value: unknown, maxDepth: number): boolean {
+  const pending: Array<[unknown, number]> = [[value, 0]];
+  while (pending.length > 0) {
+    const [item, depth] = pending.pop()!;
+    if (item === null || typeof item !== "object") continue;
+    if (depth >= maxDepth) return false;
+    for (const child of Array.isArray(item) ? item : Object.values(item)) {
+      pending.push([child, depth + 1]);
+    }
+  }
+  return true;
+}
+
+/**
+ * Decodes a response body as JSON: an uncompressed `application/json` (or
+ * `+json`) body in UTF-8 whose lists and objects nest at most `maxDepth` deep.
+ */
+export function parseSafeOutboundJson(response: SafeOutboundResponse, maxDepth: number): unknown {
+  const encoding = response.contentEncoding?.trim().toLowerCase() ?? "identity";
+  if (encoding !== "identity") {
+    throw new SafeOutboundError(
+      "unsupported_response",
+      `Outbound HTTPS response is compressed (${encoding}), and dohc reads only uncompressed responses.`,
+    );
+  }
+  const [mediaType = "", ...parameters] = (response.contentType ?? "")
+    .split(";")
+    .map((part) => part.trim().toLowerCase());
+  const charset = parameters
+    .find((part) => part.startsWith("charset="))
+    ?.slice("charset=".length)
+    .replace(/^"(.*)"$/u, "$1");
+  if (!JSON_MEDIA_TYPE.test(mediaType) || (charset !== undefined && charset !== "utf-8")) {
+    throw new SafeOutboundError(
+      "unsupported_response",
+      "Outbound HTTPS response is not JSON in UTF-8.",
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.body));
+  } catch {
+    throw new SafeOutboundError("invalid_json", "Outbound HTTPS response is not valid JSON.");
+  }
+  if (!nestsWithin(value, maxDepth)) {
+    throw new SafeOutboundError(
+      "invalid_json",
+      `Outbound HTTPS response nests lists and objects more than ${maxDepth} deep.`,
+    );
+  }
+  return value;
 }

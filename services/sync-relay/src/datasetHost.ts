@@ -68,7 +68,7 @@ import {
 import { badRequest, notFound, relayError, RelayError } from "./errors";
 import {
   memberAppConsent,
-  memberAppPage,
+  workspaceAppPage,
   memberAppIdOf,
   memberAppRow,
   memberAppScopeDigest,
@@ -79,6 +79,7 @@ import {
   type WriteMemberAppInput,
   type MemberAppScopeCollection,
 } from "./storage/memberApps";
+import { deletePhoneAppLaunches } from "./storage/phoneApps";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePaths, collectionFilePresent } from "./storage/collectionFilePresence";
@@ -138,6 +139,9 @@ type Defaults = CollectionWorkspaceDefaults;
 const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
 
 /** The existing relay connection owns every authoritative dataset transaction. */
+const outsideAppRoot = (candidate: AppPublicationCandidate) =>
+  candidate.inputs.some((file) => !file.path.startsWith(`${candidate.appRoot}/`));
+
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const { storage, limits, publicEditRelease } = options,
     nowMs = options.nowMs ?? Date.now;
@@ -534,25 +538,14 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     resolve();
     return { candidate, authorityRevision, resolveAuthority: resolve };
   }
-  function memberReach(
-    workspaceId: string,
-    userId: string,
-    datasetId: string | undefined,
-    paths?: readonly string[],
-  ) {
+  function memberReach(workspaceId: string, userId: string, datasetId: string | undefined) {
     const role = workspaceRoleOf(storage, workspaceId, userId)?.role;
     if (role === "owner") return { access: "edit" as ShareAccess, operationIds: null, token: role };
     const grantId = workspaceMemberGrantId(storage, workspaceId, userId);
     if (!grantId) return null;
     let authority: DatasetAuthority;
     try {
-      authority = named(
-        workspaceId,
-        grantId,
-        userId,
-        datasetId,
-        paths && { paths, authorityRevision: 0 },
-      );
+      authority = named(workspaceId, grantId, userId, datasetId);
     } catch (error) {
       if (
         error instanceof DatasetHostError ||
@@ -603,10 +596,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       (author === "member" && !setting.membersCanShare)
     )
       return null;
-    const paths = [candidate.appRoot, ...candidate.inputs.map((file) => file.path)];
     if (
-      !memberReach(workspaceId, authorUserId, undefined, paths) ||
-      !memberReach(workspaceId, viewerUserId, undefined, paths)
+      outsideAppRoot(candidate) ||
+      !memberReach(workspaceId, authorUserId, undefined) ||
+      !memberReach(workspaceId, viewerUserId, undefined)
     )
       return null;
     const scope: Array<MemberAppScopeCollection & { access: ShareAccess }> = [];
@@ -658,7 +651,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const slug = String(row.member_slug);
     const viewerGrantId = workspaceMemberGrantId(storage, workspaceId, auth.userId);
     if (
-      auth.launch ||
       (auth.grantId !== undefined && auth.grantId !== viewerGrantId) ||
       getWorkspaceMembership(storage, workspaceId)?.shareId !== row.share_id ||
       memberAppIdOf(workspaceId, authorUserId, slug, hash(JSON.stringify(candidate))) !==
@@ -681,11 +673,14 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth.userId,
       );
       if (!current) throw notFound();
-      const consent = memberAppConsent(
-        storage,
-        { workspaceId, viewerUserId: auth.userId, publicationId },
-        current.scope,
-      );
+      const consent =
+        auth.userId === authorUserId
+          ? ("current" as const)
+          : memberAppConsent(
+              storage,
+              { workspaceId, viewerUserId: auth.userId, publicationId },
+              current.scope,
+            );
       if (!reviewing && consent !== "current") throw new MemberAppRefusal(consent);
       return { ...current, consent };
     };
@@ -712,6 +707,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           readOnlyOnly: entry?.access !== "edit",
           operationIds,
         },
+        ...(auth.launch
+          ? {
+              authorizeOperation: () => auth.launch!.authorizeOperation(),
+              beforeCommit: () => auth.launch!.recheck(),
+            }
+          : {}),
       };
     };
     return {
@@ -1478,6 +1479,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       } catch {
         throw badRequest("Invalid app approval.");
       }
+      if (candidate.external)
+        throw badRequest(
+          "Apps that call outside services run only on the owner's computer for now.",
+        );
       if (
         candidate.capabilities.length !== 1 ||
         candidate.capabilities[0]!.kind !== "dataset" ||
@@ -2158,6 +2163,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           )
         )
           throw badRequest("Share apps from the main version of visible files.");
+        if (outsideAppRoot(candidate))
+          throw badRequest(
+            `Keep every file of ${candidate.appRoot} inside its folder to share it.`,
+          );
         const manifest = Buffer.from(JSON.stringify(candidate)),
           manifestHash = hash(manifest);
         const publicationId = memberAppIdOf(workspaceId, auth.userId, input.slug, manifestHash);
@@ -2183,24 +2192,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             manifestHash,
             nowMs: nowMs(),
           });
-          const own = memberScope(
-            workspaceId,
-            publicationId,
-            1,
-            candidate,
-            auth.userId,
-            auth.userId,
-          );
-          if (!own) throw notFound();
-          if (!input.agent)
-            recordMemberAppConsent(storage, {
-              workspaceId,
-              viewerUserId: auth.userId,
-              publicationId,
-              scopeDigest: own.digest,
-              scope: own.scope,
-              nowMs: nowMs(),
-            });
+          if (!memberScope(workspaceId, publicationId, 1, candidate, auth.userId, auth.userId))
+            throw notFound();
           return written;
         };
         const workspaceOwner = storage.db
@@ -2224,29 +2217,50 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           );
         return written!;
       },
-      /** The workspace's Member apps this person can open, and for the Owner and Admins every one. */
+      /**
+       * The official Workspace Publications this person can open, then the Member apps they can open. The Owner and
+       * Admins also see every Member app, and authors their own, so they can withdraw one that stopped working.
+       */
       memberApps(auth: AppBackendAuth, input: { workspaceId: string; cursor?: string }) {
         current();
         if (auth.kind !== "named" || auth.workspaceId !== input.workspaceId) throw notFound();
         return storage.readTx(() => {
           const role = workspaceRoleOf(storage, input.workspaceId, auth.userId)?.role;
           if (!role) throw notFound();
-          const page = memberAppPage(storage, input.workspaceId, input.cursor ?? "");
-          const apps = page.rows.flatMap((row) => {
-            let review: ReturnType<typeof namedPublication> | null = null;
+          const page = workspaceAppPage(storage, input.workspaceId, input.cursor ?? "");
+          const reachable = <T>(load: () => T) => {
             try {
-              review = namedPublication(auth, row.publicationId, true);
+              return load();
             } catch (error) {
               if (!(error instanceof RelayError || error instanceof DatasetHostError)) throw error;
+              return null;
             }
-            const member = review?.member ?? null;
-            if (!member && role === "member") return [];
+          };
+          const apps = page.rows.flatMap((row) => {
+            if (row.kind === "workspace") {
+              const served = reachable(() => servedPublication(auth, row.publicationId));
+              if (!served) return [];
+              return [
+                {
+                  ...row,
+                  name: served.candidate.appRoot.split("/").at(-1)!,
+                  reachable: true,
+                  consent: null,
+                  canWithdraw: false,
+                },
+              ];
+            }
+            const member =
+              reachable(() => namedPublication(auth, row.publicationId, true))?.member ?? null;
+            const own = row.publisherUserId === auth.userId;
+            if (!member && role === "member" && !own) return [];
             return [
               {
                 ...row,
-                name: review?.candidate.appRoot.split("/").at(-1) ?? null,
+                name: row.slug!,
                 reachable: member !== null,
                 consent: member?.consent ?? null,
+                canWithdraw: role !== "member" || own,
               },
             ];
           });
@@ -2256,13 +2270,19 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       /** Records that this person allowed the operations they reviewed. Only a person allows, never an agent. */
       consentMemberApp(auth: AppBackendAuth, publicationId: string, scopeDigest: string) {
         current();
-        if (auth.kind !== "named") throw notFound();
-        if (auth.agent) throw new MemberAppRefusal("agent");
+        if (auth.kind !== "named" || auth.launch) throw notFound();
+        if (!auth.person) throw new MemberAppRefusal("browser");
         return storage.tx(() => {
           const published = namedPublication(auth, publicationId, true);
           if (!published.member) throw notFound();
-          const { scope, digest } = published.member;
+          const { scope, digest, consent } = published.member;
           if (digest !== scopeDigest) throw new MemberAppRefusal("changed");
+          if (consent !== "current")
+            deletePhoneAppLaunches(storage, {
+              userId: auth.userId,
+              workspaceId: auth.workspaceId,
+              publicationId,
+            });
           recordMemberAppConsent(storage, {
             workspaceId: auth.workspaceId,
             viewerUserId: auth.userId,
@@ -2331,6 +2351,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         } catch {
           throw badRequest("Invalid app approval.");
         }
+        if (candidate.external)
+          throw badRequest(
+            "Apps that call outside services run only on the owner's computer for now.",
+          );
         if (
           candidate.capabilities.length === 0 ||
           candidate.capabilities.some((cap) => cap.kind !== "dataset")

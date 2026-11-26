@@ -1,11 +1,11 @@
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fenceAccount,
   initializeAccountDeletion,
   purgeAccountRows,
 } from "./storage/accountDeletion";
-import { unsealWorkspaceSecret } from "./workspaceSecretCrypto";
+import { unsealWorkspaceSecret, workspaceSecretKeyring } from "./workspaceSecretCrypto";
 import {
   closeTestStorages,
   countRows,
@@ -40,15 +40,17 @@ const resolveTestSecretSession: ResolveAccountSession = async (req) => {
 async function setup() {
   const storage = (await testStorage()) as StorageContext;
   storage.claimWorkspace({ workspaceId: "ws-1", ownerUserId: "owner", createdAtMs: 1 });
+  const secretsChanged = vi.fn<(workspaceId: string) => void>();
   const handler = testHandler(storage, {
     resolvePhoneCapableAccountSession: resolveTestSecretSession,
+    workspaceSecretsChanged: secretsChanged,
   });
-  return { storage, handler };
+  return { storage, handler, secretsChanged };
 }
 
 describe("workspace secrets relay routes", () => {
   it("enforces create/replace semantics, never returns plaintext, returns updated list atomically, and deletes cleanly", async () => {
-    const { storage, handler } = await setup();
+    const { storage, handler, secretsChanged } = await setup();
 
     const empty = await handler(request("owner", "/sync/ws-1/secrets"));
     expect(empty.status).toBe(200);
@@ -67,6 +69,7 @@ describe("workspace secrets relay routes", () => {
     );
     expect(replaceMissing.status).toBe(404);
     expect(await replaceMissing.json()).toMatchObject({ code: "workspace_secret_not_found" });
+    expect(secretsChanged).not.toHaveBeenCalled();
 
     const created = await handler(
       request("owner", "/sync/ws-1/secrets/RESEND_API_KEY", {
@@ -148,7 +151,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-1",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",
@@ -161,7 +164,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-1",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",
@@ -174,7 +177,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-other",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",
@@ -230,6 +233,7 @@ describe("workspace secrets relay routes", () => {
     );
     expect(removed.status).toBe(200);
     expect(await removed.json()).toEqual({ ok: true, deleted: true, secrets: [], limit: 50 });
+    expect(secretsChanged).toHaveBeenLastCalledWith("ws-1");
     expect(readUsage()).toBe(0);
   });
 

@@ -1244,6 +1244,9 @@ describe("dohc/ui and dohc/charts", () => {
       async attempt() {
         return { attempt: null };
       },
+      async external() {
+        throw new Error("unused");
+      },
       dataset(nextAlias: string) {
         return makeClient(nextAlias);
       },

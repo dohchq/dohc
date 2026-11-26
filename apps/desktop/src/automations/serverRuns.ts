@@ -146,6 +146,7 @@ const Hold = z.object({
   collection: z.string(),
   target: z.string(),
   action: z.enum(["change", "find", "post", "notify", "wake", "read", "send-http"]),
+  stepOrdinal: z.number().int().nonnegative().optional(),
   recipient: z.string().optional(),
   stoppedFor: z.string().nullable(),
   fileUnread: z.boolean(),
@@ -168,7 +169,10 @@ export function createServerRuns(
   }
   function read<T>(answer: ServerAnswer, schema: z.ZodType<T>): T | null {
     if (answer === null || answer.status === 404) return null;
-    const body = answer.body as { ok?: unknown } | undefined;
+    const body = answer.body as { ok?: unknown; error?: unknown } | undefined;
+    if (answer.status === 400 && typeof body?.error === "string" && body.error !== "") {
+      throw new Error(body.error);
+    }
     if (answer.status !== 200 || body?.ok !== true) {
       throw new Error(`Your server answered with ${answer.status}.`);
     }

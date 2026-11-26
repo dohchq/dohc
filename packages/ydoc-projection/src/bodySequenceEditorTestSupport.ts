@@ -35,12 +35,7 @@ import {
   toggleHeaderColumn,
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
-import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  recordsOfContainer,
-} from "./bodySequenceGrammar.js";
+import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { isBodySequenceChange } from "./bodySequenceEditor.js";
 import {
   blockHolding,
@@ -71,6 +66,7 @@ import {
   tokensOf,
   type Person,
 } from "./bodySequenceTestSupport.js";
+import { BLOCK_ELEMENT, BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 export type Part =
   | string

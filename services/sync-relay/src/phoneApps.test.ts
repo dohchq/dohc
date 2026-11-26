@@ -459,6 +459,10 @@ it("takes approval only from a phone, for one revision, and needs it again after
     authorityRevision: 3,
     approved: false,
   });
+  // The old approval is no longer one to revoke.
+  expect(
+    (await r.op("phone:ana", "appReview", { publicationId: r.publicationId })).body.result,
+  ).toMatchObject({ approval: null, revocable: false });
   expect((await r.approve(1)).status).toBe(409);
   expect(
     (await r.op("phone:ana", "appLaunch", { publicationId: r.publicationId, authorityRevision: 3 }))
@@ -539,9 +543,9 @@ it("accepts a launch ID only on its publication's app paths while everything it 
   const auth = r.hostCalls.filter((call) => call.kind === "named" && call.launch).at(-1);
   expect(auth).toMatchObject({ kind: "named", workspaceId: "trip", userId: "ana" });
   expect(auth && Object.keys(auth).sort()).toEqual(["kind", "launch", "userId", "workspaceId"]);
-  for (const path of ["activate", "summary"])
+  for (const path of ["activate", "summary", "consent"])
     expect(
-      (await r.shareWeb(path, { launchId, ...(path === "activate" ? { body: {} } : {}) })).status,
+      (await r.shareWeb(path, { launchId, ...(path === "summary" ? {} : { body: {} }) })).status,
       path,
     ).toBe(404);
   const elsewhere = await r.h(

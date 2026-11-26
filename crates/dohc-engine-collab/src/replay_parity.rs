@@ -1916,6 +1916,12 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, Colla
     })
 }
 
+fn xml_element_identity(name: &str) -> String {
+    let mut canonical = vec![TYPE_REFS_XML_ELEMENT];
+    canonical.extend_from_slice(name.as_bytes());
+    crate::hex_sha256(&canonical)
+}
+
 /// A safe reimplementation of `TypeRef::decode`'s wire shape, sufficient for a
 /// content-identity fingerprint (this module only ever needs KIND identity
 /// for the content-parity check, never the constructed `TypeRef` value

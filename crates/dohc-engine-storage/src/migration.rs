@@ -3814,6 +3814,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE deleted_at_ms IS NOT NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 112,
+        id: "v2-legacy-env-template-secrets",
+        sql: include_str!("legacy_env_template_secrets.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5336,6 +5342,142 @@ mod tests {
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
 
+    #[test]
+    fn legacy_env_template_secret_rows_are_deleted_once() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-legacy-env-template-secrets")
+            .unwrap();
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) \
+             VALUES ('ws','main','main','main',0); \
+             INSERT INTO file_objects VALUES ('ws','object',0); \
+             INSERT INTO blobs(sha256,byte_length,text) VALUES ('h',1,'x'); \
+             INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path, \
+             recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) \
+             VALUES ('ws',1,'ordinary','main','object','.env.example',1,'write','h',0,'api'); \
+             INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+             VALUES ('other','not json',0,0,'other');",
+        )
+        .unwrap();
+        let paths = [
+            ".env.example",
+            ".ENV.SAMPLE",
+            "sub/.env.template",
+            ".env.local",
+            ".env/.env.example",
+            ".env./.env.example",
+            ".env.examples",
+            ".env.example.local",
+            "x.env.example",
+        ];
+        for (order, path) in paths.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO secret_files VALUES ('ws','main',?1,'iv','tag','c',1,1,?1)",
+                [path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO secret_fork_bases VALUES ('ws','main',?1,'iv','tag','c',1,1)",
+                [path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO secret_moments(workspace_id,moment_order,moment_id,version_id,path, \
+                 recorded_at_ms,operation,metadata_origin,after_present) \
+                 VALUES ('ws',?1,?2,'main',?2,1,'write','api',0)",
+                rusqlite::params![order as i64, path],
+            )
+            .unwrap();
+        }
+        let decision = |path: &str, kind: &str| {
+            format!(
+                r#"{{"contentKind":"{kind}","operation":"write","path":"{path}","versionId":"main"}}"#
+            )
+        };
+        for (id, entries) in [
+            (
+                "mixed",
+                vec![
+                    decision(".env.local", "secret"),
+                    decision("sub/.env.template", "secret"),
+                    decision(".env.example", "text"),
+                ],
+            ),
+            ("template-only", vec![decision(".ENV.SAMPLE", "secret")]),
+        ] {
+            conn.execute(
+                "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+                 VALUES (?1,?2,0,0,'sync-materialization')",
+                [id, &format!("[{}]", entries.join(","))],
+            )
+            .unwrap();
+        }
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+
+        for table in ["secret_files", "secret_fork_bases", "secret_moments"] {
+            let kept: Vec<String> = conn
+                .prepare(&format!("SELECT path FROM {table} ORDER BY path"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(
+                kept,
+                [
+                    ".env./.env.example",
+                    ".env.example.local",
+                    ".env.examples",
+                    ".env.local",
+                    ".env/.env.example",
+                    "x.env.example",
+                ],
+                "{table}"
+            );
+        }
+        let ordinary: String = conn
+            .query_row("SELECT path FROM moments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(ordinary, ".env.example");
+        let requests: Vec<(String, String)> = conn
+            .prepare("SELECT request_id, payload_hash FROM engine_requests ORDER BY request_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            requests,
+            [
+                (
+                    "mixed".to_owned(),
+                    format!(
+                        "[{},{}]",
+                        decision(".env.local", "secret"),
+                        decision(".env.example", "text")
+                    )
+                ),
+                ("other".to_owned(), "not json".to_owned()),
+            ]
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_temp_schema WHERE name='legacy_env_template_paths'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
     fn field_history_link_upgrade(rows: i64) {
         let dir = tempdir();
         let path = dir.join("engine.db");
@@ -5888,6 +6030,10 @@ mod tests {
             (
                 "v2-chat-deleted-messages-index",
                 "266fc6765f0ac6efb2663fd7b4ec55d662db8ad2b8a6d60eb6c4db43a3a0c628",
+            ),
+            (
+                "v2-legacy-env-template-secrets",
+                "ff762aec19b44fe21680c00e845aed4ad180525837d87cd56714fd0b82a26029",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

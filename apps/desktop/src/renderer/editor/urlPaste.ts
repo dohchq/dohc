@@ -1,16 +1,9 @@
 import { closeHistory } from "@tiptap/pm/history";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
-import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
-import {
-  ContentString,
-  getItem,
-  Item,
-  type Doc,
-  type RelativePosition,
-  type XmlFragment,
-} from "yjs";
+import { ContentString, getItem, Item, type Doc, type RelativePosition } from "yjs";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
+import type { CollabPositions } from "./collabPositions";
 export interface UrlPasteOffer {
   kind: "url-paste";
   text: string;
@@ -93,8 +86,6 @@ type OfferMeta =
   | { type: "dismiss" }
   | { type: "chosen" }
   | { type: "anchor"; anchors: SpanAnchors };
-type YTiptap = typeof import("@tiptap/y-tiptap");
-type YSync = { type: XmlFragment; binding: ProsemirrorBinding };
 
 export const urlPasteOfferKey = new PluginKey<UrlPasteOfferState | null>("dohc-url-paste-offer");
 
@@ -137,60 +128,51 @@ function anchoredCharacter(doc: Doc, anchor: RelativePosition): string | null {
   }
 }
 
-// y-tiptap anchors a position to the character before it, so `from + 1`
+// An anchor keeps to the character before its position, so `from + 1`
 // anchors the URL's first character and `to` its last.
-function anchorSpan(yTiptap: YTiptap, sync: YSync, offer: UrlPasteOfferState): SpanAnchors | null {
-  const anchors = {
-    start: yTiptap.absolutePositionToRelativePosition(
-      offer.from + 1,
-      sync.type,
-      sync.binding.mapping,
-    ),
-    end: yTiptap.absolutePositionToRelativePosition(offer.to, sync.type, sync.binding.mapping),
-  };
-  const span = sync.type.doc && anchoredSpan(yTiptap, sync, anchors, offer.text);
+function anchorSpan(
+  positions: CollabPositions,
+  state: EditorState,
+  offer: UrlPasteOfferState,
+): SpanAnchors | null {
+  const start = positions.anchor(state, state, offer.from + 1, -1);
+  const end = positions.anchor(state, state, offer.to, -1);
+  if (!start || !end) return null;
+  const anchors = { start, end };
+  const span = anchoredSpan(positions, state, state, anchors, offer.text);
   return span?.from === offer.from && span.to === offer.to ? anchors : null;
 }
 
-// Y.js applies a remote edit, or an undo, by replacing the whole document,
-// which maps every position away. The anchors find the pasted characters
-// themselves, so the span is the person's own paste or nothing: a deleted
-// character, or one that no longer starts or ends the URL, dismisses it.
+// A peer's change or an undo can replace much of the document, which maps
+// positions away. The anchors find the pasted characters themselves, so the
+// span is the person's own paste or nothing: a deleted character, or one that
+// no longer starts or ends the URL, dismisses it.
 function anchoredSpan(
-  yTiptap: YTiptap,
-  sync: YSync,
+  positions: CollabPositions,
+  state: EditorState,
+  old: EditorState,
   anchors: SpanAnchors,
   text: string,
 ): { from: number; to: number } | null {
-  const doc = sync.type.doc;
+  const doc = positions.doc(state, old);
   if (
     !doc ||
     anchoredCharacter(doc, anchors.start) !== text[0] ||
     anchoredCharacter(doc, anchors.end) !== text.at(-1)
   )
     return null;
-  const start = yTiptap.relativePositionToAbsolutePosition(
-    doc,
-    sync.type,
-    anchors.start,
-    sync.binding.mapping,
-  );
-  const end = yTiptap.relativePositionToAbsolutePosition(
-    doc,
-    sync.type,
-    anchors.end,
-    sync.binding.mapping,
-  );
+  const start = positions.position(state, old, anchors.start);
+  const end = positions.position(state, old, anchors.end);
   return start === null || end === null ? null : { from: start - 1, to: end };
 }
 
 // The offer a URL paste raises. It leaves when its text changes or the caret
 // leaves its line; typing, composing, Escape and a click elsewhere dismiss it
-// from the row and the editor's key handler. `yTiptap` is the lazily loaded
-// y-tiptap module when the editor is bound to a Y.Doc.
+// from the row and the editor's key handler. `positions` is set when the
+// editor is bound to a Y.Doc.
 export function makeUrlPasteOfferPlugin(
   onChange: (offer: UrlPasteOfferState | null) => void,
-  yTiptap: YTiptap | null = null,
+  positions: CollabPositions | null = null,
 ) {
   let pending: UrlPasteOffer | null = null;
   return new Plugin<UrlPasteOfferState | null>({
@@ -207,16 +189,12 @@ export function makeUrlPasteOfferPlugin(
         }
         if (!value) return null;
         if (meta?.type === "anchor") return { ...value, anchors: meta.anchors };
-        const change: { isChangeOrigin?: boolean } | undefined = yTiptap
-          ? tr.getMeta(yTiptap.ySyncPluginKey)
-          : undefined;
         let from = tr.mapping.map(value.from, 1);
         let to = tr.mapping.map(value.to, -1);
-        if (yTiptap && change?.isChangeOrigin) {
-          // Read from the old state: this state's later plugins aren't built yet.
-          const sync = yTiptap.ySyncPluginKey.getState(old) as YSync | undefined;
-          const span =
-            value.anchors && sync ? anchoredSpan(yTiptap, sync, value.anchors, value.text) : null;
+        if (positions?.isShownChange(tr)) {
+          const span = value.anchors
+            ? anchoredSpan(positions, state, old, value.anchors, value.text)
+            : null;
           if (!span) return null;
           ({ from, to } = span);
         }
@@ -253,11 +231,11 @@ export function makeUrlPasteOfferPlugin(
     view: () => ({
       update(view, previous) {
         const offer = urlPasteOfferKey.getState(view.state) ?? null;
-        // y-tiptap's view writes the paste to the Y.Doc before this one runs,
-        // so the anchors can be taken now. anchorSpan checks that they find it.
-        const sync = yTiptap?.ySyncPluginKey.getState(view.state) as YSync | undefined;
+        // The binding's view writes the paste to the Y.Doc before this one
+        // runs, so the anchors can be taken now. anchorSpan checks that they
+        // find it.
         const anchors =
-          yTiptap && sync && offer && !offer.anchors ? anchorSpan(yTiptap, sync, offer) : null;
+          positions && offer && !offer.anchors ? anchorSpan(positions, view.state, offer) : null;
         if (anchors) {
           view.dispatch(view.state.tr.setMeta(urlPasteOfferKey, { type: "anchor", anchors }));
           return;

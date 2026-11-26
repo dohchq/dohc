@@ -234,34 +234,37 @@ function liveJournalSeedSource(
     .get(...documentParams(document));
   return source;
 }
-function liveJournalSeedClient(
+function liveJournalSeedClients(
   document: LiveDocumentKey,
   source: Record<string, unknown> | undefined,
-): number | null {
+): number[] {
   if (!source || typeof source.moment_id !== "string" || typeof source.blob_sha256 !== "string")
-    return null;
-  const hash = createHash("sha256").update("dohc:ydoc-seed-client:v1");
-  for (const field of [
-    document.workspaceId,
-    document.mainVersionId,
-    document.objectId,
-    "text",
-    source.moment_id,
-    source.blob_sha256,
-  ]) {
-    const bytes = Buffer.from(field),
-      length = Buffer.alloc(8);
-    length.writeBigUInt64BE(BigInt(bytes.length));
-    hash.update(length).update(bytes);
-  }
-  return Math.max(1, hash.digest().readUInt32BE(0));
+    return [];
+  const { moment_id, blob_sha256 } = source;
+  return ["dohc:ydoc-seed-client:v1", "dohc:ydoc-seed-client:v1-format2"].map((domain) => {
+    const hash = createHash("sha256").update(domain);
+    for (const field of [
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      "richdoc",
+      moment_id,
+      blob_sha256,
+    ]) {
+      const bytes = Buffer.from(field),
+        length = Buffer.alloc(8);
+      length.writeBigUInt64BE(BigInt(bytes.length));
+      hash.update(length).update(bytes);
+    }
+    return Math.max(1, hash.digest().readUInt32BE(0));
+  });
 }
-/** The editor id a note's original content is written under. Nobody may write under it. */
-export function liveJournalSeedClientId(
+/** The editor ids a note's original content can be written under, one per format. Nobody may write under them. */
+export function liveJournalSeedClientIds(
   storage: StorageContext,
   document: LiveDocumentKey,
-): number | null {
-  return liveJournalSeedClient(document, liveJournalSeedSource(storage, document));
+): number[] {
+  return liveJournalSeedClients(document, liveJournalSeedSource(storage, document));
 }
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
@@ -1769,7 +1772,7 @@ export function commitLiveUpdateJournal(
   );
   const validation = snapshotJournalValidation(outer.validation, anticipatedCheckpoint);
   const seedSource = liveJournalSeedSource(storage, document);
-  const seedId = liveJournalSeedClient(document, seedSource);
+  const seedIds = liveJournalSeedClients(document, seedSource);
   if (validation.kind === "accepted") {
     const evidence = validation.evidence;
     if (
@@ -1954,8 +1957,8 @@ export function commitLiveUpdateJournal(
           ? personalLiveAuthorSnapshot(storage, personal)
           : deriveLiveAuthorSnapshot(storage, current.authority, authorContext, trustedAccount);
       journalIntegrity(isDeepStrictEqual(seedSource, liveJournalSeedSource(storage, document)));
-      const seedFirstSeen = allFirstSeen.filter((range) => range.clientId === seedId);
-      const firstSeen = allFirstSeen.filter((range) => range.clientId !== seedId);
+      const seedFirstSeen = allFirstSeen.filter((range) => seedIds.includes(range.clientId));
+      const firstSeen = allFirstSeen.filter((range) => !seedIds.includes(range.clientId));
       const firstSeenDeletes = validation.evidence.candidate.firstSeenDeletes;
       const clients = [...new Set(firstSeen.map((range) => range.clientId))];
       const bindings: { clientId: number; snapshot: string }[] = [];

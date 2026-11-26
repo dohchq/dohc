@@ -46,7 +46,8 @@ export interface ForwardedRequest {
 export interface ServedAgent {
   id: string;
   threadId: string;
-  whileBusy: "line" | "steer";
+  /** "own-chat" steers in the agent's own chat and puts the message in line elsewhere. */
+  whileBusy: "line" | "own-chat" | "steer";
   note: string | null;
   /** How the agent reads its requests in this workspace: as an agent dohc does not start. */
   reader: Extract<ChatAgentReader, { kind: "connected" }>;
@@ -171,7 +172,11 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       taken.delete(key);
       return true;
     }
-    const { thread, messageCount } = await chats.getThread({
+    const {
+      thread,
+      channel: threadChannel,
+      messageCount,
+    } = await chats.getThread({
       workspaceId: workspace.id,
       threadId: request.threadId,
     });
@@ -180,7 +185,12 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     if (!live()) return false;
     const started = await dependencies.tool.forward({
       threadId: agent.threadId,
-      how: agent.whileBusy,
+      how:
+        // A mention in another agent's chat is not this agent's own chat.
+        agent.whileBusy === "steer" ||
+        (agent.whileBusy === "own-chat" && threadChannel?.agentId === agent.id)
+          ? "steer"
+          : "line",
       forwardId: forwardIdOf(workspace.id, agent.id, request.messageId, agent.threadId),
       message: forwardedMessageText({
         cli: dependencies.cli,

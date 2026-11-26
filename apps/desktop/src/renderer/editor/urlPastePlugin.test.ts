@@ -7,6 +7,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import * as yTiptap from "@tiptap/y-tiptap";
 import * as Y from "yjs";
+import { yTiptapPositions } from "./collabPositions";
 import {
   chooseUrlForm,
   makeUrlPasteOfferPlugin,
@@ -230,7 +231,9 @@ describe("URL paste offer in a shared document", () => {
         Collaboration.configure({ document: ydoc }),
         Extension.create({
           name: "urlOffer",
-          addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin(() => {}, yTiptap)],
+          addProseMirrorPlugins: () => [
+            makeUrlPasteOfferPlugin(() => {}, yTiptapPositions(yTiptap)),
+          ],
         }),
       ],
     });

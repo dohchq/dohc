@@ -23,6 +23,8 @@ export {
   isAllowedPublicHostname,
   isPublicInternetAddress,
   parseSafeOutboundHttpsUrl,
+  parseSafeOutboundJson,
+  readSafeOutboundHttps,
   resolveSafeAddresses,
   resolveSafeOutboundDestination,
   SafeOutboundError,
@@ -32,6 +34,7 @@ export {
   type SafeOutboundDestination,
   type SafeOutboundErrorCode,
   type SafeOutboundRequest,
+  type SafeOutboundResponse,
   type SafeOutboundUrlOptions,
 } from "./safeOutboundHttps";
 
@@ -45,3 +48,12 @@ export function jsonResponse(
     headers: { "content-type": "application/json", ...headers },
   });
 }
+export {
+  DECLARED_HTTPS_USER_AGENT,
+  DeclaredHttpsError,
+  safeDeclaredHttpsTransport,
+  sendDeclaredHttps,
+  type DeclaredHttpsErrorCode,
+  type DeclaredHttpsRequest,
+  type DeclaredHttpsTransport,
+} from "./declaredHttps";

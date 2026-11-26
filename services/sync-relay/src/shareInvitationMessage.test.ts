@@ -51,6 +51,27 @@ it("writes the whole invitation in plain sentences, from the inviter by name", (
     expect(html, shown).toContain(shown);
 });
 
+it("names the workspace a member invite is for, and opens the person's workspaces", () => {
+  const message = shareInvitationMessage({
+    ...invitation,
+    workspace: true,
+    subjectName: "Community",
+    access: "comment",
+    browserInvitationUrl: "https://share.example.test/workspaces",
+  });
+  expect(message.subject).toBe('Sam Rivera invited you to "Community"');
+  expect(message.text).toContain(
+    'Sam Rivera (owner@dohc.test) invited you to "Community". You can comment on it.',
+  );
+  expect(message.text).toContain("https://share.example.test/workspaces");
+  for (const shown of ["Invited you to a workspace", "Community", "Can comment"])
+    expect(message.html, shown).toContain(shown);
+  expect(message.html).not.toContain("Shared work");
+  expect(
+    shareInvitationMessage({ ...invitation, workspace: true, subjectName: null }).subject,
+  ).toBe("Sam Rivera invited you to a workspace");
+});
+
 it("names the inviter by address, with no sender name, when the account has no usable name", () => {
   for (const inviterName of [null, "", "  ", "sam@example.test", "https://dohc.computer"]) {
     const message = shareInvitationMessage({ ...invitation, inviterName });

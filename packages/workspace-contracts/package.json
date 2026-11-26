@@ -22,6 +22,7 @@
     "./agent-hues": "./src/agentHues.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",
+    "./http-headers": "./src/httpHeaders.ts",
     "./automation-controls": "./src/automationControls.ts",
     "./shared-file-settlement": "./src/sharedFileSettlement.ts",
     "./chat-identity": "./src/chatIdentity.ts",

@@ -56,6 +56,7 @@ import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
+import type { LocalAppExternal } from "./localAppExternal";
 import { createLocalApps, routeLocalApps } from "./localApps";
 import { createLocalPreviewStore } from "./localPreviewStore";
 import { createServerDatasetApps, type ServerCollectionsTransport } from "./serverDatasetApps";
@@ -199,6 +200,8 @@ export interface LocalDatasetHostOptions {
    * runs the apps approved here over them. Null while this computer keeps them.
    */
   collectionsServer?(): ServerCollectionsTransport | null;
+  /** Sends an approved app's declared outside call. Without it, apps can't make any. */
+  external?: LocalAppExternal;
   /**
    * A Collection was made here although the workspace syncs now, as one made
    * just as it starts syncing is. It needs a send to the server.
@@ -1971,6 +1974,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           createLocalUnconnectedApps({ store, workspaceId, assertCurrent }),
           () => notifyChange(null),
           () => !options.collectionsServer?.(),
+          preview ? undefined : options.external,
         ),
       };
     };

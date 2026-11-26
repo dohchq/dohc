@@ -13,6 +13,7 @@ export function workspaceSecretsHandlers<Sender, Event extends { sender: Sender 
     secret: WorkspaceSecretWriteInput,
   ): Promise<WorkspaceSecretsState>;
   deleteWorkspaceSecret(workspaceId: string, name: string): Promise<WorkspaceSecretsState>;
+  clearLocalWorkspaceSecrets(workspaceId: string): Promise<WorkspaceSecretsState>;
 }): OperationHandlers<typeof workspaceSecretsOperations, Event> {
   const admit = (event: Event, workspaceId: string) => {
     if (dependencies.currentRendererSession(event.sender)?.workspaceId !== workspaceId) {
@@ -31,6 +32,10 @@ export function workspaceSecretsHandlers<Sender, Event extends { sender: Sender 
     deleteWorkspaceSecret: (input, { event }) => {
       admit(event, input.workspaceId);
       return dependencies.deleteWorkspaceSecret(input.workspaceId, input.name);
+    },
+    clearLocalWorkspaceSecrets: (input, { event }) => {
+      admit(event, input.workspaceId);
+      return dependencies.clearLocalWorkspaceSecrets(input.workspaceId);
     },
   };
 }
