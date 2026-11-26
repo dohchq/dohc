@@ -224,7 +224,7 @@ fn finish_note(
          AND NOT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs k \
            WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
-    match store.write_with(faults, |tx| {
+    match store.write_with(faults, |tx| -> Result<(), SyncError> {
         for (_, _, kept) in claims {
             let rowids = kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>();
             let rowids = serde_json::to_string(&rowids).map_err(SyncError::corrupt)?;
