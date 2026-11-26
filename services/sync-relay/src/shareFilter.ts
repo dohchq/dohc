@@ -2150,11 +2150,15 @@ function decideCollectionWrite(
       changes.some((change) =>
         creates
           ? change.basedOnPath !== null || !change.afterPath!.startsWith(`${collectionPath}/`)
-          : change.basedOnPath === null ||
+          : (change.basedOnPath === null && !change.afterPath!.endsWith(".sql")) ||
             member.datasetFolderFor!(change.afterPath!) !== collectionPath,
       )
     )
       return refused;
+    const descriptorPath = `${collectionPath}/dataset.json`;
+    changes.sort(
+      (a, b) => Number(b.afterPath === descriptorPath) - Number(a.afterPath === descriptorPath),
+    );
     return { allowed: true, write: { kind: "dataset-rules", collectionPath, creates, changes } };
   }
   if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;

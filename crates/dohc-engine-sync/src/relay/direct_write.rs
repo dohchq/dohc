@@ -991,7 +991,12 @@ fn plan_dataset_rules<'a>(
                     net.change.after_path.as_deref() == Some(descriptor.as_str())
                         && net.change.based_on_path.is_none()
                 });
-                files.retain(|(_, net)| net.change.based_on_path.is_none() == creates);
+                files.retain(|(_, net)| {
+                    let change = &net.change;
+                    let path = change.after_path.as_deref().unwrap_or_default();
+                    change.based_on_path.is_none() == creates
+                        || (!creates && path.ends_with(".sql"))
+                });
                 if !files.is_empty() {
                     let (indices, changes) = files.into_iter().unzip();
                     groups.push((

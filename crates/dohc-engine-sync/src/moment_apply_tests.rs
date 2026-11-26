@@ -1333,6 +1333,24 @@ fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
     .unwrap();
     assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
     seq += 1;
+    let next_migration = tag(
+        absent_text_payload(
+            "next-migration",
+            "next-migration",
+            "trip/people/migrations/002.sql",
+            next,
+        ),
+        named_author("grant"),
+        "trip/people",
+    );
+    let outcome = apply_moment_envelope(
+        &mut store,
+        &envelope(NAMED_ORIGIN, seq, "ws", next_migration),
+        &NoFaults,
+    )
+    .expect("append a migration to the existing Collection");
+    assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
+    seq += 1;
 
     for (path, body, folder, author) in [
         ("trip/other.sql", sql, "trip/people", named_author("grant")),

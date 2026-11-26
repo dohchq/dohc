@@ -754,13 +754,7 @@ function folderSpellingTaken(storage: StorageContext, workspaceId: string, path:
 }
 
 function changesOf(write: CollectionWrite): ProposedChange[] {
-  if (write.kind === "dataset-rules") {
-    const descriptor = `${write.collectionPath}/dataset.json`;
-    return [...write.changes].sort(
-      (a, b) => Number(b.afterPath === descriptor) - Number(a.afterPath === descriptor),
-    );
-  }
-  return write.kind === "new-collection" ? write.changes : [write.change];
+  return "changes" in write ? write.changes : [write.change];
 }
 
 function checkRecordCreation(
@@ -1030,9 +1024,14 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   if (write.kind === "dataset-rules") {
     for (const change of write.changes) {
       const path = change.afterPath!;
-      const current = currentFile(storage, workspaceId, path);
-      if (current?.blobSha256 !== change.basedOnBlobSha256)
-        throw new CollectionWriteStaleError(path, current?.blobSha256 ?? null);
+      const current = currentFile(storage, workspaceId, path)?.blobSha256 ?? null;
+      if (
+        current !== change.basedOnBlobSha256 ||
+        (current === null &&
+          (spellingTaken(storage, workspaceId, path) ||
+            folderSpellingTaken(storage, workspaceId, path)))
+      )
+        throw new CollectionWriteStaleError(path, current);
     }
     return;
   }
@@ -1107,15 +1106,15 @@ function validateDatasetRules(
     throw refusal(
       "Write only the Collection descriptor, schema, operations, and SQL migrations in its folder.",
     );
-  if (!write.creates) return;
-  if (!texts.has(schemaPath) || !texts.has(operationsPath))
-    throw refusal("A new Collection needs its schema and operations in the same write.");
   const keys = new Set([...texts.keys()].map(pathCollisionKey));
   for (const key of keys) {
     for (let end = key.lastIndexOf("/"); end > 0; end = key.lastIndexOf("/", end - 1)) {
       if (keys.has(key.slice(0, end))) throw refusal("A Collection file cannot also be a folder.");
     }
   }
+  if (!write.creates) return;
+  if (!texts.has(schemaPath) || !texts.has(operationsPath))
+    throw refusal("A new Collection needs its schema and operations in the same write.");
   const catalogExists = storage.db
     .prepare("SELECT 1 FROM sqlite_schema WHERE name = 'dohc_dataset_catalog' AND type = 'table'")
     .get();

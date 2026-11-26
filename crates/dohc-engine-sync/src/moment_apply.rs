@@ -2436,20 +2436,15 @@ fn verify_direct_write_author(
     }
     // A version this device has not imported yet is a retry, not a refusal.
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
-    let allowed = if let Some(folder) = envelope.payload.get("collectionRulesFolder") {
-        match folder.as_str() {
-            Some(folder)
-                if matches!(
-                    payload.authors.as_deref(),
-                    Some([MomentAuthor::Named { .. }])
-                ) =>
-            {
-                writes_collection_rule(tx, &envelope.workspace_id, payload, folder)?
-            }
-            _ => false,
+    let allowed = match (
+        envelope.payload.get("collectionRulesFolder"),
+        payload.authors.as_deref(),
+    ) {
+        (Some(serde_json::Value::String(folder)), Some([MomentAuthor::Named { .. }])) => {
+            writes_collection_rule(tx, &envelope.workspace_id, payload, folder)?
         }
-    } else {
-        writes_collection_own_file(tx, &envelope.workspace_id, payload, true)?
+        (None, _) => writes_collection_own_file(tx, &envelope.workspace_id, payload, true)?,
+        _ => false,
     };
     if !allowed {
         return Err(SyncError::InvalidInput {

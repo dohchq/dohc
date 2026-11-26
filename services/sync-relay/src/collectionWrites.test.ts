@@ -1933,6 +1933,70 @@ describe("a new page in the owner's workspace", () => {
     });
   });
 
+  it("adds a migration alongside an Admin's descriptor and schema edits in one write", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    const ben = await member(r, "ben");
+    await membersAt(r, "edit");
+    const descriptor = rulesDescriptor({ name: "Volunteers" });
+    const schema = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL, due_date TEXT);";
+    const migration = "ALTER TABLE people ADD COLUMN due_date TEXT;";
+    const batch = [
+      edit("docs/people/schema.sql", rulesSchema, schema),
+      create("docs/people/migrations/002-x.sql", migration),
+      edit("docs/people/dataset.json", rulesDescriptor(), descriptor),
+    ];
+    for (const text of [descriptor, schema, migration]) await uploadAs(r, admin, text);
+
+    await expectCode(await ruleWrite(r, ben, batch, "migration"), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toHaveLength(4);
+    const committed = await ruleWrite(r, admin, batch, "migration");
+    expect(committed.status, await committed.clone().text()).toBe(200);
+    expect((await r.owner.directMoments()).slice(4).map((moment) => moment.payload.path)).toEqual([
+      "docs/people/dataset.json",
+      "docs/people/schema.sql",
+      "docs/people/migrations/002-x.sql",
+    ]);
+    expect(await json(await ruleWrite(r, admin, batch, "migration"))).toMatchObject({
+      created: false,
+    });
+  });
+
+  it("refuses migration creates with occupied paths, another Collection, or a non-SQL file", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    await r.owner.write("nested", "docs/people/nested/dataset.json", rulesDescriptor());
+    const schema = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL, due_date TEXT);";
+    await uploadAs(r, admin, schema);
+    const schemaEdit = edit("docs/people/schema.sql", rulesSchema, schema);
+    for (const path of [
+      "docs/people/migrations/001.sql",
+      "docs/people/migrations/001.SQL/child.sql",
+      "docs/people/Migrations/002.sql",
+    ]) {
+      await expectCode(
+        await ruleWrite(r, admin, [schemaEdit, create(path, rulesSchema)], "migration"),
+        409,
+        "stale",
+      );
+    }
+    for (const extra of [
+      [create("docs/people/nested/migration.sql", rulesSchema)],
+      [create("docs/people/operations.ts", rulesSource)],
+      [
+        create("docs/people/migrations/002.sql", rulesSchema),
+        create("docs/people/migrations/002.sql/child.sql", rulesSchema),
+      ],
+    ]) {
+      await expectCode(
+        await ruleWrite(r, admin, [schemaEdit, ...extra], "migration"),
+        403,
+        "share_op_rejected",
+      );
+    }
+    expect(await r.owner.directMoments()).toHaveLength(4);
+  });
+
   it("refuses a Member, the Owner, and an Admin's separate folder grant", async () => {
     const { r, admin, changes } = await rulesSetup();
     const ben = await member(r, "ben");

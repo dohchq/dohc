@@ -1319,6 +1319,87 @@ fn admin_plans_all_transactional_collection_sources_together() {
 }
 
 #[test]
+fn admin_plans_a_new_sql_migration_with_existing_collection_edits() {
+    let descriptor = r#"{"formatVersion":2,"name":"People"}"#;
+    let updated = r#"{"formatVersion":2,"name":"Volunteers"}"#;
+    let (_scratch, _path, mut engine) =
+        proposal_fixture(&[descriptor, updated, "SELECT 1;", "SELECT 2;"]);
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "descriptor".to_owned(),
+                path: "docs/people/dataset.json".to_owned(),
+                text: updated.to_owned(),
+                moment_id: "local-descriptor".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("local descriptor");
+    for (index, moment) in [
+        edit_moment(
+            "edit-schema",
+            "schema",
+            "docs/people/schema.sql",
+            "SELECT 1;",
+            "SELECT 2;",
+        ),
+        create_moment(
+            "add-migration",
+            "migration",
+            "docs/people/migrations/002-x.sql",
+            "SELECT 2;",
+        ),
+        edit_moment(
+            "edit-descriptor",
+            "descriptor",
+            "docs/people/dataset.json",
+            descriptor,
+            updated,
+        ),
+        create_moment(
+            "other-script",
+            "script",
+            "docs/people/operations.js",
+            "SELECT 2;",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        journal_local_moment(&mut engine, moment, 2_000 + index as i64);
+    }
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    client
+        .push_direct_writes(
+            &mut engine,
+            "ws",
+            SHARE,
+            &workspace_grant(),
+            true,
+            &NoFaults,
+            0,
+        )
+        .expect("admin push");
+
+    assert_eq!(
+        written_paths(&client),
+        vec![vec![
+            "docs/people/dataset.json".to_owned(),
+            "docs/people/schema.sql".to_owned(),
+            "docs/people/migrations/002-x.sql".to_owned(),
+        ]]
+    );
+}
+
+#[test]
 fn a_workspace_grant_writes_new_pages_and_leaves_other_changes_on_proposals() {
     let (_scratch, _path, mut engine) =
         proposal_fixture(&["v1", "v2", "page", "top", "record", "note"]);
