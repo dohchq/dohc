@@ -475,7 +475,7 @@ describe("outbound webhook relay routes (Model E1)", () => {
     expect(sent).toHaveLength(2);
     expect(sent[1]!.headers["Authorization"]).toBe("Bearer re_live_rotated_token");
 
-    // A workspace member stops dispatch too, until they are removed.
+    // Only a workspace member who can edit the Collection stops dispatch.
     const invitedMember = await handler(
       request(
         OWNER,
@@ -489,19 +489,33 @@ describe("outbound webhook relay routes (Model E1)", () => {
     };
     const memberId = members.people.find((person) => person.email === "member@dohc.test")?.memberId;
     expect(memberId).toBeDefined();
-    const afterMember = await handler(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
-        jsonBody({
-          ...dispatchPayload,
-          deliveryId: createHash("sha256").update("delivery-after-member").digest("hex"),
-        }),
-      ),
-    );
-    expect(afterMember.status).toBe(403);
-    expect(await afterMember.json()).toMatchObject({ ok: false, error: "reach_stopped" });
-    expect(sent).toHaveLength(2);
+    const setMemberLevel = async (level: "view" | "edit") =>
+      expect(
+        (await handler(request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level }))))
+          .status,
+      ).toBe(200);
+    const dispatchAs = (name: string) =>
+      handler(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+          jsonBody({
+            ...dispatchPayload,
+            deliveryId: createHash("sha256").update(name).digest("hex"),
+          }),
+        ),
+      );
+    const afterCommentMember = await dispatchAs("delivery-after-comment-member");
+    expect(afterCommentMember.status, await afterCommentMember.clone().text()).toBe(200);
+    expect(sent).toHaveLength(3);
+    await setMemberLevel("view");
+    expect((await dispatchAs("delivery-after-view-member")).status).toBe(200);
+    expect(sent).toHaveLength(4);
+    await setMemberLevel("edit");
+    const afterEditMember = await dispatchAs("delivery-after-edit-member");
+    expect(afterEditMember.status).toBe(403);
+    expect(await afterEditMember.json()).toMatchObject({ ok: false, error: "reach_stopped" });
+    expect(sent).toHaveLength(4);
     expect(
       (await handler(request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/remove`, jsonBody({}))))
         .status,
@@ -525,12 +539,12 @@ describe("outbound webhook relay routes (Model E1)", () => {
     );
     expect(afterShare.status).toBe(403);
     expect(await afterShare.json()).toMatchObject({ ok: false, error: "reach_stopped" });
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(4);
 
     // Account deletion cascade purges approvals and dispatches.
     const dbPath = storagePath(storage);
     expect(countRows(dbPath, "sync_relay_http_approvals")).toBe(1);
-    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(3);
+    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(5);
     initializeAccountDeletion(storage, LINK_KEY);
     const fenced = fenceAccount(storage, LINK_KEY, OWNER, "owner@dohc.test");
     expect(fenced.manifest).not.toBeNull();

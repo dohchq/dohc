@@ -1170,6 +1170,25 @@ describe("share impact", () => {
   });
 });
 
+it("sends a webhook while workspace members can only view or comment, and holds it for one who can edit", () => {
+  const member = (level: "view" | "comment" | "edit"): RosterGrant => ({
+    grantId: "membership",
+    recipientUserId: ana.userId,
+    recipientEmail: ana.email,
+    files: {
+      paths: [],
+      versionId: null,
+      access: level,
+      memberReach: { role: "member", level, rules: [] },
+    },
+    chat: null,
+  });
+  const http: ReachStep = { kind: "http", target: "hooks.example.com", stepOrdinal: 0 };
+  expect(check(owner(member("view")), http)).toEqual(allowed);
+  expect(check(owner(member("comment")), http)).toEqual(allowed);
+  expect(check(owner(member("edit")), http)).toMatchObject({ allowed: false });
+});
+
 it("stops each step outside any Collection editor's evaluated folder reach", () => {
   const member: RosterGrant = {
     grantId: "membership",
