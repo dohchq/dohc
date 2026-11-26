@@ -9629,9 +9629,6 @@ function WorkspaceShell(props: {
                                                             openSettings("advanced")
                                                           }
                                                           owner={!shareView}
-                                                          managesAccess={
-                                                            !shareView || membershipRole === "admin"
-                                                          }
                                                           onLifecycleChanged={() => {
                                                             void refreshDatasets().catch((error) =>
                                                               reportShellError(

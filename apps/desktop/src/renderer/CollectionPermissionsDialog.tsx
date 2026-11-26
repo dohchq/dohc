@@ -45,11 +45,14 @@ type Change =
     };
 type Failure = { principalKey?: string; defaults?: true; words: string };
 const levelsOf = (page: DatasetPermissionsPage): Levels => {
-  const known = (id: string) => !!page.rules?.actions.some((action) => action.operationId === id);
+  const known = (reads: boolean) => (id: string) =>
+    !!page.rules?.actions.some(
+      (action) => action.operationId === id && (action.readOnly || !reads),
+    );
   return {
-    view: page.defaults?.view.filter(known).sort() ?? [],
-    comment: page.defaults?.comment.filter(known).sort() ?? [],
-    edit: page.defaults?.edit.filter(known).sort() ?? [],
+    view: page.defaults?.view.filter(known(true)).sort() ?? [],
+    comment: page.defaults?.comment.filter(known(true)).sort() ?? [],
+    edit: page.defaults?.edit.filter(known(false)).sort() ?? [],
   };
 };
 // One row in Notices for this Collection's failed access change, which the next change that succeeds removes,
@@ -456,7 +459,7 @@ function Permissions({
               <p className="m-0 text-[12px] text-muted">Refresh to see who has access.</p>
             )
           ) : !page.permissions.length ? (
-            <p className="m-0 text-[12px] text-muted">Only you have access.</p>
+            <p className="m-0 text-[12px] text-muted">No person or app has its own access.</p>
           ) : (
             page.permissions.map((permission) => {
               const app =

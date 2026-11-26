@@ -326,7 +326,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
           expectedAuthorityRevision: item.authorityRevision,
         },
       );
-    const original = publications.publications[0]!;
+    const original = publications.publications.find((item) => item.grantId !== null)!;
     const dashboard = await page.evaluate(
       async (input) => window.dohcDesktop!.publishOwnerApp({ action: "prepare", ...input }),
       { workspaceId, appRoot, shareId: original.shareId, grantId: original.grantId! },

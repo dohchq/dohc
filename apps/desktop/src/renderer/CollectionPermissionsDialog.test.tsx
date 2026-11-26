@@ -236,7 +236,12 @@ it("shows bound app names, drift statuses, reasons, and incomplete notice", asyn
   expect(screen.getByText(/Some connected apps could not be checked right now/)).toBeTruthy();
 });
 
-function permissionsWithDefaults(edit: string, revision: number, revisionSha256: string) {
+function permissionsWithDefaults(
+  edit: string,
+  revision: number,
+  revisionSha256: string,
+  view: string[] = [],
+) {
   api.dataset.mockImplementation(async (input) =>
     input.action === "permissions"
       ? {
@@ -244,7 +249,7 @@ function permissionsWithDefaults(edit: string, revision: number, revisionSha256:
           permissions: [],
           nextCursor: null,
           defaults: {
-            view: [],
+            view,
             comment: [],
             edit: [id(2), "removed"],
             revision,
@@ -281,6 +286,7 @@ it("sets what each workspace level gets by default, and only reads below Edit", 
   const save = await screen.findByRole("button", { name: "Save for members" });
   expect((save as HTMLButtonElement).disabled).toBe(true);
   expect(screen.queryByText(/earlier rules/)).toBeNull();
+  expect(screen.getByText("No person or app has its own access.")).toBeTruthy();
   expect(box("Read orders for members with Edit").checked).toBe(true);
   expect(box("edit for members with View").disabled).toBe(true);
   expect(box("edit for members with Comment").disabled).toBe(true);
@@ -308,10 +314,12 @@ it("sets what each workspace level gets by default, and only reads below Edit", 
   );
 });
 
-it("lets the Owner save defaults chosen under earlier rules again", async () => {
-  permissionsWithDefaults(id(5), 1, "b".repeat(64));
+it("lets the Owner save defaults chosen under earlier rules again, without actions that now change data below Edit", async () => {
+  permissionsWithDefaults(id(5), 1, "b".repeat(64), [id(5)]);
   const save = await screen.findByRole("button", { name: "Save for members" });
   expect(screen.getByText(/earlier rules/)).toBeTruthy();
+  expect(box("edit for members with View").checked).toBe(false);
+  expect(box("edit for members with Edit").disabled).toBe(false);
   expect((save as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(save);
   await waitFor(() =>
