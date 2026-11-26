@@ -229,8 +229,9 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
       else joined.push([from, end]);
     }
     keptClocks.set(client, joined);
-    for (const [from, end] of joined) {
-      for (let clock = from; clock < end;) {
+    let clock = 0;
+    for (const [from, end] of spans) {
+      for (clock = Math.max(clock, from); clock < end;) {
         const part = Y.getItem(doc.store, Y.createID(client, clock));
         const partEnd = Math.min(end, part.id.clock + part.length);
         if (!(part instanceof Y.Item)) {
@@ -387,7 +388,7 @@ function sequenceEditsNotInNote(
     if (type === undefined)
       return [{ kind: "attribute", block, nodeName: kind, name, value, now: undefined }];
     if (!shows(type, name))
-      return keptLast(records?._map.get(id))
+      return keptLast(records?._map.get(id)) && same(recorded, type)
         ? []
         : [
             {
@@ -416,7 +417,7 @@ function sequenceEditsNotInNote(
   const unshown = (element: Y.XmlElement, name: string, value: unknown) => {
     const leaf = leafOf.get(element._item!);
     if (leaf === undefined || shows(leaf, name)) return undefined;
-    if (keptLast(element._map.get("type"))) return [];
+    if (keptLast(element._map.get("type")) && same(storedValue(element, "type"), leaf)) return [];
     const block = textOf.get(element._item!) ?? "";
     return [
       { kind: "attribute", block, nodeName: leaf, name, value, now: undefined, shownAs: leaf },

@@ -585,6 +585,34 @@ it("lists nothing for a tick the kept edit itself took out of its list, after an
   expect(copy.notInNote).toBe(0);
 });
 
+it("lists a tick on a to-do someone else's bulleted list shows as a list item", async () => {
+  const copy = await saved(
+    conflict(
+      both(
+        (editor) => {
+          const { node, pos } = find(editor, named("orderedList"));
+          const { schema } = editor.view.state;
+          const items: ProseMirrorNode[] = [];
+          node.forEach((item) =>
+            items.push(schema.nodes.taskItem!.create({ checked: false }, item.content)),
+          );
+          editor.view.dispatch(
+            editor.view.state.tr.replaceWith(
+              pos,
+              pos + node.nodeSize,
+              schema.nodes.taskList!.create(null, items),
+            ),
+          );
+        },
+        (editor) => markup(editor, named("taskItem", "Pack"), null, { checked: true }),
+      ),
+      list("bulletList"),
+    ),
+  );
+  expect(copy.markdown).toContain('Set checked to true on "Pack". The note has it as a listItem.');
+  expect(copy.notInNote).toBe(2);
+});
+
 it("lists nothing for a to-do the kept edit ticked and took out of its list, when that move wins over someone else putting the list in a quote", async () => {
   const copy = await saved(
     conflict(

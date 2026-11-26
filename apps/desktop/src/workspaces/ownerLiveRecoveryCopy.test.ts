@@ -575,6 +575,34 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(`${note}\n${LISTED}${listed}`);
 });
 
+it("counts each kept edit someone else saw and then collected with a deleted paragraph", async () => {
+  const { root, writes } = await workspace();
+  const typed = [
+    (doc: Y.Doc) => paragraph(doc).insert(0, "AB"),
+    (doc: Y.Doc) => paragraph(doc).insert(2, "CD"),
+  ];
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(
+      conflict(typed, (doc) => {
+        const person = new Y.Doc();
+        person.clientID = 1;
+        Y.applyUpdate(person, Y.encodeStateAsUpdate(doc));
+        for (const edit of typed) edit(person);
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(person));
+        person.destroy();
+        body(doc).delete(1, 1);
+      }),
+      source,
+    ),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(2);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    `# Plan\n\nKeep this.\n\n- [ ] tick me\n\n${LISTED}2 more kept edits, such as images, can't be shown as text.\n`,
+  );
+});
+
 it("lists nothing when a kept edit's own later edit removed it", async () => {
   const { root, writes } = await workspace();
   const saved = await saveLiveRecoveryCopy(
