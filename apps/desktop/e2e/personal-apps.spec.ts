@@ -359,11 +359,21 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
       .toBe(true);
 
     // --- Only a person allows a Member app: the desktop's sign-in is refused --
-    const listed = await mine.evaluate(
-      (id) => window.dohcDesktop!.memberAppsList({ workspaceId: id }),
-      joined,
-    );
-    const shared = listed.apps.find((app) => app.kind === "member")!;
+    const listed = await mine.evaluate(async (id) => {
+      const apps = [];
+      let cursor: string | null = null;
+      do {
+        const page = await window.dohcDesktop!.memberAppsList({
+          workspaceId: id,
+          ...(cursor ? { cursor } : {}),
+        });
+        apps.push(...page.apps);
+        cursor = page.nextCursor;
+      } while (cursor);
+      return apps;
+    }, joined);
+    const shared = listed.find((app) => app.kind === "member")!;
+    expect(shared.name).toBe("trip-board");
     const consent = await fetch(
       `${relay.baseUrl}/sync/${workspaceId}/app-publications/${shared.publicationId}/backend/consent`,
       {
