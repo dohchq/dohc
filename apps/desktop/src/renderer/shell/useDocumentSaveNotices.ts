@@ -360,34 +360,6 @@ export function useDocumentSaveNotices(input: {
         identity,
       });
     };
-    const stopDocuments = bridge().onEngineYDocSaveState((event) => {
-      if (!current()) return;
-      const refusal = event.editRefusal;
-      if (refusal) {
-        if (refusal.workspaceId !== owner) return;
-        latest.current.report({
-          message: refusal.message,
-          cause: new Error(refusal.message),
-          kind: "live-edit-refused",
-        });
-        return;
-      }
-      if (event.workspaceId !== owner) return;
-      if (event.textRemoved) {
-        removedText(event.path, event.textRemoved.text);
-        return;
-      }
-      const newest = sessions.get(event.path);
-      if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
-        return;
-      sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
-      // An author-capacity refusal has its own notice, including one a Try
-      // again ran into, so this document's save notice gives way to it.
-      if (event.authorCapacity) forget(event.path, "engine");
-      else if (event.saveFailure)
-        fail(event.path, "engine", event.saveFailure.reason, retryDocument(event.path));
-      else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(event.path, "engine");
-    });
     const secrets = new Map<string, SecretPrefix>();
     const secretSaved = (path: string, secret: SecretPrefix | null | undefined): void => {
       if (secret === undefined || (secrets.get(path) ?? null) === secret) return;
@@ -407,6 +379,35 @@ export function useDocumentSaveNotices(input: {
         identity,
       });
     };
+    const stopDocuments = bridge().onEngineYDocSaveState((event) => {
+      if (!current()) return;
+      const refusal = event.editRefusal;
+      if (refusal) {
+        if (refusal.workspaceId !== owner) return;
+        latest.current.report({
+          message: refusal.message,
+          cause: new Error(refusal.message),
+          kind: "live-edit-refused",
+        });
+        return;
+      }
+      if (event.workspaceId !== owner) return;
+      secretSaved(event.path, event.secret);
+      if (event.textRemoved) {
+        removedText(event.path, event.textRemoved.text);
+        return;
+      }
+      const newest = sessions.get(event.path);
+      if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
+        return;
+      sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
+      // An author-capacity refusal has its own notice, including one a Try
+      // again ran into, so this document's save notice gives way to it.
+      if (event.authorCapacity) forget(event.path, "engine");
+      else if (event.saveFailure)
+        fail(event.path, "engine", event.saveFailure.reason, retryDocument(event.path));
+      else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(event.path, "engine");
+    });
     const textSave = (save: TextSave): void => {
       if (!current() || save.workspaceId !== owner) return;
       secretSaved(save.path, save.secret);

@@ -1331,4 +1331,18 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     await closeEditor(envEditor, env);
   });
+
+  it("warns when a live document's settled file holds a likely secret token, and clears it when the token goes", () => {
+    render(<ActionNotices />);
+    emit({ state: { kind: "saved-here" }, secret: "sk_live_" });
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("notes/a.md has a Stripe live secret key");
+
+    emit({ state: { kind: "saving" } });
+    emit({ state: { kind: "saved-here" }, seq: 2, secret: "sk_live_" });
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+
+    emit({ state: { kind: "saved-here" }, seq: 3, secret: null });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
 });

@@ -50,6 +50,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { likelySecretPrefix, type SecretPrefix } from "@dohc/security-contract/secret-prefix";
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import {
   VersionedTextStoreError,
@@ -723,6 +724,7 @@ export interface WorkspaceEngineCapture {
       authorCapacity?: boolean,
       readOnlyCause?: undefined,
       failure?: unknown,
+      secret?: SecretPrefix | null,
     ) => void;
   }): Promise<WorkspaceEngineYDocOpenedSession>;
   // Save it again: the person chose to write a document back to its file
@@ -1332,8 +1334,9 @@ function sha256Bytes(bytes: Uint8Array): string {
 export const MAX_SETTLED_FILE_BYTES = 16 * 1024 * 1024;
 
 type SettledFileDigest =
-  // The file's bytes, hashed. Compare it with the settle's sha.
-  | { kind: "sha256"; sha256: string }
+  // The file's bytes, hashed. Compare it with the settle's sha. `secret` is
+  // the likely secret token the file holds, when the caller asked for a scan.
+  | { kind: "sha256"; sha256: string; secret?: SecretPrefix | null }
   // The file cannot BE the settled artifact: gone, not a regular file, or
   // past the largest projection the engine can produce.
   | { kind: "changed" }
@@ -1343,7 +1346,11 @@ type SettledFileDigest =
 
 // Hash the workspace file a settle claims to have written. Streamed and
 // bounded, and it refuses to read through a path that leaves the workspace.
-async function digestSettledFile(rootPath: string, path: string): Promise<SettledFileDigest> {
+async function digestSettledFile(
+  rootPath: string,
+  path: string,
+  scan = false,
+): Promise<SettledFileDigest> {
   const absolute = join(rootPath, path);
   // Containment first, the same check the disk writer runs before it writes
   // (createDefaultDiskWriter's assertContainedDir): a parent directory
@@ -1375,16 +1382,27 @@ async function digestSettledFile(rootPath: string, path: string): Promise<Settle
     if (info.isSymbolicLink() || !info.isFile()) return { kind: "changed" };
     if (info.size > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
     const hash = createHash("sha256");
+    const chunks: Buffer[] = [];
     let read = 0;
     for await (const chunk of createReadStream(absolute)) {
-      const bytes = chunk as Uint8Array;
+      const bytes = chunk as Buffer;
       read += bytes.byteLength;
       // The file grew past the bound after its size was taken. Same answer,
       // and the read stops here rather than following it.
       if (read > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
       hash.update(bytes);
+      if (scan) chunks.push(bytes);
     }
-    return { kind: "sha256", sha256: hash.digest("hex") };
+    const sha256 = hash.digest("hex");
+    if (!scan) return { kind: "sha256", sha256 };
+    return {
+      kind: "sha256",
+      sha256,
+      secret:
+        classifyEngineFilePath(path).kind === "tracked"
+          ? likelySecretPrefix(Buffer.concat(chunks).toString("utf8"))
+          : null,
+    };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
@@ -5345,9 +5363,10 @@ export function createWorkspaceEngineCapture(
         event: EngineYDocSaveEvent,
         authorCapacity?: boolean,
         failure?: unknown,
+        secret?: SecretPrefix | null,
       ): void => {
         try {
-          input.onSaveState?.(state, token, event, authorCapacity, undefined, failure);
+          input.onSaveState?.(state, token, event, authorCapacity, undefined, failure, secret);
         } catch {
           // Observer boundary: a renderer-facing status hook must never
           // re-enter the session or wedge the settle chain.
@@ -5537,7 +5556,7 @@ export function createWorkspaceEngineCapture(
         // readDiskTextState: that reader answers "can capture own this?" and
         // returns no sha at all past its 5 MiB cap, which would read as
         // "no proof of drift" for the largest files.
-        const digest = await digestSettledFile(rootPath, input.path);
+        const digest = await digestSettledFile(rootPath, input.path, true);
         if (digest.kind === "unverifiable") {
           // dohc could not check the file, which is not the same as knowing it
           // changed: a transient lock (a scanner holding it open) must not
@@ -5562,7 +5581,14 @@ export function createWorkspaceEngineCapture(
           reportSaveState("changed-on-disk", takeSaveToken(token, generation), "outcome");
           return false;
         }
-        reportSaveState("saved", takeSaveToken(token, generation), "outcome");
+        reportSaveState(
+          "saved",
+          takeSaveToken(token, generation),
+          "outcome",
+          undefined,
+          undefined,
+          digest.secret,
+        );
         // The file holds the text, so its draft goes.
         retireTextSetAside();
         return true;
