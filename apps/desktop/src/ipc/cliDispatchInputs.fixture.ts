@@ -161,6 +161,8 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "version create": ["Ideas"],
   "version switch": ["Draft"],
   "version merge": ["Draft"],
+  "version update": ["Draft"],
+  "version archive": ["Draft"],
   "version resolve": ["conflict", "--keep", "current"],
   "automation list": ["Tasks"],
   "automation buttons": ["Tasks"],

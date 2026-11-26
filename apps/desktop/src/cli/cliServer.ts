@@ -334,6 +334,13 @@ export interface CliVersionsPort {
   merge(
     versionId: string,
   ): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
+  update(versionId: string): Promise<{
+    mergedFileCount: number;
+    unchangedFileCount: number;
+    conflictCount: number;
+    skippedProtectedFileCount: number;
+  }>;
+  archive(versionId: string, archived: boolean): Promise<void>;
   resolve(conflictId: string, resolution: VersionResolution): Promise<void>;
 }
 
@@ -2624,6 +2631,8 @@ const HAND_WRITTEN_SHARE_RULES: {
   versionCreate: versionsInOwner,
   versionSwitch: versionsInOwner,
   versionMerge: versionsInOwner,
+  versionUpdate: versionsInOwner,
+  versionArchive: versionsInOwner,
   versionResolve: versionsInOwner,
 };
 const RECEIVED_SHARE_RULES: {
@@ -4098,6 +4107,8 @@ async function dispatchWorkspace(
     case "versionCreate":
     case "versionSwitch":
     case "versionMerge":
+    case "versionUpdate":
+    case "versionArchive":
     case "versionResolve": {
       const versions = context.versions;
       if (!versions) return versionsInOwner.answer;
@@ -4190,6 +4201,35 @@ async function dispatchWorkspace(
               version: { id: version.id, name: version.name },
               ...merged,
               ...page,
+            };
+          }
+          case "versionUpdate": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            if (!version.canMergeIntoMain)
+              return {
+                ok: false as const,
+                reason: "Only versions made from Main can update from Main.",
+              };
+            const updated = await versions.update(version.id);
+            const page = await versions.conflicts();
+            if ("status" in page)
+              return historyPolicyUnreadable(page, "The update ran, and its conflicts are hidden");
+            return {
+              ok: true as const,
+              version: { id: version.id, name: version.name },
+              ...updated,
+              ...page,
+            };
+          }
+          case "versionArchive": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            await versions.archive(version.id, !request.args.restore);
+            return {
+              ok: true as const,
+              version: { id: version.id, name: version.name },
+              archived: !request.args.restore,
             };
           }
           case "versionResolve": {

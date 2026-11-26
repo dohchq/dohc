@@ -203,7 +203,7 @@ impl<'a> VersionedTextStore<'a> {
             let row = conn
                 .query_row(
                     "SELECT v.workspace_id, v.version_id, v.kind, v.name, v.created_at_ms, \
-                     v.fork_version_id, v.fork_moment_id FROM versioned_workspaces w \
+                     v.fork_version_id, v.fork_moment_id, v.archived_at_ms FROM versioned_workspaces w \
                      JOIN versions v ON v.workspace_id = w.workspace_id \
                        AND v.version_id = w.main_version_id WHERE w.workspace_id = ?1",
                     params![workspace_id],
@@ -677,7 +677,7 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, version_id, kind, name, created_at_ms, \
-                     fork_version_id, fork_moment_id FROM versions WHERE workspace_id = ?1 \
+                     fork_version_id, fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1 \
                      ORDER BY created_at_ms, name, version_id",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -1115,6 +1115,7 @@ impl<'a> VersionedTextStore<'a> {
             created_at_ms: input.now_ms,
             fork_version_id: Some(input.from_version_id.clone()),
             fork_moment_id: fork_moment_id.clone(),
+            archived_at_ms: None,
         };
 
         let outcome = self.store.write_with(faults, |tx| {
@@ -1208,6 +1209,41 @@ impl<'a> VersionedTextStore<'a> {
         Ok(record)
     }
 
+    pub fn set_version_archived(
+        &mut self,
+        workspace_id: &str,
+        version_id: &str,
+        archived_at_ms: Option<i64>,
+        faults: &dyn FaultInjector,
+    ) -> Result<VersionRecord, DomainError> {
+        let outcome = self.store.write_with(faults, |tx| {
+            let record =
+                get_version(tx, workspace_id, version_id)?.ok_or(DomainError::VersionNotFound)?;
+            if record.kind == VersionKind::Main {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-is-main",
+                });
+            }
+            if archived_at_ms.is_some()
+                && get_active_version_in(tx, workspace_id)?.version_id == version_id
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-is-active",
+                });
+            }
+            tx.execute(
+                "UPDATE versions SET archived_at_ms = ?3 WHERE workspace_id = ?1 AND version_id = ?2",
+                params![workspace_id, version_id, archived_at_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok::<_, DomainError>(VersionRecord {
+                archived_at_ms,
+                ..record
+            })
+        })?;
+        committed(outcome)
+    }
+
     fn require_version(
         &self,
         workspace_id: &str,
@@ -1256,6 +1292,7 @@ pub fn ensure_main_version_in_tx(
         created_at_ms: now_ms,
         fork_version_id: None,
         fork_moment_id: None,
+        archived_at_ms: None,
     })
 }
 
@@ -2001,7 +2038,7 @@ fn get_version(
     let row = conn
         .query_row(
             "SELECT workspace_id, version_id, kind, name, created_at_ms, fork_version_id, \
-             fork_moment_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+             fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
             params![workspace_id, version_id],
             map_version_row,
         )
@@ -2076,6 +2113,7 @@ fn map_version_row(
     let created_at_ms: i64 = row.get(4)?;
     let fork_version_id: Option<String> = row.get(5)?;
     let fork_moment_id: Option<String> = row.get(6)?;
+    let archived_at_ms: Option<i64> = row.get(7)?;
     Ok(VersionKind::from_db(&kind_str).map(|kind| VersionRecord {
         workspace_id,
         version_id,
@@ -2084,6 +2122,7 @@ fn map_version_row(
         created_at_ms,
         fork_version_id,
         fork_moment_id,
+        archived_at_ms,
     }))
 }
 

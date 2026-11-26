@@ -36,7 +36,7 @@
 //! Plaintext never does.
 
 use crate::error::DomainError;
-use crate::merge::VersionFileChangeStatus;
+use crate::merge::{MERGED_INTO_NAMED, MERGED_INTO_PARENT, VersionFileChangeStatus, merge_pair};
 use crate::records::{ApplySecretFileFromVersion, InbandSecret};
 use crate::store::{validate_identifier, validate_path};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
@@ -292,6 +292,9 @@ pub struct SecretMomentPage {
 pub struct SecretWriteResult {
     pub changed: bool,
     pub moment: Option<SecretMomentRecord>,
+    /// Both sides changed the secret since their last merge, so it stayed
+    /// as it was.
+    pub diverged: bool,
 }
 
 /// Outcome of restoring a secret to the state before a protected moment.
@@ -396,6 +399,7 @@ impl<'a> SecretFileStore<'a> {
             return Ok(SecretWriteResult {
                 changed: false,
                 moment: None,
+                diverged: false,
             });
         }
 
@@ -455,6 +459,7 @@ impl<'a> SecretFileStore<'a> {
             let result = SecretWriteResult {
                 changed: true,
                 moment: Some(moment),
+                diverged: false,
             };
             after(tx, &result)?;
             Ok::<SecretWriteResult, DomainError>(result)
@@ -1167,10 +1172,13 @@ pub fn compare_secret_files_page_keyless(
     })
 }
 
-/// Three-way-apply one source-version secret state to the destination. The key
-/// is used only for equality/base comparisons; writes copy sealed fields. The
-/// queued write or delete changes the workspace file only while it still
-/// holds what `check` gives. `after` runs inside the apply transaction.
+/// Three-way-apply one secret state between a named version and its fork
+/// parent. The key is used only for equality/base comparisons; writes copy
+/// sealed fields. Into the parent the source wins any change of its own; into
+/// the named version a secret both sides changed stays as it was and reports
+/// `diverged`. The queued write or delete changes the workspace file only
+/// while it still holds what `check` gives. `after` runs inside the apply
+/// transaction.
 pub fn apply_secret_file_from_version_with<F>(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -1203,37 +1211,57 @@ where
     let outcome = store.write_with(faults, |tx| {
         require_version(tx, workspace_id, from_version_id)?;
         require_version(tx, workspace_id, to_version_id)?;
+        let (named_version_id, merged_into) =
+            merge_pair(tx, workspace_id, from_version_id, to_version_id)?
+                .ok_or(DomainError::ForkBaseNotFound)?;
+        let into_named = merged_into == MERGED_INTO_NAMED;
         let source = select_tip(tx, workspace_id, from_version_id, &path)?;
         let target = select_tip(tx, workspace_id, to_version_id, &path)?;
-        let base = select_fork_base(tx, workspace_id, from_version_id, &path)?;
-        let result = if (source.is_none() && target.is_none())
-            || source.as_ref() == target.as_ref()
-        {
-            SecretWriteResult {
+        let (parent_tip, named_tip) = if into_named {
+            (&source, &target)
+        } else {
+            (&target, &source)
+        };
+        let base = select_secret_merge_base(
+            tx,
+            workspace_id,
+            &named_version_id,
+            &path,
+            [parent_tip, named_tip],
+        )?;
+        let open = |sealed: &Option<SealedSecret>| {
+            sealed
+                .as_ref()
+                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
+                .transpose()
+        };
+        let source_text = open(&source)?;
+        let target_text = open(&target)?;
+        let base_text = open(&base)?;
+        let source_moved = !secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref());
+        let agreed = secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref());
+        let target_moved = !secret_plaintexts_equal(target_text.as_ref(), base_text.as_ref());
+        let diverged = into_named && source_moved && !agreed && target_moved;
+        let apply = source_moved && !agreed && !diverged;
+        if source_moved && !diverged {
+            record_secret_merge_base(
+                tx,
+                workspace_id,
+                &named_version_id,
+                &path,
+                merged_into,
+                [&source, &base, &target, if apply { &source } else { &target }],
+            )?;
+        }
+        if !apply {
+            let result = SecretWriteResult {
                 changed: false,
                 moment: None,
-            }
-        } else {
-            let source_text = source
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            let target_text = target
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            let base_text = base
-                .as_ref()
-                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-                .transpose()?;
-            if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
-                || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
-            {
-                SecretWriteResult {
-                    changed: false,
-                    moment: None,
-                }
-            } else {
+                diverged,
+            };
+            after(tx, &result)?;
+            return Ok(result);
+        }
         if secret_moment_exists(tx, workspace_id, moment_id)? {
             return Err(DomainError::DuplicateMomentId);
         }
@@ -1306,11 +1334,10 @@ where
             )
             .map_err(DomainError::sql_persist)?;
         }
-                SecretWriteResult {
-                    changed: true,
-                    moment: Some(moment),
-                }
-            }
+        let result = SecretWriteResult {
+            changed: true,
+            moment: Some(moment),
+            diverged: false,
         };
         after(tx, &result)?;
         Ok::<_, DomainError>(result)
@@ -1838,6 +1865,121 @@ fn select_fork_base(
         SealedSecret::from_base64(&iv, &tag, &ciphertext, byte_length).map_err(DomainError::from)
     })
     .transpose()
+}
+
+/// The secret base a merge between a named version and its fork parent
+/// compares against, chosen as `select_merge_base` chooses a file's: the last
+/// merge's base, the base that merge used when the side it wrote is back to
+/// what it held before, or the fork point.
+fn select_secret_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
+    path: &str,
+    [parent_tip, named_tip]: [&Option<SealedSecret>; 2],
+) -> Result<Option<SealedSecret>, DomainError> {
+    type Row = (Option<String>, Option<String>, String);
+    let row: Option<Row> = conn
+        .query_row(
+            "SELECT target_before_sha256, target_after_sha256, merged_into \
+             FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![workspace_id, named_version_id, path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((before, after, merged_into)) = row else {
+        return select_fork_base(conn, workspace_id, named_version_id, path);
+    };
+    let held = secret_identity(if merged_into == MERGED_INTO_PARENT {
+        parent_tip
+    } else {
+        named_tip
+    });
+    let columns = if held == before && held != after {
+        "prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, prior_byte_length          FROM secret_merge_bases WHERE prior_exists = 1"
+    } else {
+        "iv_base64, auth_tag_base64, ciphertext_base64, byte_length          FROM secret_merge_bases WHERE base_exists = 1"
+    };
+    let row: Option<(String, String, String, i64)> = conn
+        .query_row(
+            &format!("SELECT {columns} AND workspace_id = ?1 AND version_id = ?2 AND path = ?3"),
+            params![workspace_id, named_version_id, path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((iv, tag, ciphertext, byte_length)) = row else {
+        return Ok(None);
+    };
+    let byte_length = usize::try_from(byte_length).map_err(|_| DomainError::StateCorrupt {
+        reason: "secret merge base has a negative byte length",
+    })?;
+    Ok(Some(SealedSecret::from_base64(
+        &iv,
+        &tag,
+        &ciphertext,
+        byte_length,
+    )?))
+}
+
+fn secret_identity(sealed: &Option<SealedSecret>) -> Option<String> {
+    sealed
+        .as_ref()
+        .map(|sealed| dohc_engine_storage::hex_sha256(sealed.ciphertext()))
+}
+
+fn record_secret_merge_base(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    named_version_id: &str,
+    path: &str,
+    merged_into: &str,
+    [incoming, prior, before, after]: [&Option<SealedSecret>; 4],
+) -> Result<(), DomainError> {
+    use rusqlite::types::Value;
+    let sealed = |side: &Option<SealedSecret>| -> [Value; 5] {
+        side.as_ref().map_or(
+            [
+                Value::Integer(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+            |sealed| {
+                [
+                    Value::Integer(1),
+                    Value::Text(sealed.iv_base64()),
+                    Value::Text(sealed.auth_tag_base64()),
+                    Value::Text(sealed.ciphertext_base64()),
+                    Value::Integer(sealed.byte_length() as i64),
+                ]
+            },
+        )
+    };
+    let identity =
+        |side: &Option<SealedSecret>| secret_identity(side).map_or(Value::Null, Value::Text);
+    let mut values = vec![
+        Value::Text(workspace_id.to_owned()),
+        Value::Text(named_version_id.to_owned()),
+        Value::Text(path.to_owned()),
+    ];
+    values.extend(sealed(incoming));
+    values.extend(sealed(prior));
+    values.push(identity(before));
+    values.push(identity(after));
+    values.push(Value::Text(merged_into.to_owned()));
+    tx.execute(
+        "INSERT OR REPLACE INTO secret_merge_bases (workspace_id, version_id, path, \
+         base_exists, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
+         prior_exists, prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, \
+         prior_byte_length, target_before_sha256, target_after_sha256, merged_into) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        rusqlite::params_from_iter(values),
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
 }
 
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {

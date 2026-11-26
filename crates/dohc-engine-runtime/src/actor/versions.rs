@@ -89,6 +89,21 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn set_version_archived(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        archived_at_ms: Option<i64>,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<VersionRecord, RuntimeError> {
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .set_version_archived(&workspace_id, &version_id, archived_at_ms, faults.as_ref())
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// One page of snapshot METADATA (no body hydration) — the listing read
     /// behind `versionedText.list`.
     pub async fn list_snapshot_metadata(
@@ -1262,6 +1277,12 @@ pub(super) fn switch_active_version_on_store(
         .ok_or(DomainError::VersionNotFound)?;
     if previous.version_id == version_id {
         return Ok(target);
+    }
+    if target.archived_at_ms.is_some() {
+        return Err(DomainError::InvalidInput {
+            reason: "version-archived",
+        }
+        .into());
     }
     let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;

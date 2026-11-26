@@ -1,6 +1,31 @@
 {
   "owner": [
     {
+      "name": "dohc_archive_version",
+      "description": "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main and the active version can't be archived. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "restore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_chat_file_mentions",
       "description": "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.",
       "inputSchema": {
@@ -5070,7 +5095,7 @@
     },
     {
       "name": "dohc_resolve_version_conflict",
-      "description": "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
+      "description": "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in an update, current is the version and incoming is Main; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5121,8 +5146,8 @@
           "conflictId",
           "resolution"
         ],
-        "additionalProperties": false,
-        "$schema": "http://json-schema.org/draft-07/schema#"
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -5704,6 +5729,28 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_update_version",
+      "description": "Bring Main's changes into a version made from Main, named by its name or id from dohc_list_versions. Returns the merged and conflict counts, the count of protected files both sides changed (left as the version has them), and the first page of open conflicts. In an update's conflicts, current is the version and incoming is Main. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"

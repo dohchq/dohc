@@ -292,6 +292,8 @@ interface DesktopCliServerDependencies<State> {
       | "createVersion"
       | "switchVersion"
       | "mergeVersionIntoMain"
+      | "updateVersionFromMain"
+      | "setVersionArchived"
       | "resolveConflict"
       | "changePathsAs"
     > | null;
@@ -1226,6 +1228,25 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                   },
                   { done: () => ({}), failed: {} },
                 ),
+              update: (versionId) =>
+                dependencies.versionRound(
+                  workspace.workspaceId,
+                  async () => {
+                    const updated = await capture.updateVersionFromMain(versionId);
+                    notifyRenderer({ workspaceId: workspace.workspaceId });
+                    return {
+                      mergedFileCount: updated.mergedFileCount,
+                      unchangedFileCount: updated.unchangedFileCount,
+                      conflictCount: updated.conflictCount,
+                      skippedProtectedFileCount: updated.skippedProtectedPaths.length,
+                    };
+                  },
+                  { done: () => ({}), failed: {} },
+                ),
+              archive: async (versionId, archived) => {
+                await capture.setVersionArchived(versionId, archived);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+              },
               resolve: (conflictId, resolution) =>
                 dependencies.versionRound(
                   workspace.workspaceId,

@@ -357,7 +357,7 @@ fn read_markers(
     limit: usize,
 ) -> Result<Vec<VersionRecord>, DomainError> {
     let mut sql = String::from(
-        "SELECT workspace_id,version_id,kind,name,created_at_ms,fork_version_id,fork_moment_id FROM versions WHERE workspace_id=?1 AND rowid<=?2",
+        "SELECT workspace_id,version_id,kind,name,created_at_ms,fork_version_id,fork_moment_id,archived_at_ms FROM versions WHERE workspace_id=?1 AND rowid<=?2",
     );
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
         Box::new(cursor.workspace_id.clone()),

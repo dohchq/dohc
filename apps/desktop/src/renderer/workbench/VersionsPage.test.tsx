@@ -29,6 +29,8 @@ const bridgeMock = {
   countWorkspaceVersionConflicts: vi.fn(),
   switchWorkspaceVersion: vi.fn(),
   createWorkspaceVersion: vi.fn(),
+  archiveWorkspaceVersion: vi.fn(),
+  updateWorkspaceVersion: vi.fn(),
 };
 
 const NOW = Date.UTC(2026, 10, 4, 12);
@@ -257,9 +259,92 @@ describe("VersionsPage", () => {
         .queryAllByRole("button")
         .map((button) => button.textContent);
     expect(actions("main")).toEqual(["Switch"]);
-    expect(actions("draft")).toEqual(["Compare", "Merge into Main"]);
-    expect(actions("nested")).toEqual(["Switch", "Compare"]);
-    expect(actions("fresh")).toEqual(["Switch", "Compare", "Merge into Main"]);
+    expect(actions("draft")).toEqual(["Compare", "Merge into Main", "Update from Main"]);
+    expect(actions("nested")).toEqual(["Switch", "Compare", "Archive"]);
+    expect(actions("fresh")).toEqual([
+      "Switch",
+      "Compare",
+      "Merge into Main",
+      "Update from Main",
+      "Archive",
+    ]);
+  });
+
+  it("archives a version from its row, lists it under Archived, and restores it", async () => {
+    const user = userEvent.setup();
+    const archivedFresh = { ...FRESH, archivedAtMs: NOW };
+    bridgeMock.archiveWorkspaceVersion.mockImplementation(
+      async ({ archived }: { archived: boolean }) => {
+        const versions = [MAIN, DRAFT, NESTED, archived ? archivedFresh : FRESH];
+        bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions, activeVersionId: "draft" });
+        return { versions, activeVersionId: "draft" };
+      },
+    );
+    render(<Page />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    await user.click(within(row("fresh")).getByTestId("versions-page-archive"));
+    expect(bridgeMock.archiveWorkspaceVersion).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      versionId: "fresh",
+      archived: true,
+    });
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(3));
+    const archived = screen.getByTestId("versions-page-archived");
+    expect(archived.querySelector("summary")?.textContent).toBe("Archived (1)");
+    expect(archived.hasAttribute("open")).toBe(false);
+    await user.click(within(archived).getByTestId("versions-page-restore"));
+    expect(bridgeMock.archiveWorkspaceVersion).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      versionId: "fresh",
+      archived: false,
+    });
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    expect(screen.queryByTestId("versions-page-archived")).toBeNull();
+  });
+
+  it("says why an archive failed, with a Try again that archives again", async () => {
+    const user = userEvent.setup();
+    const onVersionsError = vi.fn();
+    bridgeMock.archiveWorkspaceVersion.mockRejectedValue(new Error("engine gone"));
+    render(<Page onVersionsError={onVersionsError} />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    await user.click(within(row("nested")).getByTestId("versions-page-archive"));
+    await waitFor(() => expect(onVersionsError).toHaveBeenCalledOnce());
+    expect(onVersionsError.mock.calls[0]![0]).toBe("engine gone");
+    expect(filedIdentity(onVersionsError)).toBe("version-archive:ws-1:nested");
+    filedRetry(onVersionsError)();
+    await waitFor(() => expect(bridgeMock.archiveWorkspaceVersion).toHaveBeenCalledTimes(2));
+  });
+
+  it("updates a version from Main from its row, and names the protected files it kept", async () => {
+    const user = userEvent.setup();
+    bridgeMock.updateWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 2,
+      unchangedFileCount: 0,
+      conflictCount: 0,
+      replacedProtectedPaths: [],
+      skippedProtectedPaths: [".env"],
+      conflicts: [],
+      nextAfterConflictId: null,
+    });
+    render(<Page />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    await user.click(within(row("fresh")).getByTestId("versions-page-update"));
+    const dialog = screen.getByTestId("version-merge-dialog");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Update Fresh from Main");
+    await user.click(within(dialog).getByTestId("version-merge-confirm"));
+    expect(bridgeMock.updateWorkspaceVersion).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      versionId: "fresh",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("version-merge-status").textContent).toBe(
+        "Merged 2 files into Fresh",
+      ),
+    );
+    expect(screen.getByTestId("version-merge-skipped").textContent).toBe(
+      "One protected file changed in both kept Fresh's copy.",
+    );
   });
 
   it("switches and opens compare from a row", async () => {
@@ -582,7 +667,7 @@ describe("VersionsPage", () => {
         .queryAllByRole("button")
         .map((button) => button.textContent);
     expect(actions("draft")).toEqual(["Compare", "Decide what to keep"]);
-    expect(actions("fresh")).toEqual(["Switch", "Compare", "Decide what to keep"]);
+    expect(actions("fresh")).toEqual(["Switch", "Compare", "Archive", "Decide what to keep"]);
     expect(
       within(row("draft")).getByRole("button", {
         name: "Decide what to keep",

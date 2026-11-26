@@ -189,6 +189,56 @@ it("says what a version change did", async () => {
   );
 });
 
+it("updates a version from Main, and archives or restores one", async () => {
+  expect(parseCliArguments(["version", "update", "Draft"], {})).toMatchObject({
+    verb: "versionUpdate",
+    version: "Draft",
+  });
+  expect(parseCliArguments(["version", "archive", "Draft"], {})).toMatchObject({
+    verb: "versionArchive",
+    version: "Draft",
+    restore: false,
+  });
+  expect(parseCliArguments(["version", "archive", "Draft", "--restore"], {})).toMatchObject({
+    verb: "versionArchive",
+    restore: true,
+  });
+  const request = vi.fn(async (_sent: unknown) => ({
+    ok: true,
+    version: { id: "draft", name: "Draft" },
+    mergedFileCount: 2,
+    unchangedFileCount: 0,
+    conflictCount: 0,
+    skippedProtectedFileCount: 1,
+    conflicts: [],
+    nextAfterConflictId: null,
+  }));
+  expect((await executeCli({ argv: ["version", "update", "Draft"], request })).stdout).toBe(
+    "Updated Draft from Main · 2 files merged · 0 conflicts\n1 protected file changed on both sides kept the version's copy\n",
+  );
+  request.mockResolvedValueOnce({
+    ok: true,
+    version: { id: "draft", name: "Draft" },
+    archived: false,
+  } as never);
+  expect(
+    (await executeCli({ argv: ["version", "archive", "Draft", "--restore"], request })).stdout,
+  ).toBe("Restored Draft · draft\n");
+  expect(
+    request.mock.calls.map(([sent]) => (sent as { verb: string; args: unknown }).verb),
+  ).toEqual(["versionUpdate", "versionArchive"]);
+  expect((request.mock.calls[1]![0] as { args: { restore: boolean } }).args.restore).toBe(true);
+  request.mockClear();
+  for (const argv of [
+    ["version", "update"],
+    ["version", "archive"],
+    ["version", "archive", "Draft", "Later"],
+  ]) {
+    expect((await executeCli({ argv, request })).exitCode, argv.join(" ")).toBe(1);
+  }
+  expect(request).not.toHaveBeenCalled();
+});
+
 it("says under a conflict that a newer version waits behind it, and only there", async () => {
   const listed = {
     conflictId: "c1",

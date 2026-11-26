@@ -12,6 +12,8 @@ const tools = [
   "dohc_create_version",
   "dohc_switch_version",
   "dohc_merge_version",
+  "dohc_update_version",
+  "dohc_archive_version",
   "dohc_resolve_version_conflict",
 ];
 
@@ -44,6 +46,12 @@ it("offers the version tools to the owner only and sends them as the agent", asy
     await client.callTool({ name: "dohc_create_version", arguments: { name: "Ideas" } });
     await client.callTool({ name: "dohc_switch_version", arguments: { version: "Draft" } });
     await client.callTool({ name: "dohc_merge_version", arguments: { version: "Draft" } });
+    await client.callTool({ name: "dohc_update_version", arguments: { version: "Draft" } });
+    await client.callTool({ name: "dohc_archive_version", arguments: { version: "Draft" } });
+    await client.callTool({
+      name: "dohc_archive_version",
+      arguments: { version: "Draft", restore: true },
+    });
     await client.callTool({
       name: "dohc_resolve_version_conflict",
       arguments: { conflictId: "c1", resolution: { keep: "combined", text: "both" } },
@@ -76,6 +84,18 @@ it("offers the version tools to the owner only and sends them as the agent", asy
     expect.objectContaining({
       verb: "versionMerge",
       args: expect.objectContaining({ actor: "agent", version: "Draft" }),
+    }),
+    expect.objectContaining({
+      verb: "versionUpdate",
+      args: expect.objectContaining({ actor: "agent", version: "Draft" }),
+    }),
+    expect.objectContaining({
+      verb: "versionArchive",
+      args: expect.objectContaining({ actor: "agent", version: "Draft", restore: false }),
+    }),
+    expect.objectContaining({
+      verb: "versionArchive",
+      args: expect.objectContaining({ actor: "agent", version: "Draft", restore: true }),
     }),
     expect.objectContaining({
       verb: "versionResolve",

@@ -180,8 +180,10 @@ export function VersionsPage(props: {
     () => orderVersions(snapshot?.versions ?? [], lastChanges),
     [snapshot, lastChanges],
   );
+  const listed = ordered.filter((version) => version.archivedAtMs === undefined);
+  const archived = ordered.filter((version) => version.archivedAtMs !== undefined);
   const countOrder = useRef<string[]>([]);
-  countOrder.current = ordered
+  countOrder.current = listed
     .filter((version) => version.kind !== "main")
     .map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
@@ -205,9 +207,9 @@ export function VersionsPage(props: {
     }
   }, [failedKey]);
   // Counting waits for the first listing, so it runs in the order the rows show.
-  const listed = lastChanges !== null;
+  const changesRead = lastChanges !== null;
   useEffect(() => {
-    if (versionIds === null || !listed) return;
+    if (versionIds === null || !changesRead) return;
     const named = countOrder.current;
     // A change in Main changes every count. A change in a version changes its
     // own. A Try again changes only the version it's on.
@@ -262,7 +264,7 @@ export function VersionsPage(props: {
       }
       countRun.current = null;
     })();
-  }, [workspaceId, versionIds, listed, props.historyKey, props.versionKey, countRetry]);
+  }, [workspaceId, versionIds, changesRead, props.historyKey, props.versionKey, countRetry]);
   const recount = (versionIds: readonly string[]) => {
     for (const versionId of versionIds) staleCounts.current.add(versionId);
     setCounts((current) => {
@@ -357,40 +359,77 @@ export function VersionsPage(props: {
   } else {
     const names = new Map(snapshot.versions.map((version) => [version.id, version.name]));
     body = (
-      // Row fills hang outside the column's edge, so the text starts on it.
-      <ul
-        aria-label="Versions"
-        data-testid="versions-page-list"
-        className="-mx-2 m-0 list-none p-0"
-      >
-        {ordered.map((version) => (
-          <VersionRow
-            key={version.id}
-            version={version}
-            active={version.id === snapshot.activeVersionId}
-            madeFrom={
-              version.madeFromVersionId === undefined
-                ? undefined
-                : names.get(version.madeFromVersionId)
-            }
-            lastChange={lastChanges.get(version.id) ?? null}
-            lastChangesFailed={lastChangesFailed}
-            count={counts.get(version.id)}
-            conflicts={conflictCounts.get(version.id)}
-            locked={locked}
-            takeFocus={focusRow === version.id}
-            onFocused={() => setFocusRow(null)}
-            onSwitch={() => {
-              switchedTo.current = version.id;
-              versions.requestSwitch(version.id);
-            }}
-            onCompare={() => props.onOpenCompare(version.id)}
-            onMerge={() => versions.openMerge(version)}
-            onRetryCount={() => retryCount(version.id)}
-            onReviewConflicts={props.onReviewConflicts}
-          />
-        ))}
-      </ul>
+      <>
+        {/* Row fills hang outside the column's edge, so the text starts on it. */}
+        <ul
+          aria-label="Versions"
+          data-testid="versions-page-list"
+          className="-mx-2 m-0 list-none p-0"
+        >
+          {listed.map((version) => (
+            <VersionRow
+              key={version.id}
+              version={version}
+              active={version.id === snapshot.activeVersionId}
+              madeFrom={
+                version.madeFromVersionId === undefined
+                  ? undefined
+                  : names.get(version.madeFromVersionId)
+              }
+              lastChange={lastChanges.get(version.id) ?? null}
+              lastChangesFailed={lastChangesFailed}
+              count={counts.get(version.id)}
+              conflicts={conflictCounts.get(version.id)}
+              locked={locked}
+              takeFocus={focusRow === version.id}
+              onFocused={() => setFocusRow(null)}
+              onSwitch={() => {
+                switchedTo.current = version.id;
+                versions.requestSwitch(version.id);
+              }}
+              onCompare={() => props.onOpenCompare(version.id)}
+              onMerge={() => versions.openMerge(version)}
+              onUpdate={() => versions.openUpdate(version)}
+              onArchive={() => versions.setArchived(version, true)}
+              onRetryCount={() => retryCount(version.id)}
+              onReviewConflicts={props.onReviewConflicts}
+            />
+          ))}
+        </ul>
+        {archived.length > 0 ? (
+          <details data-testid="versions-page-archived" className="mt-4">
+            <summary className="cursor-pointer py-1 text-[12px] text-muted hover:text-ink">
+              Archived ({archived.length})
+            </summary>
+            <ul aria-label="Archived versions" className="-mx-2 m-0 list-none p-0">
+              {archived.map((version) => (
+                <li
+                  key={version.id}
+                  data-testid="versions-page-archived-row"
+                  data-version-id={version.id}
+                  className="flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover"
+                >
+                  <span
+                    id={`archived-${version.id}`}
+                    className="min-w-0 flex-1 truncate text-[13px] leading-5 text-muted"
+                  >
+                    {version.name}
+                  </span>
+                  <SecondaryButton
+                    size="row"
+                    data-testid="versions-page-restore"
+                    aria-describedby={`archived-${version.id}`}
+                    aria-disabled={locked || undefined}
+                    onClick={locked ? undefined : () => versions.setArchived(version, false)}
+                  >
+                    Restore
+                  </SecondaryButton>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+      </>
     );
   }
 
@@ -451,6 +490,8 @@ function VersionRow(props: {
   onSwitch: () => void;
   onCompare: () => void;
   onMerge: () => void;
+  onUpdate: () => void;
+  onArchive: () => void;
   onRetryCount: () => void;
   onReviewConflicts: () => void;
 }) {
@@ -620,6 +661,24 @@ function VersionRow(props: {
               {...rowAction(props.onMerge)}
             >
               Merge into Main
+            </SecondaryButton>
+          )}
+          {isMain || toDecide || !version.canMergeIntoMain ? null : (
+            <SecondaryButton
+              size="row"
+              data-testid="versions-page-update"
+              {...rowAction(props.onUpdate)}
+            >
+              Update from Main
+            </SecondaryButton>
+          )}
+          {isMain || props.active ? null : (
+            <SecondaryButton
+              size="row"
+              data-testid="versions-page-archive"
+              {...rowAction(props.onArchive)}
+            >
+              Archive
             </SecondaryButton>
           )}
         </div>

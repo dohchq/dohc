@@ -5,7 +5,7 @@ use dohc_engine_domain::{
     MergeUnchangedReason, NoFaults, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
-use dohc_engine_storage::{EngineStore, hex_sha256, put_binary_blob};
+use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-merge-bases";
@@ -371,4 +371,117 @@ fn binary_merges_compare_against_the_last_merged_bytes() {
 
     put_binary(&mut store, "feat", "conflict.png", b"\x89PNG-feat-2");
     assert_eq!(outcome(&merge(&mut store, "conflict.png")), "conflict");
+}
+
+fn update(store: &mut EngineStore, path: &str) -> MergeTextFileResult {
+    let mut input = merge_request(path);
+    input.source_version_id = "main".to_owned();
+    input.target_version_id = "feat".to_owned();
+    merge_with(store, &input)
+}
+
+fn feat_text(store: &mut EngineStore, path: &str) -> Option<String> {
+    VersionedTextStore::new(store)
+        .read_text(WS, "feat", path)
+        .expect("read feat")
+        .map(|snapshot| snapshot.text)
+}
+
+#[test]
+fn a_version_updated_from_main_merges_back_without_a_conflict() {
+    let (_scratch, mut store) = open();
+    for path in ["edit.md", "revert.md"] {
+        put(&mut store, "main", path, "A");
+    }
+    fork(&mut store);
+    for path in ["edit.md", "revert.md"] {
+        put(&mut store, "main", path, "B");
+        assert_eq!(outcome(&update(&mut store, path)), "write", "{path}");
+        assert_eq!(feat_text(&mut store, path).as_deref(), Some("B"), "{path}");
+    }
+
+    put(&mut store, "feat", "edit.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "edit.md")), "write");
+    assert_eq!(main_text(&mut store, "edit.md").as_deref(), Some("C"));
+
+    put(&mut store, "feat", "revert.md", "A");
+    assert_eq!(
+        outcome(&merge(&mut store, "revert.md")),
+        "source unchanged",
+        "taking back an update is an undo of it, not a change for Main"
+    );
+    assert_eq!(main_text(&mut store, "revert.md").as_deref(), Some("B"));
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn a_resolved_update_conflict_is_not_asked_again_by_a_merge() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "r.md", LINES);
+    fork(&mut store);
+    put(&mut store, "main", "r.md", "main\n2\n3\n4\n5");
+    put(&mut store, "feat", "r.md", "feat\n2\n3\n4\n5");
+    let conflict = conflict_id(&update(&mut store, "r.md"));
+    resolve(&mut store, &conflict, ResolveConflictKind::KeepCurrent);
+
+    assert_eq!(outcome(&update(&mut store, "r.md")), "source unchanged");
+    assert_eq!(outcome(&merge(&mut store, "r.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "r.md").as_deref(),
+        Some("feat\n2\n3\n4\n5")
+    );
+    assert_eq!(open_conflicts(&mut store), 0);
+}
+
+#[test]
+fn updating_after_main_undid_a_merge_keeps_the_version() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "u.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "u.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "u.md")), "write");
+    put(&mut store, "main", "u.md", "A");
+
+    assert_eq!(outcome(&update(&mut store, "u.md")), "source unchanged");
+    assert_eq!(feat_text(&mut store, "u.md").as_deref(), Some("C"));
+    assert_eq!(outcome(&merge(&mut store, "u.md")), "write");
+    assert_eq!(main_text(&mut store, "u.md").as_deref(), Some("C"));
+}
+
+#[test]
+fn a_merge_recorded_before_updates_existed_lets_main_reach_the_version() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "p.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "p.md", "C");
+    assert_eq!(outcome(&merge(&mut store, "p.md")), "write");
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch(
+                "ALTER TABLE merge_bases DROP COLUMN merged_into;
+                 ALTER TABLE merge_bases ADD COLUMN merged_into TEXT NOT NULL DEFAULT 'main'
+                     CHECK (merged_into IN ('main', 'named'));",
+            )
+            .map_err(StorageError::persist_public)
+        })
+        .expect("replay the column migration over an older row");
+
+    put(&mut store, "main", "p.md", "D");
+    assert_eq!(outcome(&update(&mut store, "p.md")), "write");
+    assert_eq!(feat_text(&mut store, "p.md").as_deref(), Some("D"));
+    assert_eq!(outcome(&merge(&mut store, "p.md")), "already same");
+}
+
+#[test]
+fn a_merge_between_unrelated_versions_has_no_base() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "x.md", "A");
+    fork(&mut store);
+    let mut input = merge_request("x.md");
+    input.source_version_id = "main".to_owned();
+    input.target_version_id = "main".to_owned();
+    let error = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&input, &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("a version does not merge into itself");
+    assert!(matches!(error, DomainError::ForkBaseNotFound));
 }

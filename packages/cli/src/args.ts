@@ -189,7 +189,8 @@ type CliCommandBody =
   | { verb: "versionCompare"; version: string; afterPath?: string }
   | { verb: "versionConflicts"; afterConflictId?: string }
   | { verb: "versionCreate"; name: string }
-  | { verb: "versionSwitch" | "versionMerge"; version: string }
+  | { verb: "versionSwitch" | "versionMerge" | "versionUpdate"; version: string }
+  | { verb: "versionArchive"; version: string; restore: boolean }
   | {
       verb: "versionResolve";
       conflictId: string;
@@ -2825,6 +2826,32 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           version: versionOperand(input, "version merge"),
         }),
       },
+      update: {
+        capabilityId: "version.update",
+        summary: "Bring Main's changes into a version made from Main.",
+        operands: "<version>",
+        notes: [
+          "Prints the open conflicts the update leaves. A protected file both sides changed stays as the version has it.",
+        ],
+        parse: (input) => ({
+          verb: "versionUpdate",
+          version: versionOperand(input, "version update"),
+        }),
+      },
+      archive: {
+        capabilityId: "version.archive",
+        summary: "Archive a version, or restore an archived one.",
+        operands: "<version>",
+        flags: [{ name: "--restore", text: "Restore an archived version." }],
+        notes: [
+          "An archived version keeps its files and leaves the version menu. Main and the active version can't be archived.",
+        ],
+        parse: (input) => ({
+          verb: "versionArchive",
+          version: versionOperand(input, "version archive"),
+          restore: input.flags.has("--restore"),
+        }),
+      },
       resolve: {
         capabilityId: "version.conflict.resolve",
         summary: "Resolve an open conflict.",
@@ -2839,7 +2866,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         ],
         notes: [
           "Use - to read the combined text from stdin. Give exactly one of --keep, --text or -.",
-          "In a merge, current is Main and incoming is the version. In sync, current is this computer.",
+          "In a merge, current is Main and incoming is the version. In an update, current is the version and incoming is Main. In sync, current is this computer.",
         ],
         parse: (input) => {
           const [conflictId, body, ...extra] = input.operands;

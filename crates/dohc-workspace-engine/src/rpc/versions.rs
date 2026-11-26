@@ -333,6 +333,15 @@ struct VersionsSetActiveParams {
     version_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsSetArchivedParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    archived: bool,
+}
+
 pub(super) fn version_record_json(version: &VersionRecord) -> Value {
     let mut value = json!({
         "id": version.version_id,
@@ -347,6 +356,9 @@ pub(super) fn version_record_json(version: &VersionRecord) -> Value {
             fork_point["momentId"] = json!(moment_id);
         }
         value["forkPoint"] = fork_point;
+    }
+    if let Some(archived_at_ms) = version.archived_at_ms {
+        value["archivedAtMs"] = json!(archived_at_ms);
     }
     value
 }
@@ -1338,6 +1350,9 @@ impl EngineService {
         if active.version_id == target.version_id {
             return Ok(version_record_json(&target));
         }
+        if target.archived_at_ms.is_some() {
+            return Err(WireError::new(ErrorCode::InvalidParams, "version-archived"));
+        }
 
         let fence = self
             .version_fence()
@@ -1361,6 +1376,27 @@ impl EngineService {
             VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
             VersionFenceOutcome::UndoCommitted(_) => unreachable!("version fences never undo"),
         }
+    }
+
+    pub(super) async fn versions_set_archived(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsSetArchivedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let version = open
+            .actor
+            .set_version_archived(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.archived.then(now_ms).transpose()?,
+                Arc::new(NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
     }
 
     pub(super) async fn versions_list(
@@ -1403,6 +1439,7 @@ impl EngineService {
                     "createdAtMs": version.created_at_ms,
                     "forkVersionId": version.fork_version_id,
                     "forkMomentId": version.fork_moment_id,
+                    "archivedAtMs": version.archived_at_ms,
                 })
             })
             .collect();

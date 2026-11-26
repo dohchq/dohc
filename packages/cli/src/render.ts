@@ -818,6 +818,24 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ...conflictLines(merge),
       ].join("\n");
     }
+    case "versionUpdate": {
+      const update = result as CliResultByVerb["versionUpdate"];
+      if (!update.ok) return update.reason;
+      return [
+        `Updated ${lineSafe(update.version.name)} from Main · ${counted(update.mergedFileCount, "file", "files")} merged · ${counted(update.conflictCount, "conflict", "conflicts")}`,
+        ...(update.skippedProtectedFileCount > 0
+          ? [
+              `${counted(update.skippedProtectedFileCount, "protected file", "protected files")} changed on both sides kept the version's copy`,
+            ]
+          : []),
+        ...conflictLines(update),
+      ].join("\n");
+    }
+    case "versionArchive": {
+      const archive = result as CliResultByVerb["versionArchive"];
+      if (!archive.ok) return archive.reason;
+      return `${archive.archived ? "Archived" : "Restored"} ${lineSafe(archive.version.name)} · ${archive.version.id}`;
+    }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);
     case "moment":

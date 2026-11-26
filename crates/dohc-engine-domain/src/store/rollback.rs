@@ -1170,7 +1170,7 @@ fn rollback_moment_has_dependents(
     let mut version_stmt = conn
         .prepare_cached(
             "SELECT workspace_id, version_id, kind, name, created_at_ms, fork_version_id, \
-             fork_moment_id FROM versions WHERE workspace_id = ?1",
+             fork_moment_id, archived_at_ms FROM versions WHERE workspace_id = ?1",
         )
         .map_err(DomainError::sql_corrupt)?;
     let version_rows = version_stmt

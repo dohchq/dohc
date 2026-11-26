@@ -669,7 +669,7 @@ impl EngineService {
             if has_state {
                 return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
             }
-            return Ok(json!({ "changed": false, "moment": Value::Null }));
+            return Ok(json!({ "changed": false, "moment": Value::Null, "diverged": false }));
         };
         let result = open
             .actor
@@ -693,6 +693,7 @@ impl EngineService {
         Ok(json!({
             "changed": result.changed,
             "moment": result.moment.as_ref().map(secret_moment_json),
+            "diverged": result.diverged,
         }))
     }
 

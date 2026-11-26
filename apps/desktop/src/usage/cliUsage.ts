@@ -182,6 +182,8 @@ const STATIC_LEGACY_WRITES: Readonly<Record<StaticLegacyVerb, boolean>> = {
   versionCreate: true,
   versionSwitch: true,
   versionMerge: true,
+  versionUpdate: true,
+  versionArchive: true,
   versionResolve: true,
   keptCopies: false,
   collectionsWaiting: false,

@@ -858,6 +858,73 @@ describe("mergeVersionIntoMain", () => {
   });
 });
 
+describe("updateVersionFromMain", () => {
+  async function draftAndMainChanged(draftText: string | null) {
+    const root = await createTestScratch("dohc-version-ops-");
+    await write(root, "plan.md", "base\n");
+    const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    if (draftText !== null) {
+      await write(root, "plan.md", draftText);
+      engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+      await engine.flush();
+    }
+    await engine.switchVersion("main");
+    await write(root, "plan.md", "main\n");
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    return { root, engine, draftId: await versionIdByName(engine, "Draft") };
+  }
+
+  it("brings Main's change into the version and onto disk while it is active", async () => {
+    const { root, engine, draftId } = await draftAndMainChanged(null);
+    await engine.switchVersion(draftId);
+    expect(await readText(root, "plan.md")).toBe("base\n");
+    const result = await engine.updateVersionFromMain(draftId);
+    expect(result).toMatchObject({ mergedFileCount: 1, conflictCount: 0 });
+    expect(await readText(root, "plan.md")).toBe("main\n");
+    await engine.switchVersion("main");
+    expect(await readText(root, "plan.md")).toBe("main\n");
+    await engine.stop();
+  });
+
+  it("refuses a merge into Main while the version's update waits on a decision", async () => {
+    const { engine, draftId } = await draftAndMainChanged("draft\n");
+    expect((await engine.updateVersionFromMain(draftId)).conflictCount).toBe(1);
+    await expect(engine.mergeVersionIntoMain(draftId)).rejects.toThrow(
+      'Decide the conflicts from updating "Draft" from Main before merging it.',
+    );
+    await engine.stop();
+  });
+
+  it("refuses to update, merge, or switch to an archived version until it is restored", async () => {
+    const { engine, draftId } = await draftAndMainChanged(null);
+    await expect(engine.setVersionArchived("main", true)).rejects.toThrow(
+      "Main can't be archived.",
+    );
+    await engine.switchVersion(draftId);
+    await expect(engine.setVersionArchived(draftId, true)).rejects.toThrow(
+      "Switch to another version before archiving this one.",
+    );
+    await engine.switchVersion("main");
+    const archived = await engine.setVersionArchived(draftId, true);
+    expect(archived.versions.find((version) => version.id === draftId)?.archivedAtMs).toEqual(
+      expect.any(Number),
+    );
+    await expect(engine.updateVersionFromMain(draftId)).rejects.toThrow(
+      'Restore version "Draft" before updating it.',
+    );
+    await expect(engine.switchVersion(draftId)).rejects.toThrow(
+      'Restore version "Draft" before switching to it.',
+    );
+    await engine.setVersionArchived(draftId, false);
+    expect((await engine.updateVersionFromMain(draftId)).mergedFileCount).toBe(1);
+    await engine.stop();
+  });
+});
+
 describe("restoreFileToBeforeMoment", () => {
   it("restores a binary file to prior bytes byte-exactly", async () => {
     const root = await createTestScratch("dohc-version-ops-");

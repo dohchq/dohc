@@ -241,6 +241,11 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["versionId"],
     optionalStrings: ["workspaceId"],
   },
+  [VERSIONED_METHOD.versionsSetArchived]: {
+    requiredStrings: ["versionId"],
+    optionalStrings: ["workspaceId"],
+    optionalBools: ["archived"],
+  },
   [VERSIONED_METHOD.versionsEnsureMain]: { optionalStrings: ["workspaceId"] },
   [VERSIONED_METHOD.versionsActive]: { optionalStrings: ["workspaceId"] },
   [VERSIONED_METHOD.versionsMerge]: {
@@ -360,12 +365,16 @@ interface LoopbackVersion {
   kind: "main" | "named";
   name: string;
   createdAtMs: number;
+  archivedAtMs?: number;
   forkVersionId?: string;
   forkMomentId?: string;
   files: Map<string, LoopbackFile>;
   textForkBase: Map<string, LoopbackFile>;
   secrets: Map<string, string>;
   secretForkBase: Map<string, string>;
+  // A named version's last merge with its fork parent, either way, per path.
+  mergeBase?: Map<string, LoopbackFile | undefined>;
+  secretMergeBase?: Map<string, string | undefined>;
 }
 
 interface InternalSecretMoment {
@@ -1328,6 +1337,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.versionsList(state, params);
       case VERSIONED_METHOD.versionsSetActive:
         return this.setActive(state, params);
+      case VERSIONED_METHOD.versionsSetArchived:
+        return this.setArchived(state, params);
       case VERSIONED_METHOD.versionsEnsureMain:
         return this.versionJson(this.ensureMain(state, workspace));
       case VERSIONED_METHOD.versionsActive:
@@ -2260,6 +2271,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         kind: version.kind,
         name: version.name,
         createdAtMs: version.createdAtMs,
+        archivedAtMs: version.archivedAtMs ?? null,
         forkVersionId: version.forkVersionId ?? null,
         forkMomentId: version.forkMomentId ?? null,
       })),
@@ -2269,9 +2281,29 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private setActive(state: WorkspaceState, params: JsonObject): JsonValue {
     const version = this.version(state, requiredString(params, "versionId", "setActive"));
+    if (version.archivedAtMs !== undefined) throw new Error("version-archived");
     state.activeVersionId = version.id;
     state.versioned = true;
     return this.versionJson(version);
+  }
+
+  private setArchived(state: WorkspaceState, params: JsonObject): JsonValue {
+    const version = this.version(state, requiredString(params, "versionId", "setArchived"));
+    if (version.kind === "main") throw new Error("version-is-main");
+    if (params.archived !== true) delete version.archivedAtMs;
+    else if (version.id === state.activeVersionId) throw new Error("version-is-active");
+    else version.archivedAtMs ??= this.clock++;
+    return this.versionJson(version);
+  }
+
+  private mergeNamed(source: LoopbackVersion, target: LoopbackVersion) {
+    if (source.kind === "named" && source.forkVersionId === target.id) return source;
+    if (target.kind === "named" && target.forkVersionId === source.id) return target;
+    return undefined;
+  }
+
+  private mergeBaseOf(named: LoopbackVersion, path: string) {
+    return named.mergeBase?.has(path) ? named.mergeBase.get(path) : named.textForkBase.get(path);
   }
 
   private comparisonRecord(
@@ -2282,7 +2314,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonObject {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
-    const base = source.textForkBase.get(path);
+    const named = this.mergeNamed(source, target);
+    const base = named ? this.mergeBaseOf(named, path) : source.textForkBase.get(path);
     const status = this.filesEqual(current, incoming)
       ? "same"
       : this.filesEqual(current, base)
@@ -2358,12 +2391,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const source = this.version(state, sourceVersionId);
     const target = this.version(state, targetVersionId);
-    if (source.kind !== "named" || source.forkVersionId !== target.id) {
-      throw new Error("fork-base-not-found");
-    }
+    const named = this.mergeNamed(source, target);
+    if (!named) throw new Error("fork-base-not-found");
     const incoming = source.files.get(path);
     const current = target.files.get(path);
-    const base = source.textForkBase.get(path);
+    const base = this.mergeBaseOf(named, path);
     const comparison = this.comparisonRecord(workspace, path, target, source);
     // The fast-forward writes a side through the text seam, so both live sides
     // must be text. The base does not gate it: a binary base can never
@@ -2425,6 +2457,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return result;
       }
     }
+    (named.mergeBase ??= new Map()).set(path, incoming && copyFile(incoming));
     const materializeEnqueued = target.id === state.activeVersionId;
     if (!incoming) {
       const before = this.file(target, path);
@@ -2701,11 +2734,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (!source || !target) throw new Error("invalid-version");
     validateSecretMomentId(momentId);
     const path = normalizedSecretPath(rawPath);
+    const named = this.mergeNamed(source, target);
+    if (!named) throw new Error("fork-base-not-found");
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
-    const base = source.secretForkBase.get(path);
-    if ((before === undefined && after === undefined) || before === after || after === base) {
-      return { changed: false, moment: null };
+    const base = named.secretMergeBase?.has(path)
+      ? named.secretMergeBase.get(path)
+      : named.secretForkBase.get(path);
+    const diverged = named === target && after !== base && before !== after && before !== base;
+    if (after !== base && !diverged) (named.secretMergeBase ??= new Map()).set(path, after);
+    if (before === after || after === base || diverged) {
+      return { changed: false, moment: null, diverged };
     }
     this.assertFreshSecretMoment(state, momentId);
     if (after === undefined) target.secrets.delete(path);
@@ -2722,7 +2761,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       correlationId,
     );
     state.secretMoments.set(momentId, { wire, before, after });
-    return { changed: true, moment: wire };
+    return { changed: true, moment: wire, diverged: false };
   }
 
   private secretRestore(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -3646,6 +3685,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       name: version.name,
       createdAtMs: version.createdAtMs,
     };
+    if (version.archivedAtMs !== undefined) value.archivedAtMs = version.archivedAtMs;
     if (version.forkVersionId) {
       const forkPoint: JsonObject = { versionId: version.forkVersionId };
       if (version.forkMomentId) forkPoint.momentId = version.forkMomentId;

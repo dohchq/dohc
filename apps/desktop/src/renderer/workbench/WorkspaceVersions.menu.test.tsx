@@ -11,6 +11,7 @@ const bridgeMock = {
   switchWorkspaceVersion: vi.fn(),
   createWorkspaceVersion: vi.fn(),
   mergeWorkspaceVersion: vi.fn(),
+  updateWorkspaceVersion: vi.fn(),
   listWorkspaceVersionConflicts: vi.fn(),
   listVersionLastChanges: vi.fn(),
 };
@@ -250,6 +251,7 @@ describe("VersionMenu", () => {
         "separator",
         "version-compare",
         "version-merge",
+        "version-update",
         "version-share",
       ],
     ],
@@ -399,6 +401,37 @@ describe("VersionMenu", () => {
     expect(chipDot).toBeDefined();
     expect(draftDot?.className.split(" ")).toContain(chipDot);
     expect(screen.getByRole("menuitemradio", { name: "Draft" })).toBeTruthy();
+  });
+
+  it("leaves archived versions out of the list", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({
+      versions: [MAIN, DRAFT, { ...NESTED, archivedAtMs: 5 }],
+      activeVersionId: "draft",
+    });
+    renderMenu();
+    await openOn(userEvent.setup(), "Draft");
+    expect(rows().slice(0, 3)).toEqual(["Main", "Draft", "version-new"]);
+  });
+
+  it("offers Update from Main only on a version made from Main, and opens its dialog", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({
+      versions: [MAIN, DRAFT, NESTED],
+      activeVersionId: "nested",
+    });
+    renderMenu();
+    const user = userEvent.setup();
+    await openOn(user, "Draft two");
+    expect(screen.queryByTestId("version-update")).toBeNull();
+    await user.keyboard("{Escape}");
+    cleanup();
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({
+      versions: [MAIN, DRAFT],
+      activeVersionId: "draft",
+    });
+    renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-update"));
+    expect(screen.getByTestId("version-merge-confirm").textContent).toBe("Update from Main");
   });
 
   it("says on the Merge row why a version made from another version cannot merge", async () => {
@@ -594,6 +627,7 @@ describe("VersionMenu", () => {
     unchangedFileCount: 0,
     conflictCount: 0,
     replacedProtectedPaths: [],
+    skippedProtectedPaths: [],
     conflicts: [],
     nextAfterConflictId: null,
   };
@@ -803,7 +837,7 @@ describe("VersionMenu", () => {
     ],
     [
       "protected files",
-      { ...merged, replacedProtectedPaths: [".env"] },
+      { ...merged, replacedProtectedPaths: [".env"], skippedProtectedPaths: [] },
       {
         tone: "success",
         title: "Merged 1 file from Draft into Main",
@@ -948,6 +982,16 @@ describe("VersionMenu", () => {
 });
 
 describe("mergeFilesWait", () => {
+  it("finds a file an update of the version left to decide", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({
+      conflicts: [
+        { conflictId: "c", origin: "merge", sourceVersionId: "main", targetVersionId: "draft" },
+      ],
+      nextAfterConflictId: null,
+    });
+    await expect(mergeFilesWait("ws-1", "draft")).resolves.toBe(true);
+  });
+
   const row = (conflictId: string, origin: "merge" | "sync", sourceVersionId: string) => ({
     conflictId,
     path: `${conflictId}.md`,

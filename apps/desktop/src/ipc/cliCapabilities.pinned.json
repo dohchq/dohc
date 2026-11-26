@@ -303,6 +303,12 @@
     "versionMerge": [
       "version.merge"
     ],
+    "versionUpdate": [
+      "version.update"
+    ],
+    "versionArchive": [
+      "version.archive"
+    ],
     "versionResolve": [
       "version.conflict.resolve"
     ],
@@ -449,6 +455,8 @@
     "version create": "version.create",
     "version switch": "version.switch",
     "version merge": "version.merge",
+    "version update": "version.update",
+    "version archive": "version.archive",
     "version resolve": "version.conflict.resolve",
     "automation list": "automation.list",
     "automation switch": "automation.switch",

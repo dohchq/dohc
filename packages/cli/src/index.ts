@@ -195,10 +195,22 @@ function buildCliRequest(
       };
     case "versionSwitch":
     case "versionMerge":
+    case "versionUpdate":
       return {
         protocolVersion: common.protocolVersion,
         verb: command.verb,
         args: { cwd: common.cwd, actor: common.actor, version: command.version },
+      };
+    case "versionArchive":
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          version: command.version,
+          restore: command.restore,
+        },
       };
     case "versionResolve":
       return {
@@ -747,6 +759,8 @@ const REFUSING_VERBS = new Set([
   "versionCreate",
   "versionSwitch",
   "versionMerge",
+  "versionUpdate",
+  "versionArchive",
   "versionResolve",
   "accountDelete",
   "moments",

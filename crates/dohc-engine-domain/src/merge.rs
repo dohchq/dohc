@@ -8,7 +8,7 @@ use crate::conflicts::{
 use crate::error::DomainError;
 use crate::records::{
     DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord, TextSnapshot,
-    VersionKind, WriteResult, WriteText,
+    WriteResult, WriteText,
 };
 use crate::store::{
     VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_file_object, get_moment,
@@ -901,34 +901,28 @@ fn compare_text_file_versions_in_db(
     conn: &Connection,
     input: &CompareTextFileVersions,
 ) -> Result<VersionedTextComparison, DomainError> {
-    let target_exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.target_version_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    if target_exists.is_none() {
-        return Err(DomainError::VersionNotFound);
+    for version_id in [&input.target_version_id, &input.source_version_id] {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![input.workspace_id, version_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if exists.is_none() {
+            return Err(DomainError::VersionNotFound);
+        }
     }
-    let source: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT kind, fork_version_id FROM versions \
-             WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.source_version_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    let Some((kind, fork_version_id)) = source else {
-        return Err(DomainError::VersionNotFound);
-    };
-    if VersionKind::from_db(&kind)? != VersionKind::Named
-        || fork_version_id.as_deref() != Some(input.target_version_id.as_str())
-    {
+    let Some((named_version_id, merged_into)) = merge_pair(
+        conn,
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.target_version_id,
+    )?
+    else {
         return Err(DomainError::ForkBaseNotFound);
-    }
+    };
     let current = select_snapshot(
         conn,
         "snapshots",
@@ -936,19 +930,25 @@ fn compare_text_file_versions_in_db(
         &input.target_version_id,
         &input.path,
     )?;
-    let base = select_merge_base(
-        conn,
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-        &current,
-    )?;
     let incoming = select_snapshot(
         conn,
         "snapshots",
         &input.workspace_id,
         &input.source_version_id,
         &input.path,
+    )?;
+    let (parent_side, named_side) = if merged_into == MERGED_INTO_PARENT {
+        (&current, &incoming)
+    } else {
+        (&incoming, &current)
+    };
+    let base = select_merge_base(
+        conn,
+        &input.workspace_id,
+        &named_version_id,
+        &input.path,
+        parent_side,
+        named_side,
     )?;
     let status = comparison_status(&base, &current, &incoming);
     Ok(VersionedTextComparison {
@@ -997,17 +997,51 @@ fn content_identity(side: &Option<ComparisonSide>) -> ContentIdentity<'_> {
     })
 }
 
-/// The base a merge of `path` from a named version compares against: what
-/// the version last merged at that path, or its fork point if it never has.
-/// When the target holds what it held just before that merge, and not what
-/// the merge left, the merge was undone there; the base is then the one that
-/// merge itself used, so merging again applies the version's change again.
-fn select_merge_base(
+pub(crate) const MERGED_INTO_PARENT: &str = "main";
+pub(crate) const MERGED_INTO_NAMED: &str = "named";
+
+/// The named version whose merge base a merge between `source` and `target`
+/// reads and records, and which side the merge writes: the version's fork
+/// parent (`MERGED_INTO_PARENT`) or the named version (`MERGED_INTO_NAMED`).
+pub(crate) fn merge_pair(
     conn: &Connection,
     workspace_id: &str,
     source_version_id: &str,
+    target_version_id: &str,
+) -> Result<Option<(String, &'static str)>, DomainError> {
+    let fork_of = |version_id: &str| -> Result<Option<String>, DomainError> {
+        conn.query_row(
+            "SELECT fork_version_id FROM versions \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND kind = 'named'",
+            params![workspace_id, version_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(DomainError::sql_corrupt)
+    };
+    if fork_of(source_version_id)?.as_deref() == Some(target_version_id) {
+        return Ok(Some((source_version_id.to_owned(), MERGED_INTO_PARENT)));
+    }
+    if fork_of(target_version_id)?.as_deref() == Some(source_version_id) {
+        return Ok(Some((target_version_id.to_owned(), MERGED_INTO_NAMED)));
+    }
+    Ok(None)
+}
+
+/// The base a merge of `path` between a named version and its fork parent
+/// compares against: what the last merge in either direction carried at that
+/// path, or the fork point if none has. When the side that merge wrote holds
+/// what it held just before, and not what the merge left, the merge was
+/// undone there; the base is then the one that merge itself used, so merging
+/// again applies the change again.
+fn select_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    named_version_id: &str,
     path: &str,
-    current: &Option<ComparisonSide>,
+    parent_side: &Option<ComparisonSide>,
+    named_side: &Option<ComparisonSide>,
 ) -> Result<Option<ComparisonSide>, DomainError> {
     type MergeBaseRow = (
         i64,
@@ -1016,13 +1050,14 @@ fn select_merge_base(
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     );
     let row: Option<MergeBaseRow> = conn
         .query_row(
             "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
-             target_after_kind, target_after_sha256 FROM merge_bases \
+             target_after_kind, target_after_sha256, merged_into FROM merge_bases \
              WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
-            params![workspace_id, source_version_id, path],
+            params![workspace_id, named_version_id, path],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -1031,22 +1066,35 @@ fn select_merge_base(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let Some((base_exists, prior_exists, before_kind, before_sha, after_kind, after_sha)) = row
+    let Some((
+        base_exists,
+        prior_exists,
+        before_kind,
+        before_sha,
+        after_kind,
+        after_sha,
+        merged_into,
+    )) = row
     else {
         return select_snapshot(
             conn,
             "fork_base_snapshots",
             workspace_id,
-            source_version_id,
+            named_version_id,
             path,
         );
     };
-    let held = content_identity(current);
+    let held = content_identity(if merged_into == MERGED_INTO_PARENT {
+        parent_side
+    } else {
+        named_side
+    });
     let before = before_kind.as_deref().zip(before_sha.as_deref());
     let after = after_kind.as_deref().zip(after_sha.as_deref());
     let (side, exists) = if held == before && held != after {
@@ -1066,13 +1114,14 @@ fn select_merge_base(
          LEFT JOIN binary_blobs bb ON bb.sha256 = m.{side}_binary_sha256 \
          WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3"
     );
-    select_side(conn, &sql, workspace_id, source_version_id, path)
+    select_side(conn, &sql, workspace_id, named_version_id, path)
 }
 
-/// Record that `comparison.path` of a named version reached its fork parent:
-/// the incoming side becomes the path's merge base, the base the comparison
-/// used becomes its prior, and the target's content before (`current`) and
-/// after (`target_after`) tell a later merge whether this one was undone.
+/// Record that `comparison.path` crossed between a named version and its
+/// fork parent: the incoming side becomes the path's merge base, the base the
+/// comparison used becomes its prior, and the target's content before
+/// (`current`) and after (`target_after`) tell a later merge whether this one
+/// was undone.
 fn record_merge_base(
     tx: &Transaction<'_>,
     comparison: &VersionedTextComparison,
@@ -1124,15 +1173,25 @@ fn record_merge_base(
             [text(kind), text(sha)]
         })
     }
+    let Some((named_version_id, merged_into)) = merge_pair(
+        tx,
+        &comparison.workspace_id,
+        &comparison.source_version_id,
+        &comparison.target_version_id,
+    )?
+    else {
+        return Err(DomainError::ForkBaseNotFound);
+    };
     let mut values = vec![
         text(&comparison.workspace_id),
-        text(&comparison.source_version_id),
+        text(&named_version_id),
         text(&comparison.path),
     ];
     values.extend(side(&comparison.incoming));
     values.extend(side(&comparison.base));
     values.extend(identity(content_identity(&comparison.current)));
     values.extend(identity(target_after));
+    values.push(text(merged_into));
     tx.execute(
         "INSERT OR REPLACE INTO merge_bases (workspace_id, source_version_id, path, \
          base_exists, base_object_id, base_content_kind, base_blob_sha256, \
@@ -1141,9 +1200,10 @@ fn record_merge_base(
          prior_exists, prior_object_id, prior_content_kind, prior_blob_sha256, \
          prior_binary_sha256, prior_updated_at_ms, prior_latest_moment_id, \
          prior_metadata_origin, prior_metadata_summary, prior_metadata_correlation_id, \
-         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256) \
+         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256, \
+         merged_into) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         rusqlite::params_from_iter(values),
     )
     .map_err(DomainError::sql_persist)?;
@@ -1161,19 +1221,13 @@ pub(crate) fn record_resolved_merge_conflict(
     let Some(target_after) = target_after else {
         return Ok(());
     };
-    let source: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT kind, fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![conflict.workspace_id, conflict.source_version_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    let Some((kind, fork_version_id)) = source else {
-        return Ok(());
-    };
-    if VersionKind::from_db(&kind)? != VersionKind::Named
-        || fork_version_id.as_deref() != Some(conflict.target_version_id.as_str())
+    if merge_pair(
+        tx,
+        &conflict.workspace_id,
+        &conflict.source_version_id,
+        &conflict.target_version_id,
+    )?
+    .is_none()
     {
         return Ok(());
     }

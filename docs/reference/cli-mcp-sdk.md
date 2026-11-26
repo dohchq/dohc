@@ -36,7 +36,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
-| **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
+| **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_update_version`](#dohc_update_version), [`dohc_archive_version`](#dohc_archive_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
 | **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
@@ -698,6 +698,27 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
+### `dohc_update_version`
+
+Bring Main's changes into a version made from Main, named by its name or id from dohc_list_versions. Returns the merged and conflict counts, the count of protected files both sides changed (left as the version has them), and the first page of open conflicts. In an update's conflicts, current is the version and incoming is Main. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, skippedProtectedFileCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_archive_version`
+
+Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main and the active version can't be archived. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+- `restore`: `boolean`
+
+Returns `{ ok: true, version: { id, name }, archived } | { ok: false, reason }`.
+
 ### `dohc_list_version_conflicts`
 
 Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
@@ -710,7 +731,7 @@ Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersi
 
 ### `dohc_resolve_version_conflict`
 
-Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.
+Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in an update, current is the version and incoming is Main; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -2832,6 +2853,32 @@ Only versions made from Main can merge into Main. Prints the open conflicts the 
 
 With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
+#### `dohc version update`
+
+```sh
+dohc version update <version> [options]
+```
+
+Bring Main's changes into a version made from Main.
+
+Prints the open conflicts the update leaves. A protected file both sides changed stays as the version has it.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, skippedProtectedFileCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
+
+#### `dohc version archive`
+
+```sh
+dohc version archive <version> [options]
+```
+
+Archive a version, or restore an archived one.
+
+An archived version keeps its files and leaves the version menu. Main and the active version can't be archived.
+
+- `--restore`: Restore an archived version.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, archived }`.
+
 #### `dohc version resolve`
 
 ```sh
@@ -2840,7 +2887,7 @@ dohc version resolve <conflict> [-] [options]
 
 Resolve an open conflict.
 
-Use - to read the combined text from stdin. Give exactly one of --keep, --text or -. In a merge, current is Main and incoming is the version. In sync, current is this computer.
+Use - to read the combined text from stdin. Give exactly one of --keep, --text or -. In a merge, current is Main and incoming is the version. In an update, current is the version and incoming is Main. In sync, current is this computer.
 
 - `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
 - `--text <text>`: Replace both sides with this combined text.
