@@ -29,7 +29,7 @@ export const renderPublicFixture: FixtureRenderer = (checkpoint, context) => {
     Y.applyUpdate(doc, checkpoint);
     const markdown = yDocToMarkdown(doc);
     editor = mountLiveBodyEditor(editorHost, {
-      body: doc.getXmlFragment("body"),
+      doc,
       canEdit: () => false,
       edit: () => false,
       label: "Shared file editor",

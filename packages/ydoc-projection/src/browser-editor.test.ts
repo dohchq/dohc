@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import {
   mountLiveBodyEditor,
   type LiveBodyEditorHandle,
   type LiveEditorToolbarState,
 } from "./browser-editor.js";
 import { markdownToYDoc, yDocToMarkdown } from "./import-export.js";
+import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
 
 beforeAll(() => {
   const emptyRect = {
@@ -40,14 +40,15 @@ function setup(
   options: {
     editable?: boolean;
     resolveImage?: (src: string) => string | null;
+    bodySequence?: boolean;
   } = {},
 ) {
-  const doc = markdownToYDoc(markdown);
+  const doc = markdownToYDoc(markdown, { bodySequence: options.bodySequence ?? false });
   const mount = document.createElement("div");
   document.body.append(mount);
   let editable = options.editable ?? true;
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => editable,
     edit(change) {
@@ -524,6 +525,152 @@ describe("mountLiveBodyEditor", () => {
       ctx.paste("Blocked\n\nParagraph");
 
       expect(Y.encodeStateAsUpdate(ctx.doc)).toEqual(before);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
+describe("mountLiveBodyEditor on a note in format 2", () => {
+  beforeAll(() => admitBodySequenceNotes(true));
+  afterAll(() => admitBodySequenceNotes(false));
+
+  function sequenceNote(markdown: string, options: { editable?: boolean } = {}) {
+    const ctx = setup(markdown, { ...options, bodySequence: true });
+    const stored = new Y.Doc();
+    Y.applyUpdate(stored, Y.encodeStateAsUpdate(ctx.doc));
+    const refusals: unknown[] = [];
+    ctx.doc.on("update", (update: Uint8Array) => refusals.push(liveEditRefusal(stored, update)));
+    return { ...ctx, stored, refusals };
+  }
+
+  it("shows the note's text and writes typing, list toggles, Markdown shortcuts and a tick that the save takes", async () => {
+    const ctx = sequenceNote("Item one");
+    try {
+      expect(ctx.textbox.textContent).toBe("Item one");
+      ctx.setCaretAt(ctx.textbox.querySelector("p")!.firstChild!, 8);
+      ctx.paste(" and two");
+      expect(yDocToMarkdown(ctx.doc)).toBe("Item one and two\n");
+      expect(ctx.editor.toggleBulletList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("- Item one and two\n");
+      expect(ctx.editor.toggleOrderedList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("1. Item one and two\n");
+      expect(ctx.editor.toggleTaskList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("- [ ] Item one and two\n");
+      const box = ctx.textbox.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+      box.checked = true;
+      box.dispatchEvent(new Event("change"));
+      expect(yDocToMarkdown(ctx.doc)).toBe("- [x] Item one and two\n");
+      expect(ctx.editor.toggleTaskList()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("Item one and two\n");
+      expect(ctx.refusals).toHaveLength(6);
+      expect(ctx.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      ctx.cleanup();
+    }
+
+    const task = sequenceNote("");
+    try {
+      await task.typeTrigger("-", " ");
+      await vi.waitFor(() => expect(task.textbox.querySelector("ul > li")).not.toBeNull());
+      await task.typeTrigger("[x]", " ");
+      await vi.waitFor(() =>
+        expect(
+          task.textbox.querySelector('li[data-type="taskItem"]')?.getAttribute("data-checked"),
+        ).toBe("true"),
+      );
+      expect(yDocToMarkdown(task.doc)).toBe("- [x]\n");
+      expect(task.refusals.length).toBeGreaterThan(0);
+      expect(task.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      task.cleanup();
+    }
+
+    const rule = sequenceNote("");
+    try {
+      await rule.typeTrigger("---", " ");
+      await vi.waitFor(() => expect(rule.textbox.querySelector("hr")).not.toBeNull());
+      expect(yDocToMarkdown(rule.doc)).toContain("***");
+      expect(rule.refusals.length).toBeGreaterThan(0);
+      expect(rule.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      rule.cleanup();
+    }
+  });
+
+  it("takes Redo with nothing left to redo without bringing back a deleted paragraph", () => {
+    const ctx = sequenceNote("Start line.\n\nDoomed block.\n\nEnd line.");
+    try {
+      const [, doomed, end] = ctx.textbox.querySelectorAll("p");
+      ctx.editor.focus();
+      const range = document.createRange();
+      range.setStart(doomed!.firstChild!, 0);
+      range.setEnd(end!.firstChild!, 0);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+      ctx.dispatchKey("Backspace");
+      const edited = "Start line.\n\nEnd line.\n";
+      expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+
+      ctx.dispatchKey("z", { ctrlKey: true, keyCode: 90 });
+      expect(yDocToMarkdown(ctx.doc)).toContain("Doomed block.");
+      ctx.dispatchKey("Z", { ctrlKey: true, shiftKey: true, keyCode: 90 });
+      expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+
+      for (const [key, mods] of [
+        ["z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+        ["Z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+        ["y", { ctrlKey: true, keyCode: 89 }],
+      ] as const) {
+        expect(ctx.dispatchKey(key, mods).defaultPrevented).toBe(true);
+        expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+      }
+      expect(ctx.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("undoes and redoes from the toolbar, which says when each can", () => {
+    const ctx = sequenceNote("Item one");
+    try {
+      const seen: LiveEditorToolbarState[] = [];
+      ctx.editor.subscribeToolbar((state) => seen.push(state));
+      expect(ctx.editor.getToolbarState().canUndo).toBe(false);
+      ctx.setCaretAt(ctx.textbox.querySelector("p")!.firstChild!, 4);
+      expect(ctx.editor.toggleBlockquote()).toBe(true);
+      expect(seen.at(-1)?.canUndo).toBe(true);
+      expect(ctx.editor.undo()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("Item one\n");
+      expect(seen.at(-1)).toMatchObject({ canUndo: false, canRedo: true });
+      expect(ctx.editor.redo()).toBe(true);
+      expect(yDocToMarkdown(ctx.doc)).toBe("> Item one\n");
+      expect(seen.at(-1)).toMatchObject({ canUndo: true, canRedo: false });
+      expect(ctx.refusals.every((refusal) => refusal === undefined)).toBe(true);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("writes nothing for Undo or Redo, by key or from the toolbar, while the page takes no edits", () => {
+    const ctx = sequenceNote("Item one");
+    try {
+      ctx.setCaretAt(ctx.textbox.querySelector("p")!.firstChild!, 4);
+      expect(ctx.editor.toggleBlockquote()).toBe(true);
+      expect(ctx.editor.undo()).toBe(true);
+      ctx.setEditable(false);
+      const before = Y.encodeStateAsUpdate(ctx.doc);
+      expect(ctx.editor.undo()).toBe(false);
+      expect(ctx.editor.redo()).toBe(false);
+      for (const [key, mods] of [
+        ["z", { ctrlKey: true, keyCode: 90 }],
+        ["Z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+        ["y", { ctrlKey: true, keyCode: 89 }],
+      ] as const)
+        ctx.dispatchKey(key, mods);
+      expect(Y.encodeStateAsUpdate(ctx.doc)).toEqual(before);
+      expect(yDocToMarkdown(ctx.doc)).toBe("Item one\n");
     } finally {
       ctx.cleanup();
     }

@@ -362,7 +362,7 @@ function document(text: string) {
 }
 function edit(value: Session, text: string) {
   return value.edit(() => {
-    const content = (value.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    const content = (getDohcYDocBodyFragment(value.doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, text);
   });
 }
@@ -442,8 +442,10 @@ describe("named browser transport", () => {
     Y.applyUpdate(f.doc, later.bytes);
     peer.ack(later);
     await waitState(f.value, (state) => state.pendingUpdates === 0);
-    expect(getDohcYDocBodyFragment(f.doc).toString()).toBe(f.value.body.toString());
-    expect(f.value.body.toString()).toContain("base draft offline opening");
+    expect(getDohcYDocBodyFragment(f.doc).toString()).toBe(
+      getDohcYDocBodyFragment(f.value.doc).toString(),
+    );
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("base draft offline opening");
     expect(f.socket.listenerCount).toBe(0);
   });
   it("takes typing while it reconnects after it was live, even when its first open failed", async () => {
@@ -462,7 +464,7 @@ describe("named browser transport", () => {
     socket.close();
     expect(f.value.state()).toMatchObject({ status: "disconnected", typingStopped: false });
     expect(edit(f.value, " offline")).toBe(true);
-    expect(f.value.body.toString()).toContain("base offline");
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("base offline");
   });
   it("takes no typing once it stops reconnecting by itself, and keeps the waiting draft", async () => {
     const f = await live();
@@ -522,9 +524,9 @@ describe("named browser transport", () => {
     expect(f.value.state()).toMatchObject({ status: "closed", pendingUpdates: 1 });
     f.socket.message("late invalid message");
     expect(next.state()).toMatchObject({ status: "disconnected", binding: null });
-    expect(next.body.length).toBe(0);
+    expect(getDohcYDocBodyFragment(next.doc).length).toBe(0);
     expect(edit(f.value, " forbidden")).toBe(false);
-    expect(f.value.body.toString()).toContain("retained");
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("retained");
   });
   it("refuses a different signed-in account before bootstrap", async () => {
     const f = fixture();
@@ -557,7 +559,7 @@ describe("named browser transport", () => {
       pendingUpdates: 1,
       lastApplied: null,
     });
-    expect(f.value.body.toString()).toContain("draft");
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("draft");
     expect(f.sockets).toHaveLength(1);
     expect(edit(f.value, " blocked")).toBe(false);
     f.intercept(undefined);
@@ -575,7 +577,9 @@ describe("named browser transport", () => {
     await waitState(f.value, (state) => state.pendingUpdates === 0);
     expect(f.requests).toHaveLength(10);
     expect(peer.submissions()).toHaveLength(1);
-    expect(f.value.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toBe(
+      getDohcYDocBodyFragment(f.doc).toString(),
+    );
   });
   it("quarantines pending work if a reconnect observes a different account", async () => {
     const f = await live();
@@ -604,7 +608,7 @@ describe("named browser transport", () => {
       await peer.greet();
       await peer.initial(document("WRONG CONTENT"), { ...binding, [field]: "wrong" });
       expect(f.value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
-      expect(f.value.body.length).toBe(0);
+      expect(getDohcYDocBodyFragment(f.value.doc).length).toBe(0);
       expect(socket.listenerCount).toBe(0);
     },
   );
@@ -625,8 +629,8 @@ describe("named browser transport", () => {
       reason: "binding-changed",
       pendingUpdates: 1,
     });
-    expect(f.value.body.toString()).toContain("draft");
-    expect(f.value.body.toString()).not.toContain("RESTORED");
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("draft");
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).not.toContain("RESTORED");
     expect(peer.submissions()).toHaveLength(0);
   });
   it("cancels a connecting socket without accepting a late open", async () => {
@@ -783,7 +787,7 @@ it("counts a desktop editor's typing as its own when someone else's change remov
   getDohcYDocBodyFragment(doc).delete(0, 1);
   peer.applied(Y.encodeStateAsUpdate(doc, hostBefore), 2);
 
-  await vi.waitFor(() => expect(value.body.length).toBe(0));
+  await vi.waitFor(() => expect(getDohcYDocBodyFragment(value.doc).length).toBe(0));
   expect(removed).toEqual([" from the desktop"]);
 });
 
@@ -985,8 +989,8 @@ it("takes edits on the host's early state while a busy server holds the ticket, 
   expect(edit(f.value, " retry")).toBe(false);
   expect(draftNeedsReview(f.value.state())).toBe(true);
   expect(f.value.state().typingStopped).toBe(true);
-  expect(f.value.body.toString()).toContain("base draft");
-  expect(f.value.body.toString()).not.toContain("retry");
+  expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("base draft");
+  expect(getDohcYDocBodyFragment(f.value.doc).toString()).not.toContain("retry");
 });
 it("takes no edits on an early state that arrives while the page tries again after an attempt stopped", async () => {
   vi.useFakeTimers();
@@ -1019,7 +1023,7 @@ it("takes no edits on an early state that arrives while the page tries again aft
   ).toBe(true);
   expect(f.value.state()).toMatchObject({ status: "authorizing", typingAhead: true });
   expect(edit(f.value, " late")).toBe(false);
-  expect(f.value.body.toString()).not.toContain("late");
+  expect(getDohcYDocBodyFragment(f.value.doc).toString()).not.toContain("late");
 });
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();
@@ -1164,7 +1168,7 @@ it("refuses an initial frame bound to another named grant before applying conten
     reason: "binding-changed",
     binding: null,
   });
-  expect(f.value.body.length).toBe(0);
+  expect(getDohcYDocBodyFragment(f.value.doc).length).toBe(0);
 });
 // A restarting or busy server answers an invited account's session and ticket requests with the
 // same 404 as lost access. The page reads its invitation again to tell them apart.

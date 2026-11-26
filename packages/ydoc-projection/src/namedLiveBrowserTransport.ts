@@ -659,7 +659,6 @@ export function createNamedLiveBrowserTransport<
     }
     return {
       doc: provider.doc,
-      body: provider.body,
       state,
       subscribe(listener: (value: NamedLiveBrowserState) => void) {
         listeners.add(listener);

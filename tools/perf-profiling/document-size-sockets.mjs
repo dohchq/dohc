@@ -28,6 +28,7 @@ export async function startDocumentSocketProbe(
     { createLinkLiveBrowserResolver },
     { createNamedLiveProvider },
     { selfHostLiveProfile },
+    { getDohcYDocBodyFragment },
   ] = await Promise.all([
     import(pathToFileURL(require.resolve("@dohc/service-http")).href),
     load("services/sync-relay/src/namedLiveRoutes.ts"),
@@ -37,6 +38,7 @@ export async function startDocumentSocketProbe(
     load("services/sync-relay/src/linkLiveBrowserAuth.ts"),
     load("packages/ydoc-projection/src/namedLiveProvider.ts"),
     load("services/sync-relay/src/selfHostLiveProfile.ts"),
+    load("packages/ydoc-projection/src/body-fragment.ts"),
   ]);
   const { WebSocket } = require("ws"),
     profile = selfHostLiveProfile();
@@ -264,7 +266,7 @@ export async function startDocumentSocketProbe(
           const joinMs = performance.now() - started,
             initialTransferBytes = inboundBytes + outboundBytes;
           // A real provider edit must receive a durable native application ACK.
-          const queue = [provider.body];
+          const queue = [getDohcYDocBodyFragment(provider.doc)];
           let target;
           while (queue.length) {
             const node = queue.shift();

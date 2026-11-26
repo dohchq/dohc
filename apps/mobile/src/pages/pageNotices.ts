@@ -53,6 +53,10 @@ export function pageNotices(state: {
   ];
 }
 
+/** The strip for a change the page did not save and put back, from the reason its message gives. */
+export const unwrittenText = (why: unknown) =>
+  why === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten;
+
 /** A failure in place of the page offers Try again. */
 export const pageFailureAction = { name: "retry" as const, label: documentWords.tryAgain };
 

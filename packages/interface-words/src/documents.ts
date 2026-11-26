@@ -84,4 +84,9 @@ export const documentWords = {
   openPage: (name: string) => `Open ${name}`,
   /** Phone only: the page header's button back to the file's chat. */
   openChat: (name: string) => `Chat about ${name}`,
+  /** A change to a live note that dohc did not save, and put back. From the desktop's MarkdownEditor. */
+  unwrittenOvertaken:
+    "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
+  unwritten: "dohc can't save this change in a live note yet, so it put the note back as it was.",
+  dismiss: "Dismiss",
 } as const;

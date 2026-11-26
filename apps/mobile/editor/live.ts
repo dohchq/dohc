@@ -2,6 +2,7 @@
 // document replaces it in one paint. It takes edits only while live.
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import { post } from "./bridge";
 import { opensFormat, refuseFormat } from "./format";
 import { createLiveAdapter, type LiveProvider } from "./liveAdapter";
@@ -32,23 +33,32 @@ export function followLive(input: {
       refuse();
       return;
     }
-    made.doc.getMap("meta").observe(() => {
-      if (!refused && !opensFormat(made.doc)) refuse();
-    });
     const next = document.createElement("div");
     next.className = input.body.className;
     next.hidden = true;
     input.body.after(next);
     const takesEdits = () => !refused && made.state().status === "live";
-    editor = mountLiveBodyEditor(next, {
-      body: made.body,
-      label: input.label,
-      canEdit: takesEdits,
-      edit(change) {
-        if (!takesEdits()) return false;
-        change();
-        return true;
-      },
+    let sequence = readsBodySequence(made.doc);
+    const mount = () =>
+      mountLiveBodyEditor(next, {
+        doc: made.doc,
+        label: input.label,
+        canEdit: takesEdits,
+        edit(change) {
+          if (!takesEdits()) return false;
+          change();
+          return true;
+        },
+        unwritten: (why) => why !== "guarded" && post("unwritten", { why }),
+      });
+    editor = mount();
+    made.doc.on("update", () => {
+      if (refused) return;
+      if (!opensFormat(made.doc)) return refuse();
+      if (readsBodySequence(made.doc) === sequence) return;
+      sequence = !sequence;
+      editor?.destroy();
+      editor = mount();
     });
     made.subscribe(() => editor?.refresh());
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>

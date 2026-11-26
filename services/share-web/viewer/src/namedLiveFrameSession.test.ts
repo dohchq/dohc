@@ -276,7 +276,9 @@ function fixture(
       result = "success";
     },
     edit(text: string) {
-      const content = (provider.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+      const content = (getDohcYDocBodyFragment(provider.doc).get(0) as Y.XmlElement).get(
+        0,
+      ) as Y.XmlText;
       content.insert(content.length, text);
     },
     peerEdit(text: string) {
@@ -307,7 +309,9 @@ function fixture(
 it("round-trips canonical V1 bytes and exact application ACK identity through the real provider and server", async () => {
   const f = fixture();
   await f.until(() => f.provider.state().status === "live");
-  expect(f.provider.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
+  expect(getDohcYDocBodyFragment(f.provider.doc).toString()).toBe(
+    getDohcYDocBodyFragment(f.doc).toString(),
+  );
   let original: Uint8Array | undefined;
   f.provider.doc.once("update", (bytes) => {
     original = bytes.slice();
@@ -326,7 +330,9 @@ it("round-trips canonical V1 bytes and exact application ACK identity through th
   await f.until(() => f.metrics().pulls === 1);
   f.peerEdit(" peer");
   await f.until(() => f.metrics().releases === 1);
-  expect(f.provider.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
+  expect(getDohcYDocBodyFragment(f.provider.doc).toString()).toBe(
+    getDohcYDocBodyFragment(f.doc).toString(),
+  );
   expect(f.submitted).toHaveLength(1);
 });
 
@@ -352,7 +358,7 @@ it("closes a terminal refusal and retains the browser draft", async () => {
   f.edit(" draft");
   await f.until(() => f.provider.state().status === "quarantined");
   expect(f.provider.state()).toMatchObject({ pendingUpdates: 1, lastApplied: null });
-  expect(f.provider.body.toString()).toContain("draft");
+  expect(getDohcYDocBodyFragment(f.provider.doc).toString()).toContain("draft");
   await f.server.settled();
   expect(f.server.usage().closed).toBe(true);
   expect(f.hostClosed).toHaveBeenCalledTimes(1);

@@ -9,7 +9,7 @@
     "app/**/*.ts",
     "app/**/*.tsx",
     "src/**/*.ts",
-    "src/**/*.tsx",
-    "editor/**/*.ts"
-  ]
+    "src/**/*.tsx"
+  ],
+  "exclude": ["src/pages/liveAdapter.test.ts", "src/pages/noteFormat.test.ts"]
 }

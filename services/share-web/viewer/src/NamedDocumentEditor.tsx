@@ -6,6 +6,8 @@ import {
   type LiveBodyEditorHandle,
   type LiveEditorToolbarState,
 } from "@dohc/ydoc-projection/browser-editor";
+import type { BodySequenceUnwritten } from "@dohc/ydoc-projection/body-sequence-editor";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import {
   NAMED_LIVE_NO_AUTOMATIC_RETRY,
   namedLiveEditable,
@@ -137,6 +139,30 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   );
 }
 
+const UNWRITTEN = {
+  overtaken:
+    "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
+  unwritable: "dohc can't save this change in a live note yet, so it put the note back as it was.",
+};
+
+function UnwrittenNotice({ why, onDismiss }: { why: BodySequenceUnwritten; onDismiss(): void }) {
+  return (
+    <div className="edit-notice" role="alert" data-testid="unwritten-notice">
+      <span className="tile">
+        <Icon name="info" />
+      </span>
+      <div>
+        <p>{why === "overtaken" ? UNWRITTEN.overtaken : UNWRITTEN.unwritable}</p>
+        <div className="edit-notice-actions">
+          <button className="handoff-button secondary" onClick={onDismiss}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** The page's unsaved words, read again as the note or the session changes. */
 function useUnsentText(session: NamedDocumentSession) {
   const [unsent, setUnsent] = useState(() => session.unsentText());
@@ -254,41 +280,53 @@ export function NamedDocumentEditor({
     resolveImageRef = useRef(resolveImage),
     autoFocusedRef = useRef(false),
     [state, setState] = useState(session.state()),
+    [format, setFormat] = useState<1 | 2 | null>(null),
+    [unwritten, setUnwritten] = useState<BodySequenceUnwritten | null>(null),
     [toolbar, setToolbar] = useState<LiveEditorToolbarState | null>(null);
   resolveImageRef.current = resolveImage;
   const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
-    if (!element.current) return;
-    autoFocusedRef.current = false;
-    const editor = mountLiveBodyEditor(element.current, {
-      body: session.body,
-      label: "Shared file editor",
-      canEdit: () => namedLiveEditable(session.state()),
-      edit: session.edit,
-      resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
-    });
-    editorRef.current = editor;
-    const unsubscribeToolbar = editor.subscribeToolbar(setToolbar);
+    const read = () =>
+      setFormat(session.state().holds ? (readsBodySequence(session.doc) ? 2 : 1) : null);
     const receive = (value: NamedLiveBrowserState) => {
       setState(value);
-      editor.refresh();
+      read();
+      editorRef.current?.refresh();
       onState(value);
     };
     receive(session.state());
     const unsubscribe = session.subscribe(receive);
+    session.doc.on("update", read);
     return () => {
+      session.doc.off("update", read);
       unsubscribe();
+    };
+  }, [session, onState]);
+  useEffect(() => {
+    if (!element.current || format === null) return;
+    autoFocusedRef.current = false;
+    const editor = mountLiveBodyEditor(element.current, {
+      doc: session.doc,
+      label: "Shared file editor",
+      canEdit: () => namedLiveEditable(session.state()),
+      edit: session.edit,
+      unwritten: (why) => why !== "guarded" && setUnwritten(why),
+      resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
+    });
+    editorRef.current = editor;
+    const unsubscribeToolbar = editor.subscribeToolbar(setToolbar);
+    return () => {
       unsubscribeToolbar();
       editorRef.current = null;
       editor.destroy();
     };
-  }, [session, onState]);
+  }, [session, format]);
   const editable = namedLiveEditable(state);
   useEffect(() => {
-    if (!link || !editable || bodyHidden || autoFocusedRef.current) return;
+    if (!link || !editable || bodyHidden || autoFocusedRef.current || !editorRef.current) return;
     autoFocusedRef.current = true;
-    editorRef.current?.focus();
-  }, [link, editable, bodyHidden]);
+    editorRef.current.focus();
+  }, [link, editable, bodyHidden, format]);
   const working =
     state.status === "live" ||
     state.reason === "live-starting" ||
@@ -348,6 +386,7 @@ export function NamedDocumentEditor({
         </button>
       )}
       <RemovedTextNotice session={session} />
+      {unwritten && <UnwrittenNotice why={unwritten} onDismiss={() => setUnwritten(null)} />}
       {showToolbar && (
         <div className="editor-toolbar" role="toolbar" aria-label="Formatting">
           <button

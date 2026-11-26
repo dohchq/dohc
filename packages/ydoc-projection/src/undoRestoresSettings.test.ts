@@ -2,7 +2,6 @@
 import { EditorView } from "@tiptap/pm/view";
 import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { mountLiveBodyEditor } from "./browser-editor.js";
 import { markdownToYDoc, serializeRichdocBody, yDocToMarkdown } from "./import-export.js";
 
@@ -38,7 +37,7 @@ function editorOn(doc: Y.Doc, host: Host) {
     return updateState.call(this, state);
   };
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {

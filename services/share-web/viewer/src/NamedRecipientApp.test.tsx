@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { markdownToYDoc, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
   createNamedLiveBrowserTransport,
   type NamedLiveBrowserState,
@@ -49,15 +49,19 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOrigi
             } as NamedLiveBrowserState,
             close: vi.fn(),
             notify() {
-              for (const listener of listeners) listener(row.state);
+              for (const listener of listeners) listener(current());
             },
+          };
+          let held = false;
+          const current = () => {
+            held ||= row.state.status === "live";
+            return { ...row.state, holds: held };
           };
           sessions.push(row);
           close = row.close;
           return {
             doc,
-            body: getDohcYDocBodyFragment(doc),
-            state: () => row.state,
+            state: current,
             close: row.close,
             edit(change: () => void) {
               if (row.state.status !== "live") return false;
@@ -191,9 +195,7 @@ it("signs in through the account endpoint, opens current files, and waits for li
   await click("Sign in");
   expect(container.textContent).toContain("Alice");
   await click("docs/a.md");
-  expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe(
-    "false",
-  );
+  expect(container.querySelector('[role="textbox"]')).toBeNull();
   await act(async () => {
     sessions[0]!.state = { ...sessions[0]!.state, status: "live" };
     sessions[0]!.notify();
@@ -301,7 +303,12 @@ it("keeps a quarantined draft until explicit discard, then opens a fresh session
   await click("Discard draft and continue");
   expect(sessions[0]!.close).toHaveBeenCalledTimes(1);
   expect(sessions).toHaveLength(2);
-  expect(container.querySelector('[role="textbox"]')?.textContent).toContain("Draft b");
+  expect(container.querySelector('[role="textbox"]')).toBeNull();
+  await act(async () => {
+    sessions[1]!.state = { ...sessions[1]!.state, status: "live" };
+    sessions[1]!.notify();
+  });
+  expect(container.querySelector('[role="textbox"]')?.textContent).toBe("Draft b");
 });
 const panel = () => container.querySelector('aside[aria-label="Draft recovery"]');
 function unloadWarns() {

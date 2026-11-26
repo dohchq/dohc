@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { markdownToYDoc, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
   namedLiveEditable,
   type NamedLiveBrowserState,
@@ -20,6 +20,7 @@ function fixture() {
     listeners = new Set<(value: NamedLiveBrowserState) => void>();
   let state: NamedLiveBrowserState = {
     status: "live",
+    holds: true,
     reason: null,
     binding: null,
     hostEpoch: null,
@@ -36,7 +37,6 @@ function fixture() {
   };
   const session = {
     doc,
-    body: getDohcYDocBodyFragment(doc),
     state: () => state,
     subscribe(listener: (value: NamedLiveBrowserState) => void) {
       listeners.add(listener);

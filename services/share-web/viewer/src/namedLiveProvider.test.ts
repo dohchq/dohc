@@ -80,7 +80,7 @@ function document(text: string) {
   return doc;
 }
 function edit(value: Provider, text: string) {
-  const paragraph = value.body.get(0) as Y.XmlElement;
+  const paragraph = getDohcYDocBodyFragment(value.doc).get(0) as Y.XmlElement;
   const content = paragraph.get(0) as Y.XmlText;
   content.insert(content.length, text);
 }
@@ -371,7 +371,9 @@ describe("named live browser provider", () => {
     await host.greet();
     expect(value.state().status).toBe("syncing");
     await host.initial(doc);
-    expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(
+      getDohcYDocBodyFragment(doc).toString(),
+    );
     expect(value.state()).toMatchObject({ status: "live", binding, pendingUpdates: 0 });
     expect(host.submissions()).toHaveLength(0);
   });
@@ -425,7 +427,9 @@ describe("named live browser provider", () => {
         lastApplied: null,
       });
       Y.applyUpdate(doc, item.bytes);
-      expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(
+        getDohcYDocBodyFragment(doc).toString(),
+      );
       await host.ack(item);
       expect(value.state()).toMatchObject({
         status: "live",
@@ -537,7 +541,7 @@ describe("named live browser provider", () => {
     await host.submitted();
     host.route.disconnect();
     await host.route.settled();
-    const before = value.body.toString();
+    const before = getDohcYDocBodyFragment(value.doc).toString();
     const second = peer(value, 2);
     await second.greet();
     await second.initial(document("RESTORED"), { ...binding, restoreFenceGeneration: 1 });
@@ -546,7 +550,7 @@ describe("named live browser provider", () => {
       reason: "binding-changed",
       pendingUpdates: 1,
     });
-    expect(value.body.toString()).toBe(before);
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(before);
     expect(() => peer(value, 3)).toThrow("cannot reconnect");
   });
   it.each(["route-fenced", "protocol-invalid"] as const)(
@@ -555,10 +559,10 @@ describe("named live browser provider", () => {
       const { value, host } = await live();
       edit(value, " draft");
       await host.submitted();
-      const before = value.body.toString();
+      const before = getDohcYDocBodyFragment(value.doc).toString();
       await host.send({ kind: "close", reason });
       expect(value.state()).toMatchObject({ status: "quarantined", reason, pendingUpdates: 1 });
-      expect(value.body.toString()).toBe(before);
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(before);
       expect(host.isClosed()).toBe(true);
     },
   );
@@ -600,7 +604,7 @@ describe("named live browser provider", () => {
     const content = (getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, " peer");
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 3);
-    expect(value.body.toString()).toContain("peer");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("peer");
     expect(value.state().pendingUpdates).toBe(0);
   });
   it("tells the page when someone deletes the paragraph it was typing in", async () => {
@@ -613,7 +617,7 @@ describe("named live browser provider", () => {
     getDohcYDocBodyFragment(doc).delete(0, 1);
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
 
-    expect(value.body.length).toBe(0);
+    expect(getDohcYDocBodyFragment(value.doc).length).toBe(0);
     expect(removed).toEqual([" mine"]);
   });
   it("tells a desktop whose editor typed through the page that its text was removed", async () => {
@@ -646,7 +650,7 @@ describe("named live browser provider", () => {
     getDohcYDocBodyFragment(doc).delete(0, 1);
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
 
-    expect(value.body.length).toBe(0);
+    expect(getDohcYDocBodyFragment(value.doc).length).toBe(0);
     expect(removed).toEqual([]);
   });
   it("refuses an ACK from an unattempted host epoch", async () => {
@@ -670,13 +674,14 @@ describe("named live browser provider", () => {
       reason: "pending-update-limit",
       pendingUpdates: 1,
     });
-    expect(value.body.toString()).toContain("second");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("second");
     // The review shows the refused edit beside the one still waiting.
     expect(value.unsentText()).toEqual({ text: " first second", deletes: false });
   });
   it("tells deleted words from removed formatting in a stopped draft", async () => {
     const { value, host } = await live(provider({ ...limits(), maxPendingUpdates: 1 }));
-    const content = () => (value.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    const content = () =>
+      (getDohcYDocBodyFragment(value.doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content().format(0, 4, { bold: true });
     await host.ack(await host.submitted(), 1, 1);
     content().format(0, 4, { bold: null });
@@ -691,16 +696,16 @@ describe("named live browser provider", () => {
     await host.greet();
     await host.initial(document("untrusted"), binding, 0, "00".repeat(32));
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "digest-mismatch" });
-    expect(value.body.length).toBe(0);
+    expect(getDohcYDocBodyFragment(value.doc).length).toBe(0);
   });
   it("quarantines edits before initial sync", () => {
     const value = provider();
-    value.body.insert(0, [new Y.XmlElement("paragraph")]);
+    getDohcYDocBodyFragment(value.doc).insert(0, [new Y.XmlElement("paragraph")]);
     expect(value.state()).toMatchObject({
       status: "quarantined",
       reason: "edit-while-unavailable",
     });
-    expect(value.body.length).toBe(1);
+    expect(getDohcYDocBodyFragment(value.doc).length).toBe(1);
   });
   describe("on the host's early state", () => {
     const early = (doc: Y.Doc, selected = binding) =>
@@ -736,12 +741,14 @@ describe("named live browser provider", () => {
       expect(route.submissions()).toHaveLength(0);
       await route.initial(host, binding, 5);
       expect(value.state()).toMatchObject({ status: "live", typingAhead: false });
-      expect(value.body.toString()).toContain("draft");
-      expect(value.body.toString()).toContain("remote");
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("draft");
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("remote");
       const sent = await route.submitted();
       expect(sent.begin).toMatchObject({ authorContext: context });
       Y.applyUpdate(host, sent.bytes);
-      expect(getDohcYDocBodyFragment(host).toString()).toBe(value.body.toString());
+      expect(getDohcYDocBodyFragment(host).toString()).toBe(
+        getDohcYDocBodyFragment(value.doc).toString(),
+      );
       await route.ack(sent, 1, 6);
       expect(value.state().pendingUpdates).toBe(0);
     });
@@ -759,7 +766,7 @@ describe("named live browser provider", () => {
         pendingUpdates: 1,
         typingAhead: false,
       });
-      expect(value.body.toString()).toContain("base draft");
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("base draft");
     });
     it("refuses an early state once a route has the page's vector", async () => {
       const value = provider(),
@@ -770,7 +777,7 @@ describe("named live browser provider", () => {
       );
       expect(value.seed(early(document("base")), 3)).toBe(false);
       expect(value.state().typingAhead).toBe(false);
-      expect(value.body.length).toBe(0);
+      expect(getDohcYDocBodyFragment(value.doc).length).toBe(0);
     });
   });
   it("ignores late frames from a retired route", async () => {
@@ -960,7 +967,7 @@ describe("named live browser provider", () => {
       const { value, host } = await live();
       host.route.disconnect();
       await host.route.settled();
-      const old = value.body.toString(),
+      const old = getDohcYDocBodyFragment(value.doc).toString(),
         second = peer(value, 2);
       await second.greet();
       const selected =
@@ -971,7 +978,7 @@ describe("named live browser provider", () => {
             : { ...binding, currentPath: "other.md", selectorPaths: ["other.md"] };
       await second.initial(document("new document"), selected);
       expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
-      expect(value.body.toString()).toBe(old);
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(old);
     },
   );
   it("refuses a sync payload that does not cover its claimed host vector", async () => {
@@ -1002,7 +1009,7 @@ describe("named live browser provider", () => {
     await host.initial(document("base"), binding, 7);
     expect(value.state()).toMatchObject({ status: "disconnected", binding });
     expect(host.frames.some((frame) => frame.kind === "sync-applied")).toBe(false);
-    const before = value.body.toString();
+    const before = getDohcYDocBodyFragment(value.doc).toString();
     const second = peer(value, 2);
     await second.greet();
     await second.initial(document("restored"), { ...binding, restoreFenceGeneration: 1 }, 8);
@@ -1011,7 +1018,7 @@ describe("named live browser provider", () => {
       reason: "binding-changed",
       binding,
     });
-    expect(value.body.toString()).toBe(before);
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(before);
   });
   it("retains the sync cursor when a document observer retires the route", async () => {
     const value = provider(),
@@ -1054,7 +1061,7 @@ describe("named live browser provider", () => {
     const content = (getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, " peer");
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 1);
-    expect(value.body.toString()).toContain("peer");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("peer");
     edit(value, " third");
     edit(value, " fourth");
     expect(value.state().pendingUpdates).toBe(2);
@@ -1070,9 +1077,11 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
     expect(host.submissions()).toHaveLength(2);
     for (const item of [first, merged]) Y.applyUpdate(doc, item.bytes);
-    expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
-    expect(value.body.toString()).toContain("first second");
-    expect(value.body.toString()).toContain("third fourth");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(
+      getDohcYDocBodyFragment(doc).toString(),
+    );
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("first second");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("third fourth");
   });
   it("resends a retried update unchanged while later edits merge behind it", async () => {
     const { value, host, doc } = await live();
@@ -1102,8 +1111,10 @@ describe("named live browser provider", () => {
     const merged = await host.submitted(3);
     Y.applyUpdate(doc, first.bytes);
     Y.applyUpdate(doc, merged.bytes);
-    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
-    expect(value.body.toString()).toContain("base draft a b c");
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(
+      getDohcYDocBodyFragment(value.doc).toString(),
+    );
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("base draft a b c");
   });
   it("keeps a lone sent update unchanged when admission was unavailable and edits follow", async () => {
     const { value, host, doc } = await live();
@@ -1134,8 +1145,10 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
     Y.applyUpdate(doc, first.bytes);
     Y.applyUpdate(doc, merged.bytes);
-    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
-    expect(value.body.toString()).toContain("base draft a b");
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(
+      getDohcYDocBodyFragment(value.doc).toString(),
+    );
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("base draft a b");
   });
   it("starts another update when merging would pass the update byte limit", async () => {
     const { value, host, doc } = await live();
@@ -1154,7 +1167,9 @@ describe("named live browser provider", () => {
     await host.ack(third, 1, 3);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
     for (const item of [first, second, third]) Y.applyUpdate(doc, item.bytes);
-    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(
+      getDohcYDocBodyFragment(value.doc).toString(),
+    );
   });
   it("splits a burst at the host's smaller update limit and delivers all of it", async () => {
     const options = limits(),
@@ -1181,7 +1196,9 @@ describe("named live browser provider", () => {
     expect(sent.length).toBeGreaterThan(2);
     expect(value.state()).toMatchObject({ status: "live", pendingBytes: 0 });
     for (const item of sent) Y.applyUpdate(doc, item.bytes);
-    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(
+      getDohcYDocBodyFragment(value.doc).toString(),
+    );
   });
   it("keeps every merged edit in the draft when the merged update is refused", async () => {
     const { value, host } = await live();
@@ -1204,7 +1221,7 @@ describe("named live browser provider", () => {
       reason: "provenance-refused",
       pendingUpdates: 1,
     });
-    expect(value.body.toString()).toContain("base first second third");
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("base first second third");
   });
   it("merges only edits recorded under the same context", async () => {
     let current: LiveAuthorContext = { kind: "link", publicPrincipalId: "public-ana" };
@@ -1238,7 +1255,9 @@ describe("named live browser provider", () => {
     const merged = await host.submitted(2);
     Y.applyUpdate(doc, first.bytes);
     Y.applyUpdate(doc, merged.bytes);
-    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(
+      getDohcYDocBodyFragment(value.doc).toString(),
+    );
   });
   it("records a peer update cursor before a synchronous observer disconnects", async () => {
     const { value, host, doc } = await live();
@@ -1261,23 +1280,23 @@ describe("named live browser provider", () => {
         status: "quarantined",
         reason: "pending-update-limit",
       });
-      expect(value.body.toString()).toContain("larger than one byte");
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("larger than one byte");
       expect(host.submissions()).toHaveLength(0);
       expect(value.unsentText()).toEqual({ text: " larger than one byte", deletes: false });
     } else {
       const { value, host } = await live();
-      const before = value.body.toString();
+      const before = getDohcYDocBodyFragment(value.doc).toString();
       await host.route.receive(new Uint8Array(1025));
       expect(value.state()).toMatchObject({ status: "quarantined", reason: "inbound-limit" });
-      expect(value.body.toString()).toBe(before);
+      expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(before);
     }
   });
   it("refuses a malformed Yjs update before applying it", async () => {
     const { value, host } = await live();
-    const before = value.body.toString();
+    const before = getDohcYDocBodyFragment(value.doc).toString();
     await host.transfer("applied-update", new Uint8Array([255]), 1);
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "invalid-frame" });
-    expect(value.body.toString()).toBe(before);
+    expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(before);
   });
 });
 
@@ -1431,7 +1450,7 @@ it("bounds pending application resubmissions and retains the draft at the attemp
     reason: "delivery-attempt-limit",
     pendingUpdates: 1,
   });
-  expect(value.body.toString()).toContain("draft");
+  expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("draft");
   await vi.advanceTimersByTimeAsync(20_000);
   expect(host.submissions()).toHaveLength(2);
   expect(vi.getTimerCount()).toBe(0);
