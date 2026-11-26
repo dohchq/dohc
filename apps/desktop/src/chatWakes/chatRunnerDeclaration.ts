@@ -44,7 +44,7 @@ export function chatRunnerDeclaration(input: {
     handles.add(handle);
   }
   // The agents the person runs: only their names, so the phone can show their chats. One the relay can't take
-  // leaves the list unknown rather than holding back the wake roster.
+  // sends the list as unknown rather than holding back the wake roster.
   const others = input.agents.filter((agent) => agent.launch === undefined);
   const known =
     others.length <= CHAT_RUNNER_AGENTS &&
@@ -63,9 +63,9 @@ export function chatRunnerDeclaration(input: {
         displayName: agent.name,
         enabled: agent.enabled,
       })),
-      ...(known
-        ? { agents: others.map((agent) => ({ agentId: agent.id, displayName: agent.name })) }
-        : {}),
+      agents: known
+        ? others.map((agent) => ({ agentId: agent.id, displayName: agent.name }))
+        : null,
     },
   };
 }

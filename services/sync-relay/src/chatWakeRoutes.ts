@@ -163,7 +163,8 @@ type Declaration = {
   installId: string;
   computerLabel: string;
   runners: Array<Omit<ChatRunner, "installId" | "computerLabel">>;
-  agents: DeclaredAgent[] | null;
+  /** Null when the computer can't send its list; undefined in a withdrawal or from an older desktop. */
+  agents: DeclaredAgent[] | null | undefined;
 };
 
 // `{installId, computerLabel, runners: [{agentId, displayName, enabled}]}`. The handle comes from the name, as the desktop derives it.
@@ -174,7 +175,7 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
   if (
     !exactly(body, Object.hasOwn(body, "agents") ? [...keys, "agents"] : keys) ||
     !Array.isArray(body.runners) ||
-    (Object.hasOwn(body, "agents") && !Array.isArray(body.agents))
+    (Object.hasOwn(body, "agents") && body.agents !== null && !Array.isArray(body.agents))
   )
     throw badRequest(shape);
   const installId = parseString(body.installId, "installId", 256);
@@ -208,10 +209,10 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
   ) {
     throw badRequest("each agent needs its own ID and its own name");
   }
-  const others = Object.hasOwn(body, "agents") ? (body.agents as unknown[]) : null;
-  if (others !== null && others.length > CHAT_RUNNER_AGENTS)
+  const others = body.agents as unknown[] | null | undefined;
+  if (others && others.length > CHAT_RUNNER_AGENTS)
     throw badRequest(`a computer declares at most ${CHAT_RUNNER_AGENTS} other agents`);
-  const agents =
+  const agents: Declaration["agents"] =
     others?.map((value) => {
       const agent = asRecord(value);
       if (
@@ -225,7 +226,7 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
         agentId: agent.agentId,
         displayName: parseString(agent.displayName, "displayName", 200),
       };
-    }) ?? null;
+    }) ?? (others as null | undefined);
   const ids = [...runners, ...(agents ?? [])].map((agent) => agent.agentId);
   if (new Set(ids).size !== ids.length) throw badRequest("each agent needs its own ID");
   return { installId, computerLabel, runners, agents };

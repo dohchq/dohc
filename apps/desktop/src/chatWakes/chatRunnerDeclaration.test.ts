@@ -39,7 +39,7 @@ describe("a computer's runner declaration", () => {
     });
   });
 
-  it("leaves the list unknown, not the runners refused, when another agent can't be sent", () => {
+  it("sends the list as unknown, not the runners refused, when another agent can't be sent", () => {
     const answer = chatRunnerDeclaration({
       installId: "local:mac",
       computerLabel: "Mac",
@@ -54,6 +54,7 @@ describe("a computer's runner declaration", () => {
         installId: "local:mac",
         computerLabel: "Mac",
         runners: [{ agentId: "default", displayName: "Claude", enabled: true }],
+        agents: null,
       },
     });
   });

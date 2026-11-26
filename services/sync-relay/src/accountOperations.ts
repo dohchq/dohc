@@ -62,7 +62,7 @@ export type AccountOperationResult =
  * computer has it, as a desktop files one whose agent isn't in its Settings. Only the phone's route adds `archived`.
  */
 type GroupsResult = CliResultByVerb["groupsFull"];
-export type PhoneGroupsResult =
+type PhoneGroupsResult =
   | GroupsResult
   | (Extract<GroupsResult, { ok: true }> & {
       groups: Array<Extract<GroupsResult, { ok: true }>["groups"][number] & { archived?: true }>;

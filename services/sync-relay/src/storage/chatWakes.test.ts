@@ -988,10 +988,14 @@ it("knows every agent of the account's computers only once each computer sent it
   expect(names()?.get("default")).toBe("Claude");
   // Another account's or workspace's lists are apart.
   expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "other" })).toBeNull();
+  // A computer that couldn't send its list leaves the whole unknown, whatever the others say.
+  declare("laptop", [], null);
+  expect(names()).toBeNull();
+  declare("laptop", []);
   // A withdrawal takes the computer's list back.
   declare("pc", []);
   expect(names()).toEqual(new Map([["default", "Claude"]]));
-  declare("old-mac", [], null);
+  declare("old-mac", []);
   expect(names()).toBeNull();
   expect(count(storage, "sync_relay_chat_agent_lists")).toBe(0);
 
@@ -1006,4 +1010,30 @@ it("knows every agent of the account's computers only once each computer sent it
     publicationIds: [],
   });
   expect(count(storage, "sync_relay_chat_agent_lists")).toBe(0);
+});
+
+it("adds the agent lists to an older relay once", async () => {
+  const storage = await testStorage();
+  const path = storagePath(storage);
+  closeTestStorage(storage);
+  const older = inspectDatabase(path);
+  older.exec(`DROP TABLE sync_relay_chat_agent_lists;
+    DELETE FROM sync_relay_migrations WHERE migration_id = 'chat-agent-lists-v1';`);
+  older.close();
+  const upgraded = reopenTestStorage(path);
+  upgraded.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
+  upgraded.replaceChatRunners({
+    accountId: "ana",
+    workspaceId: "trip",
+    installId: "pc",
+    computerLabel: "PC",
+    runners: [],
+    agents: [{ agentId: "t3-code", displayName: "d3-code" }],
+    nowMs: NOW,
+  });
+  expect(upgraded.declaredAgentNames({ accountId: "ana", workspaceId: "trip" })).toEqual(
+    new Map([["t3-code", "d3-code"]]),
+  );
+  closeTestStorage(upgraded);
+  expect(count(reopenTestStorage(path), "sync_relay_chat_agent_lists")).toBe(1);
 });

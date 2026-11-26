@@ -158,15 +158,15 @@ export const CHAT_WAKE_CLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 /** How long a claimed wake waits for its winner's queued before it is unconfirmed. */
 export const CHAT_WAKE_CONFIRM_MS = 24 * 60 * 60 * 1000;
 // Agent lists: per owned workspace, each computer's agents that aren't runners, by name only, which with its runner
-// rows is every agent the computer has there. A row means that computer's list is known, even when empty; no row means
-// it isn't (a withdrawal, or a desktop from before lists). The phone names agent chats from these and runner rows, and
+// rows is every agent the computer has there. A row says the computer still declares there; its list is NULL when the
+// computer couldn't send it. No row is a withdrawal, or a desktop from before lists. The phone names agent chats from these and runner rows, and
 // archives one whose agent no computer has. No lease: a computer that is off keeps its agents' chats where they are.
 const AGENT_LISTS_MARKER = "chat-agent-lists-v1";
 const AGENT_LISTS_SQL = `CREATE TABLE sync_relay_chat_agent_lists (
   account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),
   workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   install_id TEXT NOT NULL CHECK (length(install_id) BETWEEN 1 AND 256),
-  agents_json TEXT NOT NULL CHECK (json_valid(agents_json) AND json_type(agents_json) = 'array'),
+  agents_json TEXT CHECK (agents_json IS NULL OR (json_valid(agents_json) AND json_type(agents_json) = 'array')),
   updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms BETWEEN 0 AND 9007199254740991),
   PRIMARY KEY (workspace_id, account_id, install_id)
 ) STRICT`;
@@ -363,7 +363,7 @@ export function replaceChatRunners(
     installId: string;
     computerLabel: string;
     runners: readonly Omit<ChatRunner, "installId" | "computerLabel">[];
-    /** The computer's other agents; absent or null when its list isn't known. */
+    /** The computer's other agents; null when it couldn't send them; absent in a withdrawal or from an older desktop. */
     agents?: readonly DeclaredAgent[] | null;
     nowMs: number;
   },
@@ -398,7 +398,7 @@ export function replaceChatRunners(
         input.nowMs,
       );
     }
-    if (input.agents == null) {
+    if (input.agents === undefined) {
       storage.db
         .prepare(
           "DELETE FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ? AND install_id = ?",
@@ -415,7 +415,7 @@ export function replaceChatRunners(
           input.accountId,
           input.workspaceId,
           input.installId,
-          JSON.stringify(input.agents),
+          input.agents === null ? null : JSON.stringify(input.agents),
           input.nowMs,
         );
     }
@@ -451,7 +451,7 @@ export function replaceChatRunners(
 
 /**
  * Every agent the account's computers have in the workspace, by ID, with its name, leased or not. Null when that isn't
- * known: no computer sent its list, or one that has runners sent none. Where two computers name an agent apart, the
+ * known: no computer sent its list, one couldn't, or one that has runners sent none. Where two computers name an agent apart, the
  * first by install ID names it, so a daily renewal never changes the name.
  */
 export function declaredAgentNames(
@@ -460,14 +460,13 @@ export function declaredAgentNames(
 ): Map<string, string> | null {
   return storage.readTx(() => {
     const args = [input.workspaceId, input.accountId] as const;
-    const listed = new Set(
-      storage.db
-        .prepare(
-          "SELECT install_id FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ?",
-        )
-        .all(...args)
-        .map((row) => String(row.install_id)),
-    );
+    const lists = storage.db
+      .prepare(
+        "SELECT install_id, agents_json FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ?",
+      )
+      .all(...args);
+    if (lists.some((row) => row.agents_json === null)) return null;
+    const listed = new Set(lists.map((row) => String(row.install_id)));
     const agents = storage.db
       .prepare(
         `SELECT install_id, agent_id, display_name FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ?

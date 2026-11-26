@@ -216,6 +216,11 @@ it("declares a computer's agents only where its account owns the workspace, with
       ["t3-code", "d3-code"],
     ]),
   );
+  // A list the computer couldn't send is unknown.
+  expect(
+    (await call("PUT", "/sync/workspaces/trip/runners", { ...declaration, agents: null })).status,
+  ).toBe(200);
+  expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "trip" })).toBeNull();
   expect(
     storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
   ).toHaveLength(1);

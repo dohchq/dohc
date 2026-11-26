@@ -482,6 +482,9 @@ describe("publishing this computer's agents", () => {
     );
     expect(r.server.row("A", "ws1")).toEqual([]);
     expect(r.server.row("A", "ws2")).toEqual([]);
+    // Still declared there, with its list unknown, so the phone archives none of its agents' chats.
+    expect(r.server.puts.at(-1)?.declaration).toEqual({ ...WITHDRAWN, agents: null });
+    expect(r.ledger.state.rows).toHaveLength(2);
     await r.roster.reconcile(a);
     expect(r.deps.refused).toHaveBeenCalledTimes(2);
     r.setAgents([runner()]);

@@ -255,10 +255,12 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
       if (abort.signal.aborted || !session.isCurrent()) return settled;
       const entry = { account, installId, workspaceId };
       // Refused: nothing of this computer's stays declared there, so no old list wakes an agent it no longer has.
-      const declaration =
-        wanted.has(workspaceId) && declared.ok
+      // Refused here: no runner, and the list unknown, so the phone archives no agent's chat for want of it.
+      const declaration = !wanted.has(workspaceId)
+        ? withdrawal(session, computerLabel)
+        : declared.ok
           ? declared.declaration
-          : withdrawal(session, computerLabel);
+          : { ...withdrawal(session, computerLabel), agents: null };
       if (wanted.has(workspaceId)) show(workspaceId, declared.ok ? null : declared);
       else show(workspaceId, null);
       if (!declares(declaration) && !ledgered.has(workspaceId)) continue;
