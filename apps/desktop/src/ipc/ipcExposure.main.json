@@ -431,7 +431,13 @@
     "desktop:create-incoming-webhook",
     "desktop:update-incoming-webhook",
     "desktop:rotate-incoming-webhook",
-    "desktop:delete-incoming-webhook"
+    "desktop:delete-incoming-webhook",
+    "desktop:member-apps-list",
+    "desktop:member-app-inspect",
+    "desktop:member-app-share",
+    "desktop:member-app-fork",
+    "desktop:member-app-withdraw",
+    "desktop:member-app-sharing"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -510,6 +516,12 @@
     "desktop:create-incoming-webhook": "trusted-sender",
     "desktop:update-incoming-webhook": "trusted-sender",
     "desktop:rotate-incoming-webhook": "trusted-sender",
-    "desktop:delete-incoming-webhook": "trusted-sender"
+    "desktop:delete-incoming-webhook": "trusted-sender",
+    "desktop:member-apps-list": "active-workspace",
+    "desktop:member-app-inspect": "active-workspace",
+    "desktop:member-app-share": "active-workspace",
+    "desktop:member-app-fork": "active-workspace",
+    "desktop:member-app-withdraw": "active-workspace",
+    "desktop:member-app-sharing": "active-workspace"
   }
 }

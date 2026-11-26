@@ -103,6 +103,8 @@ const bridge = {
     files: [{ path: "Design/Research/notes.md" }, { path: ".dohc/state.json" }],
     folders: ["Drafts"],
   })),
+  memberAppsList: vi.fn(async () => ({ apps: [], nextCursor: null, membersCanShare: false })),
+  memberAppSharing: vi.fn(async (input: { membersCanShare: boolean }) => input),
 };
 
 function renderMembers(overrides: Partial<Parameters<typeof MembersSettings>[0]> = {}) {
@@ -329,6 +331,31 @@ describe("Folder access", () => {
 });
 
 describe("Members page", () => {
+  it("lets the owner and admins, not members, choose whether members share apps", async () => {
+    renderMembers();
+    const sharing = await screen.findByRole("switch", { name: "Members can share apps" });
+    expect(sharing.getAttribute("aria-checked")).toBe("false");
+    bridge.memberAppsList.mockResolvedValueOnce({
+      apps: [],
+      nextCursor: null,
+      membersCanShare: true,
+    });
+    await userEvent.click(sharing);
+    expect(bridge.memberAppSharing).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      membersCanShare: true,
+    });
+    await waitFor(() => expect(sharing.getAttribute("aria-checked")).toBe("true"));
+    cleanup();
+    bridge.workspaceMembers.mockImplementation(async () => ({
+      status: "ready",
+      view: memberView(),
+    }));
+    renderMembers({ joined: true });
+    await screen.findByTestId("settings-members-page");
+    expect(screen.queryByRole("switch", { name: "Members can share apps" })).toBeNull();
+  });
+
   it("shows the owner every person with their email, invites, removed accounts, and the owner's controls", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");

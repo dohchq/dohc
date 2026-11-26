@@ -273,5 +273,11 @@
   "desktop:create-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
   "desktop:update-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
   "desktop:rotate-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
-  "desktop:delete-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } }
+  "desktop:delete-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
+  "desktop:member-apps-list": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:member-app-inspect": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:member-app-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:member-app-fork": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:member-app-withdraw": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:member-app-sharing": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

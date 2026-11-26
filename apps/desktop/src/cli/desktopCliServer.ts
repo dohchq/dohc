@@ -194,6 +194,17 @@ interface DesktopCliServerDependencies<State> {
     operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
     request: import("@dohc/cli/members").MembersRequest,
   ): Promise<import("@dohc/cli/members").MembersResult>;
+  /** Workspace apps and Member apps (memberAppsActions.ts). */
+  memberApps?: Pick<
+    ReturnType<
+      typeof import("../ipc/memberAppsActions").createMemberAppsActions<
+        RegistryEntry,
+        WorkspaceAuthorityOperation<RegistryEntry, State>,
+        unknown
+      >
+    >,
+    "share" | "fork" | "withdraw" | "sharing"
+  >;
   /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
   beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
@@ -557,6 +568,19 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
         return operation.signal;
       },
     );
+    const attached =
+      <Input, Result>(
+        action: (
+          operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+          input: Input,
+        ) => Promise<Result>,
+      ) =>
+      (input: Input) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
+            throw new Error("This workspace changed while this ran. Try again.");
+          return action(operation, input);
+        });
     // A move or delete holds the workspace operation fileWrite holds.
     const withPathChange = async <Result>(
       requestId: string,
@@ -698,6 +722,16 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                   throw new Error("This workspace changed while this ran. Try again.");
                 return dependencies.workspaceMembers!(operation, request);
               }),
+          }
+        : {}),
+      ...(dependencies.memberApps
+        ? {
+            memberApps: {
+              share: attached(dependencies.memberApps.share),
+              fork: attached(dependencies.memberApps.fork),
+              withdraw: attached(dependencies.memberApps.withdraw),
+              sharing: attached(dependencies.memberApps.sharing),
+            },
           }
         : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),

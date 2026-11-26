@@ -181,6 +181,15 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "inbox add": ["--title", "Follow up", "Remember to send receipt"],
   "inbox archive": ["Inbox/item.md"],
   "inbox move": ["Inbox/item.md", "Projects"],
+  "member-apps list": [],
+  "member-apps inspect": ["0000000000000000000000000000000000000000000000000000000000000000"],
+  "member-apps share": ["trip-board"],
+  "member-apps fork": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "my-trip-board",
+  ],
+  "member-apps withdraw": ["0000000000000000000000000000000000000000000000000000000000000000"],
+  "member-apps sharing": ["on"],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>

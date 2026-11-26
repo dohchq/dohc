@@ -807,13 +807,19 @@ export const MCP_TOOL_GROUPS: readonly {
     id: "sharing-and-agents",
     title: "Sharing and connected agents",
     summary:
-      "Inspect owned share codes, manage agents connected through a share link, and manage the workspace's members.",
+      "Inspect owned share codes, manage agents connected through a share link, manage the workspace's members, and share and review Member apps.",
     tools: [
       "dohc_read_share_copy",
       "dohc_list_link_agents",
       "dohc_disconnect_link_agent",
       "dohc_members",
       "dohc_collection_access",
+      "dohc_list_member_apps",
+      "dohc_inspect_member_app",
+      "dohc_share_member_app",
+      "dohc_fork_member_app",
+      "dohc_withdraw_member_app",
+      "dohc_set_member_app_sharing",
     ],
   },
   {
@@ -988,29 +994,34 @@ function verbReturns(command: string, name: string): string {
           ? { ...declaredSocketVerbs("inbox"), ...declaredWriteSocketVerbs("inbox") }[name]
           : command === "workspace"
             ? declaredSocketVerbs("workspace")[name]
-            : command === "chat"
-              ? (CHAT_SOCKET_VERBS[name] ?? name)
-              : command === "history"
-                ? HISTORY_RESULTS[name]
-                : command === "document"
-                  ? DOCUMENT_RESULTS[name]
-                  : command === "automation"
-                    ? AUTOMATION_RESULTS[name]
-                    : command === "access"
-                      ? ACCESS_RESULTS[name]
-                      : command === "sync"
-                        ? SYNC_RESULTS[name]
-                        : command === "notices"
-                          ? NOTICES_RESULTS[name]
-                          : command === "share"
-                            ? SHARE_RESULTS[name]
-                            : command === "members"
-                              ? MEMBERS_RESULTS[name]
-                              : command === "version"
-                                ? VERSION_RESULTS[name]
-                                : command === "account"
-                                  ? ACCOUNT_RESULTS[name]
-                                  : undefined;
+            : command === "member-apps"
+              ? {
+                  ...declaredSocketVerbs("member-apps"),
+                  ...declaredWriteSocketVerbs("member-apps"),
+                }[name]
+              : command === "chat"
+                ? (CHAT_SOCKET_VERBS[name] ?? name)
+                : command === "history"
+                  ? HISTORY_RESULTS[name]
+                  : command === "document"
+                    ? DOCUMENT_RESULTS[name]
+                    : command === "automation"
+                      ? AUTOMATION_RESULTS[name]
+                      : command === "access"
+                        ? ACCESS_RESULTS[name]
+                        : command === "sync"
+                          ? SYNC_RESULTS[name]
+                          : command === "notices"
+                            ? NOTICES_RESULTS[name]
+                            : command === "share"
+                              ? SHARE_RESULTS[name]
+                              : command === "members"
+                                ? MEMBERS_RESULTS[name]
+                                : command === "version"
+                                  ? VERSION_RESULTS[name]
+                                  : command === "account"
+                                    ? ACCOUNT_RESULTS[name]
+                                    : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);

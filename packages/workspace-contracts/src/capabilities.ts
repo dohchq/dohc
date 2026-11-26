@@ -435,6 +435,36 @@ const LISTED_CAPABILITIES = {
   "share.skips.dismiss": capability("Acknowledge skipped changes in a received share.", {
     ipc: ["dismissShareSkips"],
   }),
+  "app.member.list": capability(
+    "List the apps members can open in a workspace and whether members may share apps.",
+    {
+      ipc: [],
+      mcp: {},
+    },
+  ),
+  "app.member.inspect": capability(
+    "Show a Member app's author, Collection access, and source files.",
+    {
+      ipc: [],
+      mcp: {},
+    },
+  ),
+  "app.member.share": capability("Share a Personal app with a workspace's members, or update it.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "app.member.fork": capability("Copy a Member app's source into a new Personal app.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "app.member.withdraw": capability("Stop sharing a Member app with a workspace.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "app.member.sharing": capability("Turn members' app sharing on or off.", {
+    ipc: [],
+    mcp: {},
+  }),
   "members.list": capability(
     "List a workspace's people, invites, removed accounts, member level, and invite link.",
     {

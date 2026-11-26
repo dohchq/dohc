@@ -748,6 +748,32 @@ describe("executeCli", () => {
     },
   );
 
+  it.each([
+    {
+      argv: ["share", "trip-board"],
+      result: { publicationId: "a".repeat(64), slug: "trip-board" },
+    },
+    { argv: ["fork", "a".repeat(64), "trip-copy"], result: { personalApp: "trip-copy" } },
+  ])("waits up to 90 seconds for member-apps $argv.0", async ({ argv, result }) => {
+    const stateDir = await tempStateDir();
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      ok: true,
+      result: { ok: true, ...result },
+    }));
+    const run = await executeCli({
+      argv: ["member-apps", ...argv],
+      env: {},
+      client: { stateDir, transport, platform: "linux" },
+    });
+    expect(run).toMatchObject({ stderr: "", exitCode: 0 });
+    expect(transport).toHaveBeenCalledWith(
+      join(stateDir, "dohc-cli.sock"),
+      expect.any(String),
+      90_000,
+    );
+  });
+
   it("waits for a recovery copy the server takes longer than 30 seconds to prepare", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
