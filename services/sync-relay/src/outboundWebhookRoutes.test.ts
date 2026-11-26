@@ -1274,15 +1274,6 @@ automations:
     const parsed = parseAutomationsFile(fetchYaml);
     if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("bad yaml");
     const automation = parsed.entries[0].automation;
-    const digest = computeHttpStepApprovalDigest({
-      collectionId: "obj-schema",
-      collectionPath: COLLECTION,
-      automationId: automation.id,
-      stepOrdinal: 0,
-      step: automation.do[0] as AutomationHttpStep,
-      definitionDigest: definitionDigest(automation),
-      codeFileHashes: [],
-    });
     const reads: SafeOutboundRequest[] = [];
     let answer: () => SafeOutboundResponse = () => ({
       status: 200,
@@ -1292,7 +1283,7 @@ automations:
         JSON.stringify({ count: reads.length, echoed: reads.at(-1)?.headers.Authorization }),
       ),
     });
-    const { handler, sent } = await setup({
+    const { storage, handler, sent } = await setup({
       readOutboundRequest: async (req) => {
         reads.push(req);
         return answer();
@@ -1302,6 +1293,28 @@ automations:
       { objectId: "obj-schema", path: `${COLLECTION}/collection.yaml`, text: COLLECTION_SCHEMA },
       { objectId: "obj-auto", path: `${COLLECTION}/automations.yaml`, text: fetchYaml },
     ]);
+    const secret = await handler(
+      request(OWNER, `/sync/${WORKSPACE}/secrets/STATS_KEY`, {
+        ...jsonBody({
+          mode: "create",
+          usage: "http-header",
+          value: "phx_live_relay_secret",
+          allowedHosts: ["api.example.com"],
+        }),
+        method: "PUT",
+      }),
+    );
+    expect(secret.status).toBe(200);
+    const digest = computeHttpStepApprovalDigest({
+      collectionId: "obj-schema",
+      collectionPath: COLLECTION,
+      automationId: automation.id,
+      stepOrdinal: 0,
+      step: automation.do[0] as AutomationHttpStep,
+      definitionDigest: definitionDigest(automation),
+      codeFileHashes: [],
+      secretBindings: secretBindingsIn(storage),
+    })!;
     const approved = await handler(
       request(
         OWNER,
@@ -1316,18 +1329,6 @@ automations:
       ),
     );
     expect(approved.status).toBe(200);
-    const secret = await handler(
-      request(OWNER, `/sync/${WORKSPACE}/secrets/STATS_KEY`, {
-        ...jsonBody({
-          mode: "create",
-          usage: "http-header",
-          value: "phx_live_relay_secret",
-          allowedHosts: ["api.example.com"],
-        }),
-        method: "PUT",
-      }),
-    );
-    expect(secret.status).toBe(200);
     const dispatch = () =>
       handler(
         request(

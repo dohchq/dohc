@@ -736,7 +736,7 @@ automations:
       postNotice: async () => {},
       readMessageBody: async () => null,
       recipientVerdicts: async () => [],
-      isHttpStepApproved: async () => "approved",
+      readHttpApprovals: async () => ({ approved: everyDigest, secrets: HOOK_SECRETS }),
       httpWebhook: { execute },
     };
     const claim: AutomationClaim = {
@@ -878,7 +878,7 @@ automations:
       const codeAutomation = codeParsed.entries[0].automation;
       let reads = 0;
       let approvals = 0;
-      let allowNewCode: "approved" | "unapproved" = "unapproved";
+      let allowNewCode = false;
       const checked: string[][] = [];
       const codeDeps: CollectionAutomationRunDependencies = {
         ...deps,
@@ -886,7 +886,12 @@ automations:
           text: reads++ === 0 ? "return { output: 1 };" : "return { output: 2 };",
           truncated: false,
         }),
-        isHttpStepApproved: async () => (approvals++ === 0 ? "approved" : allowNewCode),
+        readHttpApprovals: async () => ({
+          approved: {
+            has: () => approvals++ === 0 || allowNewCode,
+          } as unknown as ReadonlySet<string>,
+          secrets: HOOK_SECRETS,
+        }),
         checkReach: async (steps) => {
           checked.push(steps.map((step) => step.kind));
           return false;
@@ -909,7 +914,7 @@ automations:
       execute.mockClear();
       expect(await codeRun(1)).toEqual({ kind: "wait", reason: "held" });
       expect(checked.filter((kinds) => kinds.join() === "http")).toHaveLength(2);
-      allowNewCode = "approved";
+      allowNewCode = true;
       expect(await codeRun(2)).toEqual({ kind: "done" });
       expect(execute).toHaveBeenCalledTimes(1);
     } finally {

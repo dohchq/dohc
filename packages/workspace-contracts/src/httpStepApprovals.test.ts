@@ -321,6 +321,7 @@ automations:
       headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
       secretHeaders: [],
       body: null,
+      as: null,
     };
     const digest = computeHttpStepApprovalDigest({
       collectionId: "col-obj-1",
@@ -361,6 +362,7 @@ automations:
       headers: [],
       secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
       body: null,
+      as: null,
     };
     const digestWith = (
       urlSecret: Parameters<typeof workspaceSecretApprovalBinding>[0] | null,

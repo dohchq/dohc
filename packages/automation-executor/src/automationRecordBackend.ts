@@ -1405,7 +1405,7 @@ export async function prepareRecordBackend(
         null;
       const ordered = stepsInOrder(automation);
       const fetch = ordered.find((entry) => entry.ordinal === ordinal)?.step;
-      if (collectionId === null || fetch?.kind !== "http" || !deps.isHttpStepApproved)
+      if (collectionId === null || fetch?.kind !== "http" || !deps.readHttpApprovals)
         return "unavailable";
       const files = new Set(
         ordered.flatMap(({ step }) => (step.kind === "run-file" ? [step.file] : [])),
@@ -1418,23 +1418,27 @@ export async function prepareRecordBackend(
         if (name === file && hash !== sha256) return "unavailable";
         codeFileHashes.push({ file: name, sha256: hash });
       }
-      const allowed = await deps.isHttpStepApproved(
-        computeHttpStepApprovalDigest({
-          collectionId,
-          collectionPath: collection.path,
-          automationId: automation.id,
-          stepOrdinal: ordinal,
-          step: fetch,
-          definitionDigest: definitionDigest(automation),
-          codeFileHashes,
-        }),
+      const approvals = await deps.readHttpApprovals();
+      const approvalDigest =
+        approvals === null
+          ? null
+          : computeHttpStepApprovalDigest({
+              collectionId,
+              collectionPath: collection.path,
+              automationId: automation.id,
+              stepOrdinal: ordinal,
+              step: fetch,
+              definitionDigest: definitionDigest(automation),
+              codeFileHashes,
+              secretBindings: workspaceSecretApprovalBindings(approvals.secrets),
+            });
+      if (approvals === null || approvalDigest === null) return "unavailable";
+      if (approvals.approved.has(approvalDigest)) return "approved";
+      await deps.checkReach?.(
+        [{ kind: "http", target: httpStepTargetLabel(fetch), stepOrdinal: ordinal }],
+        roster,
       );
-      if (allowed === "unapproved")
-        await deps.checkReach?.(
-          [{ kind: "http", target: httpStepTargetLabel(fetch), stepOrdinal: ordinal }],
-          roster,
-        );
-      return allowed;
+      return "unapproved";
     },
     async apply(run, effect, place, chat) {
       if (

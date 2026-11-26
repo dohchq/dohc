@@ -131,6 +131,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: approvedSecrets,
       effect: baseEffect,
+      method: "POST",
+      readResponse: false,
       depth: 1,
       signal: new AbortController().signal,
     });
@@ -183,6 +185,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: approved,
       effect: { ...baseEffect, url: { kind: "secret", secret: "SLACK_HOOK" }, secretHeaders: [] },
+      method: "POST",
+      readResponse: false,
       depth: 0,
       signal: new AbortController().signal,
     });
@@ -370,6 +374,7 @@ describe("localOutboundWebhookExecutor", () => {
         return answer;
       },
     });
+    const approved = await secrets.list("ws-1");
     const fetch = () =>
       executor.execute({
         collectionId: "col-1",
@@ -378,6 +383,7 @@ describe("localOutboundWebhookExecutor", () => {
         definitionDigest: "b".repeat(64),
         approvalDigest: "c".repeat(64),
         codeFileHashes: [],
+        secrets: approved,
         effect: {
           ...baseEffect,
           targetLabel: "api.example.com",
