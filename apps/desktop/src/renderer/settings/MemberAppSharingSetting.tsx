@@ -18,7 +18,10 @@ export function MemberAppSharingSetting(props: {
     load: async () => (await bridge().memberAppsList({ workspaceId })).membersCanShare ?? null,
   });
   useEffect(() => {
-    if (loaded.error) onError?.("dohc could not read who can share apps.", loaded.error);
+    if (loaded.error)
+      onError?.("dohc could not read who can share apps.", loaded.error, async () =>
+        loaded.retry(),
+      );
   }, [loaded.error]);
   const change = async (membersCanShare: boolean) => {
     setBusy(true);
@@ -49,7 +52,7 @@ export function MemberAppSharingSetting(props: {
             />
           </span>
         }
-        description="Members share their Personal apps with everyone here. You and admins can withdraw any of them."
+        description="Members share their Personal apps with everyone here. Turning it off pauses the apps members shared until you turn it on again."
       />
     </SettingsSection>
   );

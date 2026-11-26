@@ -129,15 +129,27 @@ describe("memberAppSlugOf", () => {
 });
 
 describe("createMemberAppsActions", () => {
-  it("sends the relay only the sharing switch, whatever else the caller passed", async () => {
-    const sent: unknown[] = [];
+  const operation = {
+    workspace: { workspaceId: "ws", rootPath: "/w" },
+    signal: new AbortController().signal,
+    assertCurrent: () => undefined,
+  };
+  const actionsAnswering = (answer: (path: string, init: RequestInit) => Response) => {
+    const sent: Array<{ path: string; body: unknown }> = [];
+    const remote = async (_workspace: unknown, options?: { allowPaused: boolean }) => {
+      if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
+      return { credentials: "token", credentialGeneration: 1 };
+    };
     const actions = createMemberAppsActions({
-      remoteForWorkspace: async () => ({ credentials: "token", credentialGeneration: 1 }),
-      remoteForJoinedWorkspace: async () => ({ credentials: "token", credentialGeneration: 1 }),
+      remoteForWorkspace: remote,
+      remoteForJoinedWorkspace: () => remote(null, { allowPaused: true }),
       currentCredentialGeneration: () => 1,
-      relayResponse: async (_credentials, _path, init) => {
-        sent.push(JSON.parse(String(init.body)));
-        return Response.json({ membersCanShare: true });
+      relayResponse: async (_credentials, path, init) => {
+        sent.push({
+          path,
+          body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+        });
+        return answer(path, init);
       },
       serverAnswered: () => undefined,
       personalFolder: () => null,
@@ -145,13 +157,37 @@ describe("createMemberAppsActions", () => {
         throw new Error("unused");
       },
     });
-    const operation = {
-      workspace: { workspaceId: "ws", rootPath: "/w" },
-      signal: new AbortController().signal,
-      assertCurrent: () => undefined,
-    };
+    return { actions, sent };
+  };
+
+  it("sends the relay only the sharing switch, whatever else the caller passed, even while sync is paused", async () => {
+    const { actions, sent } = actionsAnswering(() => Response.json({ membersCanShare: true }));
     const input = { membersCanShare: true, cwd: "/w", actor: "agent" };
     await expect(actions.sharing(operation, input)).resolves.toEqual({ membersCanShare: true });
-    expect(sent).toEqual([{ membersCanShare: true }]);
+    expect(sent.map(({ body }) => body)).toEqual([{ membersCanShare: true }]);
+  });
+
+  it("lists no apps on a server that doesn't serve Member apps", async () => {
+    const { actions } = actionsAnswering(() =>
+      Response.json({ ok: false, error: "not found", code: "not_found" }, { status: 404 }),
+    );
+    await expect(actions.list(operation, {})).resolves.toEqual({ apps: [], nextCursor: null });
+  });
+
+  it("waits out the server's rate limit on a read", async () => {
+    let limited = 2;
+    const { actions, sent } = actionsAnswering(() =>
+      limited-- > 0
+        ? Response.json({ code: "rate_limited" }, { status: 429, headers: { "retry-after": "0" } })
+        : Response.json({
+            subjectName: "trip",
+            sharerName: "Ana",
+            review: { authorityRevision: 3, consent: "none", collections: [], source: [] },
+          }),
+    );
+    await expect(actions.inspect(operation, { publicationId: "p1" })).resolves.toMatchObject({
+      name: "trip",
+    });
+    expect(sent).toHaveLength(3);
   });
 });

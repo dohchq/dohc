@@ -142,13 +142,15 @@ export const MEMBER_APPS_WRITE_DECLARATIONS = {
       command: ["member-apps", "sharing"],
       summary: "Turn members' app sharing on or off.",
       operands: "<on|off>",
-      notes: ["Only the owner and admins can change it. Apps already shared stay shared."],
+      notes: [
+        "Only the owner and admins can change it. Off pauses the apps members shared until it is on again. Apps admins shared keep working.",
+      ],
       example: ["on"],
     },
     mcp: {
       tool: "dohc_set_member_app_sharing",
       description:
-        "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.",
+        "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Off pauses the apps members shared until it is on again; apps admins shared keep working. Ask the person you work for first.",
       levels: EVERY_MCP_LEVEL,
       reason,
     },

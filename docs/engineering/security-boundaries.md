@@ -267,7 +267,8 @@ not a workspace folder.
 The desktop checks every file's digest twice: before it uploads a share, and
 before it writes a copy into the person's Personal apps. A copy never replaces
 a folder that already exists. Members share apps only while the Owner or an
-Admin turns on "Members can share apps", which is off by default. The Owner and
+Admin turns on "Members can share apps", which is off by default. Turning it off
+pauses the apps members already shared. The Owner and
 Admins can withdraw any Member app, and the author can withdraw their own.
 
 ## A phone runs an app in a locked web view

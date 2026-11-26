@@ -870,7 +870,7 @@ Returns `{ ok: true, publicationId } | { ok: false, reason }`.
 
 ### `dohc_set_member_app_sharing`
 
-Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.
+Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Off pauses the apps members shared until it is on again; apps admins shared keep working. Ask the person you work for first.
 
 - `membersCanShare`: `boolean`. Required.
 
@@ -1243,7 +1243,7 @@ dohc member-apps sharing <on|off> [options]
 
 Turn members' app sharing on or off.
 
-Only the owner and admins can change it. Apps already shared stay shared.
+Only the owner and admins can change it. Off pauses the apps members shared until it is on again. Apps admins shared keep working.
 
 With `--json`, prints `{ schemaVersion, ok: true, membersCanShare }` or `{ schemaVersion, ok: false, reason }`.
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import {
@@ -22,6 +23,8 @@ type Remote<Credentials> = Promise<{ credentials: Credentials; credentialGenerat
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const PERSONAL_ONLY = "Open a workspace you joined to share or copy Member apps.";
+const RATE_LIMITED_TRIES = 8;
+const LISTINGS = new Set(["/member-apps", "/member-apps/settings"]);
 
 /** The body the relay reads for a Member app: header length, header, then each distinct file once, by digest. */
 export function memberAppUpload(
@@ -145,66 +148,82 @@ export function createMemberAppsActions<
       base: string,
     ) => Promise<Result>,
   ) =>
-    relayOperation(operation, async (operation, credentials, session) => {
-      const place = membersPlace(operation.workspace);
-      if (place === null || place === "joined-unknown")
-        throw new Error("Workspace apps are unavailable in this workspace.");
-      const base = `/sync/${encodeURIComponent(place.workspaceId)}`;
-      const request = async (
-        path: string,
-        init?: { method: "POST"; body: unknown; type?: string },
-      ) => {
-        let response: Response;
-        try {
-          response = await dependencies.relayResponse(credentials, `${base}${path}`, {
-            method: init?.method ?? "GET",
-            headers: {
-              accept: "application/json",
-              ...(init ? { "content-type": init.type ?? "application/json" } : {}),
-            },
-            ...(init
-              ? {
-                  body: init.type
-                    ? (init.body as Uint8Array<ArrayBuffer>)
-                    : JSON.stringify(init.body),
-                }
-              : {}),
-            signal: AbortSignal.any([operation.signal, AbortSignal.timeout(120_000)]),
-          });
-        } catch {
+    relayOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const place = membersPlace(operation.workspace);
+        if (place === null || place === "joined-unknown")
+          throw new Error("Workspace apps are unavailable in this workspace.");
+        const base = `/sync/${encodeURIComponent(place.workspaceId)}`;
+        const request = async (
+          path: string,
+          init?: { method: "POST"; body: unknown; type?: string },
+        ) => {
+          let response: Response;
+          for (let tries = 1; ; tries += 1) {
+            try {
+              response = await dependencies.relayResponse(credentials, `${base}${path}`, {
+                method: init?.method ?? "GET",
+                headers: {
+                  accept: "application/json",
+                  ...(init ? { "content-type": init.type ?? "application/json" } : {}),
+                },
+                ...(init
+                  ? {
+                      body: init.type
+                        ? (init.body as Uint8Array<ArrayBuffer>)
+                        : JSON.stringify(init.body),
+                    }
+                  : {}),
+                signal: AbortSignal.any([operation.signal, AbortSignal.timeout(120_000)]),
+              });
+            } catch {
+              session.assertCurrent();
+              throw new Error(MEMBERS_UNREACHABLE);
+            }
+            dependencies.serverAnswered();
+            if (response.status !== 429 || init || tries === RATE_LIMITED_TRIES) break;
+            await response.body?.cancel();
+            const seconds = Number(response.headers.get("retry-after") ?? 2);
+            await wait(Number.isFinite(seconds) ? seconds * 1000 : 2000, undefined, {
+              signal: operation.signal,
+            });
+            session.assertCurrent();
+          }
+          if (response.ok && !response.headers.get("content-type")?.includes("json")) {
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            session.assertCurrent();
+            return { status: response.status, body: null, bytes: async () => bytes };
+          }
+          const body: unknown = await response.json().catch(() => null);
           session.assertCurrent();
-          throw new Error(MEMBERS_UNREACHABLE);
-        }
-        dependencies.serverAnswered();
-        if (response.ok && !response.headers.get("content-type")?.includes("json")) {
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          session.assertCurrent();
-          return { status: response.status, body: null, bytes: async () => bytes };
-        }
-        const body: unknown = await response.json().catch(() => null);
-        session.assertCurrent();
-        if (!response.ok) {
-          const said = (body as { error?: unknown; message?: unknown } | null) ?? {};
-          const message = typeof said.error === "string" ? said.error : said.message;
-          if (response.status === 404 && !path.endsWith("/settings"))
-            throw new Error(`dohc could not ${phrase}. This app is no longer shared with you.`);
-          if (response.status < 500 && typeof message === "string" && message)
-            throw new Error(`dohc could not ${phrase}. ${message}`);
-          if (response.status !== 404)
+          if (
+            !response.ok &&
+            !(response.status === 404 && !init && LISTINGS.has(path.split("?")[0]!))
+          ) {
+            const said = (body as { error?: unknown; message?: unknown } | null) ?? {};
+            const message = typeof said.error === "string" ? said.error : said.message;
+            if (response.status === 404)
+              throw new Error(`dohc could not ${phrase}. This app is no longer shared with you.`);
+            if (response.status < 500 && typeof message === "string" && message)
+              throw new Error(`dohc could not ${phrase}. ${message}`);
             throw new Error(
               `dohc could not ${phrase}. The server answered ${response.status}. Try again.`,
             );
-        }
-        return {
-          status: response.status,
-          body,
-          bytes: async () => {
-            throw new Error(`dohc could not ${phrase}. The server sent no file.`);
-          },
+          }
+          return {
+            status: response.status,
+            body,
+            bytes: async () => {
+              throw new Error(`dohc could not ${phrase}. The server sent no file.`);
+            },
+          };
         };
-      };
-      return work(request, base);
-    });
+        return work(request, base);
+      },
+      undefined,
+      { allowPaused: true },
+    );
 
   const unreadable = (phrase: string) =>
     new Error(`dohc could not ${phrase}. The server's answer was unreadable. Try again.`);
@@ -247,6 +266,7 @@ export function createMemberAppsActions<
         const page = await request(
           `/member-apps${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
         );
+        if (page.status === 404) return { apps: [], nextCursor: null };
         const settings = input.cursor ? null : await request("/member-apps/settings");
         const value = page.body as { apps?: unknown; nextCursor?: unknown } | null;
         const parsed = MemberAppsListResult.safeParse({
