@@ -144,7 +144,7 @@ export function useAutosavedTextDraft(props: {
   // Their Try again saves the newest draft only while this editor still
   // shows that file and can write it.
   const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const reportSave = (failure: { cause?: unknown } | null) => {
+  const reportSave = (failure: { cause?: unknown } | null, writtenText?: string) => {
     const written = props.localBuffer;
     reportTextSave(
       props.workspaceId,
@@ -158,6 +158,7 @@ export function useAutosavedTextDraft(props: {
           return true;
         },
       },
+      writtenText,
     );
   };
 
@@ -460,7 +461,10 @@ export function useAutosavedTextDraft(props: {
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
         answered = true;
-        reportSave(result.status === "no-baseline" ? {} : null);
+        reportSave(
+          result.status === "no-baseline" ? {} : null,
+          result.status === "written" ? result.body : undefined,
+        );
         if (activeLocalBuffer.current !== props.localBuffer) {
           if (result.status === "conflict" || result.status === "no-baseline") {
             captureOrphanedDraft(props.workspaceId, props.path, result.body);

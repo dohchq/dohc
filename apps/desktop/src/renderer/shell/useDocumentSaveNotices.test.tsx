@@ -1290,4 +1290,45 @@ describe("document save notices", () => {
     );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
+
+  it("warns once that a saved text file holds a likely secret token, clears it when the token goes, and never warns for a .env file", async () => {
+    const token = `ghp_${"a".repeat(30)}`;
+    writeWorkspaceText.mockResolvedValue({ status: "written", contentHash: "saved-hash" });
+    render(<ActionNotices />);
+    const save = async (
+      editor: { result: { current: ReturnType<typeof useAutosavedTextDraft> } },
+      text: string,
+    ) => {
+      act(() => editor.result.current.setDraft(text));
+      await act(async () => {
+        await editor.result.current.saveNow();
+      });
+    };
+    const note = textFile("ws-1", "notes/keys.txt", "empty");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: note });
+    await save(editor, `token=${token}`);
+    expect(writeWorkspaceText).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: `token=${token}` }),
+    );
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("notes/keys.txt has a GitHub token");
+    expect(toast.textContent).toContain("Move it to a .env file");
+    expect(toast.textContent).not.toContain(token);
+
+    await save(editor, `token=${token}\nmore`);
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+
+    await save(editor, "token=moved");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await closeEditor(editor, note);
+
+    const env = textFile("ws-1", ".env", "OLD=1");
+    const envEditor = renderHook(useAutosavedTextDraft, { initialProps: env });
+    await save(envEditor, `TOKEN=${token}`);
+    expect(writeWorkspaceText).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: `TOKEN=${token}` }),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await closeEditor(envEditor, env);
+  });
 });
