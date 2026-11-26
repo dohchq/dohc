@@ -174,6 +174,17 @@ describe("cliForThread", () => {
     ).toBe(`"C:/Users/José O'Brien-Smith.w/cli-bin/dohc.cmd"`);
   });
 
+  it("keeps an @ in a path with no space, as in an older Windows install's folder", () => {
+    expect(
+      cliForThread(
+        "C:\\Users\\kim\\AppData\\Local\\Programs\\@dohcdesktop\\resources\\cli-bin\\dohc.cmd",
+        "win32",
+      ).program,
+    ).toBe(`"C:/Users/kim/AppData/Local/Programs/@dohcdesktop/resources/cli-bin/dohc.cmd"`);
+    expect(cliForThread("/home/a@b/dohc", "linux").program).toBe(`"/home/a@b/dohc"`);
+    expect(cliForThread("C:\\Program Files\\@x\\dohc.cmd", "win32").refused).toBe("@");
+  });
+
   it("gives no program for a path some shell would not read whole, and never a bare name", () => {
     for (const path of [
       '/home/a"b/dohc',
@@ -196,9 +207,9 @@ describe("cliForThread", () => {
       "C:\\Users\\a=b\\dohc.cmd",
       "C:\\Users\\a<b>\\dohc.cmd",
       `C:\\Users\\a${at(0xa0)}b\\dohc.cmd`,
-      // cmd.exe drops the quotes of a command wrapped in cmd /c when it meets an @.
+      // cmd.exe drops the quotes of a command wrapped in cmd /c when they hold an @, splitting at the space.
       "C:\\Program Files\\@x\\dohc.cmd",
-      "/home/a@b/dohc",
+      "/home/a b/c@d/dohc",
       // The system's older text encoding on Windows turns these into a quote, a caret, a backtick.
       `C:\\Users\\a${at(0x2ba)}b\\dohc.cmd`,
       `C:\\Users\\a${at(0x2c6)}b\\dohc.cmd`,
