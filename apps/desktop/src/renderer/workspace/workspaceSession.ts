@@ -11,6 +11,7 @@ declare const brand: unique symbol;
 export type WorkspaceSession = { readonly [brand]: true };
 
 const WorkspaceSessionContext = createContext<WorkspaceSession | null>(null);
+const WorkspaceIdContext = createContext<string | null>(null);
 
 const newSession = (workspaceId: string) => ({
   workspaceId,
@@ -24,7 +25,15 @@ export function WorkspaceSessionProvider(props: { workspaceId: string; children?
     visit = newSession(props.workspaceId);
     hold(visit);
   }
-  return createElement(WorkspaceSessionContext.Provider, { value: visit.session }, props.children);
+  return createElement(
+    WorkspaceIdContext.Provider,
+    { value: visit.workspaceId },
+    createElement(WorkspaceSessionContext.Provider, { value: visit.session }, props.children),
+  );
+}
+
+export function useShownWorkspaceId(): string | null {
+  return useContext(WorkspaceIdContext);
 }
 
 export function useWorkspaceSession(): WorkspaceSession {

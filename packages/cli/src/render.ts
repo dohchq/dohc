@@ -8,7 +8,7 @@ import {
   renderThreadMarkdown,
 } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
-import { MEMBERS_REFUSED } from "./members";
+import { MEMBERS_REFUSED, type InvitationEmailAnswer } from "./members";
 import { formatStoredBytes } from "./account";
 
 type GroupsResult = CliResultByVerb["groups"];
@@ -353,7 +353,7 @@ function changeText(change: AutomationRunChange): string {
     case "notice":
       return `sent a notice to ${lineSafe(change.name)} · ${change.noticeId}`;
     case "http-sent":
-      return `sent webhook to ${lineSafe(change.target)} (HTTP ${change.status}) · ${change.deliveryId}`;
+      return `${change.fetched ? "fetched data from" : change.method === "GET" ? "sent a GET request to" : "sent webhook to"} ${lineSafe(change.target)} (HTTP ${change.status}) · ${change.deliveryId}`;
   }
 }
 
@@ -440,7 +440,7 @@ function renderMembers(result: CliResultByVerb["members"]): string {
       return `${name} has no access of its own: members can ${LEVEL_WORDS[result.memberLevel]}, as everywhere.`;
     return GROUP_LEVEL_LINES[result.level](name);
   }
-  const { view } = result;
+  const { view, invitation } = result;
   const row = (person: (typeof view.people)[number]) =>
     [
       person.name === null ? null : lineSafe(person.name),
@@ -470,11 +470,7 @@ function renderMembers(result: CliResultByVerb["members"]): string {
     "",
     ...active.map(row),
     ...(invited.length
-      ? [
-          "",
-          "Invites (dohc sends no email; each joins when they sign in with that address)",
-          ...invited.map(row),
-        ]
+      ? ["", "Invites (each joins when they sign in with that address)", ...invited.map(row)]
       : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
     ...(view.folderRules ?? []).flatMap(({ folders, members, people }) => [
@@ -483,7 +479,25 @@ function renderMembers(result: CliResultByVerb["members"]): string {
       `  Members: ${members ?? "none"}`,
       ...people.map(({ email, level }) => `  ${lineSafe(email)}: ${level}`),
     ]),
+    ...(invitation ? ["", invitationLine(invitation)] : []),
   ].join("\n");
+}
+
+function invitationLine(answer: InvitationEmailAnswer): string {
+  switch (answer.invitationEmail) {
+    case "sent":
+      return "Emailed the invitation.";
+    case "unavailable":
+      return "No email sent: this server does not send email. Tell them to sign in to dohc with that address.";
+    case "recent":
+      return "No email sent: dohc already tried to email this invitation in the last minute. Wait a minute before trying again.";
+    case "limit": {
+      const { sent, limit, windowHours } = answer.invitationEmailLimit;
+      return `No email sent: ${sent} of ${limit} invitation emails used in the last ${windowHours} ${windowHours === 1 ? "hour" : "hours"}. Tell them to sign in to dohc with that address.`;
+    }
+    case "failed":
+      return "The invite stands, but dohc could not send the email. Run the same invite again to retry.";
+  }
 }
 
 const LIVE_REASON_WORDS = {

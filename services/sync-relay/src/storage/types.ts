@@ -1151,6 +1151,8 @@ export interface SyncRelayStorage {
     workspaceId: string;
     nowMs: number;
   }): import("./chatWakes").ChatRunner[];
+  /** Every agent the account's computers have in the workspace, by ID, with its name; null when that isn't known. */
+  declaredAgentNames(input: { accountId: string; workspaceId: string }): Map<string, string> | null;
   chatWakeHead(accountId: string): number;
   /** The latest generation of each wake target of messages the phone shows, in the threads it read them in. */
   phoneChatWakes(
@@ -2172,6 +2174,11 @@ export interface SyncRelayStorage {
     ownerUserId: string,
     name: string,
   ): import("./workspaceSecrets").DeleteWorkspaceSecretResult;
+  listWorkspaceSecretSeals(): import("./workspaceSecrets").WorkspaceSecretSeal[];
+  replaceWorkspaceSecretSeal(
+    seal: import("./workspaceSecrets").WorkspaceSecretSeal,
+    next: { readonly keyId: string; readonly sealedValue: string },
+  ): boolean;
   listWorkspaceHttpStepApprovals(workspaceId: string): string[];
   hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string): boolean;
   approveWorkspaceHttpStep(

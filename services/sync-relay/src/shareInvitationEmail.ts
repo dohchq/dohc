@@ -22,6 +22,8 @@ export type ShareInvitationEmailAnswer =
     };
 
 export type ShareInvitation = {
+  /** A workspace invite names the workspace; anything else is shared work. */
+  kind?: "workspace";
   inviterUserId: string;
   shareId: string;
   grantId: string;
@@ -29,7 +31,8 @@ export type ShareInvitation = {
   access: string;
   browserInvitationUrl: string | null;
   /**
-   * Set for a resend, which one grant gets once a minute. It runs after the
+   * Set for a resend, or any email whose grant can change while it is
+   * looked up. The grant then gets one email a minute. It runs after the
    * address lookups, with nothing awaited between it and the send, and answers
    * what the grant gives now. What it throws reaches the caller, with nothing
    * counted and nothing sent.
@@ -103,6 +106,7 @@ export function createShareInvitationEmailer(options: {
         if (!recipientEmail || !ONE_MAILBOX.test(recipientEmail))
           throw new Error("not one mailbox");
         const message = shareInvitationMessage({
+          workspace: invitation.kind === "workspace",
           recipientEmail,
           inviterEmail,
           inviterName,

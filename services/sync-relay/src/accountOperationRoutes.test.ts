@@ -366,6 +366,41 @@ async function feed(response: Response) {
 }
 
 describe("an account's reads through the server's copy", () => {
+  it("names each agent's chat as the computers name its agent, and archives one no computer has", async () => {
+    const { storage, engine, h } = await relay();
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    await chats.createChannel({ workspaceId: "trip", name: "Planning" });
+    await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
+    await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "t3-code", name: "d3-code" });
+    const listed = async () =>
+      (
+        (await answer(await h(op("trip", "groupsFull")))) as { groups: Record<string, unknown>[] }
+      ).groups
+        .map(({ name, kind, archived }) => ({ name, kind, archived }))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+    // No computer has sent its list yet: the chats stand as stored.
+    expect(await listed()).toEqual([
+      { name: "d3-code", kind: "agent", archived: undefined },
+      { name: "My agent", kind: "agent", archived: undefined },
+      { name: "Planning", kind: "group", archived: undefined },
+    ]);
+    storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId: "pc",
+      computerLabel: "PC",
+      runners: [],
+      agents: [{ agentId: "t3-code", displayName: "Nova" }],
+      nowMs: Date.now(),
+    });
+    expect(await listed()).toEqual([
+      { name: "My agent", kind: "agent", archived: true },
+      { name: "Nova", kind: "agent", archived: undefined },
+      { name: "Planning", kind: "group", archived: undefined },
+    ]);
+  });
+
   it("answers each read from the copy once it has synced, without creating General", async () => {
     const { engine, h, syncs } = await relay();
     const { planning, thread, onPage } = await seedTrip(engine);

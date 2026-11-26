@@ -69,6 +69,7 @@ import {
   createWorkspaceSecretRoutes,
   WORKSPACE_SECRET_MAX_BODY_BYTES,
 } from "./workspaceSecretRoutes";
+import { workspaceSecretKeyring, type WorkspaceSecretKeyring } from "./workspaceSecretCrypto";
 import {
   createOutboundWebhookLimiters,
   createOutboundWebhookRoutes,
@@ -260,6 +261,8 @@ export interface CreateSyncRelayHandlerOptions {
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
+  // The keys that seal workspace secrets; built from linkKey alone when absent.
+  secretKeyring?: WorkspaceSecretKeyring | null;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
   // Ends share-web's phone app sessions for these launch IDs' hashes once the relay has deleted them.
@@ -287,11 +290,14 @@ export interface CreateSyncRelayHandlerOptions {
   outboundWebhookLimiters?: OutboundWebhookLimiters;
   resolveOutboundDestination?: OutboundWebhookExecutionDependencies["resolveDestination"];
   sendOutboundRequest?: OutboundWebhookExecutionDependencies["sendRequest"];
+  readOutboundRequest?: OutboundWebhookExecutionDependencies["readRequest"];
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
+  // A workspace's secrets changed, so this server's automations recheck the steps that use them.
+  workspaceSecretsChanged?: (workspaceId: string) => void;
   serverCopies?: () => ServerCopies | undefined;
   // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
   phonePages?: () => PhonePages | undefined;
@@ -356,6 +362,7 @@ export function createSyncRelayHandler({
   discussionActivity = new DiscussionActivityHub(),
   replicaWatches = new ReplicaWatches(discussionActivity),
   linkKey,
+  secretKeyring = workspaceSecretKeyring({ linkKey }),
   shareWebOrigin,
   relayExchangeKey,
   endShareWebAppLaunches,
@@ -419,6 +426,7 @@ export function createSyncRelayHandler({
   outboundWebhookLimiters = createOutboundWebhookLimiters(),
   resolveOutboundDestination,
   sendOutboundRequest,
+  readOutboundRequest,
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -426,6 +434,7 @@ export function createSyncRelayHandler({
   automationServer,
   pressDataset,
   serverRuns = () => undefined,
+  workspaceSecretsChanged = () => undefined,
   serverCopies = () => undefined,
   phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
@@ -575,13 +584,14 @@ export function createSyncRelayHandler({
     launchable: !!shareWebOrigin && !!relayExchangeKeyHash && !!respondToDatasetApp,
     nowMs,
     endShareWebLaunches: endShareWebAppLaunches,
-    // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
-    servable(userId, workspaceId, publicationId) {
-      const published = datasetHost?.servedPublication(
-        { kind: "named", workspaceId, userId },
-        publicationId,
-      );
-      if (!published || published.local) throw notFound();
+    served(auth, publicationId, reviewing) {
+      if (!datasetHost) throw notFound();
+      return datasetHost.servedPublication(auth, publicationId, reviewing);
+    },
+    async authorName(userId) {
+      const name = await accountDisplayName(lookupUserDisplayName, userId);
+      const email = await lookupUserEmail?.(userId);
+      return name || email ? formatShareSender(name, email) : null;
     },
   });
   // Share-web, with the exchange key and no person's credential, redeeming a grant or acting under a launch ID.
@@ -775,9 +785,10 @@ export function createSyncRelayHandler({
   const respondToKeyEnvelopes = createKeyEnvelopeRoutes(storage, nowMs);
   const respondToWorkspaceSecrets = createWorkspaceSecretRoutes({
     storage,
-    linkKey,
+    keyring: secretKeyring,
     nowMs,
     rateLimiter: workspaceSecretRateLimiter,
+    secretsChanged: workspaceSecretsChanged,
   });
   const outboundWebhookInFlight = new Map<string, number>();
   const readOwnerShares = async (
@@ -820,7 +831,7 @@ export function createSyncRelayHandler({
   };
   const outboundWebhookDeps: OutboundWebhookExecutionDependencies = {
     storage,
-    linkKey: linkKey ?? null,
+    keyring: secretKeyring,
     readOwnerShares,
     approvalRateLimiter: outboundWebhookLimiters.approval,
     accountRateLimiter: outboundWebhookLimiters.account,
@@ -829,6 +840,7 @@ export function createSyncRelayHandler({
     nowMs,
     ...(resolveOutboundDestination ? { resolveDestination: resolveOutboundDestination } : {}),
     ...(sendOutboundRequest ? { sendRequest: sendOutboundRequest } : {}),
+    ...(readOutboundRequest ? { readRequest: readOutboundRequest } : {}),
   };
   const respondToOutboundWebhooks = createOutboundWebhookRoutes(outboundWebhookDeps);
   const incomingWebhookLimiters = createIncomingWebhookLimiters();
@@ -941,6 +953,14 @@ export function createSyncRelayHandler({
     rateLimiters: automationPressRateLimiters,
   });
 
+  const emailInvitation = createShareInvitationEmailer({
+    storage,
+    nowMs,
+    sendEmail: sendShareInvitationEmail,
+    lookupVerifiedUserEmail,
+    lookupUserDisplayName: lookupAccountDisplayName,
+    relayPublicOrigin,
+  });
   const respondToWorkspaceMembers = createWorkspaceMemberRoutes({
     storage,
     nowMs,
@@ -955,6 +975,8 @@ export function createSyncRelayHandler({
     shareWebOrigin,
     hasValidRelayExchangeKey,
     discussionActivity,
+    emailInvitation,
+    browserOrigin: namedBrowser ? shareWebOrigin : undefined,
   });
   const respondToDirectMessages = createDirectMessageRoutes({
     storage,
@@ -1109,14 +1131,7 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
-    createShareInvitationEmailer({
-      storage,
-      nowMs,
-      sendEmail: sendShareInvitationEmail,
-      lookupVerifiedUserEmail,
-      lookupUserDisplayName: lookupAccountDisplayName,
-      relayPublicOrigin,
-    }),
+    emailInvitation,
     publicEditRelease,
     liveRooms,
   );
@@ -1393,7 +1408,13 @@ export function createSyncRelayHandler({
     nowMs,
   });
   const respondToMemberApps = datasetHost
-    ? createMemberAppRoutes({ host: datasetHost, storage, limits: appPublicationLimits })
+    ? createMemberAppRoutes({
+        host: datasetHost,
+        storage,
+        limits: appPublicationLimits,
+        ...(shareWebOrigin ? { shareWebOrigin } : {}),
+        authorName: (userId) => accountDisplayName(lookupUserDisplayName, userId),
+      })
     : undefined;
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({
     storage,
@@ -1711,8 +1732,13 @@ export function createSyncRelayHandler({
             if (launchId !== null) throw notFound();
             return await phoneApps.redeem(request, scope);
           }
-          // A phone launch reaches its own app's bundle and backend, never activation or the share summary.
-          if (route.action === "activate" || route.action === "summary") throw notFound();
+          // A phone launch reaches its own app's bundle and backend, never activation, the share summary or consent.
+          if (
+            route.action === "activate" ||
+            route.action === "summary" ||
+            route.action === "consent"
+          )
+            throw notFound();
           const { userId, guard } = await phoneApps.authorizeLaunch(launchId!, scope);
           // The guard goes with the request: rechecked after its body, and inside each commit.
           const answer = await respondToDatasetApp(
@@ -1752,10 +1778,24 @@ export function createSyncRelayHandler({
         }
         const actor = await resolveNamedActor(actorRequest, route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
+        const person =
+          route.action === "consent" &&
+          actorRequest === request &&
+          resolveAccountSession !== undefined &&
+          (await resolveAccountSession(
+            new Request(request.url, {
+              headers: { cookie: request.headers.get("cookie")! },
+              signal: request.signal,
+            }),
+          ).then(
+            (session) => session.clientKind === "browser" && session.userId === actor.userId,
+            () => false,
+          ));
         const auth = {
           kind: "named" as const,
           workspaceId: route.workspaceId,
           userId: actor.userId,
+          ...(person ? { person: true as const } : {}),
         };
         return await respondToDatasetApp(request, route, auth);
       }

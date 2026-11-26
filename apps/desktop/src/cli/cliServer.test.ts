@@ -58,6 +58,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import type { AgentMembersRequest, MembersResult } from "@dohc/cli/members";
+import type { DatasetResult } from "@dohc/cli/dataset";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import type { QuietRunRefusal } from "../agents/chatDispatchService";
@@ -1362,8 +1363,17 @@ describe("CLI socket server", () => {
     const made: unknown[] = [];
     context.makeWorkReference = async (target) => {
       if (target.kind === "documentCollection") throw new Error("not a Collection");
-      const path = target.kind === "file" && "path" in target ? target.path : undefined;
-      if (path === "missing.md") throw new Error("work-target-not-found");
+      const path =
+        (target.kind === "file" || target.kind === "app") && "path" in target
+          ? target.path
+          : undefined;
+      if (target.kind === "app" && path !== "Workouts/app.publish.json")
+        throw new Error("work-target-not-found");
+      if (
+        target.kind === "file" &&
+        ["missing.md", "Workouts", "Workout log", "Two"].includes(path!)
+      )
+        throw new Error("work-target-not-found");
       if (path === "stopped.md") throw new Error("The workspace engine is not running.");
       made.push(target);
       return String(made.length).padStart(43, "R");
@@ -1392,6 +1402,23 @@ describe("CLI socket server", () => {
         })
       ).kind,
     ).toBe("file");
+    // An app and a data Collection, by their folders.
+    const datasetId = "8ffef389-6fa8-480f-beee-35a6a96e4a65";
+    const tableId = "b59835f8-da0d-57ac-acc2-8e212e5c51e8";
+    const described = (tables: { tableId: string }[]) =>
+      ({ kind: "description", dataset: { datasetId, tables } }) as unknown as DatasetResult;
+    context.dataset = async (request) => {
+      if (request.action !== "describe") throw new Error("unexpected");
+      if (request.datasetPath === "Workout log/dataset.json") return described([{ tableId }]);
+      if (request.datasetPath === "Two/dataset.json")
+        return described([{ tableId }, { tableId: "c7a0f0c1-5b2e-4f7a-9d3e-1f2a3b4c5d6e" }]);
+      throw new Error("Collection reference broken");
+    };
+    expect((await link({ kind: "path", path: "Workouts" })).kind).toBe("app");
+    expect((await link({ kind: "path", path: "Workout log" })).kind).toBe("collection");
+    await expect(link({ kind: "path", path: "Two" })).rejects.toThrow(
+      "Two holds 2 Collections, and a link names one.",
+    );
     // The CLI names chats by short ids; links name them by their engine ids.
     expect(general.id).toBe("ch_general");
     expect(made).toEqual([
@@ -1399,6 +1426,8 @@ describe("CLI socket server", () => {
       { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },
       { kind: "message", messageId: expect.stringMatching(/^message-/u) },
       { kind: "file", path: "plans/trip.md" },
+      { kind: "app", path: "Workouts/app.publish.json" },
+      { kind: "transactionalCollection", datasetId, tableId },
     ]);
     await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
     await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow(
@@ -1418,7 +1447,7 @@ describe("CLI socket server", () => {
     };
     await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({
       kind: "chat",
-      link: `@[work:${"R".repeat(42)}5]`,
+      link: `@[work:${"R".repeat(42)}7]`,
     });
     await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual(
       {

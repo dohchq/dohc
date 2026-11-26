@@ -29,6 +29,7 @@ import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
+import { openNow } from "../server/keptStore";
 import {
   clearNoticeListsOnSignInChange,
   createNoticeStore,
@@ -47,6 +48,7 @@ import {
   type WorkspaceList,
   type WorkspaceListStore,
 } from "../server/workspaceList";
+import { launchTimings } from "../startup";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
 import { ProblemLine } from "./ProblemLine";
@@ -73,7 +75,7 @@ interface AccountValue {
   readonly runner: AppRunner;
   /** The open workspace's published apps. */
   readonly apps: WorkspaceApps | null;
-  /** The open workspace's transactional Collections, read into memory only. */
+  /** The open workspace's transactional Collections. */
   readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
   readonly livePages: ScopedEnds;
@@ -113,17 +115,19 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // asks again at once. Only where its Sign out delete stands reaches the screen, so the rest of its changes render
 // nothing.
 //
-// A running app (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections read
-// (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401 included),
-// a workspace switch and Show on phone off.
+// A running app and the apps read (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections
+// read (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401
+// included), a workspace switch, Show on phone off and a 404 for the workspace.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
   const [livePages] = useState(createScopedEnds);
-  const [collectionStores] = useState(createScopedEnds);
-  const [teardown] = useState(() => appTeardown(runner, livePages, collectionStores));
+  const [stores] = useState(createScopedEnds);
+  const [teardown] = useState(() => appTeardown(runner, livePages, stores));
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
   const [kept] = useState(createKeptDatabase);
+  const [cacheFile] = useState(createCacheDatabase);
+  const [cache] = useState(() => createReadCache(createCacheRows(cacheFile)));
   const [outbox] = useState(() => createOutbox({ store: kept, sends: phoneWrites }));
   const [account] = useState(() =>
     createAccount({
@@ -131,15 +135,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       fetch,
       onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
       pendingSignOuts: pendingSignOuts(kept),
+      onSaved: (saved) => cache.preload(saved),
     }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
-  useEffect(() => void account.restore(), [account]);
+  useEffect(() => {
+    void openNow([kept, cacheFile]).then((opened) => opened && launchTimings?.mark("databases"));
+    void account.restore();
+  }, [account, kept, cacheFile]);
   // Subscribed before the cache and the outbox follow the account, so it runs before either clears anything.
   useEffect(() => teardown.follow(account), [account, teardown]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
-  const [cache] = useState(() => createReadCache(createCacheRows(createCacheDatabase())));
   useEffect(() => cache.follow(account), [account, cache]);
   useEffect(() => pageTimings?.follow(account), [account]);
 
@@ -157,8 +164,6 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   useEffect(() => list?.reload(), [list]);
-  // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
-  // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
   const open = useMemo(
     () =>
       signIn && list
@@ -170,6 +175,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             // A workspace that stops being the open one, here or from another device, ends its apps and live pages
             // before its store stops.
             beforeSwitch: teardown.open,
+            onGone: teardown.hide,
           })
         : null,
     [signIn, list, cache, outbox, teardown],
@@ -178,26 +184,27 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
+  if (currentWorkspaceId && !choosing) launchTimings?.mark("chosen");
   const apps = useMemo(
     () =>
-      signIn && currentWorkspaceId
+      signIn && data
         ? createWorkspaceApps({
             signIn,
-            workspaceId: currentWorkspaceId,
+            workspaceId: data.workspaceId,
             runner,
             fetch,
             canOpen: canOpenApps,
+            cache,
+            ends: stores,
           })
         : null,
-    [signIn, currentWorkspaceId, runner],
+    [signIn, data, runner, cache, stores],
   );
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
-      signIn && currentWorkspaceId
-        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores)
-        : null,
-    [signIn, currentWorkspaceId, collectionStores],
+      signIn && data ? createWorkspaceCollections(signIn, data.workspaceId, stores, cache) : null,
+    [signIn, data, stores, cache],
   );
   useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);

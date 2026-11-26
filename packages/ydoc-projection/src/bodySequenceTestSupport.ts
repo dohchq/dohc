@@ -6,11 +6,6 @@ import type { Attrs, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection, type Plugin } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-} from "./bodySequenceGrammar.js";
-import {
   bodySequencePlugin,
   createBodySequenceHistory,
   isBodySequenceChange,
@@ -18,6 +13,7 @@ import {
 } from "./bodySequenceEditor.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
+import { BLOCK_ELEMENT, BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 export const REMOTE = Symbol("remote");
 export const schema = getDohcProseMirrorSchema();

@@ -41,6 +41,9 @@ describe("security contract", () => {
     for (const platform of ["win32", "linux"] as const) {
       expect(classify("config/.env", platform)).toBe("secret");
       expect(classify(".env.local", platform)).toBe("secret");
+      expect(classify(".env.example", platform)).toBe("tracked");
+      expect(classify("shared-with-me/alex/config/.ENV.Sample", platform)).toBe("tracked");
+      expect(classify("shared-with-me/alex/.env/.env.template", platform)).toBe("secret");
       expect(classify("shared-with-me/alex/.env", platform)).toBe("secret");
     }
   });

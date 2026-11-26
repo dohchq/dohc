@@ -151,6 +151,7 @@
   "desktop:list-workspace-secrets": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceSecretsHandlers.currentRendererSession" } },
   "desktop:set-workspace-secret": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceSecretsHandlers.currentRendererSession" } },
   "desktop:delete-workspace-secret": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceSecretsHandlers.currentRendererSession" } },
+  "desktop:clear-local-workspace-secrets": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceSecretsHandlers.currentRendererSession" } },
   "desktop:list-kept-typing": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:dismiss-kept-typing": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "findWorkspace === null + removeKeptTyping" } },
   "desktop:list-notices": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

@@ -111,6 +111,7 @@ export function createAccount(options: {
     ending: Pick<SignIn, "origin" | "userId"> | null,
   ) => Promise<void>;
   readonly pendingSignOuts?: PendingSignOuts;
+  readonly onSaved?: (saved: Pick<StoredSignIn, "origin" | "userId">) => void;
 }): Account {
   const { store, fetch } = options;
   const now = options.now ?? Date.now;
@@ -321,6 +322,7 @@ export function createAccount(options: {
     const loaded = await write(() => store.load()).catch(() => null);
     // A token this phone already signed out of is never signed in with again.
     const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
+    if (stored) options.onSaved?.(stored);
     const pending =
       stored && options.pendingSignOuts
         ? await options.pendingSignOuts.isPending(stored).catch(() => null)

@@ -1,10 +1,13 @@
 import {
   parseSafeOutboundHttpsUrl,
+  parseSafeOutboundJson,
+  readSafeOutboundHttps,
   resolveSafeOutboundDestination,
   SafeOutboundError,
   sendSafeOutboundHttps,
   type SafeOutboundDestination,
   type SafeOutboundRequest,
+  type SafeOutboundResponse,
 } from "@dohc/service-http";
 import {
   AUTOMATION_HTTP_USER_AGENT,
@@ -13,13 +16,20 @@ import {
   MAX_HTTP_BODY_BYTES,
   MAX_HTTP_HEADERS,
   MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_RESPONSE_BYTES,
   MAX_HTTP_TOTAL_HEADER_BYTES,
 } from "@dohc/workspace-contracts/automations";
 import {
   AUTOMATION_CHAIN_DEPTH_CAP,
   sanitizeHttpFailureReason,
+  scrubSecretsFromJson,
+  secretUrlScrubValues,
+  workspaceSecretApprovalBinding,
+  type HttpJsonValue,
 } from "@dohc/workspace-contracts/http-step-approvals";
+import { AUTOMATION_LIMITS } from "@dohc/app-backend-runtime/automation";
 import type { AutomationHttpWebhookExecutor } from "@dohc/automation-executor/collection-automation-run";
+import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
 import type { LocalWorkspaceSecretStore } from "./localWorkspaceSecretStore";
 
 const OUTBOUND_TIMEOUT_MS = 10_000;
@@ -27,7 +37,11 @@ const OUTBOUND_MAX_HEADER_SIZE = 8_192;
 const OUTBOUND_MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_LOCAL_CONCURRENT_OUTBOUND = 2;
 
-function fixedSafeOutboundReason(error: unknown, secrets: readonly string[]): string {
+function fixedSafeOutboundReason(
+  error: unknown,
+  secrets: readonly string[],
+  maxResponseBytes: number,
+): string {
   if (error instanceof SafeOutboundError) {
     switch (error.code) {
       case "unsafe_url":
@@ -39,9 +53,13 @@ function fixedSafeOutboundReason(error: unknown, secrets: readonly string[]): st
       case "redirect_refused":
         return "Webhook destination returned a redirect, which is not allowed.";
       case "response_too_large":
-        return "Webhook destination response exceeded the safety limit.";
+        return `Webhook destination response exceeded the ${maxResponseBytes / 1024} KiB limit.`;
       case "response_interrupted":
         return "Webhook connection closed before a complete response arrived.";
+      case "unsupported_response":
+        return "Webhook destination did not answer with uncompressed UTF-8 JSON.";
+      case "invalid_json":
+        return `Webhook destination answered with JSON that is invalid or nested more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`;
       default:
         return "Webhook request failed or timed out.";
     }
@@ -54,11 +72,21 @@ export function createLocalOutboundWebhookExecutor(options: {
   readonly secrets: LocalWorkspaceSecretStore;
   readonly resolveDestination?: (rawUrl: string) => Promise<SafeOutboundDestination>;
   readonly sendRequest?: (request: SafeOutboundRequest, signal?: AbortSignal) => Promise<number>;
+  readonly readRequest?: (
+    request: SafeOutboundRequest,
+    signal?: AbortSignal,
+  ) => Promise<SafeOutboundResponse>;
 }): AutomationHttpWebhookExecutor {
   let inFlight = 0;
 
   return {
-    async execute({ effect, depth, signal }) {
+    async execute({ effect, method, readResponse, depth, signal, secrets }) {
+      const maxResponseBytes = readResponse ? MAX_HTTP_RESPONSE_BYTES : OUTBOUND_MAX_RESPONSE_BYTES;
+      const approvedBindings = new Map(
+        secrets.map((secret) => [secret.name, workspaceSecretApprovalBinding(secret)]),
+      );
+      const changedSince = (summary: WorkspaceSecretSummary) =>
+        approvedBindings.get(summary.name) !== workspaceSecretApprovalBinding(summary);
       if (depth >= AUTOMATION_CHAIN_DEPTH_CAP) {
         return {
           ok: false,
@@ -121,8 +149,15 @@ export function createLocalOutboundWebhookExecutor(options: {
               beforeSend: true,
             };
           }
+          if (changedSince(secret.summary)) {
+            return {
+              ok: false,
+              reason: `Secret "${effect.url.secret}" changed while dohc was sending. Try again.`,
+              beforeSend: true,
+            };
+          }
           rawUrl = secret.value;
-          secretsToScrub.push(rawUrl);
+          secretsToScrub.push(...secretUrlScrubValues(rawUrl));
         }
 
         let destination: SafeOutboundDestination;
@@ -137,12 +172,22 @@ export function createLocalOutboundWebhookExecutor(options: {
         } catch (error) {
           return {
             ok: false,
-            reason: fixedSafeOutboundReason(error, secretsToScrub),
+            reason: fixedSafeOutboundReason(error, secretsToScrub, maxResponseBytes),
             beforeSend: true,
           };
         }
         if (effect.url.kind === "secret") {
           secretsToScrub.push(destination.canonicalHost);
+          const name = effect.url.secret;
+          const current = await options.secrets.list(options.workspaceId).catch(() => []);
+          const now = current.find((secret) => secret.name === name);
+          if (!now || changedSince(now)) {
+            return {
+              ok: false,
+              reason: `Secret "${name}" changed while dohc was sending. Try again.`,
+              beforeSend: true,
+            };
+          }
         }
 
         const outboundHeaders = Object.create(null) as Record<string, string>;
@@ -213,6 +258,13 @@ export function createLocalOutboundWebhookExecutor(options: {
               beforeSend: true,
             };
           }
+          if (changedSince(secret.summary)) {
+            return {
+              ok: false,
+              reason: `Secret "${secretHeader.secret}" changed while dohc was sending. Try again.`,
+              beforeSend: true,
+            };
+          }
           if (!secret.summary.allowedHosts.includes(destination.canonicalHost)) {
             return {
               ok: false,
@@ -253,30 +305,42 @@ export function createLocalOutboundWebhookExecutor(options: {
         outboundHeaders["X-Dohc-Delivery-Id"] = effect.deliveryId;
         outboundHeaders["X-Dohc-Chain-Depth"] = String(depth + 1);
 
+        const request: SafeOutboundRequest = {
+          destination,
+          method,
+          headers: outboundHeaders,
+          body: effect.body !== null ? Buffer.from(effect.body, "utf8") : undefined,
+          timeoutMs: OUTBOUND_TIMEOUT_MS,
+          maxHeaderSize: OUTBOUND_MAX_HEADER_SIZE,
+          maxResponseBytes,
+          rejectRedirects: true,
+        };
         let status: number;
+        let response: HttpJsonValue | undefined;
         try {
-          status = await (options.sendRequest ?? sendSafeOutboundHttps)(
-            {
-              destination,
-              method: "POST",
-              headers: outboundHeaders,
-              body: effect.body !== null ? Buffer.from(effect.body, "utf8") : undefined,
-              timeoutMs: OUTBOUND_TIMEOUT_MS,
-              maxHeaderSize: OUTBOUND_MAX_HEADER_SIZE,
-              maxResponseBytes: OUTBOUND_MAX_RESPONSE_BYTES,
-              rejectRedirects: true,
-            },
-            signal,
-          );
+          if (readResponse) {
+            const read = await (options.readRequest ?? readSafeOutboundHttps)(request, signal);
+            status = read.status;
+            if (status >= 200 && status < 300) {
+              const scrubbed = scrubSecretsFromJson(
+                parseSafeOutboundJson(read, AUTOMATION_LIMITS.resultDepth) as HttpJsonValue,
+                secretsToScrub,
+              );
+              if (!scrubbed.ok) return { ok: false, status, reason: scrubbed.reason };
+              response = scrubbed.value;
+            }
+          } else {
+            status = await (options.sendRequest ?? sendSafeOutboundHttps)(request, signal);
+          }
         } catch (error) {
           return {
             ok: false,
-            reason: fixedSafeOutboundReason(error, secretsToScrub),
+            reason: fixedSafeOutboundReason(error, secretsToScrub, maxResponseBytes),
           };
         }
 
         if (status >= 200 && status < 300) {
-          return { ok: true, status };
+          return response === undefined ? { ok: true, status } : { ok: true, status, response };
         }
         return {
           ok: false,

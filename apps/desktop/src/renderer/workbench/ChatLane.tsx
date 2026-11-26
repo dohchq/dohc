@@ -26,6 +26,7 @@ import { useMessageDelete } from "./messageDelete";
 import { useReactions } from "./reactionStore";
 import {
   MentionComposer,
+  type AddMessageFiles,
   type FileMentionCandidate,
   type MentionComposerHandle,
 } from "./MentionComposer";
@@ -92,6 +93,7 @@ export function ChatLane(props: {
   lockedLine?: string;
   mentionCandidates: readonly MentionCandidate[];
   fileCandidates?: readonly FileMentionCandidate[];
+  onAddFiles?: AddMessageFiles;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
@@ -1078,6 +1080,7 @@ export function ChatLane(props: {
               candidates={props.mentionCandidates}
               fileCandidates={props.fileCandidates}
               loadFileHeadings={props.loadFileHeadings}
+              onAddFiles={props.onAddFiles}
               onChange={setComposer}
               poll={poll}
               onPollChange={setPoll}
@@ -1101,6 +1104,7 @@ export function ChatLane(props: {
         mentionCandidates={props.mentionCandidates}
         fileCandidates={props.fileCandidates}
         loadFileHeadings={props.loadFileHeadings}
+        onAddFiles={props.onAddFiles}
         onOpenPath={props.onOpenPath}
         reactionControls={reactionControls}
         renderMessageFooter={renderFooter}

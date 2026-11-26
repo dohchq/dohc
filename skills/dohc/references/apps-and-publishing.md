@@ -149,6 +149,8 @@ Pass `{ request: { action, ... } }` to `dohc_publish_app`:
 
 ## Publishing to a share link (`dohc_publish_app`)
 
+`createLink`, `prepare`, and `approve` need a workspace that syncs with a server. Without one, they fail with "Sync this workspace before sharing." Check the sync state with `dohc_workspace_status`. The `synced` field in `.dohc/sync-history.json` does not show whether the workspace syncs now. After `approve`, link holders' reads and writes run on that server, so the app works while the owner's computer is off.
+
 1. **Create link**: `{ action: "createLink", workspaceId, appRoot, operationId: "<fresh UUID>" }` -> returns `shareId`, `grantId`, and one-time bearer `url`. Reuse the same `operationId` on retry.
 2. **Prepare**: `{ action: "prepare", workspaceId, appRoot, shareId, grantId }` -> returns `approvalId`, `candidateDigest`.
 3. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId` and `appQuery` (`?app=<publicationId>`).

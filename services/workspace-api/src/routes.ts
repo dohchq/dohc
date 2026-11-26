@@ -352,6 +352,7 @@ function corsHeaders(origin: string | null, allowed: Set<string>): Record<string
 function samePath(value: string | null): string | null {
   return value === "/account" ||
     value === "/join" ||
+    value === "/workspaces" ||
     (value !== null && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(value))
     ? value
     : null;

@@ -175,3 +175,14 @@ it("parses server-hosted send-http holds and preserves webhooksSent on Undo", as
     repeatsWebhooks: true,
   });
 });
+
+it("shows the server's reason when it refuses to allow a step", async () => {
+  const server = createServerRuns(async () => ({
+    status: 400,
+    body: { ok: false, error: "Add the secret HOOK in Settings, then allow this step." },
+    asker: { account: "owner", current: () => true },
+  }));
+  await expect(
+    server.allow("ws", { automationId: "a", definitionHash: "b", step: "http:0", seq: 1 }),
+  ).rejects.toThrow("Add the secret HOOK in Settings, then allow this step.");
+});

@@ -31,6 +31,8 @@ import {
   isAllowedPublicHostname,
   isPublicInternetAddress,
   parseSafeOutboundHttpsUrl,
+  parseSafeOutboundJson,
+  readSafeOutboundHttps,
   resolveSafeOutboundDestination,
   SafeOutboundError,
   sendSafeOutboundHttps,
@@ -141,12 +143,17 @@ describe("safeOutboundHttps URL and IP screening", () => {
 });
 
 describe("sendSafeOutboundHttps", () => {
-  function mockResponse(statusCode: number, chunks: Buffer[] = []) {
+  function mockResponse(
+    statusCode: number,
+    chunks: Buffer[] = [],
+    headers: Record<string, string> = {},
+  ) {
     httpsRequestMock.mockImplementation((_url, options, callback) => {
       const req = Object.assign(new EventEmitter(), {
         end: vi.fn(() => {
           const res = Object.assign(new EventEmitter(), {
             statusCode,
+            headers,
             resume: vi.fn(),
           });
           callback(res);
@@ -270,7 +277,11 @@ describe("sendSafeOutboundHttps", () => {
       sentHref = url.href;
       const req = Object.assign(new EventEmitter(), {
         end() {
-          const res = Object.assign(new EventEmitter(), { statusCode: 200, resume: vi.fn() });
+          const res = Object.assign(new EventEmitter(), {
+            statusCode: 200,
+            headers: {},
+            resume: vi.fn(),
+          });
           callback(res);
           res.emit("end");
           req.emit("close");
@@ -302,6 +313,29 @@ describe("sendSafeOutboundHttps", () => {
     ).rejects.toMatchObject({ code: "transport_failed" });
   });
 
+  it("keeps the body of a read response with its content headers, under the same caps", async () => {
+    const destination = await resolveSafeOutboundDestination("https://api.example.com/q", {
+      lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    mockResponse(200, [Buffer.from('{"a":'), Buffer.from("1}")], {
+      "content-type": "application/json; charset=utf-8",
+    });
+    const response = await readSafeOutboundHttps({ destination, method: "GET", headers: {} });
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("application/json; charset=utf-8");
+    expect(response.body.toString("utf8")).toBe('{"a":1}');
+
+    mockResponse(200, [Buffer.alloc(8000), Buffer.alloc(8000)]);
+    await expect(
+      readSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: 10_000 }),
+    ).rejects.toMatchObject({ code: "response_too_large" });
+
+    mockResponse(301, [], { location: "https://127.0.0.1/" });
+    await expect(readSafeOutboundHttps({ destination, headers: {} })).rejects.toMatchObject({
+      code: "redirect_refused",
+    });
+  });
+
   it("forces Accept-Encoding: identity and rejects non-finite or out-of-range size bounds", async () => {
     const destination = await resolveSafeOutboundDestination("https://api.example.com/hook", {
       lookup: async () => [{ address: "93.184.216.34", family: 4 }],
@@ -314,7 +348,7 @@ describe("sendSafeOutboundHttps", () => {
       }),
     ).toBe(200);
 
-    for (const badResponseBytes of [Number.POSITIVE_INFINITY, Number.NaN, -1, 100_000]) {
+    for (const badResponseBytes of [Number.POSITIVE_INFINITY, Number.NaN, -1, 200_000]) {
       await expect(
         sendSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: badResponseBytes }),
       ).rejects.toMatchObject({ code: "unsafe_url" });
@@ -324,5 +358,54 @@ describe("sendSafeOutboundHttps", () => {
         sendSafeOutboundHttps({ destination, headers: {}, maxHeaderSize: badHeaderSize }),
       ).rejects.toMatchObject({ code: "unsafe_url" });
     }
+  });
+});
+
+describe("parseSafeOutboundJson", () => {
+  const response = (
+    body: string | Buffer,
+    contentType: string | null,
+    contentEncoding?: string,
+  ) => ({
+    status: 200,
+    contentType,
+    contentEncoding: contentEncoding ?? null,
+    body: typeof body === "string" ? Buffer.from(body, "utf8") : body,
+  });
+
+  it("reads JSON and +json bodies in UTF-8", () => {
+    expect(parseSafeOutboundJson(response('{"rows":[[1,"é"]]}', "application/json"), 64)).toEqual({
+      rows: [[1, "é"]],
+    });
+    expect(
+      parseSafeOutboundJson(response("[]", 'application/vnd.api+json; charset="UTF-8"'), 64),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ["text/html", "<html></html>"],
+    ["application/json; charset=iso-8859-1", "{}"],
+    [null, "{}"],
+    ["application/jsonp", "{}"],
+  ])("refuses %s responses", (contentType, body) => {
+    expect(() => parseSafeOutboundJson(response(body, contentType), 64)).toThrowError(
+      expect.objectContaining({ code: "unsupported_response" }),
+    );
+  });
+
+  it("refuses compressed bodies, invalid UTF-8, invalid JSON, and nesting past the limit", () => {
+    expect(() =>
+      parseSafeOutboundJson(response("{}", "application/json", "gzip"), 64),
+    ).toThrowError(expect.objectContaining({ code: "unsupported_response" }));
+    expect(() =>
+      parseSafeOutboundJson(response(Buffer.from([0x22, 0xff, 0x22]), "application/json"), 64),
+    ).toThrowError(expect.objectContaining({ code: "invalid_json" }));
+    expect(() => parseSafeOutboundJson(response('{"a":', "application/json"), 64)).toThrowError(
+      expect.objectContaining({ code: "invalid_json" }),
+    );
+    expect(parseSafeOutboundJson(response("[[[1]]]", "application/json"), 3)).toEqual([[[1]]]);
+    expect(() => parseSafeOutboundJson(response("[[[[1]]]]", "application/json"), 3)).toThrowError(
+      expect.objectContaining({ code: "invalid_json", message: expect.stringContaining("3 deep") }),
+    );
   });
 });

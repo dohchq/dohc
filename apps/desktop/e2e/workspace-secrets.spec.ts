@@ -55,7 +55,11 @@ async function collectFiles(dir: string): Promise<string[]> {
 async function assertNotInWorkspaceFolder(rootPath: string, needles: readonly string[]) {
   const files = await collectFiles(rootPath);
   for (const file of files) {
-    const bytes = await readFile(file);
+    const bytes = await readFile(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (bytes === null) continue;
     for (const needle of needles) {
       expect(bytes.includes(Buffer.from(needle, "utf8")), `${file} must not contain secret`).toBe(
         false,
@@ -149,7 +153,7 @@ test("manages write-only synced workspace secrets through the relay and survives
     await editor.getByTestId("workspace-secret-name-input").fill("SLACK_ALERT_HOOK");
     await editor
       .getByTestId("workspace-secret-usage")
-      .getByRole("radio", { name: "Webhook URL" })
+      .getByRole("radio", { name: "Webhook link" })
       .click();
     await editor.getByTestId("workspace-secret-value-input").fill(urlSecretValue);
     await editor.getByTestId("workspace-secret-save").click();
@@ -289,7 +293,7 @@ test("stores local workspace secrets outside the workspace or fails closed when 
     await editor.getByTestId("workspace-secret-name-input").fill("LOCAL_HOOK");
     await editor
       .getByTestId("workspace-secret-usage")
-      .getByRole("radio", { name: "Webhook URL" })
+      .getByRole("radio", { name: "Webhook link" })
       .click();
     await editor.getByTestId("workspace-secret-value-input").fill(localHookValue);
     await editor.getByTestId("workspace-secret-save").click();
@@ -307,9 +311,65 @@ test("stores local workspace secrets outside the workspace or fails closed when 
 
     const reopenedSection = reopened.getByTestId(settingsSectionPin("secrets"));
     await expect(reopenedSection.getByTestId("workspace-secret-row-LOCAL_HOOK")).toBeVisible();
-    await reopenedSection.getByTestId("workspace-secret-delete-LOCAL_HOOK").click();
-    await reopened.getByTestId("workspace-secret-confirm-delete-action").click();
-    await expect(reopenedSection.getByTestId("workspace-secret-row-LOCAL_HOOK")).toHaveCount(0);
+
+    await desktop.close();
+    const vaultDir = join(temp.homeDir, "workspace-secrets");
+    const [vaultName] = await readdir(vaultDir);
+    const vaultPath = join(vaultDir, vaultName!);
+    const vault = JSON.parse(await readFile(vaultPath, "utf8")) as {
+      sealed: { data: string };
+    };
+    const first = vault.sealed.data[0]!;
+    vault.sealed.data = `${first === "A" ? "B" : "A"}${vault.sealed.data.slice(1)}`;
+    await writeFile(vaultPath, JSON.stringify(vault));
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const damaged = desktop.page;
+    const { workspaceId } = await openWorkspaceFromFirstRun(damaged, temp);
+    await openSecretsSettings(damaged);
+    const damagedSection = damaged.getByTestId(settingsSectionPin("secrets"));
+    await expect(damagedSection.getByTestId("workspace-secrets-unavailable")).toContainText(
+      "damaged or were changed outside dohc",
+    );
+    await expect(damagedSection.getByTestId("workspace-secrets-add")).toHaveCount(0);
+    await shoot(damaged, damaged.getByTestId(desktopPins.settingsDialog), "secrets-damaged-vault");
+    await damagedSection.getByTestId("workspace-secrets-clear-local").click();
+    const confirmClear = damaged.getByTestId("workspace-secrets-confirm-clear-local");
+    await expect(confirmClear).toBeVisible();
+    await shoot(damaged, confirmClear, "secrets-damaged-vault-confirm");
+    await damaged.getByTestId("workspace-secrets-confirm-clear-local-action").click();
+    await expect(damagedSection.getByTestId("workspace-secrets-empty")).toBeVisible();
+    await expect(readdir(vaultDir)).resolves.toEqual([]);
+
+    await damagedSection.getByTestId("workspace-secrets-add").click();
+    const again = damaged.getByTestId("workspace-secret-editor-dialog");
+    await again.getByTestId("workspace-secret-name-input").fill("LOCAL_HOOK");
+    await again
+      .getByTestId("workspace-secret-usage")
+      .getByRole("radio", { name: "Webhook link" })
+      .click();
+    await again.getByTestId("workspace-secret-value-input").fill(localHookValue);
+    await again.getByTestId("workspace-secret-save").click();
+    await expect(damagedSection.getByTestId("workspace-secret-row-LOCAL_HOOK")).toBeVisible();
+    await expect(readdir(vaultDir)).resolves.toHaveLength(1);
+
+    await desktop.app.evaluate(({ dialog }) => {
+      const asked = globalThis as { removalMessages?: string[] };
+      asked.removalMessages = [];
+      dialog.showMessageBox = (async (...args: unknown[]) => {
+        asked.removalMessages!.push((args.at(-1) as { message: string }).message);
+        return { response: 0, checkboxChecked: false };
+      }) as typeof dialog.showMessageBox;
+    });
+    void damaged
+      .evaluate((id) => window.dohcDesktop!.forgetWorkspace({ workspaceId: id }), workspaceId)
+      .catch(() => undefined);
+    await expect.poll(() => readdir(vaultDir)).toEqual([]);
+    expect(
+      await desktop.app.evaluate(
+        () => (globalThis as { removalMessages?: string[] }).removalMessages,
+      ),
+    ).toEqual(["This workspace has secrets saved on this computer."]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

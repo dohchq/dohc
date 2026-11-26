@@ -4305,6 +4305,12 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
+        CollabError::InvalidSuccessorBase {
+            constraint: "format-2 successor",
+            ..
+        } => SyncError::InvalidInput {
+            reason: "ydoc-note-uses-a-newer-body-format",
+        },
         CollabError::MarkdownNotRepresentable
         | CollabError::MarkdownQuoteDepthExceeded
         | CollabError::SuccessorProjectionMismatch { .. }
@@ -5841,6 +5847,63 @@ mod tests {
             lineage_transition: None,
             exported_before: None,
         }
+    }
+
+    #[test]
+    fn an_engine_that_does_not_read_format_two_refuses_to_resolve_a_format_two_note() {
+        use yrs::{Map as _, ReadTxn as _, Transact as _};
+        let current = "Current text
+";
+        let (_scratch, mut store, key) =
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                let marked = yrs::Doc::new();
+                let meta = marked.get_or_insert_map("meta");
+                meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.apply(
+                    &marked
+                        .transact()
+                        .encode_state_as_update_v1(&yrs::StateVector::default()),
+                )
+                .expect("format 2");
+                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, current)
+                    .expect("format-2 note");
+                assert_eq!(doc.note_schema_version(), 2);
+                content_conflict_store(
+                    current,
+                    "Incoming text
+",
+                    Some(&doc.encode_full_state()),
+                    ContentKind::Richdoc,
+                )
+            });
+        let state = |store: &EngineStore| {
+            let marker = dohc_engine_collab::read_marker(store, &key)
+                .unwrap()
+                .unwrap();
+            let note = dohc_engine_collab::load_persisted(store, &key)
+                .unwrap()
+                .unwrap();
+            (marker.lineage_claim_id, note.doc.encode_full_state())
+        };
+        let before = state(&store);
+        let result = try_resolve_content_conflict(
+            &mut store,
+            "document-conflict",
+            "document-object",
+            20,
+            None,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-note-uses-a-newer-body-format"
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(state(&store), before);
     }
 
     #[test]

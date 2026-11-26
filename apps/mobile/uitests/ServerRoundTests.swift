@@ -208,9 +208,11 @@ final class ServerRoundTests: XCTestCase {
     let app = XCUIApplication()
     app.launch()
     tab(app, "Chats")
-    let settings = app.buttons["Settings"]
-    XCTAssertTrue(settings.waitForExistence(timeout: 30), "Chats should show Settings")
-    settings.tap()
+    let settings = app.buttons.matching(NSPredicate(format: "label == %@", "Settings"))
+    XCTAssertTrue(settings.firstMatch.waitForExistence(timeout: 30), "Chats should show Settings")
+    let shown = settings.allElementsBoundByIndex.first { $0.isHittable }
+    XCTAssertNotNil(shown, "The Chats header's Settings should be tappable")
+    shown?.tap()
     // An agent's row has its own Sign out; the account's is the last button.
     let buttons = app.buttons.matching(NSPredicate(format: "label == %@", "Sign out"))
     XCTAssertTrue(buttons.firstMatch.waitForExistence(timeout: 30), "Settings should show Sign out")

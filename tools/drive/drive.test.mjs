@@ -54,6 +54,7 @@ const baseSettings = () => ({
   DOHC_SNAPSHOT_ALERT_EMAIL: "ops@team.invalid",
   DOHC_SNAPSHOT_HEARTBEAT_URL: "https://heartbeat.provider.invalid/ping/private-check",
   DOHC_DISK_HEARTBEAT_URL: "https://heartbeat.provider.invalid/ping/private-disk-check",
+  DOHC_RELAY_SECRET_KEYS: "drive-2026:relay-secret-key-with-at-least-32-bytes",
 });
 
 const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, dev = 2 } = {}) => ({

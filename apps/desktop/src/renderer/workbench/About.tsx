@@ -356,13 +356,15 @@ export function AboutChatRow(props: {
   onOpen: () => void;
 }) {
   const when = formatChatTime(props.thread.updatedAtMs);
+  const { quote } = props.thread;
   return (
     <button
       type="button"
       data-testid="linked-chat-open"
       data-thread-id={props.thread.id}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} h-7`}
+      {...(quote ? { title: quote } : {})}
+      className={quote ? ABOUT_TWO_LINES : `${ABOUT_ROW_BUTTON} h-7`}
     >
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <MessageSquare size={14} />
@@ -375,6 +377,14 @@ export function AboutChatRow(props: {
       >
         {formatShortTime(props.thread.updatedAtMs)}
       </time>
+      {quote ? (
+        <span
+          data-testid="linked-chat-quote"
+          className="col-start-2 col-end-4 min-w-0 truncate border-l-2 border-accent/60 pl-1.5 text-[12px] leading-4 text-subtle"
+        >
+          {quote}
+        </span>
+      ) : null}
     </button>
   );
 }

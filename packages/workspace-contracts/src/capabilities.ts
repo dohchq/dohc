@@ -1835,7 +1835,7 @@ const LISTED_CAPABILITIES = {
       "Desktop UI only; local and connected agents cannot create or rotate workspace secrets.",
   }),
   "workspace.secrets.delete": capability("Delete a sealed secret from this workspace.", {
-    ipc: ["deleteWorkspaceSecret"],
+    ipc: ["deleteWorkspaceSecret", "clearLocalWorkspaceSecrets"],
     mcpReason: "Desktop UI only; local and connected agents cannot delete workspace secrets.",
   }),
   "workspace.webhooks.list": capability(

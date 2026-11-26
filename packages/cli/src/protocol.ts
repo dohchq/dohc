@@ -2641,6 +2641,8 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
       target: z.string(),
       status: z.number().int().min(100).max(599),
       deliveryId: z.string(),
+      method: z.literal("GET").optional(),
+      fetched: z.literal(true).optional(),
       unconfirmed: z.literal(true).optional(),
     })
     .strict(),
@@ -2925,7 +2927,7 @@ export const cliResultSchemas = distinct(
       .object({
         reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
         link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
-        kind: z.enum(["chat", "thread", "message", "file", "collection"]),
+        kind: z.enum(["chat", "thread", "message", "file", "app", "collection"]),
       })
       .strict(),
     shareCopy: ShareCopyResult,

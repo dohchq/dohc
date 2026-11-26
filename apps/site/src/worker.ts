@@ -1,5 +1,5 @@
-// The site's Cloudflare Worker. wrangler.jsonc runs it first for /ingest/*
-// (site cookieless analytics) and /telemetry/* (hardened desktop and Drive
+// The site's Cloudflare Worker. wrangler.jsonc runs it first for /discord,
+// /discord/, /ingest/* (site analytics), and /telemetry/* (desktop and Drive
 // JSON batch forwarding). The assets binding serves every other path.
 
 interface Env {
@@ -202,6 +202,19 @@ async function forward(request: Request, path: string): Promise<Response> {
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url);
+    if (pathname === "/discord" || pathname === "/discord/") {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return Promise.resolve(
+          new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } }),
+        );
+      }
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://discord.gg/R9MH5TwdSD", "cache-control": "no-store" },
+        }),
+      );
+    }
     if (pathname.startsWith(`${PREFIX}/`)) return forward(request, pathname.slice(PREFIX.length));
     if (pathname === `${TELEMETRY_PREFIX}/batch` || pathname === `${TELEMETRY_PREFIX}/batch/`) {
       return forwardTelemetryBatch(request, env);

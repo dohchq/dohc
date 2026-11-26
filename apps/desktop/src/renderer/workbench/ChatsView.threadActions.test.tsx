@@ -134,61 +134,69 @@ describe("ChatsView decisions", () => {
     expect(notices()).toHaveLength(2);
   });
 
-  it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
-    const user = userEvent.setup();
-    const opening = message({
-      presentation: { group: "fixture", hue: null, self: false },
-      authorKind: "agent",
-      authorDisplayName: "You",
-      body: "Ship on which day?",
-    });
-    const poll = {
-      threadId: "thread-1",
-      messageId: opening.id,
-      state: "open" as const,
-      atMs: NOW,
-      options: ["Friday", "Monday"],
-    };
-    bridgeMock.listChannelThreads.mockResolvedValue({
-      threads: [thread({ openDecisionCount: 1 })],
-    });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [poll] });
-    bridgeMock.sendChatMessage.mockResolvedValue({
-      message: message({ id: "answer", parentMessageId: opening.id, body: "Monday" }),
-      resolved: {
-        ...poll,
-        state: "resolved",
-        resolvedByMessageId: "answer",
-        chosenOption: "Monday",
-        atMs: NOW + 1,
-      },
-    });
-    renderView();
-
-    await user.click(await screen.findByTestId("chats-channel"));
-    await user.click(await screen.findByTestId("chats-thread"));
-    const options = await screen.findAllByTestId("chats-message-poll-option");
-    expect(options.map((node) => node.textContent)).toEqual(["Friday", "Monday"]);
-    expect(screen.queryByTestId("chats-message-decision-resolve")).toBeNull();
-    await user.click(options[1]!);
-    expect(screen.getByTestId("chats-resolving-mode").textContent).toContain("Monday");
-    await user.click(screen.getByTestId("chats-send"));
-
-    await waitFor(() =>
-      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
+  it.each(["click", "number key"] as const)(
+    "answers a poll by picking a choice by %s, and the choice travels with the answer",
+    async (pick) => {
+      const user = userEvent.setup();
+      const opening = message({
+        presentation: { group: "fixture", hue: null, self: false },
+        authorKind: "agent",
+        authorDisplayName: "You",
+        body: "Ship on which day?",
+      });
+      const poll = {
         threadId: "thread-1",
-        parentMessageId: "message-1",
-        body: "Monday",
-        resolves: { messageId: "message-1", chosenOption: "Monday" },
-      }),
-    );
-    expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
-    const answered = screen.getAllByTestId("chats-message-poll-option");
-    expect(answered.map((node) => node.dataset.chosen)).toEqual(["false", "true"]);
-    expect(answered.every((node) => (node as HTMLButtonElement).disabled)).toBe(true);
-  });
+        messageId: opening.id,
+        state: "open" as const,
+        atMs: NOW,
+        options: ["Friday", "Monday"],
+      };
+      bridgeMock.listChannelThreads.mockResolvedValue({
+        threads: [thread({ openDecisionCount: 1 })],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [poll] });
+      bridgeMock.sendChatMessage.mockResolvedValue({
+        message: message({ id: "answer", parentMessageId: opening.id, body: "Monday" }),
+        resolved: {
+          ...poll,
+          state: "resolved",
+          resolvedByMessageId: "answer",
+          chosenOption: "Monday",
+          atMs: NOW + 1,
+        },
+      });
+      renderView();
+
+      await user.click(await screen.findByTestId("chats-channel"));
+      await user.click(await screen.findByTestId("chats-thread"));
+      const options = await screen.findAllByTestId("chats-message-poll-option");
+      expect(options.map((node) => node.textContent)).toEqual(["Friday", "Monday"]);
+      expect(screen.queryByTestId("chats-message-decision-resolve")).toBeNull();
+      if (pick === "click") {
+        await user.click(options[1]!);
+      } else {
+        options[0]!.focus();
+        await user.keyboard("2");
+      }
+      expect(screen.getByTestId("chats-resolving-mode").textContent).toContain("Monday");
+      await user.click(screen.getByTestId("chats-send"));
+
+      await waitFor(() =>
+        expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+          workspaceId: "workspace-a",
+          threadId: "thread-1",
+          parentMessageId: "message-1",
+          body: "Monday",
+          resolves: { messageId: "message-1", chosenOption: "Monday" },
+        }),
+      );
+      expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
+      const answered = screen.getAllByTestId("chats-message-poll-option");
+      expect(answered.map((node) => node.dataset.chosen)).toEqual(["false", "true"]);
+      expect(answered.every((node) => (node as HTMLButtonElement).disabled)).toBe(true);
+    },
+  );
 });
 
 describe("ChatsView work and run links", () => {

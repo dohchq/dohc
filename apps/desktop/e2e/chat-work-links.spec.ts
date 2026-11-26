@@ -123,3 +123,93 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+test("an agent links an app and a data Collection by their folders, and each chip opens it", async () => {
+  test.setTimeout(180_000);
+  if (SHOT_DIR !== "") await mkdir(SHOT_DIR, { recursive: true });
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const sentinel = "Log your next workout.";
+  try {
+    await mkdir(join(temp.rootPath, "Workouts"), { recursive: true });
+    await writeFile(
+      join(temp.rootPath, "Workouts", "index.html"),
+      `<!doctype html><title>Workouts</title><main>${sentinel}</main>`,
+    );
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const main = page.locator("main");
+    const { workspaceId } = await openWorkspaceFromFirstRun(page, temp);
+    await trustOpenWorkspace(desktop);
+    await waitForCliEndpoint(temp.homeDir);
+
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"),
+    );
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Workout log");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const listed = await page.evaluate(
+      async (id) => window.dohcDesktop!.dataset({ workspaceId: id, action: "list" }),
+      workspaceId,
+    );
+    if (listed.kind !== "list" || !listed.datasets[0]?.datasetPath)
+      throw Error("Expected the new Collection.");
+    const folder = listed.datasets[0].datasetPath.replace(/\/?dataset\.json$/u, "");
+
+    const cli = async (...args: string[]) =>
+      JSON.parse((await runDohcCli(temp, [...args, "--as-agent", "--json"])).stdout);
+    await cli("chat", "create-group", "Notes", "--type", "posts");
+    const app = await cli("chat", "link", "--path", "Workouts");
+    const data = await cli("chat", "link", "--path", folder);
+    expect([app.kind, data.kind]).toEqual(["app", "collection"]);
+    await cli(
+      "chat",
+      "post",
+      "Notes",
+      "--agent",
+      "Nova",
+      `The tracker is ${app.link}. Your sets are in ${data.link}.`,
+    );
+
+    await page.getByTestId(activityPin("chats")).click();
+    await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
+    const card = main.getByTestId("chats-post-card").filter({ hasText: "The tracker is" });
+    const chips = card.getByTestId("chats-post-title-work-link");
+    await expect(chips).toHaveCount(2);
+    await expect(chips.nth(0)).toContainText("Workouts");
+    await expect(chips.nth(1)).toContainText("Workout log");
+    await shoot(page, "f-app-and-collection");
+
+    const thread = main.getByTestId("chats-thread-view");
+    const openPost = async () => {
+      await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
+      await expect(async () => {
+        if (await card.isVisible()) await card.click();
+        else if (!(await thread.textContent())?.includes("The tracker is"))
+          await main.getByRole("button", { name: "Back" }).click();
+        await expect(thread).toContainText("The tracker is", { timeout: 1_000 });
+      }).toPass();
+    };
+    await openPost();
+    await thread
+      .getByTestId("chats-message-body")
+      .getByRole("button", { name: "Open Workouts", exact: true })
+      .click();
+    await expect(
+      page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
+    ).toHaveText(sentinel, { timeout: 20_000 });
+    await shoot(page, "g-app");
+
+    await openPost();
+    await thread
+      .getByTestId("chats-message-body")
+      .getByRole("button", { name: "Open Workout log", exact: true })
+      .click();
+    await expect(page.getByRole("region", { name: "Workout log", exact: true })).toBeVisible();
+    await shoot(page, "h-collection");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

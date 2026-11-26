@@ -19,21 +19,21 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-dohc is a free, open-source desktop app for building and sharing small apps with your agents. It's a local-first workspace for your files, documents, data, chat, and apps, with sync, sharing, permissions, and history built in.
+dohc is a free, open-source desktop app and local-first runtime for personal apps. You and your agents can build, run, and share small apps that live as plain files in a workspace folder next to your documents and notes. Collections for structured data, permissions, chat, version history, sync, and browser share links are built in.
 
-When an agent builds you a tool, dohc gives it a place for its data, a share link with the access you choose, and a chat where people and their agents keep working on it.
+When an agent builds you an app, you can run it in your workspace with only the data you approve, publish it to a share link, and keep working on it with people and agents in chat.
 
 [Download the newest nightly build](https://dohc.computer/#downloads) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
-Agents can build a small app really quickly. Then every app needs the same few things. It needs a place for its data, an interface people already know, a safe way for other people to use it, a way to work on it together, and a record of what each agent made.
+Agents can build a small app fast. Every app then needs the same things: a place for its data, an interface people already know, a safe way to share it, a way to work on it together, and a record of what each agent changed.
 
-Developers can wire that up with git, MCP servers, Tailscale, Supabase, and Cloudflare. It's tedious, so most of these apps stay on one laptop, and most people don't build them at all. dohc puts that setup in one app.
+Developers can wire that up with git, MCP servers, Tailscale, Supabase, and Cloudflare. That setup is tedious, so most of these apps stay on one laptop, and most people never build them. dohc puts that runtime in one desktop app.
 
-Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc owns that layer. Sync, history, permissions, and app isolation work the same whether a person or an agent made the change, so you can let an agent build an app without reading its code to know what data it can reach.
+Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc is that layer. Sync, history, permissions, and app isolation work the same for people and agents. You can run an agent-built app without reading its code to know what data it can reach.
 
-Our bet is that keeping the app's source, data, and discussion together makes the work easier to use, change, and hand over. A workspace should be useful alone and let another person or agent continue the same work when you share it.
+Keeping an app's source, data, documents, and chat in one workspace makes the work easier to use, change, and hand over. A workspace is useful on one computer, and another person or agent can continue the same work when you share it.
 
 ## Agents and workspace apps
 
@@ -65,7 +65,7 @@ The desktop app currently includes:
 
 Local work does not require an account or server. Sync and sharing use a server you operate or dohc Drive.
 
-**dohc Drive is in invite-only beta.** It is the managed service, with a planned free tier, and it hosts the apps you publish. dohc handles hosting, setup, and maintenance. [Request an invite](https://dohc.computer/#drive). If you have one, connect the desktop app to `https://drive.dohc.computer`. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
+**dohc Drive is in invite-only alpha.** It is the managed service, with a planned free tier, and it hosts the apps you publish. dohc handles hosting, setup, and maintenance. [Request an invite](https://dohc.computer/#drive). If you have one, connect the desktop app to `https://drive.dohc.computer`. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
 
 Follow the [self-hosting guide](docs/how-to/self-host.md) to set up a server and connect the desktop app.
 

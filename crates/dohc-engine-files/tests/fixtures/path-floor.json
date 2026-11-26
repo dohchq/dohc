@@ -62,5 +62,25 @@
   {
     "path": "notes/env/config.md",
     "classification": "tracked"
+  },
+  {
+    "path": ".env.example",
+    "classification": "tracked"
+  },
+  {
+    "path": "apps/web/.ENV.Template",
+    "classification": "tracked"
+  },
+  {
+    "path": "config/.env.sample ",
+    "classification": "tracked"
+  },
+  {
+    "path": ".env.example.local",
+    "classification": "secret"
+  },
+  {
+    "path": ".env/.env.sample",
+    "classification": "secret"
   }
 ]

@@ -722,8 +722,9 @@ const Sent = z.object({ runId: z.string().nullable().optional() });
 
 /**
  * Gives a thread one message. "line" puts it behind the thread's current
- * work; "steer" hands it over during that work. `forwardId` names this
- * message for its whole life, so sending it again cannot give it twice.
+ * work; "steer" hands it over during that work, or starts the thread when it
+ * has none. `forwardId` names this message for its whole life, so sending it
+ * again cannot give it twice.
  */
 export async function sendToT3CodeThread(
   session: T3CodeSession,
@@ -734,7 +735,8 @@ export async function sendToT3CodeThread(
     await session.call("t3_thread_send", {
       threadId: input.threadId,
       message: input.message,
-      mode: input.how === "steer" ? "steer" : "queue",
+      // T3 Code refuses "steer" for a thread with no turn going; "auto" steers or starts one.
+      mode: input.how === "steer" ? "auto" : "queue",
       clientRequestId: input.forwardId,
     }),
   );
@@ -773,7 +775,7 @@ export interface T3CodeThreadState {
   working: boolean;
   /** The run that is going now. It may be older than every run in `runs`. */
   activeRunId: string | null;
-  /** Something waits on the person in T3 Code: a question, an approval, or another request. */
+  /** Something waits on the person in T3 Code: a question, an approval, a private box, or another request. */
   waitingOnPerson: boolean;
   /**
    * The thread's question that waits on the person, by T3 Code's id for it,
@@ -823,7 +825,13 @@ const ThreadRead = z.object({
       completedAt: time.nullable(),
     }),
   ),
+  // The thread's newest activity, read only for a private box that waits.
+  items: z.array(z.object({ type: z.string(), status: z.string(), runId: z.string().nullable() })),
 });
+
+// How much of a thread's newest activity dohc reads for a private box. The
+// agent's run waits on the box, so little comes after it.
+const ACTIVITY_READ = 20;
 
 // T3 Code's words for a run that is over, whatever way it ended.
 const ENDED = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
@@ -1002,22 +1010,38 @@ export async function readT3CodeThread(
   session: T3CodeSession,
   threadId: string,
 ): Promise<T3CodeThreadState> {
-  const { thread, recentRuns } = shaped(
+  const { thread, recentRuns, items } = shaped(
     ThreadRead,
     await session.call("t3_thread_read", {
       threadId,
-      view: "messages",
-      limit: 1,
+      // Activity holds the private box an agent opens for a key or password,
+      // which T3 Code does not count among the requests that wait. A position
+      // past the end reads the newest items.
+      view: "activity",
+      beforePosition: Number.MAX_SAFE_INTEGER,
+      limit: ACTIVITY_READ,
       maxCharsPerItem: 1,
       runLimit: RUNS_READ,
     }),
   );
+  // Only the person can fill the box, and only in T3 Code.
+  const privateBoxWaits =
+    thread.activeRunId !== null &&
+    items.some(
+      (item) =>
+        item.type === "secret_request" &&
+        item.status === "waiting" &&
+        item.runId === thread.activeRunId,
+    );
   // T3 Code counts every request that waits on the person together. Only its
   // list of questions tells a question from an approval. A question is given
-  // only when every request that waits is one: beside an approval, an answer
-  // here would leave the thread waiting, on something the chat cannot show.
+  // only when every request that waits is one: beside an approval or a
+  // private box, an answer here would leave the thread waiting, on something
+  // the chat cannot show.
   const questions =
-    thread.pendingRequestCount > 0 ? await listT3CodeQuestions(session, threadId) : [];
+    thread.pendingRequestCount > 0 && !privateBoxWaits
+      ? await listT3CodeQuestions(session, threadId)
+      : [];
   const first = questions[0];
   const questionId =
     first !== undefined &&
@@ -1029,7 +1053,7 @@ export async function readT3CodeThread(
     title: thread.title,
     working: thread.activeRunId !== null,
     activeRunId: thread.activeRunId,
-    waitingOnPerson: thread.pendingRequestCount > 0,
+    waitingOnPerson: thread.pendingRequestCount > 0 || privateBoxWaits,
     questionId,
     closed: thread.archived || thread.settled,
     runs: recentRuns.map((run) => ({

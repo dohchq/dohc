@@ -16,6 +16,7 @@ import type {
   CollectionQueryResult,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import type { AutomationTargets } from "./automationTargets";
@@ -157,11 +158,15 @@ export interface AutomationHttpWebhookExecutor {
     definitionDigest: string;
     approvalDigest: string;
     codeFileHashes: ReadonlyArray<{ file: string; sha256: string }>;
+    secrets: readonly WorkspaceSecretSummary[];
     effect: Extract<PlannedEffect, { kind: "http" }>;
+    method: "POST" | "GET";
+    /** Read the JSON response the step saves with `as`, not only its status. */
+    readResponse: boolean;
     depth: number;
     signal: AbortSignal;
   }): Promise<
-    | { ok: true; status: number }
+    | { ok: true; status: number; response?: JsonValue }
     | {
         ok: false;
         status?: number;
@@ -172,11 +177,17 @@ export interface AutomationHttpWebhookExecutor {
   >;
 }
 
+export interface HttpApprovalSnapshot {
+  readonly approved: ReadonlySet<string>;
+  /** Null when the workspace's secrets could not be read. */
+  readonly secrets: readonly WorkspaceSecretSummary[] | null;
+}
+
 export interface CollectionAutomationRunDependencies {
   /** Sends a planned outbound HTTP webhook step after owner confirmation and reach checks. */
   httpWebhook?: AutomationHttpWebhookExecutor;
-  /** Checks whether a specific HTTP step approval digest is currently approved outside the workspace. */
-  isHttpStepApproved?(digest: string): Promise<"approved" | "unapproved" | "unavailable">;
+  /** Reads the owner's approved HTTP step digests and the workspace's secrets, or null when unavailable. */
+  readHttpApprovals?(): Promise<HttpApprovalSnapshot | null>;
   /** Local aggregate observer, after the run's durable successful completion. */
   onUsageSuccess?(invocation: import("./automationUsage").AutomationUsageInvocation): void;
   /** Before each effect this attempt lands. Throwing fails the run before the effect changes anything. */

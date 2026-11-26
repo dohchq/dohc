@@ -137,6 +137,20 @@ describe("sync relay startup guards", () => {
     expect(stderr).toContain("DOHC_RELAY_LINK_KEY must be set");
   });
 
+  it("refuses to start when DOHC_RELAY_SECRET_KEYS is malformed", async () => {
+    const dbPath = join(await tempRoot("bad-secret-keys"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      DOHC_RELAY_SECRET_KEYS: "v1:short",
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain('DOHC_RELAY_SECRET_KEYS key "v1" is 5 bytes');
+  });
+
   it("refuses to start when DOHC_RELAY_EXCHANGE_KEY is shorter than 32 characters", async () => {
     const dbPath = join(await tempRoot("short-relay-exchange-key"), "relay.sqlite");
     const { code, stderr } = await spawnRelayExpectExit({

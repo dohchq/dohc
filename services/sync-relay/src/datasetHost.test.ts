@@ -1,5 +1,5 @@
 import { createDatasetAppRoutes } from "./datasetRoutes";
-import { parseMemberAppUpload } from "./memberAppRoutes";
+import { createMemberAppRoutes, parseMemberAppUpload } from "./memberAppRoutes";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -15,15 +15,16 @@ import {
   parseAppPublicationCandidate,
   type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
-import { setMemberAppSetting, withdrawMemberApp } from "./storage/memberApps";
+import {
+  memberAppIdOf,
+  setMemberAppSetting,
+  withdrawMemberApp,
+  writeMemberApp,
+} from "./storage/memberApps";
 import { disableAppPublication } from "./storage/publications";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
-import {
-  approvePhoneApp,
-  issuePhoneAppGrant,
-  phoneAppLaunch,
-  redeemPhoneAppGrant,
-} from "./storage/phoneApps";
+import type { AccountSession, AccountSessions } from "@dohc/workspace-auth/session";
+import { createPhoneApps } from "./phoneApps";
 import type { PublicEditRelease } from "@dohc/security-contract";
 import {
   createRelayDatasetHost,
@@ -1592,15 +1593,17 @@ async function memberAppFixture() {
     ownerUserId: "owner",
     limits,
   }).candidate;
-  const candidate = (operationIds = [id(5), id(6), id(7)], revisions = [memberRevision]) => {
+  const candidate = (
+    operationIds = [id(5), id(6), id(7)],
+    revisions = [memberRevision],
+    extra?: string,
+  ) => {
     const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
-    const inputs = [
-      {
-        path: "app/index.ts",
-        sha256: sha(memberAppSource),
-        byteLength: memberAppSource.byteLength,
-      },
-    ];
+    const inputs = ["app/index.ts", ...(extra ? [extra] : [])].map((path) => ({
+      path,
+      sha256: sha(memberAppSource),
+      byteLength: memberAppSource.byteLength,
+    }));
     const files = [
       {
         path: "bundle.js",
@@ -1620,7 +1623,7 @@ async function memberAppFixture() {
       {
         ...base,
         inputs,
-        dependencies: ["app/index.ts"],
+        dependencies: inputs.map((input) => input.path),
         files,
         sourceDigest,
         dependencyLockDigest,
@@ -1667,7 +1670,11 @@ async function memberAppFixture() {
   const review = (auth: AppBackendAuth, publicationId: string) =>
     f.host.servedPublication(auth, publicationId, true)!.member!;
   const allow = (auth: AppBackendAuth, publicationId: string) =>
-    f.host.consentMemberApp(auth, publicationId, review(auth, publicationId).digest);
+    f.host.consentMemberApp(
+      { ...auth, person: true } as AppBackendAuth,
+      publicationId,
+      review(auth, publicationId).digest,
+    );
   return { ...f, grant, share, candidate, blobs, publish, review, allow };
 }
 
@@ -1751,7 +1758,7 @@ it("refuses a Member app's running write, and every later call, once its author 
   });
 });
 
-it("asks a viewer again for a new version, and only a person can allow it", async () => {
+it("asks a viewer again for a new version, and only a person in a browser can allow it", async () => {
   const f = await memberAppFixture();
   const first = f.publish([id(6)]);
   f.allow(ben, first);
@@ -1763,16 +1770,26 @@ it("asks a viewer again for a new version, and only a person can allow it", asyn
   );
   await expect(f.invoke(ben, id(6), {}, second, "second")).rejects.toMatchObject(reviewChanged);
   const { digest } = f.review(ben, second);
-  expect(() =>
-    f.host.consentMemberApp({ ...ben, agent: { depth: 1, agentId: "agent" } }, second, digest),
-  ).toThrow(expect.objectContaining({ code: "member_app_person_only", status: 403 }));
-  expect(() => f.host.consentMemberApp(ben, second, "0".repeat(64))).toThrow(
+  const person = { ...ben, person: true } as AppBackendAuth;
+  for (const desktop of [ben, { ...ben, agent: { depth: 1, agentId: "agent" } }])
+    expect(() => f.host.consentMemberApp(desktop, second, digest)).toThrow(
+      expect.objectContaining({ code: "member_app_person_only", status: 403 }),
+    );
+  expect(() => f.host.consentMemberApp(person, second, "0".repeat(64))).toThrow(
     expect.objectContaining(reviewChanged),
   );
-  f.host.consentMemberApp(ben, second, digest);
+  f.host.consentMemberApp(person, second, digest);
   expect((await f.invoke(ben, id(6), {}, second, "allowed")).result).toBe("edit");
-  expect(f.host.memberApps(ben, { workspaceId: "w" }).apps).toMatchObject([
-    { publicationId: second, publisherUserId: "ana", slug: "tracker", consent: "current" },
+  expect(f.host.memberApps(ben, { workspaceId: "w", cursor: "m" }).apps).toMatchObject([
+    {
+      kind: "member",
+      publicationId: second,
+      publisherUserId: "ana",
+      slug: "tracker",
+      name: "tracker",
+      consent: "current",
+      canWithdraw: false,
+    },
   ]);
 });
 
@@ -1788,12 +1805,12 @@ it("keeps a Member app's bindings when its publish is retried, and hides it once
   f.allow(ben, app);
   f.host.archiveDataset(owner, scope);
   expect(() => f.review(ben, app)).toThrow(expect.objectContaining({ code: "not_found" }));
-  expect(f.host.memberApps(owner, { workspaceId: "w" }).apps).toMatchObject([
+  expect(f.host.memberApps(owner, { workspaceId: "w", cursor: "m" }).apps).toMatchObject([
     { publicationId: app, reachable: false },
   ]);
 });
 
-it("asks the author to review an app their agent published before it runs for them", async () => {
+it("opens an author's own Member app without review, even one their agent published", async () => {
   const f = await memberAppFixture();
   const agent = { kind: "agent", label: "Helper", labelSource: "agent-declared" } as const;
   const { publicationId } = f.host.publishMemberApp(ana, {
@@ -1803,13 +1820,11 @@ it("asks the author to review an app their agent published before it runs for th
     blobs: f.blobs,
     agent,
   });
-  await expect(f.invoke(ana, id(6), {}, publicationId, "agent-made")).rejects.toMatchObject(
+  expect(f.review(ana, publicationId).consent).toBe("current");
+  expect((await f.invoke(ana, id(6), {}, publicationId, "agent-made")).result).toBe("edit");
+  await expect(f.invoke(ben, id(6), {}, publicationId, "viewer")).rejects.toMatchObject(
     reviewRequired,
   );
-  f.allow(ana, publicationId);
-  expect((await f.invoke(ana, id(6), {}, publicationId, "reviewed")).result).toBe("edit");
-  const own = f.publish([id(6)]);
-  expect((await f.invoke(ana, id(6), {}, own, "own")).result).toBe("edit");
 });
 
 it("stops a member's Member apps when members may no longer share, but not an admin's", async () => {
@@ -1818,7 +1833,7 @@ it("stops a member's Member apps when members may no longer share, but not an ad
   f.allow(ben, app);
   f.share(false);
   await expect(f.invoke(ben, id(6), {}, app, "off")).rejects.toMatchObject({ code: "not_found" });
-  expect(f.host.memberApps(ben, { workspaceId: "w" }).apps).toEqual([]);
+  expect(f.host.memberApps(ben, { workspaceId: "w", cursor: "m" }).apps).toEqual([]);
   f.share(true);
   expect((await f.invoke(ben, id(6), {}, app, "on")).result).toBe("edit");
   f.admin();
@@ -1907,40 +1922,261 @@ it("ends an author's Member apps when their account is deleted", async () => {
   ).toEqual({ active: 0 });
 });
 
-it("never launches a Member app on a phone, even for its author", async () => {
+/** The workspace owner's phone, over the real dataset host: its app operations, and launches as share-web redeems them. */
+function ownerPhone(f: Pick<Awaited<ReturnType<typeof memberFixture>>, "storage" | "host">) {
+  const ended: string[] = [];
+  let launches = 0;
+  const phone = createPhoneApps({
+    storage: f.storage,
+    limits,
+    sessions: { phoneSessionIsCurrent: async () => true } as unknown as AccountSessions,
+    launchable: true,
+    nowMs: () => 1e12,
+    endShareWebLaunches: (hashes) => ended.push(...hashes),
+    served: (auth, publicationId, reviewing) =>
+      f.host.servedPublication(auth, publicationId, reviewing),
+    authorName: async (userId) => `${userId} (${userId}@dohc.test)`,
+  });
+  const caller: AccountSession = {
+    userId: "owner",
+    sessionId: "phone-session",
+    clientKind: "phone",
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+  };
+  const run = async (operation: string, input: object) =>
+    phone.run(
+      caller,
+      "w",
+      operation,
+      input,
+      (await phone.names("w", operation, input)) ?? undefined,
+    ) as Record<string, unknown>;
+  const scope = (publicationId: string) => ({ workspaceId: "w", publicationId });
+  // The phone's grant, share-web's redemption, and the launch's own authority on the backend.
+  const open = async (publicationId: string): Promise<AppBackendAuth> => {
+    const { grant } = (await run("appLaunch", { publicationId, authorityRevision: 1 })) as {
+      grant: string;
+    };
+    const redeemed = await phone.redeem(
+      new Request("https://relay.test/redeem", {
+        method: "POST",
+        body: JSON.stringify({ grant, launchHost: `launch-${launches++}.apps.test` }),
+      }),
+      scope(publicationId),
+    );
+    const { launchId } = (await redeemed.json()) as { launchId: string };
+    const { userId, guard } = await phone.authorizeLaunch(launchId, scope(publicationId));
+    return { kind: "named", workspaceId: "w", userId, launch: guard };
+  };
+  return { phone, run, open, ended };
+}
+const changed = { code: "conflict" };
+
+it("lets the owner list, review, approve and open an official app over several Collections on a phone", async () => {
+  const f = await memberFixture();
+  const second = await f.collection(id(11), "second");
+  const app = f.app([memberRevision, second]);
+  const { run, open } = ownerPhone(f);
+  expect((await run("apps", {})).apps).toContainEqual(
+    expect.objectContaining({ publicationId: app, approved: false }),
+  );
+  const review = await run("appReview", { publicationId: app });
+  expect(review).toMatchObject({ author: null, consent: null, revocable: false });
+  expect(
+    (review.capabilities as { datasetId: string; operations: unknown[] }[]).map((value) => [
+      value.datasetId,
+      value.operations.length,
+    ]),
+  ).toEqual([
+    [id(1), 3],
+    [id(11), 3],
+  ]);
+  await run("appApprove", { publicationId: app, authorityRevision: 1 });
+  const launch = await open(app);
+  const added = (datasetId: string) =>
+    f.host.invoke(launch, {
+      workspaceId: "w",
+      datasetId,
+      revision: 1,
+      revisionSha256: (datasetId === id(1) ? memberRevision : second).revisionSha256,
+      operationId: id(5),
+      input: { name: "From the phone" },
+      idempotencyKey: `phone-${datasetId}`,
+      access: { kind: "app", appId: app },
+    });
+  expect((await added(id(1))).revision).toBeGreaterThan(0);
+  expect((await added(id(11))).revision).toBeGreaterThan(0);
+});
+
+it("lets the owner review a Member app on a phone and open it only once allowed, within both reaches", async () => {
   const f = await memberAppFixture();
   const app = f.publish();
-  const { approvalId } = approvePhoneApp(f.storage, {
-    userId: "ana",
-    workspaceId: "w",
+  const { run, open, ended } = ownerPhone(f);
+  const listed = await run("memberApps", {});
+  expect(listed).toEqual({
+    memberApps: [
+      {
+        publicationId: app,
+        authorityRevision: 1,
+        appRoot: expect.any(String),
+        sourceRevision: expect.any(String),
+        approved: false,
+        name: "tracker",
+        author: { name: "ana (ana@dohc.test)" },
+        consent: "none",
+      },
+    ],
+    nextCursor: null,
+  });
+  expect((await run("apps", {})).apps).not.toContainEqual(
+    expect.objectContaining({ publicationId: app }),
+  );
+  const review = await run("appReview", { publicationId: app });
+  // Declared: add, read and edit. Ana holds only read and edit, so the owner reviews those.
+  expect(review).toMatchObject({
+    name: "tracker",
+    author: { name: "ana (ana@dohc.test)" },
+    consent: "none",
+    revocable: false,
+    approval: null,
+    capabilities: [
+      {
+        datasetId: id(1),
+        access: "edit",
+        operationIds: [id(6), id(7)],
+        operations: [{ name: "read" }, { name: "edit" }],
+      },
+    ],
+    sources: [{ path: "app/index.ts", byteLength: memberAppSource.byteLength }],
+  });
+  expect(await run("appSource", { publicationId: app, path: "app/index.ts" })).toEqual({
+    path: "app/index.ts",
+    available: true,
+    text: memberAppSource.toString(),
+  });
+
+  const launch = () => run("appLaunch", { publicationId: app, authorityRevision: 1 });
+  await expect(launch()).rejects.toMatchObject(changed);
+  const digest = review.scopeDigest as string;
+  await expect(
+    run("appApprove", { publicationId: app, authorityRevision: 1, scopeDigest: "0".repeat(64) }),
+  ).rejects.toMatchObject(changed);
+  await expect(
+    run("appApprove", { publicationId: app, authorityRevision: 1 }),
+  ).rejects.toMatchObject({ code: "bad_request" });
+  await run("appApprove", { publicationId: app, authorityRevision: 1, scopeDigest: digest });
+  expect(f.review(owner, app).consent).toBe("current");
+
+  let auth = await open(app);
+  const call = (operationId: string, key: string, input: object = {}) =>
+    f.invoke(auth, operationId, input, app, key);
+  // A named caller at Edit, as any viewer: never the owner, so the declared add Ana can't run is refused too.
+  expect((await call(id(6), "read")).result).toBe("edit");
+  await expect(call(id(5), "add", { name: "Owner" })).rejects.toMatchObject(refused);
+  expect((await call(id(7), "edit", { id: "x", name: "y" })).revision).toBeGreaterThan(0);
+
+  // Ana gains add: the app now reaches more than the owner allowed, so it waits for a new review.
+  f.grant("ana-grant", [id(5), id(6), id(7)]);
+  await expect(call(id(6), "widened")).rejects.toMatchObject(reviewChanged);
+  await expect(launch()).rejects.toMatchObject(changed);
+  expect(await run("memberApps", {})).toMatchObject({
+    memberApps: [{ approved: false, consent: "changed" }],
+  });
+  const wider = (await run("appReview", { publicationId: app })) as {
+    scopeDigest: string;
+    revocable: boolean;
+  };
+  expect(wider.revocable).toBe(true);
+  await run("appApprove", {
     publicationId: app,
     authorityRevision: 1,
-    newApprovalId: "a".repeat(32),
-    nowMs: 10,
+    scopeDigest: wider.scopeDigest,
   });
-  issuePhoneAppGrant(f.storage, {
-    approvalId,
-    userId: "ana",
-    sessionId: "session",
-    workspaceId: "w",
-    publicationId: app,
-    authorityRevision: 1,
-    grantHash: "1".repeat(64),
-    expiresAtMs: 1e12,
-    nowMs: 10,
-  });
+  // The launch from before the review never resumes; a new one opens with what was allowed.
+  expect(ended).toHaveLength(1);
+  await expect(call(id(6), "stale-launch")).rejects.toMatchObject({ code: "not_found" });
+  auth = await open(app);
+  expect((await call(id(6), "allowed-again")).result).toBe("edit");
+
+  // Ana loses edit: the launch keeps only what both still reach.
+  f.grant("ana-grant", [id(6)]);
+  await expect(call(id(7), "narrowed", { id: "x", name: "z" })).rejects.toMatchObject(refused);
+  expect((await call(id(6), "narrowed-read")).result).toBe("edit");
+
+  // Ana leaves: the app is out of reach, on the backend and on the phone.
   expect(
-    redeemPhoneAppGrant(f.storage, {
-      grantHash: "1".repeat(64),
-      launchHash: "2".repeat(64),
-      launchHost: "launch.test",
+    f.storage.removeWorkspaceMember({
       workspaceId: "w",
-      publicationId: app,
-      nowMs: 10,
-      expiresAtMs: 1e12,
+      actorUserId: "owner",
+      memberId: "ana-entry",
+      nowMs: 20,
     }),
-  ).not.toBeNull();
-  expect(phoneAppLaunch(f.storage, "2".repeat(64), 10)).toBeNull();
+  ).toEqual({ ok: true });
+  await expect(call(id(6), "author-gone")).rejects.toMatchObject({ code: "not_found" });
+  await expect(launch()).rejects.toMatchObject({ code: "not_found" });
+  expect((await run("memberApps", {})).memberApps).toEqual([]);
+});
+
+it("refuses a phone launch of a Member app once it is withdrawn, taken down, or sharing stops, and revokes everywhere", async () => {
+  const f = await memberAppFixture();
+  const { run, open, ended } = ownerPhone(f);
+  const allow = async (publicationId: string) => {
+    const { scopeDigest } = (await run("appReview", { publicationId })) as { scopeDigest: string };
+    await run("appApprove", { publicationId, authorityRevision: 1, scopeDigest });
+  };
+  const app = f.publish();
+  await allow(app);
+  const auth = await open(app);
+  const read = (key: string) => f.invoke(auth, id(6), {}, app, key);
+  expect((await read("allowed")).result).toBe("edit");
+
+  f.share(false);
+  await expect(read("sharing-off")).rejects.toMatchObject({ code: "not_found" });
+  f.share(true);
+  expect((await read("sharing-on")).result).toBe("edit");
+
+  // Revoke ends the phone's launch and the owner's allowing on every device.
+  expect(await run("appRevoke", { publicationId: app })).toEqual({ revoked: true });
+  expect(ended).toHaveLength(1);
+  await expect(read("revoked")).rejects.toThrow();
+  expect(f.review(owner, app).consent).toBe("none");
+  await expect(f.invoke(owner, id(6), {}, app, "desktop")).rejects.toMatchObject(reviewRequired);
+
+  await allow(app);
+  const allowed = await open(app);
+  // Ana gains add and the owner allows it in the browser: the phone's launch from before never resumes.
+  f.grant("ana-grant", [id(5), id(6), id(7)]);
+  f.allow(owner, app);
+  await expect(f.invoke(allowed, id(6), {}, app, "allowed-in-browser")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  f.grant("ana-grant", [id(6), id(7)]);
+  const reopened = await open(app);
+  withdrawMemberApp(f.storage, { workspaceId: "w", actorUserId: "owner", publicationId: app });
+  await expect(f.invoke(reopened, id(6), {}, app, "withdrawn")).rejects.toThrow();
+  await expect(
+    run("appLaunch", { publicationId: app, authorityRevision: 1 }),
+  ).rejects.toMatchObject({ code: "not_found" });
+  // Shared again, the same version is a new publication with the same ID: the old approval doesn't carry over.
+  expect(f.publish()).toBe(app);
+  expect((await run("memberApps", {})).memberApps).toMatchObject([
+    { approved: false, consent: "none" },
+  ]);
+  // Allowed again in the browser, it still waits for the phone's own approval.
+  f.allow(owner, app);
+  expect((await run("memberApps", {})).memberApps).toMatchObject([
+    { approved: false, consent: "current" },
+  ]);
+  await expect(
+    run("appLaunch", { publicationId: app, authorityRevision: 1 }),
+  ).rejects.toMatchObject(changed);
+  await expect(f.invoke(reopened, id(6), {}, app, "republished")).rejects.toThrow();
+
+  await allow(app);
+  const last = await open(app);
+  disableAppPublication(f.storage, { publicationId: app, reason: "Abuse", nowMs: 30 });
+  await expect(f.invoke(last, id(6), {}, app, "taken-down")).rejects.toThrow();
+  expect((await run("memberApps", {})).memberApps).toEqual([]);
 });
 
 function memberAppUpload(header: unknown, blobs: Array<Uint8Array>) {
@@ -1987,7 +2223,13 @@ it("shows a Member app's reach and source for review, and its bundle only once a
     publications: true,
     shareSenderLabel: async () => "Ana (ana@dohc.test)",
   });
-  const call = (action: AppBackendAction, init: RequestInit = {}, sha256 = "", query = "") =>
+  const call = (
+    action: AppBackendAction,
+    init: RequestInit = {},
+    sha256 = "",
+    query = "",
+    auth: AppBackendAuth = ben,
+  ) =>
     route(
       new Request(`https://relay.test/${action}${query}`, init),
       {
@@ -1997,7 +2239,7 @@ it("shows a Member app's reach and source for review, and its bundle only once a
         workspaceId: "w",
         ...(sha256 && { sha256 }),
       },
-      ben,
+      auth,
     );
   const summary = (await (await call("summary")).json()) as {
     review: { scopeDigest: string; consent: string };
@@ -2028,19 +2270,22 @@ it("shows a Member app's reach and source for review, and its bundle only once a
   expect(descriptor.status).toBe(409);
   expect(await descriptor.json()).toMatchObject({ code: "member_app_review_required" });
 
-  const consent = (body: unknown) =>
-    call("consent", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  const agent = await consent({
-    scopeDigest: summary.review.scopeDigest,
-    agent: { depth: 1, agentId: "agent" },
-  });
-  expect(agent.status).toBe(403);
-  expect(await agent.json()).toMatchObject({ code: "member_app_person_only" });
-  expect(await (await consent({ scopeDigest: summary.review.scopeDigest })).json()).toMatchObject({
+  const consent = (auth: AppBackendAuth) =>
+    call(
+      "consent",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scopeDigest: summary.review.scopeDigest }),
+      },
+      "",
+      "",
+      auth,
+    );
+  const desktop = await consent(ben);
+  expect(desktop.status).toBe(403);
+  expect(await desktop.json()).toMatchObject({ code: "member_app_person_only" });
+  expect(await (await consent({ ...ben, person: true } as AppBackendAuth)).json()).toMatchObject({
     consent: "current",
   });
   expect(await (await blob(memberAppBundle)).text()).toBe(memberAppBundle.toString());
@@ -2051,4 +2296,121 @@ it("shows a Member app's reach and source for review, and its bundle only once a
       body: JSON.stringify({ authorityRevision: 1 }),
     }),
   ).rejects.toThrow();
+});
+
+it("shares a Personal app whose folder name members can't reach, and refuses files outside its folder", async () => {
+  const f = await memberAppFixture();
+  f.rule(null, "app");
+  const app = f.publish();
+  f.allow(ben, app);
+  expect((await f.invoke(ben, id(6), {}, app, "personal")).result).toBe("edit");
+  const outside = f.candidate([id(6)], undefined, "notes/index.ts");
+  expect(() =>
+    f.host.publishMemberApp(ana, {
+      workspaceId: "w",
+      slug: "tracker",
+      candidate: outside,
+      blobs: f.blobs,
+      agent: null,
+    }),
+  ).toThrow(expect.objectContaining({ code: "bad_request" }));
+  const manifest = Buffer.from(JSON.stringify(outside)),
+    manifestHash = sha(manifest),
+    stored = memberAppIdOf("w", "ana", "notes", manifestHash);
+  f.storage.tx(() =>
+    writeMemberApp(f.storage, {
+      workspaceId: "w",
+      slug: "notes",
+      candidate: outside,
+      blobs: f.blobs,
+      agent: null,
+      publisherUserId: "ana",
+      publicationId: stored,
+      manifest,
+      manifestHash,
+      nowMs: 9,
+    }),
+  );
+  for (const viewer of [ana, ben])
+    expect(() => f.review(viewer, stored)).toThrow(expect.objectContaining({ code: "not_found" }));
+});
+
+it("lists the official apps a person can open, then Member apps, across pages the viewer can't see into", async () => {
+  const f = await memberAppFixture();
+  const official = f.app([await f.collection(id(12), "private")]);
+  f.rule(null, "private");
+  const app = f.publish();
+  expect(f.host.memberApps(ben, { workspaceId: "w" })).toEqual({ apps: [], nextCursor: "m" });
+  expect(f.host.memberApps(owner, { workspaceId: "w" })).toMatchObject({
+    apps: [{ kind: "workspace", publicationId: official, reachable: true, canWithdraw: false }],
+    nextCursor: "m",
+  });
+  expect(f.host.memberApps(ben, { workspaceId: "w", cursor: "m" })).toMatchObject({
+    apps: [{ kind: "member", publicationId: app, consent: "none", canWithdraw: false }],
+    nextCursor: null,
+  });
+  f.share(false);
+  expect(f.host.memberApps(ana, { workspaceId: "w", cursor: "m" }).apps).toMatchObject([
+    { publicationId: app, reachable: false, canWithdraw: true },
+  ]);
+});
+
+it("lets every member read the sharing switch and only the Owner and Admins change it", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  const official = f.app([await f.collection(id(12), "team")]);
+  const route = createMemberAppRoutes({
+    host: f.host,
+    storage: f.storage,
+    limits,
+    shareWebOrigin: "https://share.test",
+    authorName: async (userId) => ({ ana: "Ana", owner: "Olive" })[userId] ?? null,
+  });
+  const call = (action: "apps" | "settings", userId: string, body?: unknown) =>
+    route(
+      new Request(`https://relay.test/${action}`, {
+        ...(body === undefined
+          ? {}
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            }),
+      }),
+      { route: "member-apps", workspaceId: "w", action },
+      userId,
+    );
+  expect(await (await call("settings", "ben")).json()).toEqual({ membersCanShare: true });
+  await expect(call("settings", "stranger")).rejects.toMatchObject({ code: "not_found" });
+  await expect(call("settings", "stranger", { membersCanShare: false })).rejects.toMatchObject({
+    code: "not_found",
+  });
+  await expect(call("settings", "ben", { membersCanShare: false })).rejects.toMatchObject({
+    code: "members_forbidden",
+  });
+  expect(await (await call("settings", "owner", { membersCanShare: false })).json()).toEqual({
+    membersCanShare: false,
+  });
+  f.share(true);
+  f.allow(ben, app);
+  expect(await (await call("apps", "ben")).json()).toMatchObject({
+    apps: [{ kind: "workspace", publicationId: official, authorName: "Olive" }],
+    nextCursor: "m",
+  });
+  const page = new URL("https://relay.test/apps?cursor=m");
+  const listed = await route(
+    new Request(page),
+    { route: "member-apps", workspaceId: "w", action: "apps" },
+    "ben",
+  );
+  expect(await listed.json()).toMatchObject({
+    apps: [
+      {
+        publicationId: app,
+        authorName: "Ana",
+        consent: "current",
+        url: `https://share.test/s/apps/w/${app}`,
+      },
+    ],
+  });
 });

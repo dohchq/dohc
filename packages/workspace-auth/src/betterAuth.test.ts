@@ -68,12 +68,16 @@ const describeWithPostgres = describe.skipIf(!pgAvailable);
 describe("the page an emailed link returns to", () => {
   const link = (callbackURL: string) =>
     `http://localhost:1786/api/auth/verify?token=t&callbackURL=${encodeURIComponent(callbackURL)}`;
-  it("keeps a device sign-in and the join page, and nothing else", () => {
+  it("keeps a device sign-in, the join page, and the workspaces page, and nothing else", () => {
     expect(emailedLinkNextPage(link("/device?user_code=ABCD-EFGH"))).toBe(
       "/device?user_code=ABCD-EFGH",
     );
     expect(emailedLinkNextPage(link("/join"))).toBe("/join");
+    expect(emailedLinkNextPage(link("/workspaces"))).toBe("/workspaces");
     for (const refused of [
+      "/workspaces/",
+      "/workspaces?x",
+      "//workspaces",
       "//join",
       "/join?x",
       "/joinx",

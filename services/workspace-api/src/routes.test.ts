@@ -330,6 +330,23 @@ describe("account pages", () => {
     }
   });
 
+  it("brings a person who signs up from an invitation email back to their workspaces", async () => {
+    for (const closedSignUp of [true, false]) {
+      expect(
+        await (await router({ closedSignUp })(get("/account/sign-up?next=%2Fworkspaces"))).text(),
+      ).toContain('data-next="/workspaces"');
+    }
+    expect(
+      await (await router()(get("/account/verify-email?next=%2Fworkspaces"))).text(),
+    ).toContain('<a href="/workspaces">Open your workspaces</a>');
+    for (const refused of ["%2Fworkspaces%2F", "%2Fworkspacesx", "%2F%2Fworkspaces"]) {
+      expect(
+        await (await router()(get(`/account/sign-up?next=${refused}`))).text(),
+        refused,
+      ).not.toContain("data-next");
+    }
+  });
+
   it("continues a device sign-in after a new password", async () => {
     const body = await (
       await router()(

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAccount } from "../server/account";
 import {
   A,
+  appServer,
   ACTION,
   answerLaunch,
   B,
@@ -18,13 +19,22 @@ import {
   testServer,
   type Answer,
 } from "../server/testServer";
+import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
+import { cacheScope, createReadCache, type ReadCache } from "../server/workspaceData";
 import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
 
-function setup(options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolean } = {}) {
-  const server = testServer();
+function setup(
+  options: {
+    signIn?: ReturnType<typeof signedIn>;
+    canOpen?: boolean;
+    cache?: ReadCache;
+    ends?: ScopedEnds;
+  } = {},
+) {
+  const server = appServer();
   const signIn = options.signIn ?? signedIn(server);
   const runner = createAppRunner();
   const apps = createWorkspaceApps({
@@ -33,6 +43,8 @@ function setup(options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolea
     runner,
     fetch: server.fetch,
     canOpen: options.canOpen ?? true,
+    cache: options.cache ?? createReadCache(),
+    ends: options.ends ?? createScopedEnds(),
   });
   return { server, signIn, runner, apps };
 }
@@ -90,6 +102,14 @@ describe("a launch", () => {
     }
   });
 
+  it("never touches the running app for a review already left, as a late Allow and open is", async () => {
+    const { apps, runner } = await running();
+    const left = new AbortController();
+    left.abort();
+    expect(await apps.open({ ...version(B, true), name: "other" }, left.signal)).toBe(false);
+    expect(runner.state()).toMatchObject({ publicationId: A });
+  });
+
   it("ends a launch that arrived as the review was left", async () => {
     const { server, runner, apps } = setup();
     answerLaunch(server);
@@ -119,6 +139,60 @@ describe("a launch", () => {
     expect(runner.stopped()).toBeNull();
   });
 
+  it("names the app it launches until the launch shows, fails or ends", async () => {
+    const { server, runner, apps } = setup();
+    const changed = vi.fn();
+    runner.subscribe(changed);
+    const release = holdGrant(server);
+    const shown = apps.open(app, still);
+    expect(runner.launching()).toMatchObject({ publicationId: A, name: "signup" });
+    expect(changed).toHaveBeenCalled();
+    release();
+    expect(await shown).toBe(true);
+    expect(runner.launching()).toBeNull();
+
+    server.on("POST", "/sync/ws-1/ops/appLaunch", { status: 503 });
+    const failed = apps.open(app, still);
+    expect(runner.launching()).not.toBeNull();
+    await expect(failed).rejects.toThrow();
+    expect(runner.launching()).toBeNull();
+
+    const answer = holdGrant(server);
+    const ended = apps.open(app, still);
+    changed.mockClear();
+    runner.end();
+    expect(runner.launching()).toBeNull();
+    expect(changed).toHaveBeenCalled();
+    answer();
+    expect(await ended).toBe(false);
+  });
+
+  it("stops a launch's requests when it ends, at Back or a later open", async () => {
+    const { server, runner, apps } = setup();
+    server.on("POST", "/sync/ws-1/ops/appLaunch", () => new Promise<Answer>(() => {}));
+    const grants = () => server.calls.filter((call) => call.path === "/sync/ws-1/ops/appLaunch");
+    const first = apps.open(app, still);
+    await vi.waitFor(() => expect(grants()).toHaveLength(1));
+    void apps.open(app, still);
+    expect(grants()[0]!.signal.aborted).toBe(true);
+    expect(await first).toBe(false);
+    await vi.waitFor(() => expect(grants()).toHaveLength(2));
+    runner.end();
+    expect(grants()[1]!.signal.aborted).toBe(true);
+  });
+
+  it("returns a failed launch's error, whatever a catalog check read meanwhile", async () => {
+    const { server, runner, apps } = setup();
+    const grant = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appLaunch", () => grant.promise);
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(B, true)]));
+    const launch = apps.open(app, still);
+    await apps.check();
+    expect(runner.launching()).not.toBeNull();
+    grant.resolve({ status: 503 });
+    await expect(launch).rejects.toThrow();
+  });
+
   it("opens nothing in a build that can't run apps", async () => {
     const { server, runner, apps } = setup({ canOpen: false });
     answerLaunch(server);
@@ -131,7 +205,7 @@ describe("a launch", () => {
 describe("teardown", () => {
   it("ends the app before Sign out's delete, and at a 401", async () => {
     for (const end of ["sign-out", "401"] as const) {
-      const server = testServer();
+      const server = appServer();
       serveSessionEnd(server);
       const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
       const runner = createAppRunner();
@@ -155,6 +229,8 @@ describe("teardown", () => {
         runner,
         fetch: server.fetch,
         canOpen: true,
+        cache: createReadCache(),
+        ends: createScopedEnds(),
       });
       answerLaunch(server);
       expect(await apps.open(app, still)).toBe(true);
@@ -222,6 +298,8 @@ describe("teardown", () => {
       runner,
       fetch: server.fetch,
       canOpen: true,
+      cache: createReadCache(),
+      ends: createScopedEnds(),
     }).stop();
     expect(runner.state()).not.toBeNull();
   });
@@ -229,7 +307,7 @@ describe("teardown", () => {
 
 describe("the catalog", () => {
   it("lands only the latest read, and nothing once its sign-in has ended", async () => {
-    const server = testServer();
+    const server = appServer();
     let current = true;
     const { apps } = setup({ signIn: signedIn(server, () => current) });
     const held = deferred<Answer>();
@@ -258,6 +336,34 @@ describe("the catalog", () => {
     // Once it has finished, the next check reads again.
     await apps.check();
     expect(apps.state().apps).toEqual([version(B)]);
+  });
+
+  it("shows the catalog read last at once in the workspace's next store", async () => {
+    const cache = createReadCache();
+    const { server, apps } = setup({ cache });
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)]));
+    await apps.refresh();
+    apps.stop();
+    expect(setup({ cache, signIn: signedIn(server) }).apps.state().apps).toEqual([
+      version(A, true),
+    ]);
+  });
+
+  it("empties at a 404 for the workspace, and a read on its way neither shows nor saves", async () => {
+    const cache = createReadCache();
+    const ends = createScopedEnds();
+    const { server, signIn, apps } = setup({ cache, ends });
+    const late = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A)]), () => late.promise);
+    await apps.refresh();
+    const reading = apps.refresh();
+    cache.drop(cacheScope(signIn, "ws-1"));
+    appTeardown(ends).hide("ws-1");
+    expect(apps.state()).toEqual({ apps: null, problem: null, failures: 0 });
+    late.resolve(page([version(B)]));
+    await reading;
+    expect(apps.state().apps).toBeNull();
+    expect(cache.get(cacheScope(signIn, "ws-1"), "apps")).toBeUndefined();
   });
 
   it("counts failures and keeps what it showed", async () => {

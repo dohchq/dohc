@@ -9,7 +9,7 @@ import type { CacheStore, Sql } from "./keptStore";
 export interface SavedView {
   readonly id: string;
   readonly value: unknown;
-  readonly cursor: string;
+  readonly cursor: string | null;
   readonly stale: boolean;
   readonly prefetched?: boolean;
 }
@@ -60,6 +60,7 @@ export function createCacheRows(
   const written = new Map<string, number>();
   const pending = new Map<string, Waiting>();
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const known = new WeakMap<object, Part>();
 
   /** The last change asked for, which settles after every one before it. */
   let last: Promise<void> = Promise.resolve();
@@ -102,7 +103,7 @@ export function createCacheRows(
     if (batch.length === 0) return last;
     return change(async (sql) => {
       for (const job of batch) {
-        const { text, bytes } = serialize(job.views(), scopeMaxBytes);
+        const { text, bytes } = serialize(job.views(), scopeMaxBytes, known);
         await sql.run(
           `INSERT INTO views (scope, value, bytes, used_at) VALUES (?, ?, ?, ?)
            ON CONFLICT (scope) DO UPDATE SET value = excluded.value, bytes = excluded.bytes, used_at = excluded.used_at`,
@@ -192,27 +193,45 @@ function parsed(text: unknown): unknown {
   }
 }
 
+interface Part {
+  readonly flags: string;
+  readonly text: string;
+  readonly bytes: number;
+}
+
 /**
  * The views as JSON, with each view that still fits under `maxBytes` in UTF-8, in the order given. A view whose
  * smallest possible size is already past what's left is left out before any of it is written out, so one too large
- * for the cap, such as a long chat, costs a walk over its fields, never a copy of its text.
+ * for the cap, such as a long chat, costs a walk over its fields, never a copy of its text. A view unchanged since an
+ * earlier save reuses that save's JSON.
  */
-function serialize(views: readonly SavedView[], maxBytes: number) {
+function serialize(views: readonly SavedView[], maxBytes: number, known: WeakMap<object, Part>) {
   let bytes = 2;
   const parts: string[] = [];
   for (const view of views) {
     const left = maxBytes - bytes - (parts.length > 0 ? 1 : 0);
     if (left <= 0) break;
-    const { id, value, cursor, stale } = view;
-    const saved = { id, value, cursor, stale, prefetched: view.prefetched || undefined };
-    if (leastJsonBytes(saved, left) > left) continue;
-    const part = JSON.stringify(saved);
-    const size = utf8Bytes(part);
-    if (size > left) continue;
-    parts.push(part);
-    bytes += size + (parts.length > 1 ? 1 : 0);
+    const part = jsonOf(view, left, known);
+    if (!part || part.bytes > left) continue;
+    parts.push(part.text);
+    bytes += part.bytes + (parts.length > 1 ? 1 : 0);
   }
   return { text: `[${parts.join(",")}]`, bytes };
+}
+
+function jsonOf(view: SavedView, left: number, known: WeakMap<object, Part>): Part | null {
+  const { id, value, cursor, stale } = view;
+  const prefetched = view.prefetched || undefined;
+  const flags = JSON.stringify([id, cursor, stale, prefetched === true]);
+  const key = typeof value === "object" && value !== null ? value : null;
+  const found = key && known.get(key);
+  if (found?.flags === flags) return found;
+  const saved = { id, value, cursor, stale, prefetched };
+  if (leastJsonBytes(saved, left) > left) return null;
+  const text = JSON.stringify(saved);
+  const part = { flags, text, bytes: utf8Bytes(text) };
+  if (key) known.set(key, part);
+  return part;
 }
 
 /**
@@ -254,7 +273,7 @@ function savedViews(text: unknown): readonly SavedView[] | null {
     if (
       !isRecord(item) ||
       typeof item.id !== "string" ||
-      typeof item.cursor !== "string" ||
+      (typeof item.cursor !== "string" && item.cursor !== null) ||
       typeof item.stale !== "boolean" ||
       item.value === undefined ||
       item.value === null

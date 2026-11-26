@@ -95,7 +95,8 @@ const inputs = [
   ["C:/absolute.env", false],
   // Secret-rule surface. Three rules decide secret material — an `.env`
   // segment at any depth, a basename ending `.env`, and a basename starting
-  // `.env.` — under case folding and a trailing dot/space alias strip. One
+  // `.env.` other than the `.env.example`, `.env.template` and
+  // `.env.sample` templates — under case folding and a trailing dot/space alias strip. One
   // vector per rule, plus the near misses that must stay tracked, so any
   // change to a rule moves a vector and the TypeScript oracle is asked about
   // it too.
@@ -105,6 +106,11 @@ const inputs = [
   [".env.", true],
   ["config/.env.local. ", true],
   [".envrc", true],
+  [".env.example", true],
+  ["config/.ENV.Sample", true],
+  [".env.template.", true],
+  [".env.example.local", true],
+  ["apps/site/.env/.env.example", true],
   ["notes/env/config.md", true],
   ["notes/envelope.md", true],
   // Ignored and reserved segments outrank a secret-shaped name on both sides.

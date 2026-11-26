@@ -10,6 +10,10 @@ import {
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import type { TokenCipher } from "./cloudCredentialStore";
+import { openJson, SealedJson, sealJson } from "./localSealedJson";
+
+const APPROVALS_AAD_TAG = "dohc-local-http-approvals-v2";
 
 const StoredHttpApprovalEntry = z
   .object({
@@ -24,32 +28,22 @@ const StoredHttpApprovalEntry = z
   })
   .strict();
 
-const StoredHttpApprovalFile = z
-  .object({
-    version: z.literal(1),
-    workspaceId: z.string().min(1),
-    approvals: z
-      .record(z.string(), StoredHttpApprovalEntry)
-      .refine(
-        (approvals) =>
-          Object.keys(approvals).length <= MAX_WORKSPACE_HTTP_APPROVALS &&
-          Object.keys(approvals).every(
-            (digest) => HttpStepApprovalDigest.safeParse(digest).success,
-          ),
-      ),
-  })
+const StoredApprovals = z
+  .record(z.string(), StoredHttpApprovalEntry)
+  .refine(
+    (approvals) =>
+      Object.keys(approvals).length <= MAX_WORKSPACE_HTTP_APPROVALS &&
+      Object.keys(approvals).every((digest) => HttpStepApprovalDigest.safeParse(digest).success),
+  );
+type StoredApprovals = z.output<typeof StoredApprovals>;
+
+const PlainApprovalFile = z
+  .object({ version: z.literal(1), workspaceId: z.string().min(1), approvals: StoredApprovals })
   .strict();
 
-type StoredFile = z.output<typeof StoredHttpApprovalFile>;
-
-export class LocalHttpApprovalStoreCorruptError extends Error {
-  constructor() {
-    super(
-      "This workspace's webhook approvals file could not be read, so dohc kept it untouched and held webhook steps.",
-    );
-    this.name = "LocalHttpApprovalStoreCorruptError";
-  }
-}
+const SealedApprovalFile = z
+  .object({ version: z.literal(2), workspaceId: z.string().min(1), sealed: SealedJson })
+  .strict();
 
 export class LocalHttpApprovalLimitError extends Error {
   constructor(count: number, limit: number) {
@@ -59,21 +53,19 @@ export class LocalHttpApprovalLimitError extends Error {
 }
 
 export interface LocalHttpApprovalStore {
-  isApproved(
-    workspaceId: string,
-    approvalDigest: string,
-  ): Promise<"approved" | "unapproved" | "unavailable">;
+  approved(workspaceId: string): Promise<ReadonlySet<string>>;
   approve(workspaceId: string, input: HttpStepApprovalWriteInput): Promise<void>;
-  list(workspaceId: string): Promise<string[]>;
   clearWorkspace(workspaceId: string): Promise<void>;
 }
 
 export function createLocalHttpApprovalStore(options: {
   readonly dir: string;
+  readonly cipher?: TokenCipher;
   readonly nowMs?: () => number;
 }): LocalHttpApprovalStore {
   const rootDir = join(options.dir, "http-approvals");
   const nowMs = options.nowMs ?? Date.now;
+  const sealer = () => (options.cipher?.isAvailable() === true ? options.cipher : null);
   let last: Promise<unknown> = Promise.resolve();
   const inOrder = <T>(work: () => Promise<T>): Promise<T> => {
     const done = last.then(work, work);
@@ -84,71 +76,57 @@ export function createLocalHttpApprovalStore(options: {
   const fileFor = (workspaceId: string) =>
     join(rootDir, `${createHash("sha256").update(workspaceId, "utf8").digest("hex")}.json`);
 
-  const readFileOrEmpty = async (workspaceId: string): Promise<StoredFile> => {
+  const readApprovals = async (workspaceId: string): Promise<StoredApprovals> => {
     const file = fileFor(workspaceId);
     let text: string;
     try {
       text = await readFile(file, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        return { version: 1, workspaceId, approvals: {} };
-      }
-      throw new LocalHttpApprovalStoreCorruptError();
+    } catch {
+      return {};
     }
     await chmod(file, 0o600).catch(() => undefined);
     try {
       const raw: unknown = JSON.parse(text);
-      if (
-        raw === null ||
-        typeof raw !== "object" ||
-        Array.isArray(raw) ||
-        !("approvals" in raw) ||
-        raw.approvals === null ||
-        typeof raw.approvals !== "object" ||
-        Array.isArray(raw.approvals) ||
-        !Object.keys(raw.approvals).every(
-          (digest) => HttpStepApprovalDigest.safeParse(digest).success,
-        )
-      ) {
-        throw new LocalHttpApprovalStoreCorruptError();
+      const cipher = sealer();
+      if (cipher) {
+        const parsed = SealedApprovalFile.parse(raw);
+        if (parsed.workspaceId !== workspaceId) return {};
+        return StoredApprovals.parse(
+          openJson(cipher, [APPROVALS_AAD_TAG, workspaceId], parsed.sealed),
+        );
       }
-      const parsed = StoredHttpApprovalFile.parse(raw);
-      if (parsed.workspaceId !== workspaceId) {
-        throw new LocalHttpApprovalStoreCorruptError();
-      }
-      return parsed;
+      const parsed = PlainApprovalFile.parse(raw);
+      return parsed.workspaceId === workspaceId ? parsed.approvals : {};
     } catch {
-      throw new LocalHttpApprovalStoreCorruptError();
+      return {};
     }
   };
 
-  const writeFileAtomic = async (workspaceId: string, data: StoredFile): Promise<void> => {
+  const writeApprovals = async (workspaceId: string, approvals: StoredApprovals): Promise<void> => {
     const file = fileFor(workspaceId);
-    if (Object.keys(data.approvals).length === 0) {
+    if (Object.keys(approvals).length === 0) {
       await unlink(file).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
       return;
     }
+    const cipher = sealer();
+    const stored = cipher
+      ? {
+          version: 2,
+          workspaceId,
+          sealed: sealJson(cipher, [APPROVALS_AAD_TAG, workspaceId], approvals),
+        }
+      : { version: 1, workspaceId, approvals };
     await mkdir(rootDir, { recursive: true, mode: 0o700 });
     await atomicReplaceFile(file, (tmp) =>
-      writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 }),
+      writeFile(tmp, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 }),
     );
   };
 
   return {
-    isApproved: (workspaceId, rawDigest) =>
-      inOrder(async () => {
-        const parsedDigest = HttpStepApprovalDigest.safeParse(rawDigest);
-        if (!parsedDigest.success) return "unapproved";
-        try {
-          const data = await readFileOrEmpty(workspaceId);
-          return Object.hasOwn(data.approvals, parsedDigest.data) ? "approved" : "unapproved";
-        } catch (error) {
-          if (error instanceof LocalHttpApprovalStoreCorruptError) return "unavailable";
-          throw error;
-        }
-      }),
+    approved: (workspaceId) =>
+      inOrder(async () => new Set(Object.keys(await readApprovals(workspaceId)))),
     approve: (workspaceId, rawInput) =>
       inOrder(async () => {
         const input = HttpStepApprovalWriteInput.parse(rawInput);
@@ -158,36 +136,29 @@ export function createLocalHttpApprovalStore(options: {
         ) {
           throw new Error("Collection path must be a normalized owned Collection path.");
         }
-        const data = await readFileOrEmpty(workspaceId);
-        for (const [digestKey, entry] of Object.entries(data.approvals)) {
+        const approvals = await readApprovals(workspaceId);
+        for (const [digestKey, entry] of Object.entries(approvals)) {
           if (
             digestKey !== input.approvalDigest &&
             entry.collectionPath === input.collectionPath &&
             entry.automationId === input.automationId &&
             entry.stepOrdinal === input.stepOrdinal
           ) {
-            delete data.approvals[digestKey];
+            delete approvals[digestKey];
           }
         }
-        const existing = Object.hasOwn(data.approvals, input.approvalDigest);
-        const count = Object.keys(data.approvals).length;
+        const existing = Object.hasOwn(approvals, input.approvalDigest);
+        const count = Object.keys(approvals).length;
         if (!existing && count >= MAX_WORKSPACE_HTTP_APPROVALS) {
           throw new LocalHttpApprovalLimitError(count, MAX_WORKSPACE_HTTP_APPROVALS);
         }
-        data.approvals[input.approvalDigest] = {
+        approvals[input.approvalDigest] = {
           collectionPath: input.collectionPath,
           automationId: input.automationId,
           stepOrdinal: input.stepOrdinal,
           approvedAtMs: Math.trunc(nowMs()),
         };
-        await writeFileAtomic(workspaceId, data);
-      }),
-    list: (workspaceId) =>
-      inOrder(async () => {
-        const data = await readFileOrEmpty(workspaceId);
-        return Object.keys(data.approvals).sort((left, right) =>
-          left < right ? -1 : left > right ? 1 : 0,
-        );
+        await writeApprovals(workspaceId, approvals);
       }),
     clearWorkspace: (workspaceId) =>
       inOrder(async () => {

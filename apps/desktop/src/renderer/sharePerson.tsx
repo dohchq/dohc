@@ -275,7 +275,7 @@ export const invitationEmailNoticeIdentity = (grantId: string) =>
 
 const SENDING_INVITATION = "Sending email…";
 
-function invitationResendWords(answer: ResendRelayShareInvitationResult): string {
+export function invitationResendWords(answer: ResendRelayShareInvitationResult): string {
   switch (answer.invitationEmail) {
     case "sent":
       return "Email invitation sent.";

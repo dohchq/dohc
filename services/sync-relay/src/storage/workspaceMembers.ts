@@ -449,7 +449,6 @@ export type MemberChangeRefusal =
   | "forbidden"
   | "name-required"
   | "already-member"
-  | "already-invited"
   | "removed"
   | "full"
   | "account-unavailable";
@@ -566,7 +565,7 @@ export function inviteWorkspaceMember(
     newShareId: () => string;
     nowMs: number;
   },
-): MemberChangeResult {
+): MemberChangeResult<{ invitation: WorkspaceInvitation }> {
   return asActor(storage, input.workspaceId, input.actorUserId, "invite", () => {
     const ownerUserId = ownerOf(storage, input.workspaceId)!;
     const recipient = input.recipientUserId;
@@ -576,19 +575,20 @@ export function inviteWorkspaceMember(
     const membership = ensureMembership(storage, { ...input, ownerUserId });
     if (!membership) return refuse("name-required");
     const nowMs = Math.trunc(input.nowMs);
-    if (recipient !== null) {
-      const existing = memberByAccount(storage, input.workspaceId, recipient);
-      if (existing?.state === "active") return refuse("already-member");
-      if (existing?.state === "removed") return refuse("removed");
-    } else if (
-      storage.db
-        .prepare(
-          `SELECT 1 FROM ${MEMBERS} WHERE workspace_id = ? AND state = 'invited' AND email = ?`,
-        )
-        .get(input.workspaceId, input.email)
-    ) {
-      return refuse("already-invited");
-    }
+    const existing =
+      recipient === null ? null : memberByAccount(storage, input.workspaceId, recipient);
+    if (existing?.state === "removed") return refuse("removed");
+    // Inviting someone already here, or an address already invited, emails them again.
+    const repeated =
+      existing?.state === "active"
+        ? existing.grantId
+        : storage.db
+            .prepare(
+              `SELECT grant_id FROM ${MEMBERS} WHERE workspace_id = ? AND state = 'invited' AND email = ?`,
+            )
+            .get(input.workspaceId, input.email)?.grant_id;
+    if (repeated !== undefined)
+      return { ok: true, invitation: invitationOf(membership, String(repeated)) };
     if (seatsTaken(storage, input.workspaceId) >= MAX_WORKSPACE_MEMBERS) return refuse("full");
     const grantId = input.newGrantId();
     storage.db
@@ -621,8 +621,25 @@ export function inviteWorkspaceMember(
     );
     queueAddedNotice(storage, grantId, nowMs);
     if (recipient !== null) startPersonalAgentsInMembership(storage, input.workspaceId, recipient);
-    return { ok: true };
+    return { ok: true, invitation: invitationOf(membership, grantId) };
   });
+}
+
+/** What an invitation email names: the invite's grant, and what it gives now. */
+export interface WorkspaceInvitation {
+  grantId: string;
+  shareId: string;
+  workspaceName: string;
+  access: MemberLevel;
+}
+
+function invitationOf(membership: WorkspaceMembershipRow, grantId: string): WorkspaceInvitation {
+  return {
+    grantId,
+    shareId: membership.shareId,
+    workspaceName: membership.workspaceName,
+    access: accessFor(membership, "member"),
+  };
 }
 
 /** Re-grants every entry at its role's access. A level or role change ends held requests, as revocation does. */

@@ -2,7 +2,7 @@
 
 Use this guide to run sync and sharing for your own devices and collaborators.
 Local work in dohc does not need a server or account.
-dohc Drive, the managed service at `https://drive.dohc.computer`, is in invite-only beta.
+dohc Drive, the managed service at `https://drive.dohc.computer`, is in invite-only alpha.
 
 The sections through [Check before inviting other people](#check-before-inviting-other-people) set up a working server.
 The sections after it cover optional configuration and maintenance.
@@ -628,6 +628,36 @@ Start them again and check readiness:
 ```sh
 node tools/self-host/bootstrap.mjs start
 ```
+
+### Rotate the workspace secrets key
+
+The server seals workspace secrets, such as API keys and webhook links, with `DOHC_RELAY_LINK_KEY` until you set `DOHC_RELAY_SECRET_KEYS`.
+`DOHC_RELAY_SECRET_KEYS` lists keys as `id:key`, separated by commas.
+An id is 1 to 32 lowercase letters, digits, and dashes. Each key needs at least 32 characters.
+The first key seals new secrets. Every listed key, and `DOHC_RELAY_LINK_KEY`, opens secrets sealed under it.
+
+1. Make a new key:
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+2. Put it first in `.env.self-host`, and keep any key already listed after it:
+
+   ```sh
+   DOHC_RELAY_SECRET_KEYS=secrets-2026-12:NEW_KEY,secrets-2026-06:OLD_KEY
+   ```
+
+3. Stop and start the deployment.
+   At startup the relay reseals every secret under the first key and logs a line like this:
+
+   ```text
+   [sync-relay] workspace secrets on key secrets-2026-12: 12 resealed, 0 already current, 0 unreadable, 0 changed while resealing
+   ```
+
+4. When the line shows 0 unreadable and 0 changed while resealing, every secret is on the new key. Remove the old key from the list. If some are unreadable, check that the older keys are listed exactly as before and restart.
+
+Keep the old key until then. A secret whose key you remove stops working until its owner adds it again in Settings.
 
 ### Upgrade the server
 

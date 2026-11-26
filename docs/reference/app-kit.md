@@ -250,6 +250,41 @@ dohc app stage '{"workspaceId":"<workspaceId>","appRoot":"personal-control-tower
 - Open the app in dohc and click **Review app** to inspect every new/updated Collection and app capability in one card, then click **Approve and open** (or **Discard**). Interrupted approvals resume cleanly from per-step receipts without repeating already-applied Collections.
 - See `examples/personal-control-tower` for a complete two-Collection example (`expenses` and `workouts`).
 
+## Calling outside services with a workspace secret (`external`)
+
+An app can call an outside API with a secret from **Settings > Secrets** without the secret reaching the app. Declare each request in `app.publish.json`:
+
+```json
+{
+  "entryPath": "main.tsx",
+  "external": {
+    "recentEvents": {
+      "method": "POST",
+      "url": "https://us.posthog.com/api/projects/{{project}}/query/",
+      "body": { "query": { "kind": "HogQLQuery", "query": "select event, count() from events group by event" } },
+      "params": { "project": { "type": "integer", "min": 1, "max": 99999999 } },
+      "secret": { "name": "POSTHOG_KEY", "header": "Authorization", "prefix": "Bearer " }
+    }
+  }
+}
+```
+
+Then call it by name:
+
+```tsx
+const { status, data } = await useApp().external<{ results: unknown[] }>("recentEvents", { project: 42 });
+```
+
+- `method` is `GET` or `POST`. Only `POST` sends a `body`.
+- `url` is `https://host/path`. Put query fields in `query`, not in the URL.
+- `{{name}}` fills a whole path segment, query value, or body value with a declared input. Inputs are `integer` (`min`, `max`), `enum` (`values`), `boolean`, or `string` (`maxLength`). Every input is required.
+- `headers` are fixed text. `secret.header` names the header that carries the secret, after an optional `prefix`. The secret must be a header secret whose allowed websites include the URL's host.
+- `maxResponseBytes` defaults to 192 KiB, which is also the most it can be. The answer must be uncompressed JSON in UTF-8, nested at most 64 levels deep. Each call times out after 10 seconds.
+- `access` is `"owner"`, the default. For now, only the owner's own app can make the call.
+- `status` is the service's HTTP status, so check it. A refused call throws an `AppBackendError` whose `refusal.code` is one such as `external_input`, `external_secret`, or `secret_echoed`.
+
+The owner approves these calls in the dohc window. The CLI, MCP, and `dohc app stage` refuse them. Any change to `external` needs a new approval. For now, these calls run only for approved apps in workspaces that aren't synced.
+
 ## Sandbox limits, clipboard, printing, and fullscreen
 
 Published and local apps run inside an opaque-origin `srcdoc` iframe (`window.origin === "null"`) without `allow-same-origin` or `allow-modals`. That isolation keeps app code separate from session credentials and stops modal spam, and it affects app code in these ways:

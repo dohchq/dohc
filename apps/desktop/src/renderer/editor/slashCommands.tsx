@@ -51,8 +51,8 @@ import {
   type EditorState,
 } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
-import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
-import { compareRelativePositions, type RelativePosition, type XmlFragment } from "yjs";
+import { compareRelativePositions, type RelativePosition } from "yjs";
+import type { CollabPositions } from "./collabPositions";
 import { isComposingKey } from "../ui/keys";
 import {
   FLOATING_MENU_MAX_HEIGHT,
@@ -63,8 +63,6 @@ import {
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 import { MERMAID_STARTER_SNIPPET } from "./mermaidRender";
-
-type YTiptap = typeof import("@tiptap/y-tiptap");
 
 export type SlashCommandId =
   | "wikilink"
@@ -272,9 +270,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-type GutterSlashPending = GutterSlashTarget & {
-  xmlChild: ReturnType<XmlFragment["get"]> | null;
-};
+type GutterSlashPending = GutterSlashTarget & { block: object | null };
 
 type SlashPluginState = {
   dismissed: DismissedSlash | null;
@@ -360,14 +356,6 @@ function findSlashTrigger(state: EditorState): { from: number; query: string } |
 // The "/" whose menu Escape closed, with a Y.js anchor on it when the editor
 // is bound to a Y.Doc.
 type DismissedSlash = { from: number; anchor: RelativePosition | null };
-
-type YSyncState = { type: XmlFragment; binding: ProsemirrorBinding };
-
-// y-tiptap anchors a position to the character before it, so the position
-// after the "/" anchors the "/" itself.
-function anchorSlash(yTiptap: YTiptap, sync: YSyncState, from: number): RelativePosition {
-  return yTiptap.absolutePositionToRelativePosition(from + 1, sync.type, sync.binding.mapping);
-}
 
 function readSlashCommandState(view: EditorView, previous: SlashCommandState): SlashCommandState {
   if (view.editable === false) {
@@ -497,36 +485,16 @@ function materializeGutterText(
   return true;
 }
 
-function topLevelChildIndexAt(doc: EditorState["doc"], blockPos: number): number {
-  let found = -1;
-  let index = 0;
-  doc.forEach((_child, pos) => {
-    if (pos === blockPos) found = index;
-    index += 1;
-  });
-  return found;
-}
-
-function topLevelBlockPosAtIndex(doc: EditorState["doc"], childIndex: number): number | null {
-  if (childIndex < 0 || childIndex >= doc.childCount) return null;
-  let pos = 0;
-  for (let index = 0; index < childIndex; index += 1) {
-    pos += doc.child(index).nodeSize;
-  }
-  return pos;
-}
-
 export function makeSlashCommandPlugin({
   stateRef,
   setState,
   runCommandRef,
-  yTiptap = null,
+  positions = null,
 }: {
   stateRef: RefObject<SlashCommandState>;
   setState: Dispatch<SetStateAction<SlashCommandState>>;
   runCommandRef: RefObject<(id: SlashCommandId) => void>;
-  // The lazily loaded y-tiptap module, when the editor is bound to a Y.Doc.
-  yTiptap?: YTiptap | null;
+  positions?: CollabPositions | null;
 }) {
   const publish = (next: SlashCommandState) => {
     if (slashCommandStatesEqual(stateRef.current, next)) return;
@@ -549,36 +517,23 @@ export function makeSlashCommandPlugin({
       init: () => EMPTY_SLASH_PLUGIN_STATE,
       apply(tr, prev, oldState, state) {
         const meta = tr.getMeta(slashCommandKey) as SlashPluginMeta | undefined;
-        // Read from the old state: this state's later plugins aren't built yet.
-        const sync: YSyncState | undefined = yTiptap?.ySyncPluginKey.getState(oldState);
-        const anchor = (from: number) =>
-          yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null;
+        const anchor = (from: number) => positions?.anchor(state, oldState, from + 1, -1) ?? null;
 
         if (meta?.type === "open-gutter") {
-          const childIndex = topLevelChildIndexAt(state.doc, meta.target.blockPos);
-          const xmlChild =
-            sync && childIndex >= 0 && childIndex < sync.type.length
-              ? sync.type.get(childIndex)
-              : null;
-          return {
-            dismissed: prev.dismissed,
-            gutter: { ...meta.target, xmlChild },
-          };
+          const block =
+            positions?.anchorTopLevelBlock(state, oldState, meta.target.blockPos) ?? null;
+          return { dismissed: prev.dismissed, gutter: { ...meta.target, block } };
         }
 
         const dismissing = meta?.type === "dismiss";
-        const change: { isChangeOrigin?: boolean } | undefined = yTiptap
-          ? tr.getMeta(yTiptap.ySyncPluginKey)
-          : undefined;
+        const shown = positions?.isShownChange(tr) ?? false;
 
         let gutter: GutterSlashPending | null = null;
         if (prev.gutter && !dismissing) {
-          if (change?.isChangeOrigin) {
+          if (shown) {
             let nextBlockPos: number | null = null;
-            if (sync && prev.gutter.xmlChild !== null) {
-              const targetChild = prev.gutter.xmlChild;
-              const nextIndex = sync.type.toArray().findIndex((child) => child === targetChild);
-              if (nextIndex >= 0) nextBlockPos = topLevelBlockPosAtIndex(state.doc, nextIndex);
+            if (positions && prev.gutter.block !== null) {
+              nextBlockPos = positions.resolveTopLevelBlock(state, oldState, prev.gutter.block);
             } else {
               const mapped = tr.mapping.mapResult(prev.gutter.blockPos);
               if (!mapped.deleted) nextBlockPos = mapped.pos;
@@ -588,7 +543,7 @@ export function makeSlashCommandPlugin({
               gutter = {
                 blockPos: nextBlockPos,
                 reuseEmpty: node.type.name === "paragraph" && node.textContent.length === 0,
-                xmlChild: prev.gutter.xmlChild,
+                block: prev.gutter.block,
               };
             }
           } else if (!tr.docChanged && !tr.selectionSet) {
@@ -612,7 +567,7 @@ export function makeSlashCommandPlugin({
         // document, which maps every position away. Its anchor still finds the
         // "/" when the "/" survives.
         const mapped = tr.mapping.mapResult(prev.dismissed.from);
-        const same = change?.isChangeOrigin
+        const same = shown
           ? prev.dismissed.anchor !== null &&
             compareRelativePositions(prev.dismissed.anchor, anchor(trigger.from))
           : !mapped.deleted && mapped.pos === trigger.from;

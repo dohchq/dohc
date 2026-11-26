@@ -379,6 +379,7 @@ describe("T3 Code's thread tools", () => {
       delivery: "started",
     });
     t3.tools.t3_thread_read = () => ({
+      items: [],
       recentRuns: [
         {
           runId: "run-9",
@@ -512,8 +513,31 @@ describe("T3 Code's thread tools", () => {
       t3.calls.filter((call) => call.tool === "t3_thread_send").map((call) => call.args),
     ).toEqual([
       { threadId: "t1", message: "status?", mode: "queue", clientRequestId: "f1" },
-      { threadId: "t1", message: "now", mode: "steer", clientRequestId: "f2" },
+      { threadId: "t1", message: "now", mode: "auto", clientRequestId: "f2" },
     ]);
+  });
+
+  it("gives a message that goes right away to a thread with no work going", async () => {
+    const t3 = await fakeT3Code();
+    // T3 Code's own rule: a steer needs a turn that is going.
+    t3.tools.t3_thread_send = ({ mode }) => {
+      if (mode === "steer")
+        throw new Error(
+          'thread_not_sendable: Thread t1 has no running turn that can be steered. Send with mode: "auto" or "queue" to start a new turn there.',
+        );
+      return { threadId: "t1", runId: "run-1" };
+    };
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    cleanups.push(() => session.close());
+
+    await expect(
+      sendToT3CodeThread(session, {
+        threadId: "t1",
+        message: "now",
+        how: "steer",
+        forwardId: "f1",
+      }),
+    ).resolves.toEqual({ runId: "run-1" });
   });
 
   it("sends a sign-in only to the address it was issued at, and ends a session whose handshake failed", async () => {
@@ -534,6 +558,7 @@ describe("T3 Code's thread tools", () => {
     t3.eventStream = true;
     t3.tools.t3_thread_read = () => ({
       recentRuns: [],
+      items: [],
       thread: {
         title: "Quiet",
         activeRunId: null,
@@ -589,6 +614,7 @@ describe("T3 Code's thread tools", () => {
     let pending = 0;
     t3.tools.t3_thread_read = () => ({
       recentRuns: [],
+      items: [],
       thread: {
         title: "Chief",
         activeRunId: "run-1",
@@ -651,6 +677,74 @@ describe("T3 Code's thread tools", () => {
     t3.refusals.t3_pending_request = "thread_not_found: The thread was not found.";
     await expect(readT3CodeThread(session, "t1")).rejects.toMatchObject({
       problem: "thread-gone",
+    });
+  });
+
+  it("takes a private box that waits in the running work as waiting on the person", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    let activeRunId: string | null = "run-2";
+    let items: Array<{ type: string; status: string; runId: string | null }> = [];
+    let pending = 0;
+    t3.tools.t3_thread_read = () => ({
+      recentRuns: [],
+      thread: {
+        title: "d3",
+        activeRunId,
+        pendingRequestCount: pending,
+        archived: false,
+        settled: false,
+      },
+      items,
+    });
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q-1"] });
+    const box = (status: string, runId: string | null) => ({
+      type: "secret_request",
+      status,
+      runId,
+    });
+
+    // T3 Code counts no request for the box: only its activity shows it.
+    items = [
+      { type: "command_execution", status: "completed", runId: "run-2" },
+      box("waiting", "run-2"),
+    ];
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      working: true,
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    // dohc reads the newest activity, not the oldest.
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_read")?.args).toMatchObject({
+      view: "activity",
+      beforePosition: Number.MAX_SAFE_INTEGER,
+    });
+
+    // A box beside a question: an answer here would leave the thread waiting on the box.
+    pending = 1;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    pending = 0;
+
+    // A box that was filled or closed, or that belongs to earlier work, waits on no one.
+    for (const shown of [
+      [box("completed", "run-2")],
+      [box("cancelled", "run-2")],
+      [box("waiting", "run-1")],
+    ]) {
+      items = shown;
+      await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+        waitingOnPerson: false,
+      });
+    }
+    // Nothing is going in the thread, so nothing waits on a box.
+    items = [box("waiting", null)];
+    activeRunId = null;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      working: false,
+      waitingOnPerson: false,
     });
   });
 

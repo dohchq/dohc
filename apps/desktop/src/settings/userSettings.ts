@@ -119,8 +119,9 @@ export const AgentSettings = z
     launch: AgentLaunch.optional(),
     thread: AgentThread.optional(),
     // What dohc does with a message while the thread works: put it in line,
-    // or hand it over at once. In line when absent.
-    whileBusy: z.enum(["line", "steer"]).optional(),
+    // hand it over at once, or hand it over at once only in the agent's own
+    // chat. "own-chat" when absent.
+    whileBusy: z.enum(["line", "own-chat", "steer"]).optional(),
     // What the person wrote for the agent. dohc sends it with every message.
     note: z.string().min(1).max(MAX_AGENT_NOTE_LENGTH).optional(),
     // The workspaces whose messages dohc forwards to the thread.
@@ -443,7 +444,7 @@ export function agentProblem(id: string, entry: unknown): string {
       // The rules across keys: a thread takes the place of `launch`, and its settings need it.
       return issue.code === "custom" ? issue.message : "dohc can't read `thread`.";
     case "whileBusy":
-      return "`whileBusy` must be line or steer.";
+      return "`whileBusy` must be line, own-chat, or steer.";
     case "note":
       return `\`note\` must be text of 1 to ${MAX_AGENT_NOTE_LENGTH} characters.`;
     case "workspaces":

@@ -8,11 +8,11 @@ import {
   createWorkspaceData,
   FEED_FAILURES_SHOWN,
   FEED_RETRY_MS,
-  PREFETCH_AT_ONCE,
   PREFETCH_MAX,
   views,
   type ReadCache,
 } from "./workspaceData";
+import { PREFETCH_AT_ONCE } from "./readLane";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 type Server = ReturnType<typeof testServer>;
@@ -998,11 +998,212 @@ describe("prefetching pages", () => {
     expect(data.state(views.page("p1.md")).value).toEqual({ kind: "page", markdown: "Read ahead" });
     expect(data.state(views.page("p0.md")).value).toEqual({ kind: "page", markdown: "Shown" });
 
+    data.prefetchPages(["other.md"]);
+    await settled();
+    expect(reads(server)).toBe(1 + PREFETCH_MAX);
     data.stop();
     const again = open(server, "ws-prefetch-cap", cache).data;
     again.prefetchPages(["other.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(2 + PREFETCH_MAX));
+  });
+
+  it("reads ten pages ahead in each folder", async () => {
+    const server = serve("ws-prefetch-folders", page("Read ahead"));
+    const { data } = open(server, "ws-prefetch-folders");
+    data.prefetchPages([...paths(12), ...paths(12).map((path) => `notes/${path}`)]);
+    await vi.waitFor(() => expect(reads(server)).toBe(2 * PREFETCH_MAX));
     await settled();
-    expect(reads(server)).toBe(1 + PREFETCH_MAX);
+    expect(reads(server)).toBe(2 * PREFETCH_MAX);
+    expect(data.state(views.page("notes/p9.md")).value).not.toBeNull();
+  });
+
+  it("doesn't count a failed read ahead, and tries each page once in a run", async () => {
+    const busy: Answer = { status: 503, body: { ok: false, error: "busy", code: "server_busy" } };
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/documentRead", (call) =>
+      (call.body as { path: string }).path.endsWith("bad.md") ? busy : page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages(["bad.md", ...paths(PREFETCH_MAX)]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX + 1));
+    expect(data.state(views.page(`p${PREFETCH_MAX - 1}.md`)).value).not.toBeNull();
+
+    data.prefetchPages(["notes/bad.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX + 2));
+    data.prefetchPages(["notes/bad.md"]);
+    await settled();
+    expect(reads(server)).toBe(PREFETCH_MAX + 2);
+    expect(data.state(views.page("notes/bad.md")).value).toBeNull();
+  });
+
+  it("reads the pages listed last first", async () => {
+    const waiting: ReturnType<typeof deferred<Answer>>[] = [];
+    const server = serve("ws-prefetch-order", () => {
+      const answer = deferred<Answer>();
+      waiting.push(answer);
+      return answer.promise;
+    });
+    const { data } = open(server, "ws-prefetch-order");
+    data.prefetchPages(paths(4));
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_AT_ONCE));
+    data.prefetchPages(["notes/a.md", "notes/b.md", "p3.md"]);
+    waiting.shift()!.resolve(page("Read ahead"));
+    waiting.shift()!.resolve(page("Read ahead"));
+    await vi.waitFor(() => expect(reads(server)).toBe(4));
+    const bodies = () =>
+      server.calls
+        .filter((call) => call.path.endsWith("/ops/documentRead"))
+        .map((call) => call.body);
+    expect(bodies().slice(-2)).toEqual([{ path: "notes/a.md" }, { path: "notes/b.md" }]);
+    waiting.shift()!.resolve(page("Read ahead"));
+    await vi.waitFor(() => expect(reads(server)).toBe(5));
+    expect(bodies().at(-1)).toEqual({ path: "p3.md" });
+  });
+
+  it("reads a page listed twice in one batch once", async () => {
+    const server = serve("ws-prefetch-twice", page("Read ahead"));
+    const { data } = open(server, "ws-prefetch-twice");
+    data.prefetchPages(["a.md", "a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    await settled();
+    expect(reads(server)).toBe(1);
+  });
+
+  it("counts only pages that read toward a folder's ten", async () => {
+    const missing = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/documentRead", (call) =>
+      (call.body as { path: string }).path.startsWith("gone") ? missing : page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages([...paths(PREFETCH_MAX).map((path) => `gone-${path}`), ...paths(2)]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX + 2));
+    expect(data.state(views.page("p1.md")).value).not.toBeNull();
+  });
+
+  it("aborts read-ahead on its way when a screen reads, and reads it again after", async () => {
+    const shown = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      () => new Promise<Answer>(() => {}),
+      () => shown.promise,
+      page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    data.subscribe(views.page("open.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    expect(
+      server.calls.find((call) => call.path.endsWith("/ops/documentRead"))?.signal.aborted,
+    ).toBe(true);
+    shown.resolve(page("Shown"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({
+        kind: "page",
+        markdown: "Read ahead",
+      }),
+    );
+  });
+
+  it("reads a page a person's read aborted after the batches listed since", async () => {
+    const shown = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      () => new Promise<Answer>(() => {}),
+      () => new Promise<Answer>(() => {}),
+      () => shown.promise,
+      page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages(["a.md", "b.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_AT_ONCE));
+    data.prefetchPages(["c.md"]);
+    data.subscribe(views.page("open.md"), () => {});
+    shown.resolve(page("Shown"));
+    await vi.waitFor(() => expect(reads(server)).toBe(6));
+    const bodies = server.calls
+      .filter((call) => call.path.endsWith("/ops/documentRead"))
+      .map((call) => call.body);
+    expect(bodies.slice(3)).toEqual([{ path: "c.md" }, { path: "a.md" }, { path: "b.md" }]);
+  });
+
+  it("gives Notices' pages their own ten", async () => {
+    const server = serve("ws-prefetch-notices", page("Read ahead"));
+    const { data } = open(server, "ws-prefetch-notices");
+    data.prefetchPages(paths(PREFETCH_MAX));
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX));
+    data.prefetchPages(["noted.md"], "notices");
+    await vi.waitFor(() => expect(data.state(views.page("noted.md")).value).not.toBeNull());
+  });
+
+  it("keeps reading ahead while the feed rereads an open page", async () => {
+    const change = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      page("Shown"),
+      () => new Promise<Answer>(() => {}),
+      page("Shown again"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), () => change.promise);
+    server.on("GET", feedPath("ws-a", "0.2.1"), held);
+    const { data } = open(server);
+    data.subscribe(views.page("open.md"), () => {});
+    await vi.waitFor(() => expect(data.state(views.page("open.md")).value).not.toBeNull());
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("open.md")).value).toEqual({
+        kind: "page",
+        markdown: "Shown again",
+      }),
+    );
+    const ahead = server.calls.filter((call) => call.path.endsWith("/ops/documentRead"))[1];
+    expect(ahead?.body).toEqual({ path: "a.md" });
+    expect(ahead?.signal.aborted).toBe(false);
+  });
+
+  it("waits for a screen's read, and shares two reads at once across the sign-in's stores", async () => {
+    const shown = deferred<Answer>();
+    const ahead = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      () => shown.promise,
+      () => ahead.promise,
+    );
+    server.on("POST", "/sync/ws-b/ops/documentRead", page("Read ahead"));
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    server.on("GET", feedPath("ws-b", "0.1.1"), held);
+    const signIn = signInTo(server);
+    const cache = createReadCache();
+    const a = createWorkspaceData({ signIn, workspaceId: "ws-a", cache });
+    const b = createWorkspaceData({ signIn, workspaceId: "ws-b", cache });
+    a.resume();
+    b.resume();
+    a.subscribe(views.page("open.md"), () => {});
+    a.prefetchPages(["a1.md", "a2.md"]);
+    b.prefetchPages(["b1.md"]);
+    await settled();
+    expect(reads(server)).toBe(1);
+
+    shown.resolve(page("Shown"));
+    await vi.waitFor(() => expect(reads(server)).toBe(1 + PREFETCH_AT_ONCE));
+    expect(count(server, "/sync/ws-b/ops/documentRead")).toBe(0);
+    ahead.resolve(page("Read ahead"));
+    await vi.waitFor(() => expect(count(server, "/sync/ws-b/ops/documentRead")).toBe(1));
   });
 
   it("leaves a view empty, with no problem, when its prefetch fails, and the open reads it", async () => {

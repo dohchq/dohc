@@ -26,6 +26,7 @@ import { nameSlug } from "@dohc/workspace-contracts/names";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { DiscussionActivityHub } from "./discussionActivity";
+import type { ShareInvitation, ShareInvitationEmailAnswer } from "./shareInvitationEmail";
 import { badRequest, notFound, relayError } from "./errors";
 import type { FolderRuleChange, FolderRuleResult } from "./storage/folderRules";
 import { hashLinkBearer, mintLinkBearer, sealLinkBearer, unsealLinkBearer } from "./linkSecurity";
@@ -209,6 +210,9 @@ export function createWorkspaceMemberRoutes(options: {
   shareWebOrigin?: string;
   hasValidRelayExchangeKey(request: Request): boolean;
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog">;
+  emailInvitation: (invitation: ShareInvitation) => Promise<ShareInvitationEmailAnswer>;
+  /** The share site's origin, when people can sign in there to open their workspaces. */
+  browserOrigin?: string;
 }) {
   const { storage, linkKey, shareWebOrigin } = options;
   const sealContext = (workspaceId: string, generation: number) =>
@@ -293,11 +297,15 @@ export function createWorkspaceMemberRoutes(options: {
     };
   };
 
-  const respondWithView = async (workspaceId: string, userId: string) => {
+  const respondWithView = async (
+    workspaceId: string,
+    userId: string,
+    answer?: ShareInvitationEmailAnswer,
+  ) => {
     let snapshot = storage.readWorkspaceMembers(workspaceId, userId);
     for (;;) {
       if (!snapshot) throw notFound();
-      const body = await view(snapshot);
+      const body = { ...(await view(snapshot)), ...answer };
       // The account lookups wait, and the viewer's role can change meanwhile.
       // Without this check a removed or demoted admin receives emails and the
       // invite link.
@@ -323,7 +331,6 @@ export function createWorkspaceMemberRoutes(options: {
       case "name-required":
         throw relayError("workspace_name_required");
       case "already-member":
-      case "already-invited":
         throw relayError("member_exists");
       case "removed":
         throw relayError("member_removed");
@@ -635,7 +642,45 @@ export function createWorkspaceMemberRoutes(options: {
         if (!result.ok && result.reason === "account-unavailable" && resolved !== null)
           result = invite(null);
         settle(result, workspaceId);
-        return respondWithView(workspaceId, userId);
+        if (!result.ok) throw notFound();
+        const { invitation } = result;
+        const browserInvitationUrl = options.browserOrigin
+          ? `${options.browserOrigin}/workspaces`
+          : null;
+        // Each email goes out once a minute at most, while the invite still
+        // stands and the inviter may still invite.
+        const stillInvited = () => {
+          const current = storage.readWorkspaceMembers(workspaceId, userId);
+          const membership = current?.membership;
+          const entry = current?.members.find(
+            (member) =>
+              member.grantId === invitation.grantId &&
+              (member.state === "invited" || member.state === "active"),
+          );
+          if (
+            !current ||
+            current.viewer.role === "member" ||
+            membership?.shareId !== invitation.shareId ||
+            !entry
+          )
+            throw notFound();
+          return {
+            access: entry.role === "admin" ? "edit" : membership.memberLevel,
+            browserInvitationUrl,
+          };
+        };
+        const answer = await options.emailInvitation({
+          kind: "workspace",
+          inviterUserId: userId,
+          recipientEmail: email,
+          shareId: invitation.shareId,
+          grantId: invitation.grantId,
+          subjectName: invitation.workspaceName,
+          access: invitation.access,
+          browserInvitationUrl,
+          beforeResend: stillInvited,
+        });
+        return respondWithView(workspaceId, userId, answer);
       }
       case "members-level": {
         if (!isShareAccessValue(input.level))

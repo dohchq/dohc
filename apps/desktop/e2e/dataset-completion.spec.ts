@@ -90,7 +90,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")
-      .getByRole("option", { name: "New collection", exact: true })
+      .getByRole("option", { name: "New Collection", exact: true })
       .click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -175,8 +175,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await page.getByTestId("app-view-review").click();
     await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
     const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
-    await expect(shareLink.locator("option")).toHaveCount(2);
-    await shareLink.selectOption({ index: 1 });
+    await expect(shareLink.locator("option")).toHaveCount(3);
+    await shareLink.selectOption({ index: 2 });
     await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
     await expect(
       publication.getByRole("heading", { name: "Review app publication", exact: true }),
@@ -185,9 +185,9 @@ test("@dataset-completion field rename preserves custom rules and an already pub
       "registrations-form/frontend.js",
     );
     const approval = publication.getByTestId("app-publication-capability");
-    await expect(approval).toContainText("Link actions:");
-    await expect(approval).toContainText("Helper actions: None");
-    await expect(approval).toContainText("Owner actions: None");
+    const actionRows = approval.locator("tbody tr").filter({ has: page.locator("th[scope=row]") });
+    await expect(actionRows).toHaveCount(1);
+    await expect(actionRows.locator("td")).toHaveText(["Yes", "Yes", "Yes"]);
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
     // The publication list reloads behind the notice, so its loading status can show beside it.
@@ -333,7 +333,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")
-      .getByRole("option", { name: "New collection", exact: true })
+      .getByRole("option", { name: "New Collection", exact: true })
       .click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -459,7 +459,7 @@ test("@dataset-completion board and calendar page all records and save governed 
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")
-      .getByRole("option", { name: "New collection", exact: true })
+      .getByRole("option", { name: "New Collection", exact: true })
       .click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Tasks");

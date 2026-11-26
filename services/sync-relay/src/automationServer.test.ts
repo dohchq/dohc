@@ -8,11 +8,12 @@ import {
 } from "@dohc/automation-executor/button-presser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import type {
-  ScheduledAutomation,
-  CollectionAutomationRun,
-  CollectionAutomationsOptions,
-  CollectionAutomationHold,
+import {
+  HttpStepSecretProblemError,
+  type ScheduledAutomation,
+  type CollectionAutomationRun,
+  type CollectionAutomationsOptions,
+  type CollectionAutomationHold,
 } from "@dohc/automation-executor/collection-automations";
 import type {
   AutomationRunStore,
@@ -145,6 +146,7 @@ function fakeExecutor(
     relayAnswered: () => undefined,
     groupMessagesArrived: async () => undefined,
     hostChanged: () => undefined,
+    rosterChanged: vi.fn(),
     releaseGroupSubscriptions: async () => ({
       handover: groups(at(10, 30), "message-on-server"),
       watchedGeneration: 3,
@@ -249,6 +251,11 @@ function fakeExecutor(
       };
     },
     confirmReach: async (input) => {
+      if (input.seq === 99) {
+        throw new HttpStepSecretProblemError(
+          "Add the secret HOOK in Settings, then allow this step.",
+        );
+      }
       asked.push(["allow", input]);
       return input.seq === HELD.seq ? "confirmed" : "changed";
     },
@@ -1040,6 +1047,18 @@ describe("a server that runs a workspace's automations", () => {
     });
   });
 
+  it("rechecks a hosted workspace's steps when its secrets change", async () => {
+    clock = at(8);
+    const { storage, h, host } = await relay();
+    await host("/check-in", { installId: "laptop", label: "Laptop", claim: true });
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    s.run.secretsChanged("another-workspace");
+    expect(fake.executor.rosterChanged).not.toHaveBeenCalled();
+    s.run.secretsChanged(WORKSPACE);
+    expect(fake.executor.rosterChanged).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the owner's shares without claiming an invite the owner has not opened", async () => {
     const storage = await testStorage();
     const h = testHandler(storage, { nowMs: () => clock, resolveUserIdByEmail: () => null });
@@ -1359,6 +1378,10 @@ describe("the owner's routes to the server's runs", () => {
       ["allow", allow],
       ["allow", { ...allow, seq: 6 }],
     ]);
+    expect(await call(OWNER, "allow", { ...allow, seq: 99 })).toMatchObject({
+      status: 400,
+      body: { ok: false, error: "Add the secret HOOK in Settings, then allow this step." },
+    });
     expect(
       await call(OWNER, "restore", { definitions: [], again: false, retentionId: "restore-test" }),
     ).toMatchObject({ status: 200, body: { ok: true, undone: 0, errorMessage: null } });

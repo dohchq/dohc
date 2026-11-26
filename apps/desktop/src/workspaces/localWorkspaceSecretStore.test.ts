@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
   WorkspaceSecretNotFoundError,
   WorkspaceSecretStorageUnavailableError,
   WorkspaceSecretVaultCorruptError,
+  WorkspaceSecretVaultOutdatedError,
 } from "./localWorkspaceSecretStore";
 
 const dirs: string[] = [];
@@ -195,6 +196,86 @@ describe("localWorkspaceSecretStore", () => {
       }),
     ).rejects.toBeInstanceOf(WorkspaceSecretVaultCorruptError);
     expect(await readFile(vaultPath, "utf8")).toBe(protoKeyVault);
+  });
+
+  it("refuses a vault edited, swapped, or saved by an older dohc", async () => {
+    const dir = await tempDir();
+    const store = createLocalWorkspaceSecretStore({ dir, cipher: fakeCipher(true) });
+    const add = (workspaceId: string) =>
+      store.set(workspaceId, {
+        name: "API_TOKEN",
+        mode: "create",
+        usage: "http-header",
+        value: "tok_live_123",
+        allowedHosts: ["api.example.com"],
+      });
+    await add("ws-1");
+    await add("ws-2");
+    const [first, second] = await readdir(join(dir, "workspace-secrets"));
+    const pathFor = async (workspaceId: string) =>
+      (await readFile(join(dir, "workspace-secrets", first!), "utf8")).includes(
+        `"workspaceId": "${workspaceId}"`,
+      )
+        ? join(dir, "workspace-secrets", first!)
+        : join(dir, "workspace-secrets", second!);
+    const ws1Path = await pathFor("ws-1");
+    const ws2Path = await pathFor("ws-2");
+    const original = await readFile(ws1Path, "utf8");
+    expect(original).not.toContain("api.example.com");
+    expect(original).not.toContain("tok_live_123");
+
+    const stored = JSON.parse(original) as {
+      sealed: { key: string; nonce: string; data: string };
+    };
+    const data = Buffer.from(stored.sealed.data, "base64");
+    data[0] = data[0]! ^ 1;
+    await writeFile(
+      ws1Path,
+      JSON.stringify({ ...stored, sealed: { ...stored.sealed, data: data.toString("base64") } }),
+    );
+    await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultCorruptError);
+    expect(await store.readSecretForExecution("ws-1", "API_TOKEN")).toBeNull();
+
+    const otherKey = JSON.parse(await readFile(ws2Path, "utf8")) as typeof stored;
+    await writeFile(
+      ws1Path,
+      JSON.stringify({ ...stored, sealed: { ...stored.sealed, key: otherKey.sealed.key } }),
+    );
+    await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultCorruptError);
+
+    await copyFile(ws2Path, ws1Path);
+    await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultCorruptError);
+    await writeFile(
+      ws1Path,
+      (await readFile(ws2Path, "utf8")).replace('"workspaceId": "ws-2"', '"workspaceId": "ws-1"'),
+    );
+    await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultCorruptError);
+
+    await writeFile(
+      ws1Path,
+      JSON.stringify({
+        version: 1,
+        workspaceId: "ws-1",
+        entries: {
+          API_TOKEN: {
+            usage: "http-header",
+            allowedHosts: ["evil.example.com"],
+            sealedValue: Buffer.from("sealed:tok_live_123").toString("base64"),
+            generation: 1,
+            createdAtMs: 1,
+            updatedAtMs: 1,
+          },
+        },
+      }),
+    );
+    await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultOutdatedError);
+    expect(await store.readSecretForExecution("ws-1", "API_TOKEN")).toBeNull();
+
+    expect(await store.hasSaved("ws-1")).toBe(true);
+    await store.clearWorkspace("ws-1");
+    expect(await store.hasSaved("ws-1")).toBe(false);
+    expect(await store.list("ws-1")).toEqual([]);
+    expect(await store.list("ws-2")).toHaveLength(1);
   });
 
   it("fails closed when system keychain is unavailable", async () => {

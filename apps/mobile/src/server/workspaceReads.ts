@@ -1,4 +1,6 @@
+import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { each, isFields, okAnswer, segment, text, type Fields } from "./api";
 import { REQUEST_TIMEOUT_MS, ServerError, type ServerClient } from "./client";
@@ -92,6 +94,8 @@ export interface ChatGroup {
   /** The account's unread messages across its threads. */
   readonly unreadCount: number;
   readonly unreadThreadIds: readonly string[];
+  /** An agent's chat whose agent none of the account's computers has now. Absent otherwise. */
+  readonly archived?: true;
 }
 
 /** The workspace's groups, direct messages and agent chats, with the account's unread counts. A phone's read never creates General. */
@@ -126,10 +130,16 @@ export function readChats(
         if (threads === null) return null;
         const unreadCount = threads.reduce((sum, thread) => sum + thread.unreadCount, 0);
         const postThreadIds = threads.filter((thread) => thread.post).map((thread) => thread.id);
+        const archived = group.kind === "agent" && group.archived === true;
         return Number.isSafeInteger(unreadCount)
           ? {
               id: group.id,
-              name: group.name,
+              // The default agent's chat is always stored as "My agent"; the desktop says whose it was.
+              name:
+                archived && group.channelWireId === AGENT_CHANNEL_WIRE_ID
+                  ? workspaceWords.yourAgent
+                  : group.name,
+              ...(archived ? { archived: true as const } : {}),
               kind: group.kind,
               threadIds: threads.map((thread) => thread.id),
               ...(postThreadIds.length > 0 ? { postThreadIds } : {}),

@@ -48,6 +48,7 @@ use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 mod body_sequence;
+pub(crate) use body_sequence::BOUNDARY;
 mod body_sequence_fold;
 mod body_sequence_writer;
 mod bounded_encoder;
@@ -146,6 +147,44 @@ pub fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
     ran
 }
 
+/// The engine's setting for new notes. An engine started with this and
+/// [`BODY_SEQUENCE_SETTING`] both set to `1` writes a rich document it makes,
+/// or asks an editor to seed, in format 2.
+pub const NEW_NOTE_BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE";
+
+/// The rich-document schema version a new note of `content_kind` is written
+/// in: 2 for a rich document on an engine with both settings on, otherwise 1.
+pub fn new_note_schema_version(content_kind: ContentKind) -> u8 {
+    let writes_format_two = || {
+        #[cfg(any(test, feature = "test-support"))]
+        if WRITES_NEW_NOTES_IN_FORMAT_TWO_HERE.get() {
+            return true;
+        }
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var(NEW_NOTE_BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1")
+        })
+    };
+    if content_kind == ContentKind::Richdoc && body_sequence_setting() && writes_format_two() {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static WRITES_NEW_NOTES_IN_FORMAT_TWO_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn writing_new_notes_in_format_two_here<R>(run: impl FnOnce() -> R) -> R {
+    WRITES_NEW_NOTES_IN_FORMAT_TWO_HERE.set(true);
+    let ran = run();
+    WRITES_NEW_NOTES_IN_FORMAT_TWO_HERE.set(false);
+    ran
+}
+
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
 /// failure the spike found.
@@ -195,6 +234,7 @@ impl ContentKind {
 const SUCCESSOR_EPOCH_DOMAIN: &[u8] = b"dohc:ydoc-successor-epoch:v1";
 const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
 const SEED_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-seed-client:v1";
+const SEED_CLIENT_FORMAT_TWO_DOMAIN: &[u8] = b"dohc:ydoc-seed-client:v1-format2";
 const SCHEMA_VERSION_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-schema-version-client:v1";
 
 /// The Yjs client an editor seeds `key`'s lineage under, from the head it
@@ -204,15 +244,21 @@ const SCHEMA_VERSION_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-schema-version-client:v1
 /// seeds are the same bytes, originate the same base, and share one lineage. A
 /// later head gets another client even when its text is the same, so a lineage
 /// seeded after a delete, a restore, or an archive never reuses a retired
-/// claim. The value fits a Yjs client id: nonzero and at most 32 bits.
+/// claim. A seed in rich-document `schema_version` 2 gets another client
+/// than one in format 1. The value fits a Yjs client id: nonzero and at most
+/// 32 bits.
 pub fn seed_client_id(
     key: &crate::DocKey,
     content_kind: ContentKind,
+    schema_version: u8,
     head_moment_id: &str,
     head_blob_sha256: &str,
 ) -> u32 {
     let mut hash = Sha256::new();
-    hash.update(SEED_CLIENT_DOMAIN);
+    hash.update(match schema_version {
+        2 => SEED_CLIENT_FORMAT_TWO_DOMAIN,
+        _ => SEED_CLIENT_DOMAIN,
+    });
     for field in [
         key.workspace_id.as_str(),
         key.version_id.as_str(),
@@ -387,14 +433,7 @@ pub fn fresh_successor_base(
     let in_format_two = format_two
         .then(|| successor_doc(identity, artifact, 2.0).ok())
         .flatten()
-        .filter(|doc| {
-            let weight = body_sequence_writer::Weight::of(&doc.doc);
-            match doc.markdown_source_reference() {
-                Some(_) => weight,
-                None => weight.with_room_for_a_kept_source(artifact),
-            }
-            .fits_a_live_note()
-        });
+        .filter(|doc| doc.fits_a_live_note(artifact));
     let doc = match in_format_two {
         Some(doc) => doc,
         None => successor_doc(identity, artifact, 1.0)?,
@@ -604,6 +643,34 @@ impl Ydoc {
         }
     }
 
+    fn fits_a_live_note(&self, markdown: &str) -> bool {
+        let weight = body_sequence_writer::Weight::of(&self.doc);
+        match self.markdown_source_reference() {
+            Some(_) => weight,
+            None => weight.with_room_for_a_kept_source(markdown),
+        }
+        .fits_a_live_note()
+    }
+
+    pub(crate) fn check_format_two_roots(&self) -> Result<(), CollabError> {
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        match self.body_sequence_roots() {
+            Some((sequence, containers))
+                if !body_sequence::roots_hold_only_their_own_items(
+                    &body,
+                    &sequence,
+                    &containers,
+                ) =>
+            {
+                Err(CollabError::MalformedUpdate {
+                    reason: "an update writes outside a format-2 note's sequence and containers"
+                        .into(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn check_format_two_base(&self) -> Result<(), CollabError> {
         if self.note_schema_version() != 2 {
             return Ok(());
@@ -629,6 +696,46 @@ impl Ydoc {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn reads_as_format_two(&self) -> bool {
+        if !self.reads_body_sequence {
+            return false;
+        }
+        let reading = self.doc.transact();
+        let marked = reading
+            .get_map(ROOT_META)
+            .and_then(|meta| body_sequence::stored_under(&meta, "schemaVersion"));
+        let holds = |root: Option<&yrs::branch::Branch>| {
+            root.is_some_and(yrs::branch::Branch::holds_unkeyed_item)
+        };
+        let sequence = reading.get_text(ROOT_SEQUENCE);
+        let body = reading.get_xml_fragment(ROOT_BODY);
+        matches!(marked, Some(Any::Number(2.0)))
+            && (holds(sequence.as_ref().map(AsRef::as_ref))
+                || !holds(body.as_ref().map(AsRef::as_ref)))
+    }
+
+    pub(crate) fn hides_kept_content(
+        head_state: &[u8],
+        candidate: &[u8],
+    ) -> Result<bool, CollabError> {
+        let copy = Ydoc::wire();
+        copy.apply(head_state)?;
+        let kept = copy.kept_content()?;
+        if kept.is_empty() {
+            return Ok(false);
+        }
+        copy.apply(candidate)?;
+        Ok(!kept.is_subset(&copy.kept_content()?))
+    }
+
+    fn kept_content(&self) -> Result<BTreeSet<(body_sequence::KeptAt, String)>, CollabError> {
+        let Some((sequence, containers)) = self.body_sequence_roots() else {
+            return Ok(BTreeSet::new());
+        };
+        let reading = self.doc.transact();
+        Ok(body_sequence::traced(&reading, &sequence, &containers)?.kept_content())
     }
 
     fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
@@ -1805,11 +1912,32 @@ impl Ydoc {
     }
 
     /// Seed a never-opened Collection relation referrer through the outside
-    /// grammar and exact-source proof before it can enter a lineage.
+    /// grammar and exact-source proof before it can enter a lineage. The note
+    /// is written in [`new_note_schema_version`], or in format 1 where format
+    /// 2 does not hold it.
     pub fn seed_collection_relation_markdown(&self, markdown: &str) -> Result<(), CollabError> {
         if !outside_markdown_is_allowlisted(markdown) {
             return Err(CollabError::MarkdownNotRepresentable);
         }
+        if new_note_schema_version(ContentKind::Richdoc) == 2 {
+            let staged = Ydoc::wire();
+            staged.apply(&self.encode_full_state())?;
+            let meta = staged.doc.get_or_insert_map(ROOT_META);
+            if !meta.contains_key(&staged.doc.transact(), "schemaVersion") {
+                meta.insert(&mut staged.doc.transact_mut(), "schemaVersion", 2.0);
+            }
+            if staged.body_sequence_roots().is_some()
+                && staged.seed_relation_note(markdown).is_ok()
+                && staged.fits_a_live_note(markdown)
+            {
+                let before = self.doc.transact().state_vector();
+                return self.apply(&staged.doc.transact().encode_state_as_update_v1(&before));
+            }
+        }
+        self.seed_relation_note(markdown)
+    }
+
+    fn seed_relation_note(&self, markdown: &str) -> Result<(), CollabError> {
         self.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
         let canonical = self.project_richdoc()?;
         if canonical != markdown {
@@ -12488,3 +12616,7 @@ mod successor_format_two_tests;
 #[cfg(test)]
 #[path = "ydoc/body_sequence_fold_tests.rs"]
 mod body_sequence_fold_tests;
+
+#[cfg(test)]
+#[path = "ydoc/released_format_two_tests.rs"]
+mod released_format_two_tests;

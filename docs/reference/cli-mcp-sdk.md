@@ -198,9 +198,9 @@ Returns `{ ok, app, checks: { name, ok, message?, path? }[] }`. `ok` is true whe
 
 ### `dohc_publish_app`
 
-Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.
+Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with "Sync this workspace before sharing." Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.
 
-- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "personalFolder", workspaceId: string, open?: boolean } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, audience?: "workspace", shareId?: string, grantId?: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "backend.external" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "backend.external" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "personalFolder", workspaceId: string, open?: boolean } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, audience?: "workspace", shareId?: string, grantId?: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. An app for members returns no `appQuery`. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -379,7 +379,7 @@ Returns `{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistor
 
 ### `dohc_link`
 
-Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
+Make a link to a chat, thread, message, file, app, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or an app or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -501,7 +501,7 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_start_file_chat`
 
-Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.
+Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat. To comment on a passage of a Markdown file, start `body` with a Markdown quote of the passage (`> the passage`), then a blank line, then the comment: the file's editor highlights that passage and opens the comment from it.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -831,11 +831,11 @@ Returns `{ connectionId }`.
 
 ### `dohc_members`
 
-Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; end membership for everyone; or delete a message in a Group or a file's Comments (deleteMessage, with its threadId and messageId). The server decides what your role allows: members see names and roles and delete their own messages; admins also invite, remove members, let them back in, set the level and folder or Group access, manage the invite link, and delete any message in a Group or Comments; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Deleting a message can't be undone. It shows as deleted everywhere it syncs, but people who already read it may keep a copy. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, end membership, or delete someone else's message.
+Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc emails them an invitation when the server sends email, and inviting the same address again emails it again; they join when they sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; end membership for everyone; or delete a message in a Group or a file's Comments (deleteMessage, with its threadId and messageId). The server decides what your role allows: members see names and roles and delete their own messages; admins also invite, remove members, let them back in, set the level and folder or Group access, manage the invite link, and delete any message in a Group or Comments; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Deleting a message can't be undone. It shows as deleted everywhere it syncs, but people who already read it may keep a copy. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, end membership, or delete someone else's message.
 
 - `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null } | { action: "deleteMessage", threadId: string, messageId: string } | { action: "folder", change: { folder: string, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[], create?: true } | { ruleId: string, revision: integer, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[] } | { folder: string, clear: true } | { ruleId: string, revision: integer, clear: true } } | { action: "folderMarker", folder: string }`. Required.
 
-Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
+Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
 
 ### `dohc_collection_access`
 
@@ -1292,7 +1292,7 @@ dohc members list [options]
 
 List people, invites, removed accounts, the member level, and the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members invite`
 
@@ -1300,9 +1300,9 @@ With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, wo
 dohc members invite <email> [options]
 ```
 
-Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.
+Invite someone by email. dohc emails them an invitation when the server sends email, and inviting the same address again emails it again. They join when they sign in to dohc with that address.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members remove`
 
@@ -1312,7 +1312,7 @@ dohc members remove <person> [options]
 
 Remove a person or cancel an invite. Copies already on their computer stay.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members level`
 
@@ -1322,7 +1322,7 @@ dohc members level <view|comment|edit> [options]
 
 Set what every member can do: view, comment, or edit. Admins and the owner always edit.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members admin`
 
@@ -1332,7 +1332,7 @@ dohc members admin <person> [options]
 
 Make a member an admin. Admins invite, remove members, and manage the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members member`
 
@@ -1342,7 +1342,7 @@ dohc members member <person> [options]
 
 Make an admin a member again.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members let-back-in`
 
@@ -1352,7 +1352,7 @@ dohc members let-back-in <person> [options]
 
 Let a removed account back in as a member.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members link`
 
@@ -1364,7 +1364,7 @@ Turn the invite link on or off, or reset it.
 
 Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working. dohc members list shows the link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members group`
 
@@ -1379,7 +1379,7 @@ A Group is a name or id from dohc chat groups. General, direct messages and agen
 - `--level <post|view|none>`: Set the Group's access.
 - `--clear`: Remove the Group's access, so it takes the member level.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members folder`
 
@@ -1395,7 +1395,7 @@ Use a workspace-relative path, or / for the workspace root. Each run sets the wh
 - `--person <email=level>`: Set one person's level. Repeat for more people.
 - `--clear`: Remove the folder's rule.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members remove-folder-marker`
 
@@ -1405,7 +1405,7 @@ dohc members remove-folder-marker <path> [options]
 
 Remove an unknown or unreadable folder marker.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members end`
 
@@ -1417,7 +1417,7 @@ End membership for everyone. Members lose access; copies already on their comput
 
 - `--everyone`: Required. Confirms that every member and admin loses access.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people }, invitation?: { invitationEmail } | { invitationEmail: "limit", invitationEmailLimit } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 ### `dohc document`
 
@@ -1531,7 +1531,7 @@ dohc document comment <path> [-] [options]
 
 Start a chat linked to a file with its first message.
 
-Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8.
+Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8. Start the first message with a Markdown quote of a passage, as in > the passage, to comment on that passage. The file's editor highlights it.
 
 - `--title <title>`: Set the chat title. Use 1 to 200 characters that are not all whitespace.
 - `--text <markdown>`: Set the first message as Markdown. The message must contain text that is not all whitespace.
@@ -1680,7 +1680,7 @@ Give exactly one flag. Put the printed @[work:...] text in a message: it shows a
 - `--group <group>`: Link a Group, DM, or agent chat, by name, #slug, or id.
 - `--thread <id>`: Link a thread.
 - `--message <id>`: Link a message.
-- `--path <path>`: Link a file, or a Collection by its folder.
+- `--path <path>`: Link a file, or an app or a Collection by its folder.
 
 With `--json`, prints `{ schemaVersion, kind, reference, link }`.
 
@@ -2444,8 +2444,8 @@ Pass exactly one of appRoot (compile candidate without preparing an approval) or
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`
 - `publicationId`: `SHA-256 hex`
-- `expectStartupBackend`: `({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[]`
-- `steps`: `({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[]`
+- `expectStartupBackend`: `({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "backend.external" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[]`
+- `steps`: `({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "backend.external" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[]`
 - `timeoutMs`: `integer`
 
 Returns `{ kind: "frontendVerified", ok, stage, target: { kind: "candidate", appRoot, sourceRevision? } | { kind: "publication", publicationId, appRoot, authorityRevision }, startupOk, stepsOk, handshake: { delivered, messageCount }, brokerCalls: { ok, op, operation?, status, rejectedBy?, reasonCode?, refusalCode? }[], steps: { kind, ok, index, code?, remedy? }[], diagnostics: { code, severity, detail?, path?, line?, column?, directive?, errorName?, op?, operation?, stepIndex?, remedy }[], externalRequestsBlocked }`.
@@ -2454,7 +2454,7 @@ Returns `{ kind: "frontendVerified", ok, stage, target: { kind: "candidate", app
 
 Create a scoped app link at View access by default.
 
-appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view. Generate operationId as a UUID for this creation. Reuse operationId for retries. A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
+appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view. Generate operationId as a UUID for this creation. Reuse operationId for retries. createLink, prepare, and approve need a workspace that syncs with a server. Without one, they fail with "Sync this workspace before sharing." The synced field in .dohc/sync-history.json does not show whether the workspace syncs now. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -2483,7 +2483,7 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapabilities } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, external?, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, external?, datasetCapabilities } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, external?, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, external? })[] }`.
 
 #### `dohc app checkLocal`
 
@@ -2505,7 +2505,7 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app stage`
 
@@ -2590,7 +2590,7 @@ Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `c
 - `shareId`: `string`
 - `grantId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
@@ -2650,7 +2650,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

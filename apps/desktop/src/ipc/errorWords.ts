@@ -37,6 +37,7 @@ const NO_RETRY_REFUSALS = new Set([
   "held-change-conflict",
   "held-change-undo-stale",
   "workspace-folder-moved",
+  "ydoc-note-uses-a-newer-body-format",
 ]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
@@ -213,6 +214,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
       "Another copy of dohc has this workspace open. Close it there, then try again.",
     "workspace-folder-moved":
       "This workspace's folder moved while dohc had it open. Open the workspace again from where it is now.",
+    "ydoc-note-uses-a-newer-body-format": NEWER_DOHC,
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "relay-server-busy": "The server is busy. Try again in a moment.",

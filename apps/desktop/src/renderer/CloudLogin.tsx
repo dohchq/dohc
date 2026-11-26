@@ -475,7 +475,7 @@ export function CloudLogin(
             <div data-testid="cloud-drive" className="mt-4 border-t border-line pt-3">
               <p className="m-0 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
                 dohc Drive
-                <Pill>Invite-only beta</Pill>
+                <Pill>Invite-only alpha</Pill>
               </p>
               <p className="m-0 mt-1 text-[12px] leading-relaxed text-muted">
                 dohc handles hosting, setup, and maintenance.

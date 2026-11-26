@@ -1,9 +1,8 @@
-import { accountWords } from "@dohc/interface-words/account";
 import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useSignIn } from "../account/AccountProvider";
+import { Mark, SettingsButton } from "../account/SettingsButton";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme } from "../theme";
 import { waitingToSend } from "../demo";
@@ -79,38 +78,13 @@ export function ChatsHeader({
         {sampleMe ? (
           // The sample has no Settings: nothing to press, so it isn't a button.
           <View accessible accessibilityRole="image" accessibilityLabel="You" style={styles.action}>
-            <View style={[styles.me, { backgroundColor: sampleMe.hue }]}>
-              <Text style={styles.meText} allowFontScaling={false}>
-                {sampleMe.initials}
-              </Text>
-            </View>
+            <Mark color={sampleMe.hue} ink="#fff" initial={sampleMe.initials} />
           </View>
         ) : (
           <SettingsButton />
         )}
       </View>
     </View>
-  );
-}
-
-function SettingsButton() {
-  const theme = useTheme();
-  const router = useRouter();
-  const { email } = useSignIn();
-  return (
-    <Pressable
-      style={styles.action}
-      android_ripple={ripple(theme, true)}
-      onPress={() => router.push("/settings")}
-      accessibilityRole="button"
-      accessibilityLabel={accountWords.settings}
-    >
-      <View style={[styles.me, { backgroundColor: theme.accent }]}>
-        <Text style={[styles.meText, { color: theme.bg }]} allowFontScaling={false}>
-          {[...email][0]?.toUpperCase()}
-        </Text>
-      </View>
-    </Pressable>
   );
 }
 
@@ -138,6 +112,4 @@ const styles = StyleSheet.create({
   chevron: { marginLeft: -3 },
   actions: { flexDirection: "row", alignItems: "center" },
   action: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
-  me: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
-  meText: { color: "#fff", fontSize: 12, fontWeight: "700" },
 });

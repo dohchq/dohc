@@ -12,7 +12,12 @@ import { badRequest, notFound, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
-import { readMemberAppSetting, setMemberAppSetting, withdrawMemberApp } from "./storage/memberApps";
+import {
+  readMemberAppSetting,
+  setMemberAppSetting,
+  withdrawMemberApp,
+  WORKSPACE_APP_CURSOR,
+} from "./storage/memberApps";
 
 export type MemberAppRoute = { route: "member-apps"; workspaceId: string } & (
   | { action: "apps" | "settings" }
@@ -62,6 +67,8 @@ export function parseMemberAppUpload(bytes: Uint8Array, limits: AppPublicationLi
   } catch {
     throw badRequest("Invalid Member app candidate.");
   }
+  if (candidate.external)
+    throw badRequest("Apps that call outside services run only on the owner's computer for now.");
   const sizes = new Map<string, number>();
   for (const file of [...candidate.files, ...candidate.inputs]) {
     if (
@@ -91,6 +98,9 @@ export function createMemberAppRoutes(options: {
   host: RelayDatasetHost;
   storage: SyncRelayStorage;
   limits?: AppPublicationLimits;
+  /** The viewer's origin, where people allow and open apps. Without it a list row has no URL. */
+  shareWebOrigin?: string;
+  authorName?(userId: string): Promise<string | null>;
 }) {
   return async (request: Request, route: MemberAppRoute, userId: string) => {
     const { host, storage, limits } = options;
@@ -109,10 +119,29 @@ export function createMemberAppRoutes(options: {
       if (
         [...query.keys()].some((key) => key !== "cursor") ||
         query.getAll("cursor").length > 1 ||
-        (cursor !== undefined && !/^[0-9a-f]{64}$/.test(cursor))
+        (cursor !== undefined && !WORKSPACE_APP_CURSOR.test(cursor))
       )
         throw badRequest("Invalid Member app list query.");
-      return json(host.memberApps(auth, { workspaceId, ...(cursor ? { cursor } : {}) }));
+      const page = host.memberApps(auth, { workspaceId, ...(cursor ? { cursor } : {}) });
+      const authors = new Map(
+        await Promise.all(
+          [...new Set(page.apps.map((app) => app.publisherUserId))].map(
+            async (id) => [id, (await options.authorName?.(id).catch(() => null)) ?? null] as const,
+          ),
+        ),
+      );
+      request.signal.throwIfAborted();
+      return json({
+        ...page,
+        apps: page.apps.map((app) => ({
+          ...app,
+          authorName: authors.get(app.publisherUserId)!,
+          url:
+            app.reachable && options.shareWebOrigin
+              ? `${options.shareWebOrigin}/s/apps/${workspaceId}/${app.publicationId}`
+              : null,
+        })),
+      });
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");
     if (query.size) throw badRequest("Member app changes take no query.");

@@ -235,3 +235,19 @@ it("persists a crude-text draft synchronously, before the held projection import
   });
   expect(drafts.result.current.length).toBe(1);
 });
+
+it("declares a format-2 note's sequence and container records before its first update", async () => {
+  const seed = new Y.Doc();
+  seed.getMap("meta").set("schemaVersion", 2);
+  seed.getText("sequence").insert(0, "Pack");
+  seed.getMap("containers").set("list1", "bulletList");
+  harness = harnessBridge(Y.encodeStateAsUpdate(seed));
+  vi.stubGlobal("dohcDesktop", harness.api);
+
+  const retained = retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const doc = retained.boundDoc();
+  expect(doc.share.get("sequence")).toBeInstanceOf(Y.Text);
+  expect(doc.share.get("containers")).toBeInstanceOf(Y.Map);
+  expect(doc.getText("sequence").toString()).toBe("Pack");
+});

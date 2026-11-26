@@ -4,6 +4,9 @@ import { accountWorkspace, each } from "./api";
 import type { CacheRows, SavedView } from "./cacheRows";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
+import { appOperations, type PhoneApp } from "./phoneApps";
+import { collectionOperations, type PhoneCollection } from "./phoneCollections";
+import { readLane } from "./readLane";
 import {
   earlierCursor,
   FEED_HOLD_MS,
@@ -64,6 +67,7 @@ export interface ViewState<T> {
   readonly problem: ReadProblem | null;
   /** How many reads have failed, so each failure is reported once. */
   readonly failures: number;
+  readonly fromCache?: boolean;
 }
 
 /** Whether the feed is failing: why, and how many times the store has shown that it is, so each is reported once. */
@@ -80,7 +84,11 @@ export interface Known {
 
 export interface View<T> {
   readonly id: string;
-  read(client: ServerClient, workspaceId: string, signal: AbortSignal): Promise<Read<T>>;
+  read(
+    client: ServerClient,
+    workspaceId: string,
+    signal: AbortSignal,
+  ): Promise<Omit<Read<T>, "cursor"> & { readonly cursor: string | null }>;
   /** Whether `changes` can touch what the view shows now, `value`. */
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
@@ -101,6 +109,22 @@ export const views = {
     read: readChats,
     affectedBy: (changes) => changes.chats !== undefined,
   } satisfies View<readonly ChatGroup[]>,
+  apps: {
+    id: "apps",
+    read: (client, workspaceId, signal) =>
+      appOperations(client, workspaceId, signal)
+        .list()
+        .then((value) => ({ value, cursor: null })),
+    affectedBy: () => false,
+  } satisfies View<readonly PhoneApp[]>,
+  collections: {
+    id: "collections",
+    read: (client, workspaceId, signal) =>
+      collectionOperations(client, workspaceId, signal)
+        .list()
+        .then((value) => ({ value, cursor: null })),
+    affectedBy: () => false,
+  } satisfies View<readonly PhoneCollection[]>,
 
   /** A chat's stream: a change to one of its threads, or to a thread the store can't place in a chat yet. */
   stream(groupId: string): View<GroupStream | MissingChat> {
@@ -199,6 +223,8 @@ export const views = {
 export function viewOf(id: string): View<unknown> | null {
   if (id === views.files.id) return views.files;
   if (id === views.chats.id) return views.chats;
+  if (id === views.apps.id) return views.apps;
+  if (id === views.collections.id) return views.collections;
   const [kind, ...rest] = id.split(":");
   const key = rest.join(":");
   if (key === "") return null;
@@ -212,7 +238,7 @@ export function viewOf(id: string): View<unknown> | null {
 export interface Cached {
   readonly view: View<unknown>;
   readonly value: unknown;
-  readonly cursor: string;
+  readonly cursor: string | null;
   /** A change the feed reported may have touched it since. */
   readonly stale: boolean;
   readonly prefetched?: boolean;
@@ -234,13 +260,14 @@ export interface ReadCache {
    * to read: the scope already has views in memory, which are newer, or the cache keeps nothing on disk.
    */
   restore(scope: string): Promise<void> | null;
+  preload(signIn: Pick<SignIn, "origin" | "userId">): void;
   /** The sign-in's saved workspace list, or null when the cache keeps nothing on disk. */
   savedList(signIn: Pick<SignIn, "origin" | "userId">): SavedList | null;
   /** Saves now what waits to be saved, as when the app goes to the background. */
   flush(): void;
   /**
    * Empties the cache each time the account's sign-in changes: sign-out, a 401, or a new sign-in. The saved sign-in
-   * read at launch keeps it, and a launch with none empties it.
+   * read at launch, or on Try again after it couldn't be read, keeps it, and a read that finds none empties it.
    */
   follow(account: {
     state(): AccountState;
@@ -266,6 +293,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
   // One restore per scope at a time: a second store for the scope waits on the first, so the scope stays tracked until
   // the only read of its file settles, and a list that drops it meanwhile moves its generation on.
   const restoring = new Map<string, Promise<void>>();
+  const preloads = new Map<string, { readonly epoch: number; readonly read: Promise<unknown> }>();
   function forget(scope: string) {
     drops.set(scope, (drops.get(scope) ?? 0) + 1);
     scopes.delete(scope);
@@ -300,6 +328,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
     clear() {
       epoch += 1;
       scopes.clear();
+      preloads.clear();
       void files?.removeAll();
     },
     restore(scope) {
@@ -317,7 +346,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
           const views = new Map<string, Cached>();
           for (const item of found) {
             const view = viewOf(item.id);
-            if (view && isCursor(item.cursor))
+            if (view && (item.cursor === null || isCursor(item.cursor)))
               views.set(view.id, {
                 view,
                 value: item.value,
@@ -331,15 +360,24 @@ export function createReadCache(files?: CacheRows): ReadCache {
       restoring.set(scope, done);
       return done;
     },
+    preload(signIn) {
+      for (const scope of [listScope(signIn), choiceScope(signIn)])
+        if (files) preloads.set(scope, { epoch, read: files.readList(scope) });
+    },
     savedList(signIn) {
       if (!files) return null;
       const scope = listScope(signIn);
+      const readList = (key: string) => {
+        const early = preloads.get(key);
+        preloads.delete(key);
+        return early?.epoch === epoch ? early.read : files.readList(key);
+      };
       return {
         load() {
           const expected = epoch;
-          return files
-            .readList(scope)
-            .then((found) => (epoch === expected ? each(found, accountWorkspace) : null));
+          return readList(scope).then((found) =>
+            epoch === expected ? each(found, accountWorkspace) : null,
+          );
         },
         // The list from the server, or one this phone changed, decides which workspaces the cache keeps: only those the
         // phone can open.
@@ -356,9 +394,9 @@ export function createReadCache(files?: CacheRows): ReadCache {
         },
         loadChosen() {
           const expected = epoch;
-          return files
-            .readList(choiceScope(signIn))
-            .then((found) => (epoch === expected && typeof found === "string" ? found : null));
+          return readList(choiceScope(signIn)).then((found) =>
+            epoch === expected && typeof found === "string" ? found : null,
+          );
         },
         chose: (workspaceId) => void files.writeList(choiceScope(signIn), workspaceId),
       };
@@ -372,7 +410,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
         const last = serving;
         const next = account.state();
         serving = next;
-        if (last.status === "loading") {
+        if (last.status === "loading" || last.status === "unreadable") {
           if (next.status === "signed-out") cache.clear();
           return;
         }
@@ -383,7 +421,22 @@ export function createReadCache(files?: CacheRows): ReadCache {
   return cache;
 }
 
-const isListing = (view: View<unknown>) => view.id === views.files.id || view.id === views.chats.id;
+const isListing = (view: View<unknown>) =>
+  [views.files, views.chats, views.apps, views.collections].some((each) => each.id === view.id);
+
+export function cachedList<T>(
+  cache: ReadCache,
+  signIn: Pick<SignIn, "origin" | "userId">,
+  workspaceId: string,
+  view: View<T>,
+) {
+  const scope = cacheScope(signIn, workspaceId);
+  return {
+    value: () => (cache.get(scope, view.id)?.value as T | undefined) ?? null,
+    restored: cache.restore(scope) ?? Promise.resolve(),
+    save: (value: T) => cache.set(scope, { view, value, cursor: null, stale: false }),
+  };
+}
 
 export interface WorkspaceData {
   readonly workspaceId: string;
@@ -394,7 +447,7 @@ export interface WorkspaceData {
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
-  prefetchPages(paths: readonly string[]): void;
+  prefetchPages(paths: readonly string[], bucket?: string): void;
   retry(view: View<unknown>): void;
   /**
    * Reads the view now, in place of any read on its way, as a pull to refresh asks. Settles once this read answers,
@@ -423,11 +476,9 @@ export interface WorkspaceData {
 export const FEED_RETRY_MS = 1000;
 export const FEED_RETRY_MAX_MS = 30_000;
 export const FEED_FAILURES_SHOWN = 3;
-export const PREFETCH_AT_ONCE = 2;
 export const PREFETCH_MAX = 10;
 
 let instances = 0;
-const prefetches = new Map<string, number>();
 
 interface Entry {
   readonly view: View<unknown>;
@@ -455,6 +506,7 @@ export function createWorkspaceData(options: {
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
   const wait = options.sleep ?? sleep;
   const scope = cacheScope(signIn, workspaceId);
+  const lane = readLane(signIn);
   const everything = new AbortController();
   const entries = new Map<string, Entry>();
   let stopped = false;
@@ -473,21 +525,28 @@ export function createWorkspaceData(options: {
       if (cached.stale && cached.prefetched) continue;
       const target = entries.get(cached.view.id);
       if (target) {
-        target.state = { ...target.state, value: cached.value };
+        target.state = { ...target.state, value: cached.value, fromCache: true };
         target.stale = cached.stale;
         target.prefetched = cached.prefetched;
         shown(target);
       } else {
         entries.set(cached.view.id, {
           view: cached.view,
-          state: { value: cached.value, loading: false, problem: null, failures: 0 },
+          state: {
+            value: cached.value,
+            loading: false,
+            problem: null,
+            failures: 0,
+            fromCache: true,
+          },
           listeners: new Set(),
           stale: cached.stale,
           prefetched: cached.prefetched,
           reads: requestGenerations(),
         });
       }
-      cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
+      if (cached.cursor !== null)
+        cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
     }
   }
   seed(cache.entries(scope));
@@ -566,12 +625,19 @@ export function createWorkspaceData(options: {
     if (cached) cache.set(scope, { ...cached, prefetched: undefined });
   }
 
-  function read(target: Entry, prefetch = false) {
+  function read(target: Entry, by: "person" | "feed" | AbortSignal = "person"): Promise<unknown> {
     const request = target.reads.next();
     const from = cursor;
     const unseen = target.prefetched || target.state.value === null;
-    if (!prefetch) set(target, { ...target.state, loading: true });
-    return target.view.read(signIn.client, workspaceId, everything.signal).then(
+    const ahead = typeof by === "string" ? null : by;
+    if (!ahead) set(target, { ...target.state, loading: true });
+    const reading = ahead
+      ? target.view.read(signIn.client, workspaceId, ahead)
+      : lane.screen(
+          () => target.view.read(signIn.client, workspaceId, everything.signal),
+          by === "person",
+        );
+    return reading.then(
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
@@ -586,14 +652,16 @@ export function createWorkspaceData(options: {
         cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
-        follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
+        if (answer.cursor !== null)
+          follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
+        return value;
       },
       (error: unknown) => {
         // An answer that no longer counts says nothing, not even that the workspace has gone.
         if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
         const problem = shownProblem(error);
-        if (problem === null || prefetch) return;
+        if (problem === null || ahead) return;
         set(target, {
           ...target.state,
           loading: false,
@@ -604,24 +672,40 @@ export function createWorkspaceData(options: {
     );
   }
 
-  const queued: View<unknown>[] = [];
-  const prefetching = new Set<string>();
+  let queued: { readonly path: string; readonly bucket: string }[] = [];
+  const tried = new Set<string>();
+  const buckets = new Map<string, { kept: number; reading: number }>();
   function drain() {
-    while (running && live() && !restoring && prefetching.size < PREFETCH_AT_ONCE) {
-      const view = queued.shift();
-      const count = prefetches.get(scope) ?? 0;
-      if (!view || count >= PREFETCH_MAX) return;
+    let next = 0;
+    while (next < queued.length && running && live() && !restoring && lane.free()) {
+      const { path, bucket } = queued[next];
+      const allowance = buckets.get(bucket) ?? { kept: 0, reading: 0 };
+      buckets.set(bucket, allowance);
+      if (allowance.kept < PREFETCH_MAX && allowance.kept + allowance.reading >= PREFETCH_MAX) {
+        next += 1;
+        continue;
+      }
+      queued.splice(next, 1);
+      if (allowance.kept >= PREFETCH_MAX) continue;
+      const view = views.page(path);
       const found = entries.get(view.id);
       if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
         continue;
-      prefetches.set(scope, count + 1);
-      prefetching.add(view.id);
-      void read(found ?? entry(view), true).finally(() => {
-        prefetching.delete(view.id);
-        drain();
+      tried.add(path);
+      allowance.reading += 1;
+      const target = found ?? entry(view);
+      void lane.ahead(everything.signal, async (signal) => {
+        const value = await read(target, signal);
+        allowance.reading -= 1;
+        if ((value as PageRead | undefined)?.kind === "page") allowance.kept += 1;
+        else if (signal.aborted) {
+          tried.delete(path);
+          queued.push({ path, bucket });
+        }
       });
     }
   }
+  const leaveLane = lane.onFree(drain);
 
   /** Starts the feed from a read's cursor, or moves it back to one older than its own. */
   function follow(readCursor: string) {
@@ -708,7 +792,7 @@ export function createWorkspaceData(options: {
       cache.drop(scope);
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
-          void read(target);
+          void read(target, "feed");
           continue;
         }
         forget(target);
@@ -723,7 +807,7 @@ export function createWorkspaceData(options: {
     for (const target of entries.values()) {
       if (!target.view.affectedBy(answer.changed, known, target.state.value)) continue;
       if (target.listeners.size > 0) {
-        void read(target);
+        void read(target, "feed");
         continue;
       }
       forget(target);
@@ -748,10 +832,16 @@ export function createWorkspaceData(options: {
       const target = entry(view);
       if (due(target)) void read(target);
     },
-    prefetchPages(paths) {
-      for (const view of paths.map(views.page))
-        if (!prefetching.has(view.id) && !queued.some((next) => next.id === view.id))
-          queued.push(view);
+    prefetchPages(paths, bucket) {
+      const fresh = new Map(
+        paths
+          .filter((path) => !tried.has(path))
+          .map((path) => [
+            path,
+            { path, bucket: bucket ?? path.slice(0, path.lastIndexOf("/") + 1) },
+          ]),
+      );
+      queued = [...fresh.values(), ...queued.filter((next) => !fresh.has(next.path))];
       drain();
     },
     retry(view) {
@@ -765,7 +855,9 @@ export function createWorkspaceData(options: {
         return Promise.resolve();
       }
       const target = entry(view);
-      const start = () => (live() ? read(target) : Promise.resolve());
+      const start = async () => {
+        if (live()) await read(target);
+      };
       return restoring && restored ? restored.then(start) : start();
     },
     feed: () => feedState,
@@ -790,6 +882,7 @@ export function createWorkspaceData(options: {
     stop() {
       stopped = true;
       running = false;
+      leaveLane();
       stopFeed();
       everything.abort();
     },

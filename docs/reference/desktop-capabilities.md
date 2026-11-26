@@ -16,7 +16,7 @@ Use this reference to check which platform and services a feature needs.
 | Manage app data through tables or an agent | An approved transactional Collection; table edits and app operations use the same dataset rules. |
 | Run the bundled MCP launcher | The installed desktop app on Windows x64, an Apple silicon Mac, or Linux x64. dohc supplies Node.js. Linux arm64 builds need Node.js 22.13+, 23.4+, or 24+ on `PATH`. |
 | Agent replies through MCP or `dohc chat reply` | An installed agent and the desktop app. dohc supplies the reply runtime on Windows x64, Apple silicon Macs, and Linux x64. Linux arm64 builds need Node.js 22.13+, 23.4+, or 24+ on `PATH`. |
-| dohc Drive | Invite-only beta. An invited account and a connection to `https://drive.dohc.computer`. |
+| dohc Drive | Invite-only alpha. An invited account and a connection to `https://drive.dohc.computer`. |
 
 The supported self-host bundle supplies the session host and live-editing limits.
 Live editing covers existing Markdown documents on the main version.

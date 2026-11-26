@@ -18,6 +18,6 @@ export function automationReachCopy(
     case "notify":
       return `notify ${step.target}`;
     case "send-http":
-      return `send a webhook to ${step.target}`;
+      return `send a request to ${step.target}`;
   }
 }

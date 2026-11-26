@@ -10,6 +10,7 @@
     "./body-sequence-editor": "./src/bodySequenceEditor.ts",
     "./body-sequence-tiptap": "./src/bodySequenceTiptap.ts",
     "./body-sequence-testing": "./src/bodySequenceTestSupport.ts",
+    "./body-sequence-yjs": "./src/bodySequenceStore.ts",
     "./removed-text": "./src/removedText.ts",
     "./engine-markdown-reader": "./src/engine-markdown-reader.ts",
     "./browser-editor": "./src/browser-editor.ts",
