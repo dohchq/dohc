@@ -2897,7 +2897,9 @@ export function NoticeCenter(props: {
                 if (event.key !== "Escape" || event.defaultPrevented) return;
                 event.preventDefault();
                 event.stopPropagation();
-                setOpen(false);
+                // Escape backs out of Clear all's confirm first and keeps Notices open.
+                if (confirmingClear) confirmClear(false);
+                else setOpen(false);
               }}
               onBlur={(event) => {
                 // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
@@ -2917,15 +2919,7 @@ export function NoticeCenter(props: {
                 <Bell size={13} aria-hidden className="text-subtle" />
                 <span className="text-sm font-semibold text-ink">Notices</span>
                 {confirmingClear ? (
-                  <span
-                    className="ml-auto flex shrink-0 items-center gap-2"
-                    onKeyDown={(event) => {
-                      if (event.key !== "Escape") return;
-                      // Escape backs out of the confirm and keeps Notices open.
-                      event.preventDefault();
-                      confirmClear(false);
-                    }}
-                  >
+                  <span className="ml-auto flex shrink-0 items-center gap-2">
                     <SecondaryButton
                       ref={clearCancelRef}
                       size="row"

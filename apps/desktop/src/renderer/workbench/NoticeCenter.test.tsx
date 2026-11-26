@@ -504,6 +504,11 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center-clear-confirm")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-clear-all"));
     expect(screen.getByTestId("notice-center")).toBeTruthy();
+    // From a row too.
+    await user.click(screen.getByTestId("notice-center-clear-all"));
+    await user.keyboard("{ArrowDown}{Escape}");
+    expect(screen.queryByTestId("notice-center-clear-confirm")).toBeNull();
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
 
     await user.click(screen.getByTestId("notice-center-clear-all"));
     await user.click(screen.getByTestId("notice-center-clear-confirm"));
