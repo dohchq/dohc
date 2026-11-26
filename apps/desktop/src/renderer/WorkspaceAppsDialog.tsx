@@ -70,6 +70,7 @@ export function WorkspaceAppsDialog(props: {
       await work();
     } catch (cause) {
       setError(ipcErrorMessage(cause, fallback));
+      props.reportError(fallback, cause, () => void run(key, fallback, work));
     } finally {
       setBusy(null);
     }

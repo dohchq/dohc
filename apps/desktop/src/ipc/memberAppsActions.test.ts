@@ -77,6 +77,20 @@ describe("writeForkedApp", () => {
     expect(await readFile(join(folder, "my-trip", "src", "list.tsx"), "utf8")).toBe("list");
   });
 
+  it("puts a nested app's manifest at the top of the copy", async () => {
+    const folder = await personalFolder();
+    await writeForkedApp(folder, "trip-copy", [
+      file("examples/trip/app.publish.json", "{}"),
+      file("examples/trip/main.ts", "x"),
+      file("examples/trip/portal/app.publish.json", "[]"),
+    ]);
+    expect(await readFile(join(folder, "trip-copy", "app.publish.json"), "utf8")).toBe("{}");
+    expect(await readFile(join(folder, "trip-copy", "main.ts"), "utf8")).toBe("x");
+    expect(await readFile(join(folder, "trip-copy", "portal", "app.publish.json"), "utf8")).toBe(
+      "[]",
+    );
+  });
+
   it("leaves a folder that exists untouched", async () => {
     const folder = await personalFolder();
     await mkdir(join(folder, "mine"));

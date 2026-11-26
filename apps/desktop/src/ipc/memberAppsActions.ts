@@ -25,6 +25,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const PERSONAL_ONLY = "Open a workspace you joined to share or copy Member apps.";
 const RATE_LIMITED_TRIES = 8;
 const LISTINGS = new Set(["/member-apps", "/member-apps/settings"]);
+const MANIFEST = "app.publish.json";
 
 /** The body the relay reads for a Member app: header length, header, then each distinct file once, by digest. */
 export function memberAppUpload(
@@ -63,12 +64,16 @@ export async function writeForkedApp(
     throw new Error(
       `Name the copy with lowercase letters, digits, or hyphens. ${appRoot} is not a folder name you can use.`,
     );
-  const roots = new Set(files.map((file) => file.path.split("/", 1)[0]));
-  if (roots.size !== 1)
+  const root =
+    files
+      .filter((file) => `/${file.path}`.endsWith(`/${MANIFEST}`))
+      .map((file) => file.path.slice(0, -MANIFEST.length))
+      .sort((a, b) => a.length - b.length)[0] ?? `${files[0]?.path.split("/", 1)[0]}/`;
+  if (!files.length || files.some((file) => !file.path.startsWith(root)))
     throw new Error("This app's source spans more than one folder, so dohc cannot copy it.");
   const placed = files.map((file) => {
-    const rest = file.path.slice(file.path.indexOf("/") + 1);
-    if (!file.path.includes("/") || !isShareablePath(`${appRoot}/${rest}`))
+    const rest = file.path.slice(root.length);
+    if (!rest || !isShareablePath(`${appRoot}/${rest}`))
       throw new Error(`${file.path} is not a file dohc can copy.`);
     if (sha256(file.bytes) !== file.sha256)
       throw new Error(`${file.path} doesn't match the app the author shared. Try again.`);
