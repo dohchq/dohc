@@ -706,7 +706,7 @@ fn a_line_added_or_deleted_takes_no_letters_from_the_line_above() {
         let kept = folded_beside(rule.0, rule.1, |doc| last_line_given(doc, &heading));
         expect(kept, "A\n\n# B\n");
         let kept = folded_beside(rule.1, rule.0, |doc| last_line_given(doc, &heading));
-        expect(kept, "A\n\n***\n\n# B\n");
+        expect(kept, "A\n\n---\n\n# B\n");
         let level = [("level", Any::Number(2.0))];
         let (title, ruled) = ("# Title\n", "---\n\n# Title\n");
         let kept = folded_beside(title, ruled, |doc| last_line_given(doc, &level));
