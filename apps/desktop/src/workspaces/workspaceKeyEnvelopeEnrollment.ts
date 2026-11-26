@@ -124,15 +124,17 @@ async function downloadEnvelope(transport: EngineRelayWorkspaceClient): Promise<
  * protected files and this computer has no key. "need-passphrase": this
  * computer has the key and the server has no passphrase-wrapped copy, so other
  * computers can't open them. Null when neither. Undefined while this computer
- * has neither a key nor protected files.
+ * has neither a key nor protected files, or has the key and no `transport`
+ * to ask the server.
  */
 export async function readProtectedFilesNeed(
   rootPath: string,
   secretState: () => Promise<WorkspaceSecretState>,
-  transport: Pick<EngineRelayWorkspaceClient, "downloadKeyEnvelope">,
+  transport: Pick<EngineRelayWorkspaceClient, "downloadKeyEnvelope"> | null,
 ): Promise<"locked" | "need-passphrase" | null | undefined> {
   if (!existsSync(join(resolve(rootPath), SECRET_KEY_RELATIVE_PATH)))
     return (await secretState()) === "protected-key-missing" ? "locked" : undefined;
+  if (!transport) return undefined;
   try {
     await transport.downloadKeyEnvelope();
     return null;
@@ -170,6 +172,7 @@ export async function enrollWorkspaceKeyEnvelope(input: {
     return;
   }
 
+  if (dataKey === "missing" && input.resume && input.passphrase === undefined) return;
   const envelopeJson = await downloadEnvelope(input.transport);
   if (envelopeJson === null) {
     if (dataKey === "missing") throw new Error(NO_PASSPHRASE_YET);

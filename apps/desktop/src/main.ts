@@ -3699,24 +3699,23 @@ function engineForWorkspace(
       const notSent = failed
         ? false
         : notSentWhileOpen.read(workspace.workspaceId, () => daemonRelay.firstExportsHeldOpen());
-      const passphrase = failed
-        ? false
-        : (withWorkspaceAttachment(workspace, (lease) =>
-            workspaceActivity.checkProtectedFiles(
-              canonicalWorkspaceFor(lease),
-              lease.state.activity,
-              () =>
-                readProtectedFilesNeed(
-                  workspace.rootPath,
-                  () =>
-                    readWorkspaceSecretState(
-                      receivedShareEngine.workspaceForRegistered(canonicalWorkspaceFor(lease)),
-                      requireEngineSessions(),
-                    ),
-                  daemonRelay,
-                ),
-            ),
-          ) ?? false);
+      const passphrase =
+        withWorkspaceAttachment(workspace, (lease) =>
+          workspaceActivity.checkProtectedFiles(
+            canonicalWorkspaceFor(lease),
+            lease.state.activity,
+            () =>
+              readProtectedFilesNeed(
+                workspace.rootPath,
+                () =>
+                  readWorkspaceSecretState(
+                    receivedShareEngine.workspaceForRegistered(canonicalWorkspaceFor(lease)),
+                    requireEngineSessions(),
+                  ),
+                failed ? null : daemonRelay,
+              ),
+          ),
+        ) ?? false;
       const [collectionsChanged, notSentChanged, passphraseChanged] = await Promise.all([
         collections,
         notSent,
