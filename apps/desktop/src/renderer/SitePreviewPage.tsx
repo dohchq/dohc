@@ -857,8 +857,11 @@ export function SitePreviewPage(props: {
               access={props.access}
               localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
               testId={needsPublication ? "app-view-review" : "site-preview-review"}
-              open={reviewOpen}
-              onOpenChange={setReviewOpen}
+              disabled={versionPending}
+              open={reviewOpen && !versionPending}
+              onOpenChange={(next) => {
+                if (!versionPending || !next) setReviewOpen(next);
+              }}
               onLocalChange={localApprovalChanged}
               onCollectionsChange={props.onCollectionsChange}
               onShareSource={
@@ -1053,7 +1056,12 @@ export function SitePreviewPage(props: {
 
             {needsPublication ? (
               <>
-                <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+                <AppViewBody
+                  view={appView}
+                  onReview={() => {
+                    if (!versionPending) setReviewOpen(true);
+                  }}
+                />
                 {isOwnerLocalApp && inspectorOpen ? (
                   <AppInspectorDrawer
                     workspaceId={props.workspaceId}
@@ -1080,8 +1088,9 @@ export function SitePreviewPage(props: {
                           ? "Preview stopped."
                           : runningMode
                             ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
-                            : // The start waits for main's answer about trust.
-                              !props.sharedView && trust.trusted === null && !trust.readFailed
+                            : // The start waits for main's answer about version and trust.
+                              versionPending ||
+                                (!props.sharedView && trust.trusted === null && !trust.readFailed)
                               ? ""
                               : "This app did not start automatically."
                       : "This app has no previewable entry, dev script, or build output yet."
@@ -1089,6 +1098,7 @@ export function SitePreviewPage(props: {
                 >
                   {restartMode &&
                   !runningMode &&
+                  !versionPending &&
                   (props.sharedView || trust.trusted !== null || trust.readFailed) ? (
                     <PrimaryButton
                       data-testid="site-preview-restart"

@@ -1005,7 +1005,7 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("app-view-review")).toBeNull();
   });
 
-  it("holds preview and AppView startup while active version is loading", async () => {
+  it("holds preview, AppView, and Review app while active version is unresolved", async () => {
     const appViewBridge = {
       ...bridgeMock,
       appView: vi.fn(async (request: { viewId: string }) => ({
@@ -1027,6 +1027,12 @@ describe("SitePreviewPage", () => {
     await waitFor(() => expect(appViewBridge.getSitePackage).toHaveBeenCalled());
     expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
     expect(appViewBridge.appView).not.toHaveBeenCalled();
+    expect(screen.queryByText("This app did not start automatically.")).toBeNull();
+    expect(screen.queryByTestId("site-preview-restart")).toBeNull();
+    const reviewButton = screen.getByTestId("site-preview-review") as HTMLButtonElement;
+    expect(reviewButton.disabled).toBe(true);
+    await userEvent.click(reviewButton);
+    expect(appViewBridge.publishOwnerApp).not.toHaveBeenCalled();
 
     view.rerender(
       <SitePreviewPage
@@ -1037,6 +1043,7 @@ describe("SitePreviewPage", () => {
       />,
     );
     await screen.findByTestId("site-preview-frame");
+    expect((screen.getByTestId("site-preview-review") as HTMLButtonElement).disabled).toBe(false);
     expect(appViewBridge.startSitePreview).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceId: "ws-sites",

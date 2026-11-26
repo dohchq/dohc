@@ -695,6 +695,37 @@ describe("switchVersion", () => {
     expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(2);
     await engine.stop();
   });
+
+  it("lets a workspace close settle without deadlocking when withVersionLock checks live capture state", async () => {
+    const root = await createTestScratch("dohc-version-ops-");
+    await write(root, "plan.md", "v1\n");
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
+    engine.start();
+    await engine.flush();
+    let entered!: () => void;
+    const enteredLock = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let releaseWork!: () => void;
+    const workGate = new Promise<void>((resolve) => {
+      releaseWork = resolve;
+    });
+    let activeCapture: WorkspaceEngineCapture | null = engine;
+    const locked = engine.withVersionLock(async () => {
+      entered();
+      await workGate;
+      if (activeCapture !== engine) {
+        throw new Error("capture closed");
+      }
+    });
+    await enteredLock;
+    // Simulate close clearing the active entry then retiring live sessions and stopping capture.
+    activeCapture = null;
+    const closing = engine.settleAndCloseAllLiveSessions().then(() => engine.stop());
+    releaseWork();
+    await expect(locked).rejects.toThrow("capture closed");
+    await expect(closing).resolves.toBeUndefined();
+  });
 });
 
 describe("mergeVersionIntoMain", () => {

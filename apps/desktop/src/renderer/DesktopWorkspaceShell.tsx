@@ -8647,9 +8647,7 @@ function WorkspaceShell(props: {
   const activeVersionId = workspaceVersions.onMain ? null : (workspaceVersions.active?.id ?? null);
   const activeVersionName = activeVersionId ? (workspaceVersions.active?.name ?? null) : null;
   const versionPending =
-    !shareView &&
-    (!captureDecided ||
-      (captureAvailable && workspaceVersions.snapshot === null && !workspaceVersions.loadFailed));
+    !shareView && (!captureDecided || (captureAvailable && workspaceVersions.snapshot === null));
   const versionPreview = useMemo(
     () =>
       activeVersionId && activeVersionName

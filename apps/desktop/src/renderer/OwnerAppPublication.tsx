@@ -176,6 +176,7 @@ type ControlProps = PublicationProps & {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   testId: string;
+  disabled?: boolean;
 };
 
 /** Review app: the person's one way to see what the app can reach, and to approve or publish it. */
@@ -194,11 +195,12 @@ function PublicationControl(props: ControlProps) {
       <SecondaryButton
         size="compact"
         data-testid={props.testId}
+        disabled={props.disabled}
         onClick={() => props.onOpenChange(true)}
       >
         Review app
       </SecondaryButton>
-      {props.open ? (
+      {props.open && !props.disabled ? (
         <PublicationDialog
           {...props}
           onClose={() => props.onOpenChange(false)}

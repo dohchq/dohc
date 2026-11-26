@@ -11145,6 +11145,7 @@ function registerIpcHandlers(): void {
       DesktopRendererWorkspaceOperation
     >
   >[0];
+  const mainVersionLocks = new Map<string, WorkspaceEngineCapture>();
   const datasetDependencies = {
     hostForWorkspace: localDatasetHostFor,
     collectionRulesChanged: notifyCollectionRulesChanged,
@@ -11312,9 +11313,17 @@ function registerIpcHandlers(): void {
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       work: () => Promise<T>,
     ) => {
-      await openWorkspaceActivity(workspace);
       const { capture } = await requireEngineCapture(workspace.workspaceId, "Collections");
-      return capture.withVersionLock(work);
+      return capture.withVersionLock(async () => {
+        const previous = mainVersionLocks.get(workspace.workspaceId);
+        mainVersionLocks.set(workspace.workspaceId, capture);
+        try {
+          return await work();
+        } finally {
+          if (previous) mainVersionLocks.set(workspace.workspaceId, previous);
+          else mainVersionLocks.delete(workspace.workspaceId);
+        }
+      });
     },
     createSources: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
@@ -11328,7 +11337,16 @@ function registerIpcHandlers(): void {
         files,
         signal,
         {
-          register: () => openWorkspaceActivity(workspace),
+          register: async () => {
+            const locked = mainVersionLocks.get(workspace.workspaceId);
+            if (locked) {
+              if (activity.engineCaptureFor(workspace.workspaceId) !== locked) {
+                throw new Error(captureRefusal("Collections"));
+              }
+              return;
+            }
+            await openWorkspaceActivity(workspace);
+          },
           capture: async () => {
             const captured = await withEngineAdapter(workspace, async (adapter) => {
               await flushDatasetSourceCapture(adapter, signal, Object.keys(files));
