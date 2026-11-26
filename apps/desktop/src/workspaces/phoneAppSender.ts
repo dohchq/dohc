@@ -65,6 +65,7 @@ export interface PhoneAppSenderDependencies<Workspace extends { workspaceId: str
   ): Promise<void>;
   credentials(workspace: Workspace): Promise<CloudCredentials>;
   onMain(workspace: Workspace): Promise<boolean>;
+  catchUp(workspace: Workspace, signal: AbortSignal): Promise<void>;
   apps(workspace: Workspace): Promise<readonly SendableSite[]>;
   readSource(
     workspace: Workspace,
@@ -174,6 +175,8 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     };
     if (!(await deps.onMain(workspace))) return;
     const published = await current();
+    await deps.catchUp(workspace, signal);
+    if (!deps.atHead(workspaceId)) return void waiting.add(workspaceId);
     const apps = (await deps.apps(workspace)).filter(sendableApp).map((app) => app.root);
     if (!(await deps.onMain(workspace))) return;
     roots.set(workspaceId, new Set([...apps, ...published.keys()]));
@@ -223,7 +226,10 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         signal.throwIfAborted();
         const now = (await current()).get(appRoot);
         if ((now?.publicationId ?? null) === expected) throw error;
-        if (now?.sourceRevision === revision) return;
+        await deps.catchUp(workspace, signal);
+        const latest = (await deps.readSource(workspace, appRoot, signal)).sourceRevision;
+        if (latest === now?.sourceRevision) return;
+        if (latest !== revision) return later(workspaceId);
         row = await publish(candidate, now?.publicationId ?? null);
       }
       if (candidate.capabilities.length)

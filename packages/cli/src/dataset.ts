@@ -741,7 +741,7 @@ export const DatasetPreparation = z
 export type DatasetPreparation = z.infer<typeof DatasetPreparation>;
 export const DatasetBoundApp = z
   .object({
-    scope: z.enum(["local", "link", "workspace"]),
+    scope: z.enum(["local", "link", "workspace", "owner"]),
     publicationId: sha256,
     authorityRevision: z.number().int().positive(),
     appRoot: z.string().min(1).max(1024),

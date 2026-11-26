@@ -12140,6 +12140,7 @@ function registerIpcHandlers(): void {
       );
       return (active?.id ?? "main") === "main";
     },
+    catchUp: (workspace, signal) => activity.catchUpCloudSync(workspace.workspaceId, signal),
     apps: (workspace) => ownedSiteCatalog.list(workspace),
     readSource: async (workspace, appRoot, signal) => {
       const source = await withEngineAdapter(workspace, (adapter) =>

@@ -15,8 +15,9 @@ export interface ShareLinkPublication {
   linkCurrent?: boolean;
   operatorTakedown?: boolean;
   authorityRevision: number;
-  shareId: string;
-  /** The link grant; absent for a Workspace Publication. */
+  /** The share; null for an Owner Publication. */
+  shareId: string | null;
+  /** The link grant; absent for a Workspace or Owner Publication. */
   grantId?: string;
   candidate: unknown;
 }
@@ -29,6 +30,8 @@ export function parseShareLinkPublication(
 ): ShareLinkPublication | null {
   const row = raw as Record<string, unknown> | null;
   const owner = row?.owner as Record<string, unknown> | undefined;
+  const own =
+    owner?.shareId === undefined && owner?.grantId === undefined && row?.ownerState !== undefined;
   return !row ||
     row.publicationId !== publicationId ||
     typeof row.active !== "boolean" ||
@@ -37,9 +40,10 @@ export function parseShareLinkPublication(
     (row.authorityRevision as number) < 1 ||
     owner?.workspaceId !== workspaceId ||
     owner.ownerUserId !== ownerUserId ||
-    typeof owner.shareId !== "string" ||
-    owner.shareId.length < 1 ||
-    owner.shareId.length > 200 ||
+    (!own &&
+      (typeof owner.shareId !== "string" ||
+        owner.shareId.length < 1 ||
+        owner.shareId.length > 200)) ||
     (owner.grantId !== undefined &&
       (typeof owner.grantId !== "string" || owner.grantId.length < 1 || owner.grantId.length > 200))
     ? null
@@ -49,7 +53,7 @@ export function parseShareLinkPublication(
         linkCurrent: row.linkCurrent !== false,
         operatorTakedown: Boolean(row.operatorTakedown),
         authorityRevision: row.authorityRevision as number,
-        shareId: owner.shareId,
+        shareId: typeof owner.shareId === "string" ? owner.shareId : null,
         ...(typeof owner.grantId === "string" ? { grantId: owner.grantId } : {}),
         candidate: row.candidate,
       };
@@ -228,11 +232,12 @@ export async function discoverDatasetBoundApps(input: {
         }
         await add(
           {
-            scope: found.grantId === undefined ? "workspace" : "link",
+            scope:
+              found.shareId === null ? "owner" : found.grantId === undefined ? "workspace" : "link",
             publicationId: e.principal,
             authorityRevision: found.authorityRevision,
             appRoot: cand.appRoot,
-            shareId: found.shareId,
+            ...(found.shareId === null ? {} : { shareId: found.shareId }),
             ...(found.grantId === undefined ? {} : { grantId: found.grantId }),
           },
           cap,

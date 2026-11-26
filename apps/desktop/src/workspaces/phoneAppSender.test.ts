@@ -82,12 +82,14 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   }));
   const upload = vi.fn(async () => {});
   const changed = vi.fn();
+  const catchUp = vi.fn(async () => {});
   const sender = createPhoneAppSender<{ workspaceId: string }>({
     enabled: async () => state.enabled,
     atHead: () => true,
     withWorkspace: (workspaceId, work) => work({ workspaceId }, new AbortController().signal),
     credentials: async () => credentials,
     onMain: async () => state.onMain,
+    catchUp,
     apps: async () => state.apps.map((root) => site(root)),
     readSource: async (_workspace, appRoot) => ({
       sourceRevision: state.revisions[appRoot]!,
@@ -107,6 +109,7 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     upload,
     changed,
     relayJson,
+    catchUp,
     refuseNextPublish: () => {
       refuseNextPublish = true;
     },
@@ -317,5 +320,36 @@ describe("createPhoneAppSender", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("doesn't send a stale app over a newer one another computer sent, once it has pulled", async () => {
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.owner.set("apps/trip", {
+      publicationId: "a-2",
+      authorityRevision: 1,
+      sourceRevision: "r2",
+    });
+    test.catchUp.mockImplementationOnce(async () => {
+      test.state.revisions["apps/trip"] = "r2";
+    });
+    await test.sender.run("ws");
+    expect(test.catchUp).toHaveBeenCalledOnce();
+    expect(test.prepare).not.toHaveBeenCalled();
+    expect(test.posts).toEqual([]);
+    expect(test.owner.get("apps/trip")?.publicationId).toBe("a-2");
+  });
+
+  it("pulls again after a refused send and leaves a newer version in place", async () => {
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.refuseNextPublish();
+    test.catchUp
+      .mockImplementationOnce(async () => {})
+      .mockImplementationOnce(async () => {
+        test.state.revisions["apps/trip"] = "elsewhere";
+      });
+    await test.sender.run("ws");
+    expect(test.posts).toHaveLength(1);
+    expect(test.owner.get("apps/trip")?.publicationId).toBe("from-another-computer");
+    expect(test.sender.notSent("ws")).toEqual([]);
   });
 });

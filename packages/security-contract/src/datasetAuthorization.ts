@@ -359,7 +359,7 @@ export function assessAppDatasetDrift(
   capability: AppDatasetCapability,
   targetRevision: DatasetRevision,
   options: {
-    scope: "local" | "link" | "workspace";
+    scope: "local" | "link" | "workspace" | "owner";
     bindingCurrent: boolean;
     preservesAccess?: boolean;
     pinnedRevision?: DatasetRevision;

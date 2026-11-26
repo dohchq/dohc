@@ -32,6 +32,7 @@ export const BOUND_APP_SCOPE_LABEL = {
   local: "Local",
   link: "Share link",
   workspace: "Workspace",
+  owner: "Your phones",
 } as const;
 export interface CollectionMigrationReviewDialogProps {
   workspaceId: string;
