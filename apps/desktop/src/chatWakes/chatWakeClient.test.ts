@@ -195,14 +195,17 @@ describe("the chat wake client", () => {
       agents: [{ agentId: "mine", displayName: "Mine" }],
     };
     const refused = { status: 400, body: { ok: false, error: "bad_request" } };
-    const w = world(refused, {
-      body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 },
-    });
-    await w.client.replaceRunners("ws", declaration, w.signal);
-    expect(w.sent.map((sent) => JSON.parse(String(sent.init.body)))).toEqual([
-      declaration,
-      { installId: "mac", computerLabel: "Mac", runners: declaration.runners },
-    ]);
+    for (const status of [400, 413]) {
+      const w = world(
+        { status, body: { ok: false } },
+        { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 } },
+      );
+      await w.client.replaceRunners("ws", declaration, w.signal);
+      expect(w.sent.map((sent) => JSON.parse(String(sent.init.body)))).toEqual([
+        declaration,
+        { installId: "mac", computerLabel: "Mac", runners: declaration.runners },
+      ]);
+    }
     // A declaration without them has nothing to drop: the refusal stands.
     const { agents: _agents, ...runners } = declaration;
     const again = world(refused, refused);

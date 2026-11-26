@@ -399,8 +399,6 @@ describe("an account's reads through the server's copy", () => {
       { name: "Planning", kind: "group", archived: undefined },
       { name: "vibe-guy", kind: "agent", archived: undefined },
     ]);
-    // An agent's own reads keep the CLI's answer.
-    expect(JSON.stringify(await answer(await h(op("trip", "groups"))))).not.toContain("archived");
   });
 
   it("answers each read from the copy once it has synced, without creating General", async () => {

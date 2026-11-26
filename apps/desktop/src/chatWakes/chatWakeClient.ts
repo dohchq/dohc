@@ -46,7 +46,7 @@ export class ChatWakeAnswerError extends Error {
   }
 }
 
-/** The relay refused the body as a bad request: from an older relay, a declaration with a field it doesn't know. */
+/** The relay refused the body: from an older relay, a declaration with a field it doesn't know, or past its size limit. */
 class ChatWakeBadRequestError extends Error {
   constructor() {
     super("The server refused this computer's runner declaration.");
@@ -94,7 +94,7 @@ export function createChatWakeClient(input: {
       404: () => new ChatWakeMissingError(),
       503: () => new ChatWakeBusyError(),
     };
-    if (badRequest) errors[400] = badRequest;
+    if (badRequest) errors[400] = errors[413] = badRequest;
     const response = await relayRequest({ relay: input.relay, path, init, errors, label });
     try {
       return await response.json();
