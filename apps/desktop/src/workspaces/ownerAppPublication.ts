@@ -35,6 +35,7 @@ import {
 } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { likelySecretPrefix, type SecretPrefix } from "@dohc/security-contract/secret-prefix";
+import { isUtf8 } from "node:buffer";
 import { posix } from "node:path";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
@@ -654,12 +655,9 @@ async function prepareAppSources(
     );
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
-  const textPaths = new Set(
-    metadata.files.filter((file) => file.contentKind === "text").map((file) => file.path),
-  );
   const decoder = new TextDecoder();
   const likelySecrets = selected.files.flatMap((file) => {
-    if (!textPaths.has(file.path)) return [];
+    if (!isUtf8(file.bytes)) return [];
     const prefix = likelySecretPrefix(decoder.decode(file.bytes));
     return prefix ? [{ path: file.path, prefix }] : [];
   });

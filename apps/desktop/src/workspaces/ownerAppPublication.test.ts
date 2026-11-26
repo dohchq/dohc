@@ -443,7 +443,10 @@ describe("app without app.publish.json", () => {
     page(h, {
       "app/index.html": '<!doctype html><h1>Trip</h1><img src="logo.png">',
     });
-    h.sources.set("app/logo.png", new TextEncoder().encode(`PNG ghp_${"a".repeat(30)}`));
+    h.sources.set(
+      "app/logo.png",
+      Uint8Array.from([0x89, ...new TextEncoder().encode(`PNG ghp_${"a".repeat(30)}`)]),
+    );
     const { likelySecrets } = await h.prepare();
     expect(h.capturePaths.flat()).toContain("app/logo.png");
     expect(likelySecrets).toEqual([]);
