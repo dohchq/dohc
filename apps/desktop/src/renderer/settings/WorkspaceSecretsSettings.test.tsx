@@ -14,6 +14,8 @@ const bridgeMock = {
     vi.fn<(payload: { workspaceId: string; secret: unknown }) => Promise<WorkspaceSecretsState>>(),
   deleteWorkspaceSecret:
     vi.fn<(payload: { workspaceId: string; name: string }) => Promise<WorkspaceSecretsState>>(),
+  clearLocalWorkspaceSecrets:
+    vi.fn<(payload: { workspaceId: string }) => Promise<WorkspaceSecretsState>>(),
   onCloudSessionChanged: vi.fn<
     (
       listener: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void,
@@ -174,6 +176,33 @@ describe("WorkspaceSecretsSettings", () => {
     render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
     expect(await screen.findByTestId("workspace-secrets-unavailable")).toBeTruthy();
     expect(screen.getByText(/system keychain is unavailable/u)).toBeTruthy();
+    expect(screen.queryByTestId("workspace-secrets-clear-local")).toBeNull();
+  });
+
+  it("deletes a damaged local vault only after the person confirms", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listWorkspaceSecrets.mockResolvedValue({
+      kind: "unavailable",
+      storage: "local",
+      message: "This workspace's secrets on this computer are damaged.",
+      canDelete: true,
+    });
+    bridgeMock.clearLocalWorkspaceSecrets.mockResolvedValueOnce({
+      kind: "ready",
+      storage: "local",
+      secrets: [],
+      limit: 50,
+    });
+
+    render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("workspace-secrets-clear-local"));
+    await user.click(screen.getByTestId("workspace-secrets-cancel-clear-local"));
+    expect(bridgeMock.clearLocalWorkspaceSecrets).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("workspace-secrets-clear-local"));
+    await user.click(screen.getByTestId("workspace-secrets-confirm-clear-local-action"));
+    expect(await screen.findByTestId("workspace-secrets-empty")).toBeTruthy();
+    expect(bridgeMock.clearLocalWorkspaceSecrets).toHaveBeenCalledWith({ workspaceId: "ws-1" });
   });
 
   it("ignores a slow workspace A mutation after switching to workspace B and refreshes on sign-out", async () => {

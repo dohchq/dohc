@@ -2174,6 +2174,11 @@ export interface SyncRelayStorage {
     ownerUserId: string,
     name: string,
   ): import("./workspaceSecrets").DeleteWorkspaceSecretResult;
+  listWorkspaceSecretSeals(): import("./workspaceSecrets").WorkspaceSecretSeal[];
+  replaceWorkspaceSecretSeal(
+    seal: import("./workspaceSecrets").WorkspaceSecretSeal,
+    next: { readonly keyId: string; readonly sealedValue: string },
+  ): boolean;
   listWorkspaceHttpStepApprovals(workspaceId: string): string[];
   hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string): boolean;
   approveWorkspaceHttpStep(

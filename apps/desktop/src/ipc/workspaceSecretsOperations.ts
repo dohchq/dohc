@@ -45,4 +45,16 @@ export const workspaceSecretsOperations = {
     result: WorkspaceSecretsState,
     guard: "trusted-sender",
   },
+  clearLocalWorkspaceSecrets: {
+    capabilityId: "workspace.secrets.delete",
+    scope: "workspace",
+    handlerCheck: {
+      check: "workspaceSecretsHandlers.currentRendererSession",
+      reason: "The sender must show this workspace; the vault is this computer's copy.",
+    },
+    channel: "desktop:clear-local-workspace-secrets",
+    payload: WorkspaceSecretWorkspace,
+    result: WorkspaceSecretsState,
+    guard: "trusted-sender",
+  },
 } as const satisfies OperationTable;

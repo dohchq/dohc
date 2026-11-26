@@ -7,7 +7,12 @@ import {
   writeAutomationsFile,
   type AutomationHttpStep,
 } from "./automations";
-import { computeHttpStepApprovalDigest, sanitizeHttpFailureReason } from "./httpStepApprovals";
+import { createHash } from "node:crypto";
+import {
+  computeHttpStepApprovalDigest,
+  sanitizeHttpFailureReason,
+  workspaceSecretApprovalBinding,
+} from "./httpStepApprovals";
 
 describe("http automation steps", () => {
   it("parses and round-trips literal URL, secret URL, headers, secret headers, JSON body, and text body", () => {
@@ -233,6 +238,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "ä.js", sha256: "3".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -246,6 +252,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -261,6 +268,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -276,6 +284,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "9".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -291,6 +300,7 @@ automations:
       stepOrdinal: 0,
       step,
       definitionDigest: "a".repeat(64),
+      secretBindings: new Map([["HOOK_TOKEN", "binding"]]),
       codeFileHashes: [
         { file: "a.js", sha256: "1".repeat(64) },
         { file: "z.js", sha256: "2".repeat(64) },
@@ -298,6 +308,101 @@ automations:
       ],
     });
     expect(movedCollection).not.toBe(base);
+  });
+
+  it("keeps the first digest format for steps that name no secret", () => {
+    const step: AutomationHttpStep = {
+      kind: "http",
+      url: { kind: "literal", url: "https://hooks.example.com/notify" },
+      method: "POST",
+      headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
+      secretHeaders: [],
+      body: null,
+    };
+    const digest = computeHttpStepApprovalDigest({
+      collectionId: "col-obj-1",
+      collectionPath: "Tasks",
+      automationId: "notify",
+      stepOrdinal: 0,
+      step,
+      definitionDigest: "a".repeat(64),
+      codeFileHashes: [],
+      secretBindings: null,
+    });
+    expect(digest).toBe(
+      createHash("sha256")
+        .update(
+          JSON.stringify([
+            "dohc-http-step-approval-v1",
+            "col-obj-1",
+            "Tasks",
+            "notify",
+            0,
+            ["literal", "https://hooks.example.com/notify"],
+            "POST",
+            ["x-event"],
+            [],
+            "a".repeat(64),
+            [],
+          ]),
+        )
+        .digest("hex"),
+    );
+  });
+
+  it("ties a secret step's approval to each secret's identity", () => {
+    const step: AutomationHttpStep = {
+      kind: "http",
+      url: { kind: "secret", secret: "HOOK_URL" },
+      method: "POST",
+      headers: [],
+      secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
+      body: null,
+    };
+    const digestWith = (
+      urlSecret: Parameters<typeof workspaceSecretApprovalBinding>[0] | null,
+      token: Parameters<typeof workspaceSecretApprovalBinding>[0],
+    ) => {
+      const bindings = new Map([["HOOK_TOKEN", workspaceSecretApprovalBinding(token)]]);
+      if (urlSecret) bindings.set("HOOK_URL", workspaceSecretApprovalBinding(urlSecret));
+      return computeHttpStepApprovalDigest({
+        collectionId: "col-obj-1",
+        collectionPath: "Tasks",
+        automationId: "notify",
+        stepOrdinal: 0,
+        step,
+        definitionDigest: "a".repeat(64),
+        codeFileHashes: [],
+        secretBindings: bindings,
+      });
+    };
+    const url = { usage: "http-url" as const, allowedHosts: [], createdAtMs: 10, generation: 1 };
+    const token = {
+      usage: "http-header" as const,
+      allowedHosts: ["api.example.com"],
+      createdAtMs: 20,
+      generation: 1,
+    };
+    const approved = digestWith(url, token);
+    expect(approved).toMatch(/^[0-9a-f]{64}$/u);
+    expect(digestWith(url, { ...token, generation: 7 })).toBe(approved);
+    expect(digestWith({ ...url, generation: 2 }, token)).not.toBe(approved);
+    expect(digestWith({ ...url, createdAtMs: 11 }, token)).not.toBe(approved);
+    expect(digestWith(url, { ...token, createdAtMs: 21 })).not.toBe(approved);
+    expect(digestWith(url, { ...token, allowedHosts: ["evil.example.com"] })).not.toBe(approved);
+    expect(digestWith(null, token)).not.toBe(approved);
+    expect(
+      computeHttpStepApprovalDigest({
+        collectionId: "col-obj-1",
+        collectionPath: "Tasks",
+        automationId: "notify",
+        stepOrdinal: 0,
+        step,
+        definitionDigest: "a".repeat(64),
+        codeFileHashes: [],
+        secretBindings: null,
+      }),
+    ).toBeNull();
   });
 
   it("scrubs secrets from failure reasons", () => {

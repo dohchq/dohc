@@ -59,7 +59,12 @@ describe("localOutboundWebhookExecutor", () => {
   it("injects pinned header secret, standard headers, and returns status without leaking secrets", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-local-webhook-"));
     dirs.push(dir);
-    const secrets = createLocalWorkspaceSecretStore({ dir, cipher: fakeCipher() });
+    let clock = 1000;
+    const secrets = createLocalWorkspaceSecretStore({
+      dir,
+      cipher: fakeCipher(),
+      nowMs: () => (clock += 1),
+    });
     await secrets.set("ws-1", {
       name: "RESEND_API_KEY",
       mode: "create",
@@ -86,6 +91,7 @@ describe("localOutboundWebhookExecutor", () => {
       definitionDigest: "b".repeat(64),
       approvalDigest: "c".repeat(64),
       codeFileHashes: [],
+      secrets: await secrets.list("ws-1"),
       effect: baseEffect,
       depth: 1,
       signal: new AbortController().signal,
@@ -99,6 +105,86 @@ describe("localOutboundWebhookExecutor", () => {
     expect(sent[0]!.headers["X-Dohc-Delivery-Id"]).toBe("a".repeat(64));
     expect(sent[0]!.headers["X-Dohc-Chain-Depth"]).toBe("2");
     expect(sent[0]!.headers["Content-Type"]).toBe("application/json");
+
+    const approvedSecrets = await secrets.list("ws-1");
+    await secrets.remove("ws-1", "RESEND_API_KEY");
+    await secrets.set("ws-1", {
+      name: "RESEND_API_KEY",
+      mode: "create",
+      usage: "http-header",
+      value: "re_live_secret_new",
+      allowedHosts: ["api.resend.com"],
+    });
+    const recreated = await executor.execute({
+      collectionId: "col-1",
+      collectionPath: "Tasks",
+      automation: dummyAutomation,
+      definitionDigest: "b".repeat(64),
+      approvalDigest: "c".repeat(64),
+      codeFileHashes: [],
+      secrets: approvedSecrets,
+      effect: baseEffect,
+      depth: 1,
+      signal: new AbortController().signal,
+    });
+    expect(recreated).toEqual({
+      ok: false,
+      reason: 'Secret "RESEND_API_KEY" changed while dohc was sending. Try again.',
+      beforeSend: true,
+    });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("refuses a webhook link replaced while dohc looked up its address", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-local-webhook-"));
+    dirs.push(dir);
+    let clock = 1000;
+    const secrets = createLocalWorkspaceSecretStore({
+      dir,
+      cipher: fakeCipher(),
+      nowMs: () => (clock += 1),
+    });
+    await secrets.set("ws-1", {
+      name: "SLACK_HOOK",
+      mode: "create",
+      usage: "http-url",
+      value: "https://hooks.example.com/old",
+    });
+    const approved = await secrets.list("ws-1");
+    const sendRequest = vi.fn(async () => 200);
+    const executor = createLocalOutboundWebhookExecutor({
+      workspaceId: "ws-1",
+      secrets,
+      resolveDestination: async (raw) => {
+        await secrets.set("ws-1", {
+          name: "SLACK_HOOK",
+          mode: "replace",
+          usage: "http-url",
+          value: "https://hooks.example.com/new",
+        });
+        return fakeDestination(raw);
+      },
+      sendRequest,
+    });
+
+    const result = await executor.execute({
+      collectionId: "col-1",
+      collectionPath: "Tasks",
+      automation: dummyAutomation,
+      definitionDigest: "b".repeat(64),
+      approvalDigest: "c".repeat(64),
+      codeFileHashes: [],
+      secrets: approved,
+      effect: { ...baseEffect, url: { kind: "secret", secret: "SLACK_HOOK" }, secretHeaders: [] },
+      depth: 0,
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'Secret "SLACK_HOOK" changed while dohc was sending. Try again.',
+      beforeSend: true,
+    });
+    expect(sendRequest).not.toHaveBeenCalled();
   });
 
   it("refuses sending a header secret to a non-pinned host and enforces chain depth cap", async () => {
@@ -127,6 +213,7 @@ describe("localOutboundWebhookExecutor", () => {
       definitionDigest: "b".repeat(64),
       approvalDigest: "c".repeat(64),
       codeFileHashes: [],
+      secrets: await secrets.list("ws-1"),
       effect: {
         ...baseEffect,
         url: { kind: "literal", url: "https://evil.example.com/steal" },
@@ -149,6 +236,7 @@ describe("localOutboundWebhookExecutor", () => {
       definitionDigest: "b".repeat(64),
       approvalDigest: "c".repeat(64),
       codeFileHashes: [],
+      secrets: await secrets.list("ws-1"),
       effect: baseEffect,
       depth: 4,
       signal: new AbortController().signal,
@@ -190,6 +278,7 @@ describe("localOutboundWebhookExecutor", () => {
       definitionDigest: "b".repeat(64),
       approvalDigest: "c".repeat(64),
       codeFileHashes: [],
+      secrets: await secrets.list("ws-1"),
       effect: {
         ...baseEffect,
         url: { kind: "secret", secret: "SLACK_HOOK" },
@@ -218,6 +307,7 @@ describe("localOutboundWebhookExecutor", () => {
       definitionDigest: "b".repeat(64),
       approvalDigest: "c".repeat(64),
       codeFileHashes: [],
+      secrets: await secrets.list("ws-1"),
       effect: {
         ...baseEffect,
         url: { kind: "secret", secret: "SLACK_HOOK" },

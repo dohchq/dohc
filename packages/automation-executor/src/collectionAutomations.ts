@@ -14,7 +14,11 @@ import {
   type AutomationScheduleTrigger,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
-import { computeHttpStepApprovalDigest } from "@dohc/workspace-contracts/http-step-approvals";
+import {
+  computeHttpStepApprovalDigest,
+  httpStepSecretProblem,
+  workspaceSecretApprovalBindings,
+} from "@dohc/workspace-contracts/http-step-approvals";
 import {
   COLLECTION_SCHEMA_FILENAME,
   collectionVersionError,
@@ -122,6 +126,7 @@ import {
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
+  type HttpApprovalSnapshot,
   rebaseRun,
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
@@ -437,9 +442,8 @@ export interface ServerDataset {
 }
 
 export interface CollectionHttpApprovalGate {
-  isApproved(digest: string): Promise<"approved" | "unapproved" | "unavailable">;
-  /** Reads the workspace's full approved digest set once per batch check, or null when unavailable. */
-  readApprovedDigests?(): Promise<ReadonlySet<string> | null>;
+  /** Reads the approved digests and the workspace's secrets together, or null when unavailable. */
+  read(): Promise<HttpApprovalSnapshot | null>;
   approve?(input: {
     approvalDigest: string;
     collectionId: string;
@@ -1349,6 +1353,9 @@ type ClaimAction =
 const RUN_PAGE = 20;
 // The most claims one page of either ledger holds.
 const CLAIM_PAGE_LIMIT = 100;
+
+/** A held webhook step can't be allowed until its secrets are fixed in Settings; the message says how. */
+export class HttpStepSecretProblemError extends Error {}
 
 export class CollectionAutomations {
   async makeWritesDurable(claimId?: string): Promise<void> {
@@ -3258,6 +3265,7 @@ export class CollectionAutomations {
     collectionPath: string;
     automationId: string;
     stepOrdinal: number;
+    secretProblem: string | null;
   } | null> {
     const located = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
@@ -3275,36 +3283,27 @@ export class CollectionAutomations {
     if (!stepEntry || stepEntry.step.kind !== "http") return null;
     const codeFileHashes = await this.codeFileHashesFor(located.collectionPath, automation);
     if (codeFileHashes === null) return null;
-    return {
-      approvalDigest: computeHttpStepApprovalDigest({
-        collectionId,
-        collectionPath: located.collectionPath,
-        automationId: automation.id,
-        stepOrdinal: matched.stepOrdinal,
-        step: stepEntry.step,
-        definitionDigest: definitionDigest(automation),
-        codeFileHashes,
-      }),
+    const approvals = this.options.httpApprovals ? await this.options.httpApprovals.read() : null;
+    const secrets = approvals?.secrets ?? null;
+    const approvalDigest = computeHttpStepApprovalDigest({
       collectionId,
       collectionPath: located.collectionPath,
       automationId: automation.id,
       stepOrdinal: matched.stepOrdinal,
+      step: stepEntry.step,
+      definitionDigest: definitionDigest(automation),
+      codeFileHashes,
+      secretBindings: workspaceSecretApprovalBindings(secrets),
+    });
+    if (approvalDigest === null) return null;
+    return {
+      approvalDigest,
+      collectionId,
+      collectionPath: located.collectionPath,
+      automationId: automation.id,
+      stepOrdinal: matched.stepOrdinal,
+      secretProblem: secrets === null ? null : httpStepSecretProblem(stepEntry.step, secrets),
     };
-  }
-
-  async httpApprovalInputFor(input: {
-    automationId: string;
-    definitionHash: string;
-    step: string;
-  }): Promise<{
-    approvalDigest: string;
-    collectionId: string;
-    collectionPath: string;
-    automationId: string;
-    stepOrdinal: number;
-  } | null> {
-    await this.ready();
-    return this.computeHttpApprovalInput(input);
   }
 
   /**
@@ -3348,7 +3347,16 @@ export class CollectionAutomations {
         }
         const approve = options?.approveHttpStep ?? this.options.httpApprovals?.approve;
         if (!approve) return false;
-        await approve(httpApproval);
+        if (httpApproval.secretProblem !== null) {
+          throw new HttpStepSecretProblemError(httpApproval.secretProblem);
+        }
+        await approve({
+          approvalDigest: httpApproval.approvalDigest,
+          collectionId: httpApproval.collectionId,
+          collectionPath: httpApproval.collectionPath,
+          automationId: httpApproval.automationId,
+          stepOrdinal: httpApproval.stepOrdinal,
+        });
       }
       this.verdicts.set(key, {
         ...stored,
@@ -4997,10 +5005,18 @@ export class CollectionAutomations {
       if (!reach.allowed && steps[index]!.kind !== "dataset-field")
         return { kind: "disabled", reason: reach.reason, denialCause: "reach-restricted" };
     }
-    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }], steps)) {
+    const wait = await this.recordVerdicts(
+      roster,
+      [{ automationId, collectionPath, automation }],
+      steps,
+    );
+    if (wait !== null) {
       return {
         kind: "disabled",
-        reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.`,
+        reason:
+          wait === "held"
+            ? `Automation "${automation.name}" is waiting. Allow its step in Notices.`
+            : `Automation "${automation.name}" is waiting because dohc can't check its webhook approval or secrets right now. Check this workspace's sync and its secrets in Settings.`,
         denialCause: "held-step",
       };
     }
@@ -6847,10 +6863,10 @@ export class CollectionAutomations {
       inventories.get(automationId)?.some((step) => step.kind === "http"),
     );
     if (!hasAnyHttp) return states;
-    let prefetched: ReadonlySet<string> | null | undefined;
-    if (this.options.httpApprovals?.readApprovedDigests) {
-      prefetched = await this.options.httpApprovals.readApprovedDigests();
-    }
+    const approvals: HttpApprovalSnapshot | null = this.options.httpApprovals
+      ? await this.options.httpApprovals.read()
+      : { approved: new Set(), secrets: [] };
+    const secretBindings = workspaceSecretApprovalBindings(approvals?.secrets ?? null);
     for (const { automationId, collectionPath, automation } of owned) {
       const steps = inventories.get(automationId);
       if (!steps || !steps.some((step) => step.kind === "http")) continue;
@@ -6880,18 +6896,16 @@ export class CollectionAutomations {
           step: entry.step,
           definitionDigest: digest,
           codeFileHashes,
+          secretBindings,
         });
-        const state: "approved" | "unapproved" | "unavailable" =
-          prefetched !== undefined
-            ? prefetched === null
-              ? "unavailable"
-              : prefetched.has(approvalDigest)
-                ? "approved"
-                : "unapproved"
-            : this.options.httpApprovals
-              ? await this.options.httpApprovals.isApproved(approvalDigest)
-              : "unapproved";
-        states.set(key, { state, approvalDigest });
+        if (approvals === null || approvalDigest === null) {
+          states.set(key, { state: "unavailable", approvalDigest: null });
+          continue;
+        }
+        states.set(key, {
+          state: approvals.approved.has(approvalDigest) ? "approved" : "unapproved",
+          approvalDigest,
+        });
       }
     }
     return states;
@@ -6901,7 +6915,7 @@ export class CollectionAutomations {
     roster: Exclude<ReachRoster, { kind: "unknown" }>,
     automations?: readonly OwnedAutomation[],
     resolved?: readonly ReachStep[],
-  ): Promise<boolean> {
+  ): Promise<"held" | "unchecked" | null> {
     await this.loadChat(roster);
     automations ??= this.everyAutomation();
     const owned = automations;
@@ -6919,8 +6933,8 @@ export class CollectionAutomations {
     const httpApprovalStates = await this.httpApprovalStatesFor(owned, inventories);
     return await this.updateVerdicts(() => {
       // Without the saved verdicts every step waits.
-      if (this.verdictsUnreadable) return owned.length > 0;
-      let held = false;
+      if (this.verdictsUnreadable) return owned.length > 0 ? "held" : null;
+      let wait: "held" | "unchecked" | null = null;
       for (const { automationId, collectionPath, automation } of owned) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
@@ -6945,7 +6959,7 @@ export class CollectionAutomations {
           if (reachStep.kind === "http") {
             const info = httpApprovalStates.get(key);
             if (next.verdict === "allowed" && info?.state === "unavailable") {
-              held = true;
+              wait ??= "unchecked";
               return;
             }
             next = {
@@ -6956,7 +6970,7 @@ export class CollectionAutomations {
                 : {}),
             };
           }
-          if (next.verdict === "held") held = true;
+          if (next.verdict === "held") wait = "held";
           if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, {
             automationId,
@@ -6967,7 +6981,7 @@ export class CollectionAutomations {
           });
         });
       }
-      return held;
+      return wait;
     });
   }
 
@@ -8004,7 +8018,7 @@ export class CollectionAutomations {
       withHost: (work) => this.withLiveHost(work),
       cachedRoster: () => this.options.cachedRoster(),
       checkReach: async (steps, roster) => {
-        return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
+        return owned !== undefined && (await this.recordVerdicts(roster, [owned], steps)) !== null;
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
       onUsageSuccess: this.options.onUsageSuccess,
@@ -8030,7 +8044,7 @@ export class CollectionAutomations {
       postNotice: this.options.postNotice,
       ...(this.options.httpWebhook ? { httpWebhook: this.options.httpWebhook } : {}),
       ...(this.options.httpApprovals
-        ? { isHttpStepApproved: (digest: string) => this.options.httpApprovals!.isApproved(digest) }
+        ? { readHttpApprovals: () => this.options.httpApprovals!.read() }
         : {}),
     };
   }

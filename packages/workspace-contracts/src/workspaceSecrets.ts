@@ -193,6 +193,7 @@ export const WorkspaceSecretsState = z.discriminatedUnion("kind", [
       kind: z.literal("unavailable"),
       storage: WorkspaceSecretsStorageKind,
       message: z.string().min(1),
+      canDelete: z.literal(true).optional(),
     })
     .strict(),
   z

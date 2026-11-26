@@ -14,9 +14,12 @@ import {
 } from "@dohc/workspace-contracts/workspace-secrets";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import type { TokenCipher } from "./cloudCredentialStore";
+import { openJson, SealedJson, sealJson } from "./localSealedJson";
+
+const VAULT_AAD_TAG = "dohc-local-workspace-secrets-v2";
 
 const StoredEntryBase = {
-  sealedValue: z.string().min(1),
+  value: z.string().min(1),
   generation: z.number().int().min(1),
   createdAtMs: z.number().int().min(0),
   updatedAtMs: z.number().int().min(0),
@@ -47,21 +50,29 @@ const StoredSecretEntry = z.discriminatedUnion("usage", [
     .strict(),
 ]);
 
+const StoredEntries = z
+  .record(z.string(), StoredSecretEntry)
+  .refine(
+    (entries) =>
+      Object.keys(entries).length <= MAX_WORKSPACE_SECRETS &&
+      Object.entries(entries).every(
+        ([name, entry]) =>
+          WorkspaceSecretName.safeParse(name).success &&
+          (entry.usage === "http-header"
+            ? validateSecretHeaderValue(entry.value)
+            : validateSecretHttpUrl(entry.value) !== null),
+      ),
+  );
+
 const StoredWorkspaceSecretFile = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     workspaceId: z.string().min(1),
-    entries: z
-      .record(z.string(), StoredSecretEntry)
-      .refine(
-        (entries) =>
-          Object.keys(entries).length <= MAX_WORKSPACE_SECRETS &&
-          Object.keys(entries).every((name) => WorkspaceSecretName.safeParse(name).success),
-      ),
+    sealed: SealedJson,
   })
   .strict();
 
-type StoredFile = z.output<typeof StoredWorkspaceSecretFile>;
+type StoredFile = { entries: z.output<typeof StoredEntries> };
 
 export class WorkspaceSecretStorageUnavailableError extends Error {
   constructor() {
@@ -82,11 +93,20 @@ export class WorkspaceSecretLimitError extends Error {
 }
 
 export class WorkspaceSecretVaultCorruptError extends Error {
+  constructor(
+    message = "This workspace's secrets on this computer are damaged or were changed outside dohc, so dohc won't use them. Delete them and add them again.",
+  ) {
+    super(message);
+    this.name = "WorkspaceSecretVaultCorruptError";
+  }
+}
+
+export class WorkspaceSecretVaultOutdatedError extends WorkspaceSecretVaultCorruptError {
   constructor() {
     super(
-      "This workspace's local secrets file could not be read, so dohc kept it untouched and refused changes.",
+      "This workspace's secrets on this computer were saved by an older dohc and can't be checked for changes, so dohc won't use them. Delete them and add them again.",
     );
-    this.name = "WorkspaceSecretVaultCorruptError";
+    this.name = "WorkspaceSecretVaultOutdatedError";
   }
 }
 
@@ -154,30 +174,27 @@ export function createLocalWorkspaceSecretStore(options: {
       text = await readFile(file, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        return { version: 1, workspaceId, entries: {} };
+        return { entries: {} };
       }
       throw new WorkspaceSecretVaultCorruptError();
     }
     await chmod(file, 0o600).catch(() => undefined);
+    let raw: unknown;
     try {
-      const raw: unknown = JSON.parse(text);
-      if (
-        raw === null ||
-        typeof raw !== "object" ||
-        Array.isArray(raw) ||
-        !("entries" in raw) ||
-        raw.entries === null ||
-        typeof raw.entries !== "object" ||
-        Array.isArray(raw.entries) ||
-        !Object.keys(raw.entries).every((name) => WorkspaceSecretName.safeParse(name).success)
-      ) {
-        throw new WorkspaceSecretVaultCorruptError();
-      }
+      raw = JSON.parse(text);
+    } catch {
+      throw new WorkspaceSecretVaultCorruptError();
+    }
+    if (raw !== null && typeof raw === "object" && "version" in raw && raw.version === 1) {
+      throw new WorkspaceSecretVaultOutdatedError();
+    }
+    try {
       const parsed = StoredWorkspaceSecretFile.parse(raw);
-      if (parsed.workspaceId !== workspaceId) {
-        throw new WorkspaceSecretVaultCorruptError();
-      }
-      return parsed;
+      if (parsed.workspaceId !== workspaceId) throw new WorkspaceSecretVaultCorruptError();
+      const entries = StoredEntries.parse(
+        openJson(options.cipher!, [VAULT_AAD_TAG, workspaceId], parsed.sealed),
+      );
+      return { entries };
     } catch {
       throw new WorkspaceSecretVaultCorruptError();
     }
@@ -191,9 +208,14 @@ export function createLocalWorkspaceSecretStore(options: {
       });
       return;
     }
+    const stored: z.input<typeof StoredWorkspaceSecretFile> = {
+      version: 2,
+      workspaceId,
+      sealed: sealJson(options.cipher!, [VAULT_AAD_TAG, workspaceId], data.entries),
+    };
     await mkdir(rootDir, { recursive: true, mode: 0o700 });
     await atomicReplaceFile(file, (tmp) =>
-      writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 }),
+      writeFile(tmp, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 }),
     );
   };
 
@@ -227,11 +249,10 @@ export function createLocalWorkspaceSecretStore(options: {
         const createdAtMs = existing ? existing.createdAtMs : now;
         const updatedAtMs = Math.max(createdAtMs, now);
         const generation = existing ? existing.generation + 1 : 1;
-        const sealedValue = options.cipher!.encrypt(input.value);
         data.entries[input.name] = {
           usage: input.usage,
           allowedHosts: input.usage === "http-header" ? [...input.allowedHosts] : [],
-          sealedValue,
+          value: input.value,
           generation,
           createdAtMs,
           updatedAtMs,
@@ -262,14 +283,6 @@ export function createLocalWorkspaceSecretStore(options: {
         }
         const entry = Object.hasOwn(data.entries, name) ? data.entries[name] : undefined;
         if (!entry) return null;
-        let value: string;
-        try {
-          value = options.cipher!.decrypt(entry.sealedValue);
-        } catch {
-          return null;
-        }
-        if (entry.usage === "http-header" && !validateSecretHeaderValue(value)) return null;
-        if (entry.usage === "http-url" && validateSecretHttpUrl(value) === null) return null;
         return {
           summary: {
             name,
@@ -279,7 +292,7 @@ export function createLocalWorkspaceSecretStore(options: {
             createdAtMs: entry.createdAtMs,
             updatedAtMs: entry.updatedAtMs,
           },
-          value,
+          value: entry.value,
         };
       }),
     clearWorkspace: (workspaceId) =>

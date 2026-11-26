@@ -26,6 +26,7 @@ import {
 } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
+  HttpStepSecretProblemError,
   type CollectionAutomationRun,
   type CollectionAutomationsOptions,
   type RunAdmission,
@@ -166,6 +167,7 @@ export type ServerExecutor = Pick<
   | "relayAnswered"
   | "groupMessagesArrived"
   | "hostChanged"
+  | "rosterChanged"
   | "releaseGroupSubscriptions"
   | "reachHandover"
   | "relayedClaim"
@@ -1215,10 +1217,10 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         );
       },
       httpApprovals: {
-        isApproved: async (digest) =>
-          storage.hasWorkspaceHttpStepApproval(workspaceId, digest) ? "approved" : "unapproved",
-        readApprovedDigests: async () =>
-          new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+        read: async () => ({
+          approved: new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+          secrets: storage.listWorkspaceSecrets(workspaceId),
+        }),
       },
       httpWebhook: {
         execute: async ({
@@ -2033,39 +2035,44 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     // A closed copy runs nothing, so it holds nothing.
     holds: (scope) => ownedCopy(scope).executor.holds(),
     allow: (scope, input, allowOptions) =>
-      ownedCopy(scope).executor.confirmReach(
-        input,
-        allowOptions?.recheckDesktopHttpApproval
-          ? {
-              approveHttpStep: async (approval) => {
-                await allowOptions.recheckDesktopHttpApproval!();
-                let result;
-                try {
-                  result = storage.approveWorkspaceHttpStep({
-                    workspaceId: scope.workspaceId,
-                    ownerUserId: scope.ownerUserId,
-                    approvalDigest: approval.approvalDigest,
-                    collectionPath: approval.collectionPath,
-                    automationId: approval.automationId,
-                    stepOrdinal: approval.stepOrdinal,
-                    nowMs: nowMs(),
-                  });
-                } catch (error) {
-                  if (error instanceof SyncRelayQuotaExceededError) {
-                    throw relayError("quota_exceeded", error.message);
+      ownedCopy(scope)
+        .executor.confirmReach(
+          input,
+          allowOptions?.recheckDesktopHttpApproval
+            ? {
+                approveHttpStep: async (approval) => {
+                  await allowOptions.recheckDesktopHttpApproval!();
+                  let result;
+                  try {
+                    result = storage.approveWorkspaceHttpStep({
+                      workspaceId: scope.workspaceId,
+                      ownerUserId: scope.ownerUserId,
+                      approvalDigest: approval.approvalDigest,
+                      collectionPath: approval.collectionPath,
+                      automationId: approval.automationId,
+                      stepOrdinal: approval.stepOrdinal,
+                      nowMs: nowMs(),
+                    });
+                  } catch (error) {
+                    if (error instanceof SyncRelayQuotaExceededError) {
+                      throw relayError("quota_exceeded", error.message);
+                    }
+                    throw error;
                   }
-                  throw error;
-                }
-                if (!result.ok) {
-                  if (result.reason === "unauthorized") throw notFound();
-                  throw badRequest(
-                    `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
-                  );
-                }
-              },
-            }
-          : undefined,
-      ),
+                  if (!result.ok) {
+                    if (result.reason === "unauthorized") throw notFound();
+                    throw badRequest(
+                      `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
+                    );
+                  }
+                },
+              }
+            : undefined,
+        )
+        .catch((error: unknown) => {
+          if (error instanceof HttpStepSecretProblemError) throw badRequest(error.message);
+          throw error;
+        }),
   };
 
   const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {
@@ -2079,6 +2086,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   return {
     deleteAccount(userId: string) {
       for (const ws of hosted.values()) ws.names.delete(userId);
+    },
+    secretsChanged(workspaceId: string) {
+      hosted.get(workspaceId)?.executor.rosterChanged();
     },
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       for (const id of workspaceIds) {
