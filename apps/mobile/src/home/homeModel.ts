@@ -1,4 +1,5 @@
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
+import type { PhoneApp } from "../server/phoneApps";
 import type { WorkspaceFile } from "../server/workspaceReads";
 
 export type HomeRow =
@@ -45,6 +46,22 @@ type Folder = {
   readonly folders: Map<string, Folder>;
   readonly pages: WorkspaceFile[];
 };
+
+export function appGroups(apps: readonly PhoneApp[]) {
+  const groups = new Map<string, PhoneApp[]>();
+  for (const app of apps) {
+    const key = app.member ? `member:${app.publicationId}` : app.appRoot;
+    groups.set(key, [...(groups.get(key) ?? []), app]);
+  }
+  return [...groups].map(([key, all]) => {
+    const owner = all.filter((app) => app.owner);
+    return {
+      key,
+      versions: owner.length ? owner : all,
+      approvedBefore: all.some((app) => app.approved),
+    };
+  });
+}
 
 export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): string[] {
   const fresh = rows.flatMap((row) =>

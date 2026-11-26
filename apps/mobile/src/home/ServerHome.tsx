@@ -31,23 +31,24 @@ import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
-import { memberAppState } from "../apps/reviewControls";
+import { appState } from "../apps/reviewControls";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
-import { homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
+import { appGroups, homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
 const NO_COLLECTIONS: CollectionsState = { collections: null, problem: null, failures: 0 };
 const nothing = () => () => undefined;
 
-// Home in a signed-in build, in the desktop Home's order: the open workspace's published apps, each version under its app, then
-// its pages, in the folders that hold them, then its sketches, its transactional Collections, and last its other files.
-// A page opens to read; a folder opens in place; an app's version opens its review; a Collection opens its records. The
-// phone opens no other kind of file yet, so those rows only name it.
+// Home in a signed-in build, in the desktop Home's order: the open workspace's apps, one per root folder, preferring the
+// version sent to the owner's phones, with its versions under it only when it lists several; then its pages, in the
+// folders that hold them, then its sketches, its transactional Collections, and last its other files.
+// A page opens to read; a folder opens in place; an app or its version opens its review; a Collection opens its
+// records. The phone opens no other kind of file yet, so those rows only name it.
 // The list reads again when the feed reports a file change.
 export function ServerHome() {
   const theme = useTheme();
@@ -183,12 +184,20 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
       ) : appsState.apps.length === 0 ? (
         <EmptyLine text={appWords.noApps} />
       ) : (
-        appGroups(appsState.apps).map(([root, versions]) => {
+        appGroups(appsState.apps).map(({ key, versions, approvedBefore }) => {
           const name = appName(versions[0]!);
           if (versions.length === 1)
-            return <AppRow key={root} app={versions[0]!} name={name} depth={0} />;
+            return (
+              <AppRow
+                key={key}
+                app={versions[0]!}
+                name={name}
+                depth={0}
+                approvedBefore={approvedBefore}
+              />
+            );
           return (
-            <Fragment key={root}>
+            <Fragment key={key}>
               <View style={[styles.row, styles.app]} accessible accessibilityRole="header">
                 <AppWindow size={18} color={theme.ink} strokeWidth={1.9} />
                 <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
@@ -196,7 +205,13 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
                 </Text>
               </View>
               {versions.map((app) => (
-                <AppRow key={app.publicationId} app={app} name={name} depth={1} />
+                <AppRow
+                  key={app.publicationId}
+                  app={app}
+                  name={name}
+                  depth={1}
+                  approvedBefore={approvedBefore}
+                />
               ))}
             </Fragment>
           );
@@ -254,35 +269,22 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
 }
 
 /**
- * The apps by identity, each with its published versions in the catalog's order: the owner's by root folder, and each
- * Member app alone, as its one current version.
+ * One version of an app, which opens its review. Alone, it shows its app's name; under its app, its version. Each
+ * shows whether it waits for a review, and a Member app who made it.
  */
-function appGroups(apps: readonly PhoneApp[]) {
-  const groups = new Map<string, PhoneApp[]>();
-  for (const app of apps) {
-    const key = app.member ? `member:${app.publicationId}` : app.appRoot;
-    groups.set(key, [...(groups.get(key) ?? []), app]);
-  }
-  return [...groups];
-}
-
-/**
- * One version of an app, which opens its review. Alone, it shows its app's name and its version beside it; a Member
- * app shows who made it and whether it waits for a review.
- */
-function AppRow(props: { app: PhoneApp; name: string; depth: number }) {
-  const { app, name, depth } = props;
+function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBefore: boolean }) {
+  const { app, name, depth, approvedBefore } = props;
   const theme = useTheme();
   const router = useRouter();
   const version = appWords.version(shortVersion(app));
   const label = depth === 0 ? name : version;
-  const state = memberAppState(app);
+  const state = appState(app, approvedBefore);
   const made = app.member
     ? app.member.author
       ? appWords.sharedBy(app.member.author)
       : appWords.sharedByMember
     : null;
-  const detail = made ? (state ?? "") : depth === 0 ? version : "";
+  const detail = state ?? "";
   return (
     <Pressable
       onPress={() => router.push({ pathname: "/app-review", params: { id: app.publicationId } })}
@@ -295,7 +297,7 @@ function AppRow(props: { app: PhoneApp; name: string; depth: number }) {
       accessibilityRole="button"
       accessibilityLabel={[
         name,
-        ...(made ? [made] : [version]),
+        ...(made ? [made] : depth ? [version] : []),
         ...(state ? [state] : app.approved ? [appWords.approved] : []),
       ].join(", ")}
     >

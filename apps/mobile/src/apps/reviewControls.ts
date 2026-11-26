@@ -34,7 +34,12 @@ export function reviewStatus(
   return review.member ? appWords.reviewToOpen : appWords.approveToOpen;
 }
 
-export function memberAppState(app: Pick<PhoneApp, "approved" | "member">): string | null {
-  if (!app.member || app.approved) return null;
-  return app.member.consent === "changed" ? appWords.updated : appWords.toReview;
+export function appState(
+  app: Pick<PhoneApp, "approved" | "member">,
+  approvedBefore: boolean,
+): string | null {
+  if (app.approved) return null;
+  return (app.member ? app.member.consent === "changed" : approvedBefore)
+    ? appWords.updated
+    : appWords.toReview;
 }

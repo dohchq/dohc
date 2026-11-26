@@ -276,8 +276,10 @@ describe("teardown", () => {
 
   it("ends the app only when a complete catalog no longer lists it approved", async () => {
     const cases: [string, Answer[], boolean][] = [
-      ["withdrawn", [page([version(B, true)])], true],
+      ["withdrawn", [page([version(B, true, "trip")])], true],
       ["revoked elsewhere", [page([version(A)])], true],
+      ["replaced by a newer version", [page([version(B, false, "events/signup", true)])], false],
+      ["revoked beside a newer version", [page([version(A), version(B, true)])], true],
       ["still approved", [page([version(A, true)])], false],
       ["a failed read", [{ status: 503 }], false],
       ["an incomplete read", [page([version(B)], B)], false],
