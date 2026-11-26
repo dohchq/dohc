@@ -2448,6 +2448,26 @@ describe("sync relay handler", () => {
     const current = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     expect(await current.text()).toBe(first);
   });
+
+  it("counts a same-key replacement once against the quota after pruning its history", async () => {
+    const pruned = keyEnvelopeJson("cHJ1bmVk", 1);
+    const otherKey = keyEnvelopeJson("b3RoZXI=", 2);
+    const current = keyEnvelopeJson("Y3VycmVudA==", 1);
+    const larger = keyEnvelopeJson("A".repeat(1_000), 1);
+    const storage = await testStorage({
+      workspaceQuotaBytes: otherKey.length + larger.length - 1,
+    });
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect((await h(putKeys(pruned))).status).toBe(200);
+    expect((await h(putKeys(otherKey, sha256(pruned)))).status).toBe(200);
+    expect((await h(putKeys(current, sha256(otherKey)))).status).toBe(200);
+
+    const replaced = await h(putKeys(larger, sha256(current)));
+    expect(replaced.status).toBe(413);
+    const stored = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    expect(await stored.text()).toBe(current);
+  });
 });
 
 describe("sync relay epoch and stream identity enforcement", () => {

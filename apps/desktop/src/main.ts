@@ -815,7 +815,7 @@ import {
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import {
   enrollWorkspaceKeyEnvelope,
-  keyNeedsPassphrase,
+  readProtectedFilesNeed,
 } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaces/workspaceJoinEnrollment";
 import {
@@ -3702,10 +3702,19 @@ function engineForWorkspace(
       const passphrase = failed
         ? false
         : (withWorkspaceAttachment(workspace, (lease) =>
-            workspaceActivity.checkProtectedFilesPassphrase(
+            workspaceActivity.checkProtectedFiles(
               canonicalWorkspaceFor(lease),
               lease.state.activity,
-              () => keyNeedsPassphrase(workspace.rootPath, daemonRelay),
+              () =>
+                readProtectedFilesNeed(
+                  workspace.rootPath,
+                  () =>
+                    readWorkspaceSecretState(
+                      receivedShareEngine.workspaceForRegistered(canonicalWorkspaceFor(lease)),
+                      requireEngineSessions(),
+                    ),
+                  daemonRelay,
+                ),
             ),
           ) ?? false);
       const [collectionsChanged, notSentChanged, passphraseChanged] = await Promise.all([

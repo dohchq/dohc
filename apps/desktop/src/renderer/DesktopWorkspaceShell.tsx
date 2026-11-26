@@ -8458,6 +8458,9 @@ function WorkspaceShell(props: {
   useEffect(() => {
     reportProtectedFiles(protectedFiles, openSyncSettings);
   }, [protectedFiles, reportProtectedFiles, openSyncSettings]);
+  useEffect(() => {
+    if (protectedFiles) refreshCloudStatus();
+  }, [protectedFiles, refreshCloudStatus]);
   // History stopped recording. Try again keeps its row, busy, until the
   // restart answers: one that runs again clears the row, and a failure shows
   // it again with its toast.

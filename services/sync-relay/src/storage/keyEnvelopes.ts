@@ -54,11 +54,11 @@ export function putKeyEnvelope(
     }
     const keyCheck = envelopeKeyCheck(input.envelopeJson);
     if (keyCheck !== null && keyCheck === envelopeKeyCheck(currentJson)) {
-      const prunedBytes = deleteHistoryWithKeyCheck(storage, input.workspaceId, keyCheck);
+      deleteHistoryWithKeyCheck(storage, input.workspaceId, keyCheck);
       assertWorkspaceQuota(
         storage,
         input.workspaceId,
-        envelopeAddedBytes - Buffer.byteLength(currentJson, "utf8") - prunedBytes,
+        envelopeAddedBytes - Buffer.byteLength(currentJson, "utf8"),
       );
       replaceCurrentEnvelope(storage, input);
       return { sha256: nextSha256 };
@@ -99,7 +99,7 @@ function deleteHistoryWithKeyCheck(
   storage: StorageContext,
   workspaceId: string,
   keyCheck: string,
-): number {
+): void {
   const rows = storage.db
     .prepare(
       "SELECT history_seq, envelope_json FROM sync_relay_key_envelope_history WHERE workspace_id = ?",
@@ -108,15 +108,12 @@ function deleteHistoryWithKeyCheck(
   const remove = storage.db.prepare(
     "DELETE FROM sync_relay_key_envelope_history WHERE history_seq = ?",
   );
-  let bytes = 0;
   for (const row of rows) {
     if (typeof row.envelope_json !== "string" || envelopeKeyCheck(row.envelope_json) !== keyCheck) {
       continue;
     }
     remove.run(Number(row.history_seq));
-    bytes += Buffer.byteLength(row.envelope_json, "utf8");
   }
-  return bytes;
 }
 
 export function getKeyEnvelope(

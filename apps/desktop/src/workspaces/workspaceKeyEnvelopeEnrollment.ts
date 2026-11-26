@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 import { SECRET_KEY_RELATIVE_PATH } from "./workspaceDataKey";
+import type { WorkspaceSecretState } from "./workspaceSecretEnrollmentState";
 
 const KEY_ENVELOPE_UPLOAD_ATTEMPTS = 3;
 
@@ -119,20 +120,24 @@ async function downloadEnvelope(transport: EngineRelayWorkspaceClient): Promise<
 }
 
 /**
- * Whether this computer's workspace secret key still needs a passphrase on the
- * server before other computers can open its protected files. Undefined while
- * this computer has no key.
+ * What this computer's protected files wait for. "locked": History holds
+ * protected files and this computer has no key. "need-passphrase": this
+ * computer has the key and the server has no passphrase-wrapped copy, so other
+ * computers can't open them. Null when neither. Undefined while this computer
+ * has neither a key nor protected files.
  */
-export async function keyNeedsPassphrase(
+export async function readProtectedFilesNeed(
   rootPath: string,
+  secretState: () => Promise<WorkspaceSecretState>,
   transport: Pick<EngineRelayWorkspaceClient, "downloadKeyEnvelope">,
-): Promise<boolean | undefined> {
-  if (!existsSync(join(resolve(rootPath), SECRET_KEY_RELATIVE_PATH))) return undefined;
+): Promise<"locked" | "need-passphrase" | null | undefined> {
+  if (!existsSync(join(resolve(rootPath), SECRET_KEY_RELATIVE_PATH)))
+    return (await secretState()) === "protected-key-missing" ? "locked" : undefined;
   try {
     await transport.downloadKeyEnvelope();
-    return false;
+    return null;
   } catch (error) {
-    if (error instanceof RelayKeyEnvelopeMissingError) return true;
+    if (error instanceof RelayKeyEnvelopeMissingError) return "need-passphrase";
     throw error;
   }
 }

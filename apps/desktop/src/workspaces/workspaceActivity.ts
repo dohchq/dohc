@@ -63,7 +63,7 @@ interface WatchedWorkspace {
   // Why protected files wait on the workspace secret key, or null.
   secretKeyUnavailable: string | null;
   protectedFiles: NonNullable<SyncStatusResult["protectedFiles"]> | null;
-  protectedFilesPassphraseChecked: boolean;
+  protectedFilesChecked: boolean;
   outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
   outsideWriteCopyReadError: string | null | undefined;
   protectedCopies: readonly (readonly [string, string, number])[] | null;
@@ -472,7 +472,7 @@ export function createWorkspaceActivity(
         recoveryUnavailable: false,
         secretKeyUnavailable: null,
         protectedFiles: null,
-        protectedFilesPassphraseChecked: false,
+        protectedFilesChecked: false,
         outsideWriteCopies: null,
         outsideWriteCopyReadError: undefined,
         protectedCopies: null,
@@ -768,27 +768,24 @@ export function createWorkspaceActivity(
     }
   }
 
-  async function checkProtectedFilesPassphrase(
+  async function checkProtectedFiles(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
-    needsPassphrase: () => Promise<boolean | undefined>,
+    read: () => Promise<WatchedWorkspace["protectedFiles"] | undefined>,
   ): Promise<boolean> {
     const entry = state.entry;
-    if (!entry || entry.protectedFilesPassphraseChecked) return false;
-    let needed: boolean | undefined;
+    if (!entry || entry.protectedFilesChecked) return false;
+    let found: WatchedWorkspace["protectedFiles"] | undefined;
     try {
-      needed = await needsPassphrase();
+      found = await read();
     } catch (error) {
-      console.error(
-        `[desktop] protected files passphrase check failed for ${workspace.workspaceId}:`,
-        error,
-      );
+      console.error(`[desktop] protected files check failed for ${workspace.workspaceId}:`, error);
       return false;
     }
-    if (needed === undefined || state.entry !== entry) return false;
-    entry.protectedFilesPassphraseChecked = true;
-    if (!needed || entry.protectedFiles === "need-passphrase") return false;
-    entry.protectedFiles = "need-passphrase";
+    if (found === undefined || state.entry !== entry) return false;
+    entry.protectedFilesChecked = true;
+    if (found === null || entry.protectedFiles === found) return false;
+    entry.protectedFiles = found;
     notify({ workspaceId: workspace.workspaceId });
     return true;
   }
@@ -800,10 +797,10 @@ export function createWorkspaceActivity(
     const entry = state.entry;
     if (!entry) return;
     const wasLocked = entry.protectedFiles === "locked";
-    if (wasLocked) await entry.capture?.restoreLockedProtectedFiles();
+    await entry.capture?.restoreLockedProtectedFiles();
     if (state.entry !== entry) return;
     entry.protectedFiles = null;
-    entry.protectedFilesPassphraseChecked = false;
+    entry.protectedFilesChecked = false;
     notify({ workspaceId: workspace.workspaceId });
     if (wasLocked) void retryCloudSync(state, "person").catch(() => undefined);
   }
@@ -1279,7 +1276,7 @@ export function createWorkspaceActivity(
     recordSyncPauseReopenFailed,
     readCollectionsWaiting,
     syncPassEnded,
-    checkProtectedFilesPassphrase,
+    checkProtectedFiles,
     protectedFilesUnlocked,
     reconcileCloud,
     stopEngine,

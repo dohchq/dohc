@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { NO_PASSPHRASE_YET } from "@dohc/security-contract/secret-passphrase";
@@ -15,13 +15,23 @@ import {
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { createTestScratch } from "./testTemp";
 import { installWorkspaceDataKey } from "./workspaceDataKey";
-import { enrollWorkspaceKeyEnvelope, keyNeedsPassphrase } from "./workspaceKeyEnvelopeEnrollment";
+import {
+  enrollWorkspaceKeyEnvelope,
+  readProtectedFilesNeed,
+} from "./workspaceKeyEnvelopeEnrollment";
 import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
 } from "./workspaceSecretEnrollmentState";
 
 const PASSPHRASE = "unlock after join passphrase";
+
+const protectedFilesNeed = (daemon: LiveDaemonCapture) =>
+  readProtectedFilesNeed(
+    daemon.workspace.rootPath,
+    () => readWorkspaceSecretState(daemon.workspace, daemon.sessions),
+    daemon.relay,
+  );
 
 async function enrollLikeSettings(daemon: LiveDaemonCapture, passphrase?: string): Promise<void> {
   await enrollWorkspaceKeyEnvelope({
@@ -56,7 +66,7 @@ it.skipIf(engine.missing)(
       await owner.chats.ensureGeneralChannel({ workspaceId });
       await writeAndCapture(owner, rootA, "notes.md", "before secrets\n");
       expect((await pushUntilDrained(owner.relay)).pushed).toBeGreaterThan(0);
-      expect(await keyNeedsPassphrase(rootA, owner.relay)).toBeUndefined();
+      expect(await protectedFilesNeed(owner)).toBeUndefined();
 
       other = await openJoinedDaemonCapture({
         workspaceId,
@@ -67,11 +77,12 @@ it.skipIf(engine.missing)(
       await pullAndExpect(other, rootB, "notes.md", "before secrets\n");
 
       await writeAndCapture(owner, rootA, ".env", "TOKEN=after-join\n");
+      await writeAndCapture(owner, rootA, ".env.local", "TOKEN=owner-local\n");
       await writeAndCapture(owner, rootA, "notes.md", "after secrets\n");
       expect(await readWorkspaceSecretState(owner.workspace, owner.sessions)).toBe(
         "protected-key-present",
       );
-      expect(await keyNeedsPassphrase(rootA, owner.relay)).toBe(true);
+      expect(await protectedFilesNeed(owner)).toBe("need-passphrase");
       expect((await pushUntilDrained(owner.relay)).pushed).toBeGreaterThan(0);
 
       await pullAndExpect(other, rootB, "notes.md", "after secrets\n");
@@ -82,12 +93,13 @@ it.skipIf(engine.missing)(
       expect(await readWorkspaceSecretState(other.workspace, other.sessions)).toBe(
         "protected-key-missing",
       );
-      expect(await keyNeedsPassphrase(rootB, other.relay)).toBeUndefined();
+      expect(await protectedFilesNeed(other)).toBe("locked");
+      await writeFile(join(rootB, ".env.local"), "TOKEN=made-while-locked\n");
 
       await expect(enrollLikeSettings(other, PASSPHRASE)).rejects.toThrow(NO_PASSPHRASE_YET);
 
       await enrollLikeSettings(owner, PASSPHRASE);
-      expect(await keyNeedsPassphrase(rootA, owner.relay)).toBe(false);
+      expect(await protectedFilesNeed(owner)).toBeNull();
       await expect(enrollLikeSettings(other, "not the passphrase")).rejects.toThrow(
         /Passphrase could not unlock/u,
       );
@@ -96,8 +108,10 @@ it.skipIf(engine.missing)(
         "protected-key-present",
       );
 
+      expect(await protectedFilesNeed(other)).toBeNull();
       await other.capture.restoreLockedProtectedFiles();
       expect(await readFile(join(rootB, ".env"), "utf8")).toBe("TOKEN=after-join\n");
+      expect(await readFile(join(rootB, ".env.local"), "utf8")).toBe("TOKEN=made-while-locked\n");
       expect(lockedReports.at(-1)).toBe(false);
 
       await writeAndCapture(owner, rootA, ".env", "TOKEN=after-unlock\n");

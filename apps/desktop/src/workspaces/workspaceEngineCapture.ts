@@ -4961,15 +4961,16 @@ export function createWorkspaceEngineCapture(
   // its way to the workspace folder, and every write/delete registers an
   // expected engine event. A pre-existing non-text/unreadable file at a
   // secret path is never clobbered (same never-clobber rule as text).
-  async function secretKeyFileExists(): Promise<boolean> {
+  async function presentOnDisk(path: string): Promise<boolean> {
     try {
-      await lstat(join(rootPath, SECRET_KEY_RELATIVE_PATH));
+      await lstat(join(rootPath, path));
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
   }
+  const secretKeyFileExists = () => presentOnDisk(SECRET_KEY_RELATIVE_PATH);
 
   async function planSecretMaterialization(
     targetVersionId: string,
@@ -10859,13 +10860,15 @@ export function createWorkspaceEngineCapture(
 
     restoreLockedProtectedFiles() {
       return enqueueResult("restore locked protected files", async () => {
+        if (!(await secretKeyFileExists())) return;
         const engine = await engineStore();
         const policy = await readPolicyForTask();
         const activeVersionId = await activeVersionIdOf(engine);
-        await materialize(
-          await planSecretMaterialization(activeVersionId, activeVersionId),
-          policy,
-        );
+        const absent: MaterializeOperation[] = [];
+        for (const operation of await planSecretMaterialization(activeVersionId, activeVersionId))
+          if (operation.kind === "write" && !(await presentOnDisk(operation.path)))
+            absent.push(operation);
+        await materialize(absent, policy);
         await engine.reconcileCapture?.();
         options.onProtectedFilesLocked?.(false);
       });
