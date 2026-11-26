@@ -55,7 +55,11 @@ async function collectFiles(dir: string): Promise<string[]> {
 async function assertNotInWorkspaceFolder(rootPath: string, needles: readonly string[]) {
   const files = await collectFiles(rootPath);
   for (const file of files) {
-    const bytes = await readFile(file);
+    const bytes = await readFile(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (bytes === null) continue;
     for (const needle of needles) {
       expect(bytes.includes(Buffer.from(needle, "utf8")), `${file} must not contain secret`).toBe(
         false,
