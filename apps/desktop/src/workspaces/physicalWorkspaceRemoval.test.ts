@@ -8,7 +8,7 @@ import { createWorkspaceTrust } from "./workspaceTrust";
 
 function harness(
   registeredInitially = true,
-  confirmDraftRemoval?: (workspaceId: string) => Promise<boolean>,
+  confirmRemoval?: (workspaceId: string) => Promise<boolean>,
 ) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace",
@@ -35,7 +35,7 @@ function harness(
     removeWorkspace,
     removeDrafts,
     onError,
-    confirmDraftRemoval,
+    confirmRemoval,
   });
   const files = new Map<string, string>();
   const writeText = vi.fn(async (file: string, text: string) => {

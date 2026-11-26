@@ -16,6 +16,7 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import {
   computeHttpStepApprovalDigest,
+  httpStepSecretNames,
   httpStepSecretProblem,
   workspaceSecretApprovalBindings,
 } from "@dohc/workspace-contracts/http-step-approvals";
@@ -2199,6 +2200,26 @@ export class CollectionAutomations {
   /** Whether any Collection has an automation dohc can run, switched on or not. */
   hasAutomations(): boolean {
     return this.everyAutomation().length > 0;
+  }
+
+  /** The automations whose webhook steps name each workspace secret, or null until this executor has opened. */
+  secretUses(): Map<string, Array<{ collectionPath: string; automationName: string }>> | null {
+    if (this.state !== "open") return null;
+    const uses = new Map<string, Array<{ collectionPath: string; automationName: string }>>();
+    for (const { collectionPath, automation } of this.everyAutomation()) {
+      const names = new Set(
+        stepsInOrder(automation).flatMap(({ step }) =>
+          step.kind === "http" ? httpStepSecretNames(step) : [],
+        ),
+      );
+      for (const name of names) {
+        uses.set(name, [
+          ...(uses.get(name) ?? []),
+          { collectionPath, automationName: automation.name },
+        ]);
+      }
+    }
+    return uses;
   }
 
   /** The automations in one Collection's file, with why each can or cannot run. */

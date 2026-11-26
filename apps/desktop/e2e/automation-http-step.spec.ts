@@ -1,4 +1,3 @@
-import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -173,8 +172,6 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
       )
       .toBe(200);
 
-    await addHeaderSecret(page, "RESEND_API_KEY", "api.resend.com", headerSecretValue);
-
     const panel = await openTasksAutomations(page);
     await panel.getByRole("button", { name: "New automation" }).click();
     await panel.getByLabel("Name").fill("Notify on new task");
@@ -185,10 +182,22 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
     await panel.getByRole("button", { name: "Add header", exact: true }).click();
     await panel.getByLabel("Step 2, header 1 name", { exact: true }).fill("X-Source");
     await panel.getByLabel("Step 2, header 1 value", { exact: true }).fill("dohc");
-    await panel.getByRole("button", { name: "Add secret header", exact: true }).click();
+    await panel.getByRole("button", { name: "Add API key header", exact: true }).click();
+    await expect(panel.getByLabel("Step 2, secret header 1 secret", { exact: true })).toHaveValue(
+      "",
+    );
+    await panel.getByRole("button", { name: "New API key", exact: true }).click();
+    const editor = page.getByTestId("workspace-secret-editor-dialog");
+    await expect(editor.getByTestId("workspace-secret-hosts-input")).toHaveValue("api.resend.com");
+    await editor.getByTestId("workspace-secret-name-input").fill("RESEND_API_KEY");
+    await editor.getByTestId("workspace-secret-value-input").fill(headerSecretValue);
+    await shoot(page, editor, "secrets-add-from-builder");
+    await editor.getByTestId("workspace-secret-save").click();
+    await expect(editor).toHaveCount(0);
     await expect(panel.getByLabel("Step 2, secret header 1 secret", { exact: true })).toHaveValue(
       "RESEND_API_KEY",
     );
+    await expect(panel.getByLabel("Name")).toHaveValue("Notify on new task");
     await panel.getByLabel("Step 2, body type", { exact: true }).selectOption("json");
     await shoot(page, panel, "pr2-http-builder");
 

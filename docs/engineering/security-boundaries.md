@@ -440,7 +440,9 @@ Storage follows the workspace's sync mode:
   storage keeps values out of workspace files and API responses; it does not defend
   against arbitrary code running as the same OS user, and it does not detect a rollback to
   an older copy of a vault or approval file. Turning on sync later does not copy local
-  secrets to the server; the owner enters them on the server directly. Pausing sync on a
+  secrets to the server; the owner enters them on the server directly, and Settings offers
+  to delete the copies left on this computer. Removing or forgetting a workspace deletes
+  its vault and approval file after the owner confirms. Pausing sync on a
   synced workspace keeps its server binding and refuses secret reads or changes until sync
   resumes instead of switching to local keychain storage.
 - **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
@@ -472,6 +474,12 @@ approval. Each run reads approvals and secrets together before it sends. Just be
 sending, the relay rereads every secret it loaded and refuses the request if one changed,
 and the desktop executor compares each secret it reads with the one the approval saw,
 checking a webhook link again after it looks up the link's address.
+
+An HTTP step runs only while nobody but the owner can edit its Collection, its
+automations file, or code it runs. A workspace member counts only when their access
+reaches Edit on one of those paths: members at the default Comment level or at View don't
+hold the step. See the
+[outbound webhook route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
 
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
 enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),

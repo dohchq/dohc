@@ -271,7 +271,9 @@ describe("localWorkspaceSecretStore", () => {
     await expect(store.list("ws-1")).rejects.toBeInstanceOf(WorkspaceSecretVaultOutdatedError);
     expect(await store.readSecretForExecution("ws-1", "API_TOKEN")).toBeNull();
 
+    expect(await store.hasSaved("ws-1")).toBe(true);
     await store.clearWorkspace("ws-1");
+    expect(await store.hasSaved("ws-1")).toBe(false);
     expect(await store.list("ws-1")).toEqual([]);
     expect(await store.list("ws-2")).toHaveLength(1);
   });

@@ -7,6 +7,7 @@ import {
   type WorkspaceSecretsState,
   type WorkspaceSecretSummary,
   type WorkspaceSecretUsage,
+  type WorkspaceSecretUse,
   type WorkspaceSecretWriteInput,
 } from "@dohc/workspace-contracts/workspace-secrets";
 import { KeyRound, Laptop, Plus, Server, ShieldAlert, Trash2 } from "lucide-react";
@@ -33,7 +34,34 @@ import { SettingRow, SettingsSection } from "./SettingRow";
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
-type EditorMode = { kind: "add" } | { kind: "replace"; secret: WorkspaceSecretSummary };
+export type SecretDraft = { name: string; usage: WorkspaceSecretUsage; hosts: string[] };
+
+type EditorMode =
+  | { kind: "add"; draft?: SecretDraft }
+  | { kind: "replace"; secret: WorkspaceSecretSummary };
+
+export const secretUsageLabel = (usage: WorkspaceSecretUsage) =>
+  usage === "http-header" ? "API key" : "Webhook link";
+
+function SecretUses(props: { uses: readonly WorkspaceSecretUse[] | undefined }) {
+  if (props.uses === undefined) return null;
+  if (props.uses.length === 0) {
+    return <p className="m-0 text-[13px] text-muted">No automations use this secret.</p>;
+  }
+  return (
+    <div data-testid="workspace-secret-uses" className="flex flex-col gap-1 text-[13px]">
+      <span className="text-muted">Used by</span>
+      <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+        {props.uses.map((use) => (
+          <li key={`${use.collectionPath}\u0000${use.automationName}`} className="text-ink">
+            {use.automationName}
+            <span className="text-muted">{` in ${use.collectionPath}`}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 type FieldErrors = {
   name?: string;
@@ -46,9 +74,9 @@ function parseHostList(raw: string): { hosts: string[]; error?: string } {
     .split(/[\s,]+/u)
     .map((part) => part.trim())
     .filter(Boolean);
-  if (parts.length === 0) return { hosts: [], error: "Add at least one allowed host." };
+  if (parts.length === 0) return { hosts: [], error: "Add at least one allowed website." };
   if (parts.length > MAX_SECRET_ALLOWED_HOSTS) {
-    return { hosts: [], error: `Enter at most ${MAX_SECRET_ALLOWED_HOSTS} hosts.` };
+    return { hosts: [], error: `Enter at most ${MAX_SECRET_ALLOWED_HOSTS} websites.` };
   }
   const normalized: string[] = [];
   const seen = new Set<string>();
@@ -57,7 +85,7 @@ function parseHostList(raw: string): { hosts: string[]; error?: string } {
     if (host === null) {
       return {
         hosts: [],
-        error: `"${part}" is not a valid public hostname. Use a host like api.resend.com.`,
+        error: `"${part}" is not a public website. Enter one like api.resend.com.`,
       };
     }
     if (!seen.has(host)) {
@@ -68,20 +96,24 @@ function parseHostList(raw: string): { hosts: string[]; error?: string } {
   return { hosts: normalized.sort() };
 }
 
-function SecretEditorDialog(props: {
+export function SecretEditorDialog(props: {
   mode: EditorMode;
   storage: "local" | "server";
   existingNames: ReadonlySet<string>;
+  uses?: readonly WorkspaceSecretUse[];
   onCancel: () => void;
   onSave: (secret: WorkspaceSecretWriteInput) => Promise<void>;
 }) {
   const existing = props.mode.kind === "replace" ? props.mode.secret : null;
+  const draft = props.mode.kind === "add" ? props.mode.draft : undefined;
   const isReplace = existing !== null;
-  const [name, setName] = useState(existing ? existing.name : "");
+  const [name, setName] = useState(existing?.name ?? draft?.name ?? "");
   const [usage, setUsage] = useState<WorkspaceSecretUsage>(
-    existing ? existing.usage : "http-header",
+    existing?.usage ?? draft?.usage ?? "http-header",
   );
-  const [hostsText, setHostsText] = useState(existing ? existing.allowedHosts.join(", ") : "");
+  const [hostsText, setHostsText] = useState(
+    (existing?.allowedHosts ?? draft?.hosts ?? []).join(", "),
+  );
   const [value, setValue] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -93,7 +125,7 @@ function SecretEditorDialog(props: {
   const nameRef = useRef<HTMLInputElement>(null);
   const valueRef = useRef<HTMLInputElement>(null);
 
-  useOpeningFocus(() => (isReplace ? valueRef.current : nameRef.current));
+  useOpeningFocus(() => (isReplace || draft?.name ? valueRef.current : nameRef.current));
 
   useEffect(
     () => () => {
@@ -118,12 +150,12 @@ function SecretEditorDialog(props: {
     if (!raw) return "Enter a secret value.";
     if (nextUsage === "http-header") {
       if (!validateSecretHeaderValue(raw)) {
-        return "Header secrets must be printable ASCII up to 4,096 bytes with no line breaks or tabs.";
+        return "An API key can use only plain letters, numbers, and symbols, up to 4,096 characters, with no line breaks or tabs.";
       }
       return undefined;
     }
     if (validateSecretHttpUrl(raw) === null) {
-      return "Enter a public HTTPS URL (port 443, no IP address or local host).";
+      return "Enter a public https:// link (port 443, no IP address or local host).";
     }
     return undefined;
   };
@@ -189,6 +221,8 @@ function SecretEditorDialog(props: {
           </p>
         </div>
 
+        {isReplace ? <SecretUses uses={props.uses} /> : null}
+
         <form
           className="flex flex-col gap-4"
           onSubmit={(event) => {
@@ -242,8 +276,8 @@ function SecretEditorDialog(props: {
               value={usage}
               disabled={saving}
               options={[
-                { value: "http-header", label: "HTTP header" },
-                { value: "http-url", label: "Webhook URL" },
+                { value: "http-header", label: secretUsageLabel("http-header") },
+                { value: "http-url", label: secretUsageLabel("http-url") },
               ]}
               onChange={(nextUsage) => {
                 setUsage(nextUsage);
@@ -255,7 +289,7 @@ function SecretEditorDialog(props: {
           {usage === "http-header" ? (
             <div className="flex flex-col gap-1">
               <label htmlFor={`${id}-hosts`} className="text-[12px] font-medium text-muted">
-                Allowed hosts
+                Allowed websites
               </label>
               <input
                 id={`${id}-hosts`}
@@ -266,7 +300,7 @@ function SecretEditorDialog(props: {
                 value={hostsText}
                 placeholder="api.resend.com"
                 aria-invalid={fieldErrors.hosts ? true : undefined}
-                aria-describedby={fieldErrors.hosts ? `${id}-hosts-error` : undefined}
+                aria-describedby={fieldErrors.hosts ? `${id}-hosts-error` : `${id}-hosts-help`}
                 data-testid="workspace-secret-hosts-input"
                 onChange={(event) => {
                   setHostsText(event.target.value);
@@ -287,13 +321,17 @@ function SecretEditorDialog(props: {
                 <FieldError id={`${id}-hosts-error`} testId="workspace-secret-hosts-error">
                   {fieldErrors.hosts}
                 </FieldError>
-              ) : null}
+              ) : (
+                <p id={`${id}-hosts-help`} className="m-0 text-[12px] text-subtle">
+                  Automations send this key only to these websites.
+                </p>
+              )}
             </div>
           ) : null}
 
           <div className="flex flex-col gap-1">
             <label htmlFor={`${id}-value`} className="text-[12px] font-medium text-muted">
-              {usage === "http-url" ? "Webhook URL" : "Secret value"}
+              {secretUsageLabel(usage)}
             </label>
             <input
               ref={valueRef}
@@ -496,6 +534,35 @@ export function WorkspaceSecretsSettings(props: {
     );
   }
 
+  function clearDialog(synced: boolean) {
+    return (
+      <ConfirmDialog
+        title={
+          synced
+            ? "Delete the secrets saved on this computer?"
+            : "Delete this workspace's saved secrets?"
+        }
+        icon={Trash2}
+        intent="danger"
+        confirmLabel={deletingBusy ? "Deleting…" : "Delete saved secrets"}
+        confirmDisabled={deletingBusy}
+        testId="workspace-secrets-confirm-clear-local"
+        cancelTestId="workspace-secrets-cancel-clear-local"
+        confirmTestId="workspace-secrets-confirm-clear-local-action"
+        onCancel={() => {
+          if (!deletingBusy) setConfirmingClear(false);
+        }}
+        onConfirm={() => void handleClearLocal()}
+      >
+        <p className="m-0">
+          {synced
+            ? "dohc deletes the secrets this workspace saved on this computer before it synced. The secrets on your server stay. This cannot be undone."
+            : "dohc deletes every secret this workspace saved on this computer. Automations that use them stop until you add them again. This cannot be undone."}
+        </p>
+      </ConfirmDialog>
+    );
+  }
+
   if (state.kind === "unavailable") {
     return (
       <SettingsSection>
@@ -519,27 +586,7 @@ export function WorkspaceSecretsSettings(props: {
             ) : null}
           </EmptyState>
         </div>
-        {confirmingClear ? (
-          <ConfirmDialog
-            title="Delete this workspace's saved secrets?"
-            icon={Trash2}
-            intent="danger"
-            confirmLabel={deletingBusy ? "Deleting…" : "Delete saved secrets"}
-            confirmDisabled={deletingBusy}
-            testId="workspace-secrets-confirm-clear-local"
-            cancelTestId="workspace-secrets-cancel-clear-local"
-            confirmTestId="workspace-secrets-confirm-clear-local-action"
-            onCancel={() => {
-              if (!deletingBusy) setConfirmingClear(false);
-            }}
-            onConfirm={() => void handleClearLocal()}
-          >
-            <p className="m-0">
-              dohc deletes every secret this workspace saved on this computer. Automations that use
-              them stop until you add them again. This cannot be undone.
-            </p>
-          </ConfirmDialog>
-        ) : null}
+        {confirmingClear ? clearDialog(false) : null}
       </SettingsSection>
     );
   }
@@ -548,9 +595,14 @@ export function WorkspaceSecretsSettings(props: {
   const storageLabel =
     state.storage === "server" ? "Sealed on your sync server" : "Sealed on this computer";
   const atLimit = state.secrets.length >= state.limit;
+  const usesOf = (name: string) => (state.uses ? (state.uses[name] ?? []) : undefined);
 
   return (
     <div data-testid="workspace-secrets-panel" className="flex flex-col gap-6">
+      <p className="m-0 text-[13px] text-muted">
+        Secrets keep API keys and private webhook links out of your automation files. Automations
+        send each one only where you allow, and nobody can read it back after you save it.
+      </p>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[12px] text-muted">
           <StorageIcon size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
@@ -591,11 +643,11 @@ export function WorkspaceSecretsSettings(props: {
               key={secret.name}
               testId={`workspace-secret-row-${secret.name}`}
               title={secret.name}
-              detail={<Pill>{secret.usage === "http-header" ? "HTTP header" : "Webhook URL"}</Pill>}
+              detail={<Pill>{secretUsageLabel(secret.usage)}</Pill>}
               description={
                 secret.usage === "http-header"
-                  ? `${secret.allowedHosts.join(", ")} · Updated ${dayFormat.format(secret.updatedAtMs)}`
-                  : `Hidden HTTPS URL · Updated ${dayFormat.format(secret.updatedAtMs)}`
+                  ? `Sent only to ${secret.allowedHosts.join(", ")} · Updated ${dayFormat.format(secret.updatedAtMs)}`
+                  : `Hidden webhook link · Updated ${dayFormat.format(secret.updatedAtMs)}`
               }
             >
               <SecondaryButton
@@ -618,11 +670,32 @@ export function WorkspaceSecretsSettings(props: {
         </SettingsSection>
       )}
 
+      {state.localCopies ? (
+        <SettingsSection>
+          <SettingRow
+            testId="workspace-secrets-local-copies"
+            title="Secrets from before sync"
+            description="This computer still has secrets this workspace saved before it synced. Automations now use the secrets on your server."
+          >
+            <SecondaryButton
+              size="compact"
+              data-testid="workspace-secrets-clear-local"
+              onClick={() => setConfirmingClear(true)}
+            >
+              Delete copies on this computer
+            </SecondaryButton>
+          </SettingRow>
+        </SettingsSection>
+      ) : null}
+
+      {confirmingClear ? clearDialog(true) : null}
+
       {editorMode ? (
         <SecretEditorDialog
           mode={editorMode}
           storage={state.storage}
           existingNames={new Set(state.secrets.map((secret) => secret.name))}
+          uses={editorMode.kind === "replace" ? usesOf(editorMode.secret.name) : undefined}
           onCancel={() => setEditorMode(null)}
           onSave={handleSave}
         />
@@ -643,9 +716,12 @@ export function WorkspaceSecretsSettings(props: {
           }}
           onConfirm={() => void handleDelete(deletingSecret)}
         >
-          <p className="m-0">
-            Automations using this secret will stop until you add it again. This cannot be undone.
-          </p>
+          <div className="flex flex-col gap-3">
+            <SecretUses uses={usesOf(deletingSecret)} />
+            <p className="m-0">
+              Automations that use this secret stop until you add it again. This cannot be undone.
+            </p>
+          </div>
         </ConfirmDialog>
       ) : null}
     </div>

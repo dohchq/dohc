@@ -1332,8 +1332,16 @@ automations:
       nowMs: () => 1_000,
     });
     try {
+      expect(executor.secretUses()).toBeNull();
       await executor.open();
       await executor.automationsIn("Tasks");
+      const sendWebhook = [{ collectionPath: "Tasks", automationName: "Send webhook" }];
+      expect(executor.secretUses()).toEqual(
+        new Map([
+          ["API_TOKEN", sendWebhook],
+          ["SLACK_HOOK", sendWebhook],
+        ]),
+      );
       const initialHold = executor.holds()[0];
       expect(initialHold).toBeDefined();
       expect(

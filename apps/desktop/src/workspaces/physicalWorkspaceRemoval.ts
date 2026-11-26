@@ -15,7 +15,7 @@ export function createPhysicalWorkspaceRemoval<
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
-  confirmDraftRemoval?(workspaceId: string): Promise<boolean>;
+  confirmRemoval?(workspaceId: string): Promise<boolean>;
   onError(workspaceId: string, error: unknown): void;
 }) {
   return async function removePhysicalWorkspace(
@@ -29,8 +29,8 @@ export function createPhysicalWorkspaceRemoval<
   ): Promise<boolean> {
     if (
       !keepDrafts &&
-      dependencies.confirmDraftRemoval &&
-      !(await dependencies.confirmDraftRemoval(binding.workspaceId))
+      dependencies.confirmRemoval &&
+      !(await dependencies.confirmRemoval(binding.workspaceId))
     )
       return false;
     await confirmed();

@@ -3244,8 +3244,20 @@ function registerReservedPhysicalWorkspace(
   return binding;
 }
 
+async function deleteLocalWorkspaceSecrets(workspaceId: string): Promise<void> {
+  await localWorkspaceSecrets().clearWorkspace(workspaceId);
+  await localHttpApprovals().clearWorkspace(workspaceId);
+}
+
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
-  retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
+  retireBinding: (binding, retirement) =>
+    workspaceAuthorities.retireBinding(binding, {
+      ...retirement,
+      finalize: async () => {
+        await retirement.finalize?.();
+        await deleteLocalWorkspaceSecrets(binding.workspaceId);
+      },
+    }),
   findWorkspace,
   removeWorkspace: (workspaceId) => {
     removeWorkspace(workspaceId);
@@ -3257,16 +3269,20 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     forwardProblems.delete(workspaceId);
     chatDispatchNotices.clear(workspaceId, "forward-stuck");
   },
-  confirmDraftRemoval: async (workspaceId) => {
+  confirmRemoval: async (workspaceId) => {
     await flushTypingCheckpoints(workspaceId);
-    if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId)))
-      return true;
+    const drafts = await hasWorkspaceLiveDrafts(
+      join(stateDir(), "live-draft-recovery"),
+      workspaceId,
+    );
+    const secrets = await localWorkspaceSecrets().hasSaved(workspaceId);
+    if (!drafts && !secrets) return true;
     const answer = await showMessageBox({
       type: "warning",
       title: "Remove this workspace from the list?",
-      message: "This workspace has typing waiting to recover.",
+      message: `This workspace has ${[drafts && "typing waiting to recover", secrets && "secrets saved on this computer"].filter(Boolean).join(" and ")}.`,
       detail:
-        "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
+        "Removing it deletes them from this computer. The folder stays. This cannot be undone.",
       buttons: ["Remove from list", "Cancel"],
       defaultId: 1,
       cancelId: 1,
@@ -6177,14 +6193,27 @@ async function workspaceSecretsState(
   workspaceId: string,
   mutation?: WorkspaceSecretsMutation,
 ): Promise<WorkspaceSecretsState> {
+  const state = await readWorkspaceSecrets(workspaceId, mutation);
+  if (state.kind !== "ready") return state;
+  const uses = collectionAutomationsOf(workspaceId)?.secretUses();
+  const localCopies =
+    state.storage === "server" && (await localWorkspaceSecrets().hasSaved(workspaceId));
+  return {
+    ...state,
+    ...(uses ? { uses: Object.fromEntries(uses) } : {}),
+    ...(localCopies ? { localCopies: true as const } : {}),
+  };
+}
+
+async function readWorkspaceSecrets(
+  workspaceId: string,
+  mutation?: WorkspaceSecretsMutation,
+): Promise<WorkspaceSecretsState> {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return { kind: "none" };
   if (mutation?.kind === "clear-local") {
-    if (entry.remote !== undefined || entry.pausedRemote !== undefined) {
-      throw new Error("This workspace keeps its secrets on your server, not on this computer.");
-    }
     await localWorkspaceSecrets().clearWorkspace(workspaceId);
-    return workspaceSecretsState(workspaceId);
+    return readWorkspaceSecrets(workspaceId);
   }
   if (entry.remote === undefined && entry.pausedRemote !== undefined) {
     const message =
