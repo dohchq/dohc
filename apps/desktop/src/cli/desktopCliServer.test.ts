@@ -185,10 +185,7 @@ function fixture(
       replacedProtectedPaths: [],
       skippedProtectedPaths: [".env"],
     })),
-    setVersionArchived: vi.fn<Capture["setVersionArchived"]>(async () => ({
-      versions: [],
-      activeVersionId: "main",
-    })),
+    setVersionArchived: vi.fn<Capture["setVersionArchived"]>(async () => undefined),
     resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(

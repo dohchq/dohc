@@ -5907,7 +5907,7 @@ mod tests {
             ),
             (
                 "v2-merge-bases-bidirectional",
-                "7cc764f8131c44ef35acfbc95258f58a23f6e353a2acfda3c14c39d3c04b9f98",
+                "6a9dea0fc40cb82eb20626b393bb8c13b7d505cdb6cf6b6286134e14f00e7ffd",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6028,11 +6028,16 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(archived, [None, None]);
-        let merged_into: String = conn
-            .query_row("SELECT merged_into FROM merge_bases", [], |row| row.get(0))
+        let (merged_into, merge_seq): (String, i64) = conn
+            .query_row(
+                "SELECT merged_into, merge_seq FROM merge_bases",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!(
-            merged_into, "main",
+            (merged_into.as_str(), merge_seq),
+            ("main", 1),
             "a merge recorded before was a merge into Main"
         );
         assert!(
@@ -6040,7 +6045,20 @@ mod tests {
                 .is_err()
         );
         conn.execute(
-            "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists,merged_into)              VALUES ('ws','feat','.env',0,0,'named')",
+            "INSERT INTO merge_bases(workspace_id,source_version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','a.md',0,0,'named',2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','.env',0,0,'named',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secret_merge_bases(workspace_id,version_id,path,base_exists,prior_exists,merged_into,merge_seq) \
+             VALUES ('ws','feat','.env',0,0,'main',2)",
             [],
         )
         .unwrap();

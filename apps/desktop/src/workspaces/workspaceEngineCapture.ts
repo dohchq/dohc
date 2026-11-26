@@ -782,7 +782,7 @@ export interface WorkspaceEngineCapture {
   mergeVersionIntoMain(sourceVersionId: string): Promise<WorkspaceVersionMergeResult>;
   // Brings Main's changes into a named version made from Main, the same way.
   updateVersionFromMain(versionId: string): Promise<WorkspaceVersionMergeResult>;
-  setVersionArchived(versionId: string, archived: boolean): Promise<WorkspaceVersionsSnapshot>;
+  setVersionArchived(versionId: string, archived: boolean): Promise<void>;
   // One page of open conflicts; pass the previous page's nextAfterConflictId
   // to continue.
   listOpenConflictsPage(afterConflictId?: string): Promise<WorkspaceVersionConflictPage>;
@@ -5101,9 +5101,12 @@ export function createWorkspaceEngineCapture(
       const mergeOrder = [...respelled, ...ordered];
       // Re-running the merge resumes: a path that already has an open
       // conflict for this version pair re-surfaces that conflict instead of
-      // recording a duplicate. Only the paths are retained from the walk.
+      // recording a duplicate. Any other unresolved conflict involving either
+      // participant blocks until decided so open conflicts on Main or the
+      // version never leak into another merge's resolution list.
       const openConflictPaths = new Set<string>();
       let openOtherWay = false;
+      let openBlockingConflict = false;
       {
         let afterConflictId: string | undefined;
         do {
@@ -5121,12 +5124,22 @@ export function createWorkspaceEngineCapture(
               conflict.targetVersionId === targetVersionId
             ) {
               openConflictPaths.add(conflict.path);
+              continue;
             }
             if (
               conflict.sourceVersionId === targetVersionId &&
               conflict.targetVersionId === sourceVersionId
             ) {
               openOtherWay = true;
+              continue;
+            }
+            if (
+              conflict.sourceVersionId === sourceVersionId ||
+              conflict.targetVersionId === sourceVersionId ||
+              conflict.sourceVersionId === targetVersionId ||
+              conflict.targetVersionId === targetVersionId
+            ) {
+              openBlockingConflict = true;
             }
           }
           afterConflictId = page.nextAfterConflictId ?? undefined;
@@ -5137,6 +5150,13 @@ export function createWorkspaceEngineCapture(
           intoMain
             ? `Decide the conflicts from updating "${named.name}" from Main before merging it.`
             : `Decide the conflicts from merging "${named.name}" into Main before updating it.`,
+        );
+      }
+      if (openBlockingConflict) {
+        throw new Error(
+          intoMain
+            ? `Decide the open conflicts before merging "${named.name}" into Main.`
+            : `Decide the open conflicts before updating "${named.name}" from Main.`,
         );
       }
       const materializations: MaterializeOperation[] = [];
@@ -5171,38 +5191,31 @@ export function createWorkspaceEngineCapture(
       // stays one protected moment back in history. Into a version, a
       // secret both sides changed stays as it was.
       const secrets = secretStoreFor();
-      const secretChanges: SecretFileComparePage["entries"] = [];
       const replacedProtectedPaths: string[] = [];
       const skippedProtectedPaths: string[] = [];
-      {
-        let secretAfterPath: string | undefined;
-        do {
-          const page = await secrets.compareSecretFileVersions({
-            workspaceId,
-            targetVersionId,
-            sourceVersionId,
-            ...(secretAfterPath !== undefined ? { afterPath: secretAfterPath } : {}),
-          });
-          secretChanges.push(...page.entries);
-          secretAfterPath = page.nextAfterPath ?? undefined;
-        } while (secretAfterPath !== undefined);
-      }
-      for (const change of secretChanges) {
+      const [sourceSecrets, targetSecrets] = await Promise.all([
+        secrets.listSecretFiles({ workspaceId, versionId: sourceVersionId }),
+        secrets.listSecretFiles({ workspaceId, versionId: targetVersionId }),
+      ]);
+      const secretPaths = [
+        ...new Set([...sourceSecrets.map((s) => s.path), ...targetSecrets.map((s) => s.path)]),
+      ].sort(compareEnginePaths);
+      for (const path of secretPaths) {
         const applied = await secrets.applySecretFileFromVersion({
           workspaceId,
           targetVersionId,
           sourceVersionId,
-          path: change.path,
+          path,
           metadata: {
             origin: "api",
             summary: intoMain
-              ? `Updated ${pathBasename(change.path)} from version "${named.name}"`
-              : `Updated ${pathBasename(change.path)} from Main`,
+              ? `Updated ${pathBasename(path)} from version "${named.name}"`
+              : `Updated ${pathBasename(path)} from Main`,
             correlationId,
           },
         });
         if (applied.diverged) {
-          skippedProtectedPaths.push(change.path);
+          skippedProtectedPaths.push(path);
           continue;
         }
         if (!applied.changed) {
@@ -5210,22 +5223,22 @@ export function createWorkspaceEngineCapture(
           continue;
         }
         mergedFileCount += 1;
-        replacedProtectedPaths.push(change.path);
+        replacedProtectedPaths.push(path);
         if (activeVersionId === targetVersionId) {
           const materialized = await secrets.materializeSecretFile({
             workspaceId,
             versionId: targetVersionId,
-            path: change.path,
+            path,
           });
           materializations.push(
             materialized.present
               ? {
                   kind: "write",
-                  path: change.path,
+                  path,
                   text: materialized.text,
                   protected: true,
                 }
-              : { kind: "delete", path: change.path, protected: true },
+              : { kind: "delete", path, protected: true },
           );
         }
       }
@@ -9437,7 +9450,6 @@ export function createWorkspaceEngineCapture(
           throw new Error("Switch to another version before archiving this one.");
         }
         await engine.setVersionArchived({ workspaceId, versionId, archived });
-        return versionsSnapshot(engine);
       });
     },
 

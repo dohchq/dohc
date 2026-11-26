@@ -1444,3 +1444,45 @@ fn updating_after_main_undid_a_secret_merge_keeps_the_version() {
         Some("A=feat\n")
     );
 }
+
+#[test]
+fn secret_apply_refuses_archived_versions_in_both_directions() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    forked_secret(&mut store, &key, "A=1\n");
+    write_version(&mut store, &key, "feat", ".env", "A=2\n", "sm-feat", 11);
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(500), &NO_FAULTS)
+        .unwrap();
+
+    for (from, to, id) in [("feat", "main", "sm-m"), ("main", "feat", "sm-u")] {
+        let err = apply_secret_file_from_version_with(
+            &mut store,
+            &key,
+            &ApplySecretFileFromVersion {
+                workspace_id: WS.to_owned(),
+                path: ".env".to_owned(),
+                from_version_id: from.to_owned(),
+                to_version_id: to.to_owned(),
+                moment_id: id.to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 600,
+            },
+            &|_, _, _, _| Ok(Preimage::Absent),
+            &NO_FAULTS,
+            |_, _| Ok(()),
+        )
+        .expect_err("archived version must be refused");
+        assert!(matches!(
+            err,
+            dohc_engine_domain::DomainError::InvalidInput {
+                reason: "version-archived"
+            }
+        ));
+    }
+}

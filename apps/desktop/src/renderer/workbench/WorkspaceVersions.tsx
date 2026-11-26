@@ -704,6 +704,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
           <VersionMergeDialog
             workspaceId={workspaceId}
             source={merge.source}
+            versions={snapshot?.versions}
             update={merge.update}
             runOnOpen={merge.runOnOpen}
             {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
@@ -911,6 +912,7 @@ type MergeStage =
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
+  versions?: readonly WorkspaceVersionRecord[];
   // Merges Main into the version instead.
   update?: boolean;
   // VersionMenu's contract: drain writes, hold the release across the IPC.
@@ -935,6 +937,10 @@ export function VersionMergeDialog(props: {
 }) {
   const { workspaceId, source } = props;
   const [from, into] = props.update ? ["Main", source.name] : [source.name, "Main"];
+  const versionNames = useMemo(
+    () => new Map((props.versions ?? []).map((version) => [version.id, version.name])),
+    [props.versions],
+  );
   const [stage, setStage] = useState<MergeStage>({
     stage: props.runOnOpen ? "running" : "confirm",
   });
@@ -1134,7 +1140,10 @@ export function VersionMergeDialog(props: {
               conflicts={stage.conflicts}
               hasMore={stage.nextAfterConflictId !== null}
               onLoadMore={loadMoreConflicts}
-              namesFor={() => [from, into]}
+              namesFor={(conflict) => [
+                versionNames.get(conflict.sourceVersionId) ?? from,
+                versionNames.get(conflict.targetVersionId) ?? into,
+              ]}
               onResolved={onResolved}
               onError={props.onConflictError}
             />

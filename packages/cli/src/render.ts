@@ -778,7 +778,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
           const parent = version.madeFromVersionId;
           const madeFrom =
             parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
-          return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+          const archived = version.archivedAtMs !== undefined ? " · archived" : "";
+          return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}${archived}`;
         })
         .join("\n");
     }

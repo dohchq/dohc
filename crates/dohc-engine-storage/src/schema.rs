@@ -285,7 +285,8 @@ const REQUIRED_TABLES: &[&str] = &[
 const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("live_audit_events", "restore_generation"),
     ("versions", "archived_at_ms"),
-    ("merge_bases", "merged_into"),
+    ("merge_bases", "merge_seq"),
+    ("secret_merge_bases", "merge_seq"),
 ];
 
 /// How an existing file was classified by the fingerprint fence.

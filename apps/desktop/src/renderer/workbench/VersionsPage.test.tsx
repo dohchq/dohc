@@ -277,7 +277,6 @@ describe("VersionsPage", () => {
       async ({ archived }: { archived: boolean }) => {
         const versions = [MAIN, DRAFT, NESTED, archived ? archivedFresh : FRESH];
         bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions, activeVersionId: "draft" });
-        return { versions, activeVersionId: "draft" };
       },
     );
     render(<Page />);

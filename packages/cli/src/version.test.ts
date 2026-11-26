@@ -68,13 +68,14 @@ it("marks binary files and conflicts, and exits 1 with a refusal's reason", asyn
 });
 
 it("says what each version was made from, by its id when the list doesn't have it", async () => {
-  const row = (id: string, name: string, madeFromVersionId?: string) => ({
+  const row = (id: string, name: string, madeFromVersionId?: string, archivedAtMs?: number) => ({
     id,
     name,
     kind: madeFromVersionId ? "named" : "main",
     createdAtMs: 10,
     canMergeIntoMain: madeFromVersionId === "main",
     ...(madeFromVersionId ? { madeFromVersionId } : {}),
+    ...(archivedAtMs !== undefined ? { archivedAtMs } : {}),
   });
   const listed = {
     ok: true,
@@ -84,6 +85,7 @@ it("says what each version was made from, by its id when the list doesn't have i
       row("draft", "Draft", "main"),
       row("nested", "Nested", "draft"),
       row("orphan", "Orphan", "gone"),
+      row("old", "Old", "main", 42),
     ],
   };
   const request = vi.fn(async () => listed as never);
@@ -95,6 +97,7 @@ it("says what each version was made from, by its id when the list doesn't have i
       "* Draft · draft · made from Main",
       "  Nested · nested · made from Draft",
       "  Orphan · orphan · made from gone",
+      "  Old · old · made from Main · archived",
       "",
     ].join("\n"),
   });

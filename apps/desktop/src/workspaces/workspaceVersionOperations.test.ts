@@ -909,10 +909,11 @@ describe("updateVersionFromMain", () => {
       "Switch to another version before archiving this one.",
     );
     await engine.switchVersion("main");
-    const archived = await engine.setVersionArchived(draftId, true);
-    expect(archived.versions.find((version) => version.id === draftId)?.archivedAtMs).toEqual(
-      expect.any(Number),
-    );
+    await engine.setVersionArchived(draftId, true);
+    expect(
+      (await engine.listVersions()).versions.find((version) => version.id === draftId)
+        ?.archivedAtMs,
+    ).toEqual(expect.any(Number));
     await expect(engine.updateVersionFromMain(draftId)).rejects.toThrow(
       'Restore version "Draft" before updating it.',
     );
@@ -921,6 +922,25 @@ describe("updateVersionFromMain", () => {
     );
     await engine.setVersionArchived(draftId, false);
     expect((await engine.updateVersionFromMain(draftId)).mergedFileCount).toBe(1);
+    await engine.stop();
+  });
+
+  it("blocks updating Draft B when Draft A left an open conflict on Main", async () => {
+    const { root, engine, draftId: draftA } = await draftAndMainChanged("draft-a\n");
+    await engine.createVersion("Draft B");
+    const draftB = await versionIdByName(engine, "Draft B");
+    await write(root, "plan.md", "draft-b\n");
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+
+    expect((await engine.mergeVersionIntoMain(draftA)).conflictCount).toBe(1);
+    await expect(engine.updateVersionFromMain(draftB)).rejects.toThrow(
+      'Decide the open conflicts before updating "Draft B" from Main.',
+    );
+    await expect(engine.mergeVersionIntoMain(draftB)).rejects.toThrow(
+      'Decide the open conflicts before merging "Draft B" into Main.',
+    );
     await engine.stop();
   });
 });

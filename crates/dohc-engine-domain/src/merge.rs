@@ -330,6 +330,25 @@ impl VersionedTextStore<'_> {
                 }
                 return reconstruct_merge(tx, input, &recorded);
             }
+            for version_id in [&input.target_version_id, &input.source_version_id] {
+                let archived: Option<Option<i64>> = tx
+                    .query_row(
+                        "SELECT archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                        params![input.workspace_id, version_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                match archived {
+                    None => return Err(DomainError::VersionNotFound),
+                    Some(Some(_)) => {
+                        return Err(DomainError::InvalidInput {
+                            reason: "version-archived",
+                        });
+                    }
+                    Some(None) => {}
+                }
+            }
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
                 target_version_id: input.target_version_id.clone(),
@@ -1052,36 +1071,30 @@ fn select_merge_base(
         Option<String>,
         String,
     );
-    let row: Option<MergeBaseRow> = conn
-        .query_row(
+    let mut stmt = conn
+        .prepare(
             "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
              target_after_kind, target_after_sha256, merged_into FROM merge_bases \
-             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
-            params![workspace_id, named_version_id, path],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 \
+             ORDER BY merge_seq ASC",
         )
-        .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let Some((
-        base_exists,
-        prior_exists,
-        before_kind,
-        before_sha,
-        after_kind,
-        after_sha,
-        merged_into,
-    )) = row
-    else {
+    let rows: Vec<MergeBaseRow> = stmt
+        .query_map(params![workspace_id, named_version_id, path], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    if rows.is_empty() {
         return select_snapshot(
             conn,
             "fork_base_snapshots",
@@ -1089,22 +1102,37 @@ fn select_merge_base(
             named_version_id,
             path,
         );
-    };
-    let held = content_identity(if merged_into == MERGED_INTO_PARENT {
-        parent_side
-    } else {
-        named_side
-    });
-    let before = before_kind.as_deref().zip(before_sha.as_deref());
-    let after = after_kind.as_deref().zip(after_sha.as_deref());
-    let (side, exists) = if held == before && held != after {
-        ("prior", prior_exists)
-    } else {
-        ("base", base_exists)
-    };
+    }
+    let (chosen_dir, side, exists) = rows
+        .iter()
+        .find_map(
+            |(_, prior_exists, before_kind, before_sha, after_kind, after_sha, merged_into)| {
+                let held = content_identity(if merged_into == MERGED_INTO_PARENT {
+                    parent_side
+                } else {
+                    named_side
+                });
+                let before = before_kind.as_deref().zip(before_sha.as_deref());
+                let after = after_kind.as_deref().zip(after_sha.as_deref());
+                (held == before && held != after).then_some((
+                    merged_into.as_str(),
+                    "prior",
+                    *prior_exists,
+                ))
+            },
+        )
+        .unwrap_or_else(|| {
+            let latest = rows.last().expect("rows is non-empty");
+            (latest.6.as_str(), "base", latest.0)
+        });
     if exists == 0 {
         return Ok(None);
     }
+    let dir = if chosen_dir == MERGED_INTO_PARENT {
+        MERGED_INTO_PARENT
+    } else {
+        MERGED_INTO_NAMED
+    };
     let sql = format!(
         "SELECT m.{side}_object_id, m.path, b.sha256, m.{side}_blob_sha256, \
          m.{side}_updated_at_ms, m.{side}_latest_moment_id, m.{side}_metadata_origin, \
@@ -1112,7 +1140,8 @@ fn select_merge_base(
          m.{side}_content_kind, m.{side}_binary_sha256, bb.byte_length FROM merge_bases m \
          LEFT JOIN blobs b ON b.sha256 = m.{side}_blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256 = m.{side}_binary_sha256 \
-         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3"
+         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3 \
+         AND m.merged_into = '{dir}'"
     );
     select_side(conn, &sql, workspace_id, named_version_id, path)
 }
@@ -1182,6 +1211,49 @@ fn record_merge_base(
     else {
         return Err(DomainError::ForkBaseNotFound);
     };
+    let other_dir = if merged_into == MERGED_INTO_PARENT {
+        MERGED_INTO_NAMED
+    } else {
+        MERGED_INTO_PARENT
+    };
+    let incoming_id = content_identity(&comparison.incoming);
+    let other_after: Option<(Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT target_after_kind, target_after_sha256 FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 AND merged_into = ?4",
+            params![
+                comparison.workspace_id,
+                named_version_id,
+                comparison.path,
+                other_dir
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if let Some((after_kind, after_sha)) = other_after
+        && after_kind.as_deref().zip(after_sha.as_deref()) != incoming_id
+    {
+        tx.execute(
+            "DELETE FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3 AND merged_into = ?4",
+            params![
+                comparison.workspace_id,
+                named_version_id,
+                comparison.path,
+                other_dir
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    let next_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(merge_seq), 0) + 1 FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
+            params![comparison.workspace_id, named_version_id, comparison.path],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
     let mut values = vec![
         text(&comparison.workspace_id),
         text(&named_version_id),
@@ -1192,6 +1264,7 @@ fn record_merge_base(
     values.extend(identity(content_identity(&comparison.current)));
     values.extend(identity(target_after));
     values.push(text(merged_into));
+    values.push(Value::Integer(next_seq));
     tx.execute(
         "INSERT OR REPLACE INTO merge_bases (workspace_id, source_version_id, path, \
          base_exists, base_object_id, base_content_kind, base_blob_sha256, \
@@ -1201,9 +1274,9 @@ fn record_merge_base(
          prior_binary_sha256, prior_updated_at_ms, prior_latest_moment_id, \
          prior_metadata_origin, prior_metadata_summary, prior_metadata_correlation_id, \
          target_before_kind, target_before_sha256, target_after_kind, target_after_sha256, \
-         merged_into) \
+         merged_into, merge_seq) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         rusqlite::params_from_iter(values),
     )
     .map_err(DomainError::sql_persist)?;

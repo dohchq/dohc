@@ -2157,6 +2157,7 @@ const versionListResultSchema = z.discriminatedUnion("ok", [
             createdAtMs: z.number(),
             canMergeIntoMain: z.boolean(),
             madeFromVersionId: z.string().min(1).optional(),
+            archivedAtMs: z.number().optional(),
           })
           .strict(),
       ),

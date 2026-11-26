@@ -183,12 +183,8 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
 
     async archiveWorkspaceVersion(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const snapshot = await capture.setVersionArchived(input.versionId, input.archived);
+      await capture.setVersionArchived(input.versionId, input.archived);
       notifyRenderer({ workspaceId: input.workspaceId });
-      return {
-        versions: snapshot.versions.map(workspaceVersionForIpc),
-        activeVersionId: snapshot.activeVersionId,
-      };
     },
 
     async listKeptCopies(input) {

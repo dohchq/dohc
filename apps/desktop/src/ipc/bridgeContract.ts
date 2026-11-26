@@ -3955,7 +3955,7 @@ export const workspaceVersionOperations = {
     capabilityId: "version.archive",
     channel: "desktop:archive-workspace-version",
     payload: ArchiveWorkspaceVersionPayload,
-    result: ListWorkspaceVersionsResult,
+    result: z.void(),
     ...versionGuard,
   },
   listWorkspaceVersionConflicts: {

@@ -122,7 +122,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
         skippedProtectedPaths: [".env"],
       };
     }),
-    setVersionArchived: vi.fn<Operations["setVersionArchived"]>().mockResolvedValue(snapshot),
+    setVersionArchived: vi.fn<Operations["setVersionArchived"]>().mockResolvedValue(undefined),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => {
       steps.push("conflicts");
       return conflictPage;
@@ -516,11 +516,11 @@ describe("registered workspace version handlers", () => {
     expect(h.steps).toEqual(["capture", "update", "notify"]);
   });
 
-  it("archives a version and returns the versions", async () => {
+  it("archives a version and notifies the renderer", async () => {
     const h = harness();
     await expect(
       h.invoke(ops.archiveWorkspaceVersion.channel, { workspaceId, versionId, archived: true }),
-    ).resolves.toMatchObject({ activeVersionId: snapshot.activeVersionId });
+    ).resolves.toBeUndefined();
     expect(h.operations.setVersionArchived).toHaveBeenCalledExactlyOnceWith(versionId, true);
     expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId });
   });

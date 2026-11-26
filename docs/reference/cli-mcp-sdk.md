@@ -655,7 +655,7 @@ A shared view keeps no versions of its own, so it does not offer this tool.
 
 No arguments.
 
-Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId } | { ok: false, reason }`.
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId?, archivedAtMs? }[], activeVersionId } | { ok: false, reason }`.
 
 ### `dohc_create_version`
 
@@ -2789,7 +2789,7 @@ List the versions and which one is active.
 
 A version's madeFromVersionId is the id of the version it was made from.
 
-With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId }`.
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId?, archivedAtMs? }[], activeVersionId }`.
 
 #### `dohc version compare`
 

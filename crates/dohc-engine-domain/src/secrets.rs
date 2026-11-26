@@ -1209,8 +1209,8 @@ where
     validate_origin(metadata_origin)?;
     let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
-        require_version(tx, workspace_id, from_version_id)?;
-        require_version(tx, workspace_id, to_version_id)?;
+        require_unarchived_version(tx, workspace_id, from_version_id)?;
+        require_unarchived_version(tx, workspace_id, to_version_id)?;
         let (named_version_id, merged_into) =
             merge_pair(tx, workspace_id, from_version_id, to_version_id)?
                 .ok_or(DomainError::ForkBaseNotFound)?;
@@ -1879,32 +1879,50 @@ fn select_secret_merge_base(
     [parent_tip, named_tip]: [&Option<SealedSecret>; 2],
 ) -> Result<Option<SealedSecret>, DomainError> {
     type Row = (Option<String>, Option<String>, String);
-    let row: Option<Row> = conn
-        .query_row(
+    let mut stmt = conn
+        .prepare(
             "SELECT target_before_sha256, target_after_sha256, merged_into \
-             FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-            params![workspace_id, named_version_id, path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+             FROM secret_merge_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
+             ORDER BY merge_seq ASC",
         )
-        .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let Some((before, after, merged_into)) = row else {
+    let rows: Vec<Row> = stmt
+        .query_map(params![workspace_id, named_version_id, path], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    if rows.is_empty() {
         return select_fork_base(conn, workspace_id, named_version_id, path);
-    };
-    let held = secret_identity(if merged_into == MERGED_INTO_PARENT {
-        parent_tip
+    }
+    let (chosen_dir, use_prior) = rows
+        .iter()
+        .find_map(|(before, after, merged_into)| {
+            let held = secret_identity(if merged_into == MERGED_INTO_PARENT {
+                parent_tip
+            } else {
+                named_tip
+            });
+            (held == *before && held != *after).then_some((merged_into.as_str(), true))
+        })
+        .unwrap_or_else(|| {
+            let latest = rows.last().expect("rows is non-empty");
+            (latest.2.as_str(), false)
+        });
+    let columns = if use_prior {
+        "prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, prior_byte_length \
+         FROM secret_merge_bases WHERE prior_exists = 1"
     } else {
-        named_tip
-    });
-    let columns = if held == before && held != after {
-        "prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, prior_byte_length          FROM secret_merge_bases WHERE prior_exists = 1"
-    } else {
-        "iv_base64, auth_tag_base64, ciphertext_base64, byte_length          FROM secret_merge_bases WHERE base_exists = 1"
+        "iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+         FROM secret_merge_bases WHERE base_exists = 1"
     };
     let row: Option<(String, String, String, i64)> = conn
         .query_row(
-            &format!("SELECT {columns} AND workspace_id = ?1 AND version_id = ?2 AND path = ?3"),
-            params![workspace_id, named_version_id, path],
+            &format!(
+                "SELECT {columns} AND workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4"
+            ),
+            params![workspace_id, named_version_id, path, chosen_dir],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
@@ -1960,6 +1978,39 @@ fn record_secret_merge_base(
     };
     let identity =
         |side: &Option<SealedSecret>| secret_identity(side).map_or(Value::Null, Value::Text);
+    let other_dir = if merged_into == MERGED_INTO_PARENT {
+        MERGED_INTO_NAMED
+    } else {
+        MERGED_INTO_PARENT
+    };
+    let incoming_id = secret_identity(incoming);
+    let other_after: Option<Option<String>> = tx
+        .query_row(
+            "SELECT target_after_sha256 FROM secret_merge_bases \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4",
+            params![workspace_id, named_version_id, path, other_dir],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if let Some(after_sha) = other_after
+        && after_sha != incoming_id
+    {
+        tx.execute(
+            "DELETE FROM secret_merge_bases \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 AND merged_into = ?4",
+            params![workspace_id, named_version_id, path, other_dir],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    let next_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(merge_seq), 0) + 1 FROM secret_merge_bases \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![workspace_id, named_version_id, path],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
     let mut values = vec![
         Value::Text(workspace_id.to_owned()),
         Value::Text(named_version_id.to_owned()),
@@ -1970,12 +2021,13 @@ fn record_secret_merge_base(
     values.push(identity(before));
     values.push(identity(after));
     values.push(Value::Text(merged_into.to_owned()));
+    values.push(Value::Integer(next_seq));
     tx.execute(
         "INSERT OR REPLACE INTO secret_merge_bases (workspace_id, version_id, path, \
          base_exists, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
          prior_exists, prior_iv_base64, prior_auth_tag_base64, prior_ciphertext_base64, \
-         prior_byte_length, target_before_sha256, target_after_sha256, merged_into) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         prior_byte_length, target_before_sha256, target_after_sha256, merged_into, merge_seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params_from_iter(values),
     )
     .map_err(DomainError::sql_persist)?;
@@ -2021,6 +2073,33 @@ fn validate_origin(origin: &str) -> Result<(), DomainError> {
         Err(DomainError::InvalidInput {
             reason: "write metadata origin is invalid",
         })
+    }
+}
+
+fn require_unarchived_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), DomainError> {
+    if version_id.is_empty() {
+        return Err(DomainError::InvalidInput {
+            reason: "version_id must not be empty",
+        });
+    }
+    let archived: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT archived_at_ms FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match archived {
+        None => Err(DomainError::VersionNotFound),
+        Some(Some(_)) => Err(DomainError::InvalidInput {
+            reason: "version-archived",
+        }),
+        Some(None) => Ok(()),
     }
 }
 

@@ -299,6 +299,38 @@ describe("secret version operations through the desktop daemon path", () => {
     await engine.stop();
   });
 
+  it("enumerates equal protected tips during update so agreement is recorded", async () => {
+    const root = await createTestScratch("dohc-engine-secret-");
+    await write(root, ".env", ENV_A);
+    const loopback = new SecretMergeLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+    const created = await engine.createVersion("Experiment");
+    await write(root, ".env", ENV_B);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+    await write(root, ".env", ENV_B);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+
+    requests.length = 0;
+    await engine.updateVersionFromMain(created.activeVersionId);
+    expect(
+      requests.filter(
+        (request) =>
+          request.method === VERSIONED_METHOD.secretsApply &&
+          typeof request.params === "object" &&
+          request.params !== null &&
+          !Array.isArray(request.params) &&
+          request.params.path === ".env",
+      ),
+    ).toHaveLength(1);
+    await engine.stop();
+  });
+
   it("restores a protected file to before a moment and materializes it", async () => {
     const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);

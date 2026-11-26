@@ -5,7 +5,7 @@ use dohc_engine_domain::{
     MergeUnchangedReason, NoFaults, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
-use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
+use dohc_engine_storage::{EngineStore, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-merge-bases";
@@ -455,21 +455,97 @@ fn a_merge_recorded_before_updates_existed_lets_main_reach_the_version() {
     fork(&mut store);
     put(&mut store, "feat", "p.md", "C");
     assert_eq!(outcome(&merge(&mut store, "p.md")), "write");
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute_batch(
-                "ALTER TABLE merge_bases DROP COLUMN merged_into;
-                 ALTER TABLE merge_bases ADD COLUMN merged_into TEXT NOT NULL DEFAULT 'main'
-                     CHECK (merged_into IN ('main', 'named'));",
-            )
-            .map_err(StorageError::persist_public)
-        })
-        .expect("replay the column migration over an older row");
 
     put(&mut store, "main", "p.md", "D");
     assert_eq!(outcome(&update(&mut store, "p.md")), "write");
     assert_eq!(feat_text(&mut store, "p.md").as_deref(), Some("D"));
     assert_eq!(outcome(&merge(&mut store, "p.md")), "already same");
+}
+
+#[test]
+fn undoing_first_direction_after_second_direction_keeps_both_sides_work() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "a.md", LINES);
+    put(&mut store, "main", "b.md", LINES);
+    fork(&mut store);
+
+    // Direction 1: edit separate lines in Main & Draft, merge Draft->Main, update Draft->Main, undo Main.
+    put(&mut store, "main", "a.md", "MAIN\n2\n3\n4\n5");
+    put(&mut store, "feat", "a.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&merge(&mut store, "a.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    // Restore Main to before its merge.
+    put(&mut store, "main", "a.md", "MAIN\n2\n3\n4\n5");
+    assert_eq!(outcome(&update(&mut store, "a.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "a.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "updating Draft after undoing Main's merge must keep Draft's original edit"
+    );
+
+    // Direction 2: edit separate lines in Main & Draft, update Draft from Main, merge Draft->Main, undo Draft.
+    put(&mut store, "main", "b.md", "MAIN\n2\n3\n4\n5");
+    put(&mut store, "feat", "b.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&update(&mut store, "b.md")), "write");
+    assert_eq!(
+        feat_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT")
+    );
+    // Restore Draft to before its update.
+    put(&mut store, "feat", "b.md", "1\n2\n3\n4\nFEAT");
+    assert_eq!(outcome(&merge(&mut store, "b.md")), "write");
+    assert_eq!(
+        main_text(&mut store, "b.md").as_deref(),
+        Some("MAIN\n2\n3\n4\nFEAT"),
+        "merging Draft after undoing Draft's update must keep Main's original edit"
+    );
+}
+
+#[test]
+fn merging_from_or_into_an_archived_version_is_refused() {
+    let (_scratch, mut store) = open();
+    put(&mut store, "main", "arch.md", "A");
+    fork(&mut store);
+    put(&mut store, "feat", "arch.md", "B");
+    VersionedTextStore::new(&mut store)
+        .set_version_archived(WS, "feat", Some(999), &NO_FAULTS)
+        .expect("archive feat");
+
+    let merge_err = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&merge_request("arch.md"), &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("merge from archived version must fail");
+    assert!(matches!(
+        merge_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
+
+    let mut update_req = merge_request("arch.md");
+    update_req.source_version_id = "main".to_owned();
+    update_req.target_version_id = "feat".to_owned();
+    let update_err = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(&update_req, &NO_FAULTS, |_, _| Ok(()))
+        .expect_err("update into archived version must fail");
+    assert!(matches!(
+        update_err,
+        DomainError::InvalidInput {
+            reason: "version-archived"
+        }
+    ));
 }
 
 #[test]
