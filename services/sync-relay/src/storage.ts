@@ -1203,15 +1203,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.tx(() => automationWorkspaceStorage.endCopyReasonInTransaction(this, workspaceId, reason));
   }
 
-  listAccountWorkspaces(ownerUserId: string) {
-    return accountWorkspaceStorage.listAccountWorkspaces(this, ownerUserId);
+  listAccountWorkspaces(userId: string) {
+    return accountWorkspaceStorage.listAccountWorkspaces(this, userId);
   }
 
-  showsOnPhone(ownerUserId: string, workspaceId: string) {
-    return accountWorkspaceStorage.showsOnPhone(this, ownerUserId, workspaceId);
+  showsOnPhone(userId: string, workspaceId: string) {
+    return accountWorkspaceStorage.showsOnPhone(this, userId, workspaceId);
   }
 
-  setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }) {
+  phoneRole(userId: string, workspaceId: string) {
+    return accountWorkspaceStorage.phoneRole(this, userId, workspaceId);
+  }
+
+  setShowOnPhone(input: { userId: string; workspaceId: string; showOnPhone: boolean }) {
     return accountWorkspaceStorage.setShowOnPhone(this, input);
   }
 

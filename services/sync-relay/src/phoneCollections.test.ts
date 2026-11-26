@@ -186,7 +186,7 @@ const definition: DatasetDefinition = {
       label: "Read",
       tableId: PEOPLE,
       kind: "read",
-      access: "owner",
+      access: "link",
       readOnly: true,
       fieldIds: [KEY, NAME, PAID, RECEIPT],
     },
@@ -368,7 +368,7 @@ async function phone(keys = KEYS.slice(0, 2)) {
   return {
     storage: base.storage,
     showOnPhone: (showOnPhone: boolean) =>
-      storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: "w", showOnPhone }),
+      storage.setShowOnPhone({ userId: "owner", workspaceId: "w", showOnPhone }),
     host,
     op,
     records: (after?: unknown, as?: string) =>
@@ -1012,4 +1012,60 @@ it("adds no record where the phone couldn't read it back by its key", async () =
     }),
   );
   expect(invoked).toBe(0);
+});
+
+it("reads a joined workspace's Collection through the Member's own grant, read-only below Edit", async () => {
+  const f = await phone();
+  expect(
+    (f.storage as SyncRelayStorage).inviteWorkspaceMember({
+      workspaceId: "w",
+      actorUserId: "owner",
+      workspaceName: "Fundraiser",
+      email: "ana@example.test",
+      recipientUserId: "ana",
+      newMemberId: () => "member-ana",
+      newGrantId: () => "grant-ana",
+      newShareId: () => "share-w",
+      nowMs: 1,
+    }),
+  ).toMatchObject({ ok: true });
+  const ana = "ana:ana-phone:phone";
+  expect(await f.op("collections", {}, ana)).toEqual(ok({ collections: [], nextCursor: null }));
+  const offered = new Set(
+    definition.operations
+      .filter((operation) => operation.access !== "owner")
+      .map((operation) => operation.operationId),
+  );
+  const reads = f.host
+    .describe(owner, scope)
+    .operations.filter((operation) => operation.readOnly && offered.has(operation.operationId))
+    .map((operation) => operation.operationId);
+  f.host.setWorkspaceDefaults(owner, {
+    ...scope,
+    defaults: {
+      view: reads,
+      comment: reads,
+      edit: [...offered],
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
+  expect(await f.op("collections", {}, ana)).toEqual(
+    ok({ collections: [{ datasetId: DATASET, name: "Registrations" }], nextCursor: null }),
+  );
+  const described = (await f.op("collection", { datasetId: DATASET }, ana)).body.result as {
+    tables: Array<{ fields: Array<{ editable: boolean }>; canCreate: boolean; canDelete: boolean }>;
+  };
+  expect(described.tables.flatMap((table) => table.fields).some((field) => field.editable)).toBe(
+    false,
+  );
+  expect(described.tables.some((table) => table.canCreate || table.canDelete)).toBe(false);
+  expect(rowKeys(await f.records(undefined, ana))).toEqual(["r00", "r01"]);
+  (f.storage as SyncRelayStorage).setShowOnPhone({
+    userId: "ana",
+    workspaceId: "w",
+    showOnPhone: false,
+  });
+  expect(await f.op("collections", {}, ana)).toEqual(notFound);
+  expect((await f.op("collections", {})).status, "the owner's phone still shows it").toBe(200);
 });

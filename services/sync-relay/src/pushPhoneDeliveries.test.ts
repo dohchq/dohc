@@ -244,7 +244,7 @@ it("alerts a share grantee's browser but never their phone", async () => {
 it("queues nothing for the phone of a workspace with Show on phone off", async () => {
   const f = await fixture({ browsers: true });
   f.browser("owner", "Kim");
-  f.storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: W, showOnPhone: false });
+  f.storage.setShowOnPhone({ userId: "owner", workspaceId: W, showOnPhone: false });
   f.say("alice", "message", "team-thread", "@Kim I do");
   f.agent("answer", "team-thread");
   f.notice("answer", "team-thread");

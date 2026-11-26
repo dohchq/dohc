@@ -595,10 +595,10 @@ describe("a phone's chat write through the server's copy", () => {
         }),
       });
 
-    f.storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: WORKSPACE, showOnPhone: false });
+    f.storage.setShowOnPhone({ userId: OWNER, workspaceId: WORKSPACE, showOnPhone: false });
     await replay();
     expect(f.engine.writes, "hidden from the phone, nothing replays").toEqual([]);
-    f.storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: WORKSPACE, showOnPhone: true });
+    f.storage.setShowOnPhone({ userId: OWNER, workspaceId: WORKSPACE, showOnPhone: true });
 
     await replay();
     expect(f.engine.writes).toMatchObject([
@@ -915,7 +915,7 @@ describe("a phone's chat write through the server's copy", () => {
     const replaying = replay();
     await reading.reached;
     background.storage.setShowOnPhone({
-      ownerUserId: OWNER,
+      userId: OWNER,
       workspaceId: WORKSPACE,
       showOnPhone: false,
     });
@@ -923,7 +923,7 @@ describe("a phone's chat write through the server's copy", () => {
     await replaying;
     expect(replies(background), "only the lost send").toBe(1);
     background.storage.setShowOnPhone({
-      ownerUserId: OWNER,
+      userId: OWNER,
       workspaceId: WORKSPACE,
       showOnPhone: true,
     });

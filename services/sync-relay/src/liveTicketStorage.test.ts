@@ -677,14 +677,14 @@ it("mints no owner's phone ticket for a workspace hidden from the phone or owned
   try {
     expect(
       state.storage.setShowOnPhone({
-        ownerUserId: "owner-1",
+        userId: "owner-1",
         workspaceId: scope.workspaceId,
         showOnPhone: false,
       }),
-    ).toBe(true);
+    ).toBe("owner");
     expect(state.storage.mintLiveTicket(ownerMint)).toBeNull();
     state.storage.setShowOnPhone({
-      ownerUserId: "owner-1",
+      userId: "owner-1",
       workspaceId: scope.workspaceId,
       showOnPhone: true,
     });
@@ -693,7 +693,7 @@ it("mints no owner's phone ticket for a workspace hidden from the phone or owned
     ).toBeNull();
     expect(state.storage.mintLiveTicket(ownerMint)).not.toBeNull();
     state.storage.setShowOnPhone({
-      ownerUserId: "owner-1",
+      userId: "owner-1",
       workspaceId: scope.workspaceId,
       showOnPhone: false,
     });

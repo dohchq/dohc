@@ -36,18 +36,20 @@ import {
 import { documentMarkdown, settledDocumentMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import * as Y from "yjs";
-import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
+import { currentAccountFeedCursor } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError } from "./errors";
 import { untilAborted } from "./namedLiveFrameHost";
+import { channelShown, pathShown, type PhoneMember } from "./phoneMember";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
 // The reads an account makes through this server's copy of a workspace it
-// owns. The caller authenticates the account and decides what it can reach;
-// this runs the read on the copy and keeps the engine's own failures, and
-// every secret file, out of the answer.
+// owns or, on a phone, joined. The caller authenticates the account and
+// decides what it can reach; this runs the read on the copy and keeps the
+// engine's own failures, every secret file, and whatever a Member's reach
+// hides out of the answer.
 
 export type AccountOperationResult =
   | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText" | "groupsFull">]
@@ -107,8 +109,10 @@ class PageMissing extends OperationError {
 }
 
 export interface AccountOperationInput {
-  /** The account that owns the workspace, from the caller's credential. */
+  /** The account that owns the workspace, whose copy this reads. */
   owner: string;
+  /** A Member's or an Admin's reach, which narrows every answer, or null for the owner. */
+  member: PhoneMember | null;
   workspaceId: string;
   /** The operation's name and arguments as the caller received them. */
   operation: string;
@@ -146,6 +150,7 @@ export function isAccountOperation(name: string): name is ServerOperation {
  *
  * The caller's duties:
  * - Authenticate the caller and check that `owner` owns the workspace before reading the arguments.
+ * - Pass `member` for anyone but the owner, and only from the phone's Bearer route.
  * - Pass `phone: true` only from the phone's Bearer route.
  * - With `phone: false`, enforce the caller's own reach and level in `authorize`.
  * - Make `authorize` throw notFound() for any loss of access.
@@ -181,17 +186,20 @@ export async function runAccountOperation(
         lap("open", started);
         await authorize();
         // The sync brings the copy at least this far.
-        const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
+        const cursor = currentAccountFeedCursor(server.storage, input.workspaceId, input.member);
         const stale =
           request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica);
         await timed("sync", stale ? replica.sync(signal) : Promise.resolve());
         await authorize();
         const read = await timed(
           "read",
-          untilAborted(answer(server.storage, replica, input.workspaceId, request), signal),
+          untilAborted(
+            answer(server.storage, replica, input.workspaceId, request, input.member),
+            signal,
+          ),
         );
         const result =
-          request.operation === "groupsFull" && input.visitor.phone
+          request.operation === "groupsFull" && input.visitor.phone && input.member === null
             ? phoneGroups(
                 server.storage.declaredAgentNames({
                   accountId: input.owner,
@@ -201,7 +209,8 @@ export async function runAccountOperation(
               )
             : read;
         await authorize();
-        if (!("ok" in result) || result.ok) server.copies.hold(input.owner, input.workspaceId);
+        if (!("ok" in result) || result.ok)
+          server.copies.hold(input.visitor.userId, input.workspaceId);
         return { result, cursor };
       },
     );
@@ -256,14 +265,16 @@ async function answer(
   replica: AutomationReplica,
   workspaceId: string,
   request: ParsedOperation,
+  member: PhoneMember | null,
 ): Promise<AccountOperationResult> {
-  const chats = serverChats(storage, replica, workspaceId);
+  const chats = serverChats(storage, replica, workspaceId, member);
+  const files = () => serverFiles(replica, workspaceId, member);
   try {
     switch (request.operation) {
       case "listFiles":
-        return await listFiles(serverFiles(replica, workspaceId), request.args, PLATFORM);
+        return await listFiles(files(), request.args, PLATFORM);
       case "readText":
-        return await readText(serverFiles(replica, workspaceId), request.args.path, PLATFORM);
+        return await readText(files(), request.args.path, PLATFORM);
       case "groups":
         return await listGroups(chats);
       case "threads":
@@ -284,7 +295,7 @@ async function answer(
       }
       case "documentRead":
         return await readDocument(
-          serverDocuments(storage, replica, workspaceId),
+          serverDocuments(storage, replica, workspaceId, member),
           request.args.path,
           PLATFORM,
         );
@@ -344,12 +355,15 @@ type Place = (objectIds: readonly string[]) => Promise<ReadonlyMap<string, Place
  * The chat operations' host over the copy. It never writes, so a read never
  * creates General. A thread on a deleted file stays readable, with its file
  * unavailable, as on the desktop. A thread on a secret file reads as missing,
- * and an attachment to one is left out.
+ * and an attachment to one is left out. For a Member, so does a thread or an
+ * attachment on a file their reach hides, and every chat but the Groups it
+ * shows.
  */
 export function serverChats(
   storage: SyncRelayStorage,
   replica: AutomationReplica,
   workspaceId: string,
+  member: PhoneMember | null = null,
 ): ChatsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   const chats = replicaChatStore(replica);
@@ -371,7 +385,9 @@ export function serverChats(
         if (found?.status === "found") {
           known.set(
             objectId,
-            hiddenFile(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path },
+            pathShown(member, found.path)
+              ? { kind: "placed", path: found.path }
+              : { kind: "hidden" },
           );
           continue;
         }
@@ -382,16 +398,21 @@ export function serverChats(
                 (thread) => thread.linkedFile?.pathHint,
               )
             : [last];
-        known.set(objectId, hints.some(hiddenFile) ? { kind: "hidden" } : { kind: "unavailable" });
+        known.set(
+          objectId,
+          hints.every((hint) => pathShown(member, hint))
+            ? { kind: "unavailable" }
+            : { kind: "hidden" },
+        );
       }
     }
     return known;
   };
   return {
     workspaceId,
-    store: withoutSecretFiles(chats, place),
+    store: withoutSecretFiles(chats, place, member),
     fileObjectId: async (path) => {
-      if (hiddenFile(path)) return null;
+      if (!pathShown(member, path)) return null;
       const [found] = (
         await files.resolveFiles({ workspaceId, targets: [{ path }], signal: replica.signal })
       ).results;
@@ -415,25 +436,50 @@ export function serverChats(
 
 /**
  * The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their
- * object. A thread's own decisions and reactions answer only for a thread it lists.
+ * object, and for a Member without the chats their reach hides. A thread's own decisions, reactions, messages and
+ * projection answer only for a thread it lists.
  */
-function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
+function withoutSecretFiles(
+  store: ChatReadStore,
+  place: Place,
+  member: PhoneMember | null,
+): ChatReadStore {
   const hidden = (
     placed: ReadonlyMap<string, Placement>,
     objectId: string | undefined,
     hint: string | undefined,
-  ) => hiddenFile(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
+  ) =>
+    !pathShown(member, hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
+  let channels: Promise<ReadonlySet<string>> | undefined;
+  const shownChannels = (workspaceId: string) =>
+    (channels ??= store.listChannels({ workspaceId }).then(async (rows) => {
+      const shown = new Set<string>();
+      for (const row of rows) {
+        const wireId = await store.getChannelWireId({ workspaceId, channelId: row.id });
+        if (channelShown(member, wireId, row.kind)) shown.add(row.id);
+      }
+      return shown;
+    }));
+  const channelHidden = async (workspaceId: string, channelId: string | undefined) =>
+    member !== null &&
+    (channelId === undefined || !(await shownChannels(workspaceId)).has(channelId));
   // Threads this read already listed, placed as `place` placed them.
   const listed = new Set<string>();
-  const threads = async <Thread extends Pick<ChatThread, "id" | "linkedFile">>(
+  const threads = async <
+    Thread extends Pick<ChatThread, "id" | "linkedFile" | "workspaceId" | "channelId">,
+  >(
     rows: Thread[],
   ): Promise<Thread[]> => {
     const placed = await place(
       rows.flatMap((thread) => (thread.linkedFile ? [thread.linkedFile.objectId] : [])),
     );
-    const kept = rows.filter(
-      (thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint),
-    );
+    const kept: Thread[] = [];
+    for (const thread of rows) {
+      if (hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint)) continue;
+      if (!thread.linkedFile && (await channelHidden(thread.workspaceId, thread.channelId)))
+        continue;
+      kept.push(thread);
+    }
     for (const thread of kept) listed.add(thread.id);
     return kept;
   };
@@ -462,16 +508,30 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
   };
   return {
     ...store,
+    listChannels: async (input) => {
+      const rows = await store.listChannels(input);
+      if (member === null) return rows;
+      const shown = await shownChannels(input.workspaceId);
+      return rows.filter((row) => shown.has(row.id));
+    },
+    getThreadProjection: async (input) => {
+      if (member !== null) await admit(input.workspaceId, input.threadId);
+      return await store.getThreadProjection(input);
+    },
     listThreads: async (input) => await threads(await store.listThreads(input)),
     listThreadsForFile: async (input) => await threads(await store.listThreadsForFile(input)),
     listChannelThreads: async (input) => {
+      if (await channelHidden(input.workspaceId, input.channelId)) return [];
       const summaries = await store.listChannelThreads(input);
       const kept = new Set(await threads(summaries.map((summary) => summary.thread)));
       return summaries.filter((summary) => kept.has(summary.thread));
     },
     listAgentUnreadThreads: async (workspaceId, reader) =>
       await threads(await store.listAgentUnreadThreads(workspaceId, reader)),
-    listMessages: async (input) => await messages(await store.listMessages(input)),
+    listMessages: async (input) => {
+      if (member !== null) await admit(input.workspaceId, input.threadId);
+      return await messages(await store.listMessages(input));
+    },
     listThreadDecisions: async (workspaceId, threadId) => {
       await admit(workspaceId, threadId);
       return await store.listThreadDecisions(workspaceId, threadId);
@@ -481,6 +541,8 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
       return await store.listReactions(input);
     },
     listGroupStream: async (input) => {
+      if (await channelHidden(input.workspaceId, input.channelId))
+        throw new OperationError(`chat channel not found: ${input.channelId}`);
       const page = await store.listGroupStream(input);
       const shown = await messages(page.items.map((item) => item.message));
       return {
@@ -504,12 +566,13 @@ function serverDocuments(
   storage: SyncRelayStorage,
   replica: AutomationReplica,
   workspaceId: string,
+  member: PhoneMember | null,
 ): DocumentsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   return {
     async read(path) {
       const missing = new PageMissing(path);
-      if (hiddenFile(path)) throw missing;
+      if (!pathShown(member, path)) throw missing;
       if (liveDocumentKindForPath(path) !== "richdoc")
         throw new OperationError(`${path} is not a Markdown document.`);
       const version = await files.getActiveVersion({ workspaceId });
@@ -547,18 +610,23 @@ function serverDocuments(
 }
 
 /**
- * The files in the copy's active version. A hidden file is never listed, and
- * reads as missing without asking the engine. A text file over the desktop's
- * editor limit is refused before its body is fetched.
+ * The files in the copy's active version. A hidden file, or for a Member one
+ * their reach hides, is never listed, and reads as missing without asking the
+ * engine. A text file over the desktop's editor limit is refused before its
+ * body is fetched.
  */
-function serverFiles(replica: AutomationReplica, workspaceId: string): FilesHost {
+function serverFiles(
+  replica: AutomationReplica,
+  workspaceId: string,
+  member: PhoneMember | null,
+): FilesHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   return {
     async list() {
       const version = await files.getActiveVersion({ workspaceId });
       if (version === null) return [];
       return (await files.listTextFileMetadata({ workspaceId, versionId: version.id }))
-        .filter((file) => !hiddenFile(file.path))
+        .filter((file) => pathShown(member, file.path))
         .map(({ path, objectId, contentKind, byteLength }) => ({
           path,
           objectId,
@@ -567,7 +635,7 @@ function serverFiles(replica: AutomationReplica, workspaceId: string): FilesHost
         }));
     },
     async readText(path) {
-      if (hiddenFile(path)) return { kind: "missing" };
+      if (!pathShown(member, path)) return { kind: "missing" };
       const version = await files.getActiveVersion({ workspaceId });
       const file =
         version === null

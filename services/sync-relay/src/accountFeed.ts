@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -6,6 +7,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, RelayError } from "./errors";
+import { channelShown, pathShown, type PhoneMember } from "./phoneMember";
 import { observeAcceptedLiveUpdates } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { AccountFeedStanding } from "./storage/accountFeed";
@@ -23,28 +25,53 @@ const isPage = (path: string) => liveDocumentKindForPath(path) === "richdoc";
 /**
  * Whether a thread shows, judged from the relay's log alone as its reads
  * judge it: hidden when its create names a hidden path, or the log last put
- * its file at one.
+ * its file at one. For a Member, a thread on no file shows only in a Group
+ * their reach shows.
  */
 export function threadShownByLog(
-  storage: Pick<SyncRelayStorage, "accountFeedThreadPaths">,
+  storage: Pick<SyncRelayStorage, "accountFeedThreadPaths" | "findChannelCreateKind">,
   workspaceId: string,
   threadId: string,
+  member: PhoneMember | null = null,
 ): boolean {
   const paths = storage.accountFeedThreadPaths(workspaceId, threadId);
-  return !(paths.named.some(hiddenFile) || hiddenFile(paths.lastKnownPath ?? undefined));
+  if (!paths.named.every((path) => pathShown(member, path))) return false;
+  if (!pathShown(member, paths.lastKnownPath ?? undefined)) return false;
+  if (member === null) return true;
+  if (paths.linkedObjectId !== null) return paths.lastKnownPath !== null;
+  return (
+    paths.channelWireId !== null &&
+    channelShown(
+      member,
+      paths.channelWireId,
+      storage.findChannelCreateKind(workspaceId, paths.channelWireId),
+    )
+  );
 }
 
-type Cursor = Pick<AccountFeedStanding, "floor" | "log" | "journal">;
+type Cursor = Pick<AccountFeedStanding, "floor" | "log" | "journal"> & { reach: string | null };
 type FeedStorage = Pick<
   SyncRelayStorage,
-  "accountFeedStanding" | "accountFeedLogRows" | "accountFeedJournalRows" | "accountFeedThreadPaths"
+  | "accountFeedStanding"
+  | "accountFeedLogRows"
+  | "accountFeedJournalRows"
+  | "accountFeedThreadPaths"
+  | "findChannelCreateKind"
 >;
 
-const format = (cursor: Cursor) => `${cursor.floor}.${cursor.log}.${cursor.journal}`;
+const REACH_KEY = randomBytes(32);
+const reachMark = (member: PhoneMember | null) =>
+  member === null ? null : member.selector.reach.keyedSignature(REACH_KEY).slice(0, 16);
+
+const format = (cursor: Cursor) =>
+  `${cursor.floor}.${cursor.log}.${cursor.journal}${cursor.reach === null ? "" : `.${cursor.reach}`}`;
 
 function parseCursor(value: string | null): Cursor {
-  const match = /^(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})$/u.exec(value ?? "");
-  const [floor, log, journal] = (match?.slice(1) ?? []).map(Number);
+  const match =
+    /^(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})(?:\.([0-9a-f]{16}))?$/u.exec(
+      value ?? "",
+    );
+  const [floor, log, journal] = (match?.slice(1, 4) ?? []).map(Number);
   if (
     floor === undefined ||
     log === undefined ||
@@ -53,17 +80,18 @@ function parseCursor(value: string | null): Cursor {
   ) {
     throw badRequest("since must be a cursor this server answered");
   }
-  return { floor, log, journal };
+  return { floor, log, journal, reach: match?.[4] ?? null };
 }
 
-/** The cursor of everything the workspace's log and journal hold now. */
+/** The cursor of everything the workspace's log and journal hold now, for the owner or this Member. */
 export function currentAccountFeedCursor(
   storage: Pick<SyncRelayStorage, "accountFeedStanding">,
   workspaceId: string,
+  member: PhoneMember | null = null,
 ): string {
   const standing = storage.accountFeedStanding(workspaceId);
   if (standing === null) throw notFound();
-  return format(standing);
+  return format({ ...standing, reach: reachMark(member) });
 }
 
 /** What changed, by kind. A kind is present when anything of it changed, and lists the objects or threads known to have. */
@@ -87,7 +115,8 @@ function readChanges(
   storage: FeedStorage,
   workspaceId: string,
   since: Cursor,
-  standing: Cursor,
+  standing: Omit<Cursor, "reach">,
+  member: PhoneMember | null,
 ): { next: Cursor; changed: AccountFeedChanges | null } {
   const files = new Set<string>(),
     pages = new Set<string>(),
@@ -104,21 +133,22 @@ function readChanges(
   const shown = (threadId: string) => {
     let known = threadShown.get(threadId);
     if (known === undefined) {
-      known = threadShownByLog(storage, workspaceId, threadId);
+      known = threadShownByLog(storage, workspaceId, threadId, member);
       threadShown.set(threadId, known);
     }
     return known;
   };
   for (const row of rows) {
     if (row.moment) {
-      // An object that moves into or out of a secret path shows as changed, from where it can be seen.
+      // An object that moves into or out of a secret path, or a path a Member's reach hides, shows as changed, from
+      // where it can be seen.
       const visible = [row.moment.path, row.moment.previousPath].filter(
-        (path): path is string => path !== null && !hiddenFile(path),
+        (path): path is string => path !== null && pathShown(member, path),
       );
       if (visible.length === 0) continue;
       files.add(row.moment.objectId);
       if (visible.some(isPage)) pages.add(row.moment.objectId);
-    } else if (row.chat && (row.threadId === null || shown(row.threadId))) {
+    } else if (row.chat && (row.threadId === null ? member === null : shown(row.threadId))) {
       chatsChanged = true;
       if (row.threadId !== null) chats.add(row.threadId);
     }
@@ -132,7 +162,7 @@ function readChanges(
   const journal =
     accepted.length === ROWS_PER_READ ? accepted.at(-1)!.journalCursor : standing.journal;
   for (const row of accepted) {
-    if (!hiddenFile(row.path)) pages.add(row.objectId);
+    if (pathShown(member, row.path)) pages.add(row.objectId);
   }
   const changed: AccountFeedChanges = {
     ...(files.size > 0 ? { files: [...files] } : {}),
@@ -140,7 +170,7 @@ function readChanges(
     ...(chatsChanged ? { chats: [...chats] } : {}),
   };
   return {
-    next: { floor: standing.floor, log, journal },
+    next: { floor: standing.floor, log, journal, reach: since.reach },
     changed: Object.keys(changed).length > 0 ? changed : null,
   };
 }
@@ -210,8 +240,9 @@ export type AccountFeedWaits = ReturnType<typeof createAccountFeedWaits>;
 
 /**
  * Answers what changed in the workspace after `since`, waiting up to
- * `holdMs` for a change when nothing has. A change on a hidden file never
- * answers, and neither does it end the wait. A gap longer than one part
+ * `holdMs` for a change when nothing has. A change on a hidden file, or one
+ * a Member's reach hides, never answers, and neither does it end the wait. A
+ * Member's cursor from another reach answers `replace`. A gap longer than one part
  * answers each part, changed or not, so one request reads at most one part.
  * `authorize` checks the caller again after every wait; the caller checks it
  * once more before it answers.
@@ -226,6 +257,8 @@ export async function readAccountFeed(
     since: string | null;
     holdMs: number;
     signal: AbortSignal;
+    /** A Member's reach, read again after every wait. Null for the owner. */
+    member(): PhoneMember | null;
     authorize(): Promise<void>;
   },
 ): Promise<AccountFeedAnswer> {
@@ -234,16 +267,19 @@ export async function readAccountFeed(
   for (;;) {
     const standing = storage.accountFeedStanding(input.workspaceId);
     if (standing === null) throw notFound();
-    // A restore since, or a cursor outside what the workspace holds, can't be continued.
+    const member = input.member();
+    const reach = reachMark(member);
+    // A restore since, a cursor outside what the workspace holds, or one from another reach can't be continued.
     if (
       standing.floor !== since.floor ||
       since.log < since.floor ||
       since.log > standing.log ||
-      since.journal > standing.journal
+      since.journal > standing.journal ||
+      since.reach !== reach
     ) {
-      return { cursor: format(standing), replace: true };
+      return { cursor: format({ ...standing, reach }), replace: true };
     }
-    const read = readChanges(storage, input.workspaceId, since, standing);
+    const read = readChanges(storage, input.workspaceId, since, standing, member);
     if (read.changed) return { cursor: format(read.next), changed: read.changed };
     since = read.next;
     if (since.log < standing.log || since.journal < standing.journal)
@@ -258,7 +294,7 @@ export async function readAccountFeed(
       signal: input.signal,
       shouldPark: () => {
         const now = storage.accountFeedStanding(input.workspaceId);
-        return now !== null && format(now) === format(since);
+        return now !== null && format({ ...now, reach: since.reach }) === format(since);
       },
     });
     await input.authorize();

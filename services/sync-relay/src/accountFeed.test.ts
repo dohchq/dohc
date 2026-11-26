@@ -40,9 +40,11 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
     accountFeedThreadPaths: () => ({
       created: false,
       linkedObjectId: null,
+      channelWireId: null,
       lastKnownPath: null,
       named: [],
     }),
+    findChannelCreateKind: () => null,
   };
   const waits = createAccountFeedWaits(storage, new DiscussionActivityHub());
   const poll = async () => {
@@ -56,6 +58,7 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
         since,
         holdMs: 0,
         signal: new AbortController().signal,
+        member: () => null,
         authorize: async () => {},
       });
       if ("replace" in answer) throw new Error("The feed answered replace.");

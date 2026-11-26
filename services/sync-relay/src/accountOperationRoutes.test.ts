@@ -19,6 +19,7 @@ import {
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { asRecord } from "@dohc/workspace-core";
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
 import { PhoneChatContext } from "@dohc/workspace-contracts/chat-wakes";
 import {
   ChatsLoopbackEngine,
@@ -1599,7 +1600,7 @@ describe("an account's chat writes through the server's copy", () => {
             )
             .run(),
         );
-      else storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+      else storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false });
     };
     // The computers' routes and the phone's share one counted check, as one resolver served both before.
     const resolve: ResolveAccountSession = async (request) => {
@@ -3848,5 +3849,189 @@ describe("an account's chat writes through the server's copy", () => {
       notifyChatWakeChange(f.storage, "ana");
       expect(await denialBytes(await held), kind).toBe(missing);
     }
+  });
+});
+
+describe("a Member's phone reads in a workspace they joined", () => {
+  const RULE = parseAccessRule("people:\n  cara@dohc.test: edit\n")!;
+  async function joined() {
+    const fixture = await relay();
+    const { storage, engine } = fixture;
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    const seeded = await seedTrip(engine);
+    engine.files.seedTextFile({
+      workspace: "trip",
+      path: "private/budget.md",
+      text: "# Budget\n",
+      objectId: "object-budget",
+    });
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const onBudget = await chats.createThread({
+      workspaceId: "trip",
+      title: "Budget",
+      linkedFile: { objectId: "object-budget", pathHint: "private/budget.md" },
+    });
+    const ruled = storage.changeFolderRule({
+      workspaceId: "trip",
+      actorUserId: "ana",
+      change: { kind: "create", folder: "private", rule: RULE },
+      nowMs: 2,
+    });
+    expect(ruled).toMatchObject({ ok: true });
+    return { ...fixture, ...seeded, onBudget };
+  }
+  const asBen = signedIn("ben");
+  const files = (result: Record<string, unknown>) =>
+    (result.files as Array<{ path: string }>).map((file) => file.path);
+
+  it("lists, reads and comments only within the Member's reach", async () => {
+    const { h, onBudget } = await joined();
+    expect(files(await answer(await h(op("trip", "listFiles"))))).toContain("private/budget.md");
+    expect(files(await answer(await h(op("trip", "listFiles", {}, asBen))))).toEqual([
+      "docs/plan.md",
+    ]);
+    expect(
+      JSON.stringify(
+        await answer(await h(op("trip", "readText", { path: "private/budget.md" }, asBen))),
+      ),
+    ).toBe(
+      JSON.stringify(
+        await answer(await h(op("trip", "readText", { path: "private/nothing.md" }, asBen))),
+      ).replace("nothing", "budget"),
+    );
+    expect(
+      await answer(await h(op("trip", "documentRead", { path: "private/budget.md" }, asBen))),
+    ).toMatchObject({ ok: false, refusal: "missing" });
+    expect(
+      await answer(await h(op("trip", "documentRead", { path: "docs/plan.md" }, asBen))),
+    ).toMatchObject({ ok: true });
+    expect(
+      JSON.stringify(await answer(await h(op("trip", "fileChats", { path: "private/budget.md" })))),
+    ).toContain(onBudget.id);
+    expect(JSON.stringify(await answer(await h(op("trip", "groupsFull", {}, asBen))))).toContain(
+      "Planning",
+    );
+    expect(
+      JSON.stringify(
+        await answer(await h(op("trip", "fileChats", { path: "private/budget.md" }, asBen))),
+      ),
+    ).toBe(
+      JSON.stringify(
+        await answer(await h(op("trip", "fileChats", { path: "private/none.md" }, asBen))),
+      ).replace("none", "budget"),
+    );
+    expect(
+      await answer(await h(op("trip", "chat", { threadId: onBudget.id }, asBen))),
+    ).toMatchObject({ ok: false, refusal: "missing" });
+    expect(await answer(await h(op("trip", "chat", { threadId: onBudget.id })))).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("refuses the owner's writes, marks, wakes, contexts and page opens alike, and a workspace they left", async () => {
+    const { storage, h } = await joined();
+    const missing = await denialBytes(await h(op("notes", "groups", {}, asBen)));
+    for (const operation of [
+      ...Object.keys(phoneWriteIds),
+      "markRead",
+      "retryWake",
+      "chatContext",
+      "openPage",
+    ])
+      expect(await denialBytes(await h(op("trip", operation, {}, asBen))), operation).toBe(missing);
+    expect((await h(changes("0.0.0", { headers: asBen }))).status).toBe(200);
+    const wakes = new Request("http://relay.test/sync/trip/ops/wakeChanges?since=0", {
+      headers: asBen,
+    });
+    expect(await denialBytes(await h(wakes))).toBe(missing);
+    expect(
+      storage.removeWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        nowMs: 3,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await denialBytes(await h(op("trip", "groups", {}, asBen)))).toBe(missing);
+  });
+
+  it("keeps reading after the owner hides it on their phone, and stops when the Member hides it", async () => {
+    const { storage, h } = await joined();
+    expect(storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false })).toBe(
+      "owner",
+    );
+    expect(files(await answer(await h(op("trip", "listFiles", {}, asBen))))).toEqual([
+      "docs/plan.md",
+    ]);
+    expect(storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false })).toBe(
+      "member",
+    );
+    expect((await h(op("trip", "listFiles", {}, asBen))).status).toBe(404);
+    expect(storage.showsOnPhone("ana", "trip")).toBe(false);
+    expect(storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true })).toBe(
+      "owner",
+    );
+    expect(storage.showsOnPhone("ben", "trip")).toBe(false);
+  });
+
+  it("answers the feed only within the Member's reach, and replaces it when their reach narrows", async () => {
+    const { storage, activity, h } = await joined();
+    const { cursor } = await json(await h(op("trip", "groups", {}, asBen)));
+    expect(String(cursor)).toMatch(/^\d+\.\d+\.\d+\.[0-9a-f]{16}$/u);
+    const write = logWriter(storage, activity);
+    write("moment.append", {
+      objectId: "object-budget",
+      path: "private/budget.md",
+      versionId: "main",
+    });
+    write("chat.thread.create", {
+      threadId: "thread-budget",
+      linkedObjectId: "object-budget",
+      linkedPathHint: "private/budget.md",
+    });
+    write("chat.message.append", { threadId: "thread-budget", messageId: "m" });
+    write("chat.channel.create", { channelId: "c" });
+    const last = write("moment.append", {
+      objectId: "object-plan",
+      path: "docs/plan.md",
+      versionId: "main",
+    });
+    const delivered = await feed(await h(changes(String(cursor), { headers: asBen })));
+    expect(delivered).toMatchObject({
+      cursor: expect.stringMatching(new RegExp(`^0\\.${last}\\.0\\.`, "u")),
+      changed: { files: ["object-plan"], pages: ["object-plan"] },
+    });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: { kind: "create", folder: "docs", rule: RULE },
+        nowMs: 4,
+      }),
+    ).toMatchObject({ ok: true });
+    const replaced = await feed(await h(changes(String(delivered.cursor), { headers: asBen })));
+    expect(replaced).toMatchObject({ replace: true });
+    expect(replaced.cursor).not.toBe(delivered.cursor);
+    expect(await feed(await h(changes(String(replaced.cursor), { headers: asBen })))).toMatchObject(
+      {
+        changed: {},
+      },
+    );
+    expect(
+      await feed(await h(changes(String(replaced.cursor).split(".").slice(0, 3).join(".")))),
+      "the owner's cursor names no reach",
+    ).toMatchObject({ changed: {} });
   });
 });

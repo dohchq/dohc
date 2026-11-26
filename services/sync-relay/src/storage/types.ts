@@ -1107,13 +1107,14 @@ export interface SyncRelayStorage {
   forgetAutomationWorkspaces(kept?: readonly string[]): void;
   endCopyReasonEverywhere(reason: import("./automationWorkspaces").CopyReason): void;
   endCopyReason(workspaceId: string, reason: import("./automationWorkspaces").CopyReason): void;
-  listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
-  showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
+  listAccountWorkspaces(userId: string): import("./accountWorkspaces").AccountWorkspace[];
+  showsOnPhone(userId: string, workspaceId: string): boolean;
+  phoneRole(userId: string, workspaceId: string): import("./accountWorkspaces").PhoneRole | null;
   setShowOnPhone(input: {
-    ownerUserId: string;
+    userId: string;
     workspaceId: string;
     showOnPhone: boolean;
-  }): boolean;
+  }): import("./accountWorkspaces").PhoneRole | null;
   endAccountReasonsOfHiddenOrDisownedCopies(): void;
   recordAccountOperation(
     input: import("./operationRecords").RecordOperationInput,

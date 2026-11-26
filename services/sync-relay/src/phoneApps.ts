@@ -6,6 +6,7 @@ import { hiddenFile } from "./accountFeed";
 import type { AppBackendAuth, PhoneAppLaunchGuard } from "./appBackendAuthority";
 import type { RelayDatasetHost } from "./datasetHost";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
+import type { PhoneMember } from "./phoneMember";
 import type { SyncRelayStorage } from "./storage";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -14,6 +15,7 @@ import {
   memberAppRow,
   MemberAppRefusal,
   recordMemberAppConsent,
+  workspaceAppPage,
 } from "./storage/memberApps";
 import {
   approvePhoneApp,
@@ -85,7 +87,9 @@ type Served = ReturnType<RelayDatasetHost["servedPublication"]>;
  * on a computer is absent. The phone opens only apps over transactional
  * Collections or that request nothing in the workspace. A Member app runs for
  * the owner as for any viewer: within both its author's and the owner's reach,
- * and only once the owner allowed what it can do.
+ * and only once the owner allowed what it can do. A Member or an Admin sees
+ * the workspace's official apps instead of the owner's published ones, and the
+ * Member apps both reaches allow, and each runs within their own reach.
  */
 export function createPhoneApps(options: {
   storage: SyncRelayStorage;
@@ -153,6 +157,33 @@ export function createPhoneApps(options: {
     return row;
   }
 
+  function workspaceApp(userId: string, workspaceId: string, id: string) {
+    const row = context.db
+      .prepare(
+        `SELECT p.created_at_ms FROM sync_relay_app_publications p WHERE p.workspace_id=? AND p.publication_id=?
+         AND p.active=1 AND p.audience='workspace'
+         AND NOT EXISTS (SELECT 1 FROM sync_relay_member_apps m WHERE m.publication_id=p.publication_id)
+         AND NOT EXISTS (SELECT 1 FROM sync_relay_app_publication_takedowns t WHERE t.publication_id=p.publication_id)`,
+      )
+      .get(workspaceId, id);
+    if (!row || !options.limits) throw notFound();
+    const published = served(userId, workspaceId, id, false);
+    if (
+      !published ||
+      published.local ||
+      published.member ||
+      hiddenFile(published.candidate.appRoot) ||
+      published.candidate.capabilities.some((capability) => capability.kind !== "dataset")
+    )
+      throw notFound();
+    return {
+      candidate: published.candidate,
+      authorityRevision: published.authorityRevision,
+      createdAtMs: Number(row.created_at_ms),
+      approvalProvenance: undefined,
+    };
+  }
+
   function memberApp(userId: string, workspaceId: string, id: string, reviewing: boolean) {
     const row = memberAppRow(context, id);
     if (!row || row.workspaceId !== workspaceId || !options.limits) throw notFound();
@@ -176,18 +207,23 @@ export function createPhoneApps(options: {
   }
 
   // Everything a launch is bound to except its sign-in: the launch, its expiry, its approval, the publication
-  // at the launch's revision, the fence, ownership and Show on phone. Plain reads with no transaction of their
-  // own, so the dataset host runs this inside each commit.
+  // at the launch's revision, the fence, the person's place in the workspace and their Show on phone. Plain reads
+  // with no transaction of their own, so the dataset host runs this inside each commit.
   function holds(binding: PhoneAppBinding, launchHash: string): void {
     const { userId, workspaceId } = binding;
     if (
       phoneAppLaunch(storage, launchHash, options.nowMs())?.approvalId !== binding.approvalId ||
       accountIsFenced(storage, userId) ||
-      !storage.workspaceIsOwnedBy(workspaceId, userId) ||
-      !storage.showsOnPhone(userId, workspaceId)
+      storage.phoneRole(userId, workspaceId) === null
     )
       throw notFound();
   }
+  const app = (userId: string, workspaceId: string, id: string, reviewing: boolean) =>
+    isMemberApp(workspaceId, id)
+      ? memberApp(userId, workspaceId, id, reviewing)
+      : storage.workspaceIsOwnedBy(workspaceId, userId)
+        ? publication(userId, workspaceId, id)
+        : workspaceApp(userId, workspaceId, id);
   // The sign-in, read from the session table, then the rest after that wait, and the publication in full.
   async function recheck(binding: PhoneAppBinding, launchHash: string): Promise<void> {
     const { userId, sessionId, workspaceId } = binding;
@@ -196,9 +232,7 @@ export function createPhoneApps(options: {
       throw notFound();
     }
     holds(binding, launchHash);
-    const current = isMemberApp(workspaceId, binding.publicationId)
-      ? memberApp(userId, workspaceId, binding.publicationId, false)
-      : publication(userId, workspaceId, binding.publicationId);
+    const current = app(userId, workspaceId, binding.publicationId, false);
     if (current.authorityRevision !== binding.authorityRevision) throw notFound();
   }
 
@@ -243,9 +277,9 @@ export function createPhoneApps(options: {
     },
 
     /**
-     * One app operation for `caller` in a workspace it owns while it shows on
-     * the phone. The route has checked both. Approving and launching take a
-     * phone sign-in.
+     * One app operation for `caller` in a workspace it owns or joined while it
+     * shows on their phone. The route has checked both, and passes a Member's
+     * or an Admin's reach. Approving and launching take a phone sign-in.
      */
     run(
       caller: AccountSession,
@@ -253,6 +287,7 @@ export function createPhoneApps(options: {
       operation: string,
       input: unknown,
       names: ReadonlyMap<string, string | null> = new Map(),
+      member: PhoneMember | null = null,
     ): unknown {
       const userId = caller.userId;
       if (operation === "memberApps") {
@@ -298,6 +333,36 @@ export function createPhoneApps(options: {
         if (cursor !== undefined && (typeof cursor !== "string" || !PUBLICATION.test(cursor)))
           throw badRequest("Invalid app cursor.");
         if (!options.limits) return { apps: [], nextCursor: null };
+        if (member !== null) {
+          const page = workspaceAppPage(context, workspaceId, `w${cursor ?? ""}`);
+          return {
+            apps: page.rows.flatMap((row) => {
+              if (row.kind !== "workspace") return [];
+              let found;
+              try {
+                found = workspaceApp(userId, workspaceId, row.publicationId);
+              } catch (error) {
+                if (error instanceof RelayError) return [];
+                throw error;
+              }
+              return [
+                {
+                  publicationId: row.publicationId,
+                  authorityRevision: found.authorityRevision,
+                  appRoot: found.candidate.appRoot,
+                  sourceRevision: found.candidate.sourceRevision,
+                  approved:
+                    phoneAppApproval(storage, {
+                      userId,
+                      workspaceId,
+                      publicationId: row.publicationId,
+                    })?.authorityRevision === found.authorityRevision,
+                },
+              ];
+            }),
+            nextCursor: page.nextCursor?.startsWith("w") ? page.nextCursor.slice(1) : null,
+          };
+        }
         const page = storage.listAppPublications({
           workspaceId,
           ownerUserId: userId,
@@ -344,8 +409,8 @@ export function createPhoneApps(options: {
         operation === "appApprove" ? ["scopeDigest"] : [],
       );
       const id = publicationId(body.publicationId);
-      const member = isMemberApp(workspaceId, id);
-      if (!member && body.scopeDigest !== undefined) throw badRequest("Invalid app arguments.");
+      if (!isMemberApp(workspaceId, id) && body.scopeDigest !== undefined)
+        throw badRequest("Invalid app arguments.");
       if (operation === "appRevoke") {
         const { revoked, launchHashes } = revokePhoneApp(storage, {
           userId,
@@ -355,9 +420,7 @@ export function createPhoneApps(options: {
         ended(launchHashes);
         return { revoked };
       }
-      const row = member
-        ? memberApp(userId, workspaceId, id, operation !== "appLaunch")
-        : publication(userId, workspaceId, id);
+      const row = app(userId, workspaceId, id, operation !== "appLaunch");
       const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
       const approved =
         "member" in row

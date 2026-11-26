@@ -24,6 +24,7 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import type { PhonePages } from "./phonePages";
+import { phoneMember, type PhoneMember } from "./phoneMember";
 import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
@@ -73,7 +74,9 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * A signed-in account's reads, chat writes, read marks, wake retries,
  * conversation contexts, and a phone's page opens for live editing in a
  * workspace it owns, through this server's copy of it, while it shows on the
- * phone; its published apps (phoneApps.ts); its transactional Collections
+ * phone. A Member or an Admin reaches only the reads, the change feed, the
+ * apps and the Collections of a workspace they joined, while it shows on their
+ * own phone, each narrowed by their reach; its published apps (phoneApps.ts); its transactional Collections
  * (phoneCollections.ts); its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
@@ -166,9 +169,19 @@ export function createAccountOperationRoute(options: {
     if (!feed && !wakeFeed && !app && !collection && !page && options.copies() === undefined)
       throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone. Signing in is the browser's only gate.
-    const reaches = (userId: string) =>
-      storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
-      (browser || storage.showsOnPhone(userId, route.workspaceId));
+    const joinedReads = feed || app || collection || isAccountOperation(route.operation);
+    const owner = storage.workspaceOwner(route.workspaceId);
+    const reaches = (userId: string) => {
+      if (browser) return storage.workspaceIsOwnedBy(route.workspaceId, userId);
+      const role = storage.phoneRole(userId, route.workspaceId);
+      return role === "owner" || (role !== null && joinedReads);
+    };
+    const memberOf = (userId: string): PhoneMember | null => {
+      if (userId === owner) return null;
+      const found = phoneMember(storage, route.workspaceId, userId);
+      if (found === null) throw notFound();
+      return found;
+    };
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
@@ -186,18 +199,25 @@ export function createAccountOperationRoute(options: {
         page ||
         isAccountOperation(route.operation)
       ) ||
-      !reaches(caller.userId)
+      !reaches(caller.userId) ||
+      owner === null
     )
       throw notFound();
-    const authorize = async () => {
+    const member = memberOf(caller.userId);
+    const check = async (sameReach: boolean) => {
       const current = await checkSignIn();
       if (
         current.sessionId !== caller.sessionId ||
         current.userId !== caller.userId ||
-        !reaches(caller.userId)
+        !reaches(caller.userId) ||
+        storage.workspaceOwner(route.workspaceId) !== owner ||
+        (sameReach &&
+          memberOf(caller.userId)?.selector.reach.signature() !==
+            member?.selector.reach.signature())
       )
         throw notFound();
     };
+    const authorize = () => check(true);
     if (feed) {
       const url = new URL(request.url);
       const hold = url.searchParams.get("hold");
@@ -208,9 +228,10 @@ export function createAccountOperationRoute(options: {
         since: url.searchParams.get("since"),
         holdMs: hold === null ? 0 : parseLogHold(hold),
         signal: request.signal,
-        authorize,
+        member: () => memberOf(caller.userId),
+        authorize: () => check(false),
       });
-      await authorize();
+      await check(false);
       return jsonResponse({ ok: true, ...answer });
     }
     if (wakeFeed) {
@@ -254,6 +275,7 @@ export function createAccountOperationRoute(options: {
           route.operation,
           args,
           names ?? undefined,
+          member,
         ),
       });
     }
@@ -261,6 +283,7 @@ export function createAccountOperationRoute(options: {
     if (collection)
       return await options.phoneCollections!.respond({
         caller,
+        member,
         workspaceId: route.workspaceId,
         operation: route.operation,
         args,
@@ -284,6 +307,7 @@ export function createAccountOperationRoute(options: {
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = {
       reason: "account",
+      userId: caller.userId,
       caller: caller.sessionId,
       signal: readSignal ?? request.signal,
       phone: true,
@@ -356,7 +380,8 @@ export function createAccountOperationRoute(options: {
     const { result, cursor } = await runAccountOperation(
       { storage, copies },
       {
-        owner: caller.userId,
+        owner,
+        member,
         workspaceId: route.workspaceId,
         operation: route.operation,
         args,

@@ -5,6 +5,7 @@ import {
   type ResolveAccountSession,
 } from "@dohc/workspace-auth/session";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
+import { initializeAccountDeletion, purgeAccountRows } from "./storage/accountDeletion";
 import { isAccountWorkspacePath } from "./accountWorkspaceRoutes";
 import type { StorageContext } from "./storage/context";
 import {
@@ -75,8 +76,8 @@ describe("the account's workspace list", () => {
     expect(await json(response)).toEqual({
       ok: true,
       workspaces: [
-        { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true },
-        { workspaceId: "trip", name: null, canOpen: true, showOnPhone: true },
+        { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true, role: "owner" },
+        { workspaceId: "trip", name: null, canOpen: true, showOnPhone: true, role: "owner" },
       ],
     });
   });
@@ -92,8 +93,8 @@ describe("the account's workspace list", () => {
     );
     expect(named.status).toBe(200);
     expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
-      { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true },
-      { workspaceId: "trip", name: "Lisbon trip", canOpen: true, showOnPhone: true },
+      { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true, role: "owner" },
+      { workspaceId: "trip", name: "Lisbon trip", canOpen: true, showOnPhone: true, role: "owner" },
     ]);
   });
 
@@ -166,6 +167,7 @@ describe("Show on phone", () => {
       name: null,
       canOpen: true,
       showOnPhone: false,
+      role: "owner",
     });
     expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
     expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({
@@ -173,6 +175,7 @@ describe("Show on phone", () => {
       name: null,
       canOpen: true,
       showOnPhone: true,
+      role: "owner",
     });
   });
 
@@ -255,6 +258,117 @@ describe("Show on phone", () => {
       name: null,
       canOpen: true,
       showOnPhone: true,
+      role: "owner",
     });
+  });
+});
+
+describe("Show on phone for a workspace the account joined", () => {
+  async function joined() {
+    const fixture = await relay();
+    expect(
+      fixture.storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    return fixture;
+  }
+
+  it("lists a joined workspace after the account's own, with its role", async () => {
+    const { storage, h } = await joined();
+    expect((await json(await h(list(account("ben"))))).workspaces).toEqual([
+      { workspaceId: "budget", name: null, canOpen: false, showOnPhone: true, role: "owner" },
+      { workspaceId: "trip", name: "Lisbon", canOpen: true, showOnPhone: true, role: "member" },
+    ]);
+    expect(
+      storage.setWorkspaceMemberRole({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        role: "admin",
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await json(await h(list(account("ben"))))).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: "trip", role: "admin" }),
+    );
+    expect(
+      storage.removeWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        nowMs: 2,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await json(await h(list(account("ben"))))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: "budget" }),
+    ]);
+  });
+
+  it("hides it only on the Member's phones, never ending the owner's server copy", async () => {
+    const { storage, h, sockets } = await joined();
+    storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons: ["account"] });
+    expect((await h(patch("trip", account("ben")))).status).toBe(200);
+    expect(sockets.stopPhoneWorkspace).toHaveBeenCalledExactlyOnceWith("ben", "trip");
+    expect(storage.listAutomationWorkspaces()).toMatchObject([
+      { workspaceId: "trip", reasons: ["account"] },
+    ]);
+    storage.endAccountReasonsOfHiddenOrDisownedCopies();
+    expect(storage.listAutomationWorkspaces()).toMatchObject([
+      { workspaceId: "trip", reasons: ["account"] },
+    ]);
+    expect(storage.showsOnPhone("ana", "trip")).toBe(true);
+    expect((await json(await h(list(account("ben"))))).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: "trip", showOnPhone: false }),
+    );
+    expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: "trip", showOnPhone: true }),
+    );
+    expect((await h(patch("trip", account("ana")))).status).toBe(200);
+    expect(storage.listAutomationWorkspaces()).toMatchObject([
+      { workspaceId: "trip", reasons: [] },
+    ]);
+    expect((await h(patch("trip", account("ben"), { showOnPhone: true }))).status).toBe(200);
+    expect(storage.showsOnPhone("ben", "trip")).toBe(true);
+    expect(storage.showsOnPhone("ana", "trip")).toBe(false);
+  });
+
+  it("refuses a workspace the account left, as one it was never in", async () => {
+    const { storage, h } = await joined();
+    const missing = await denialBytes(await h(patch("notes", account("ben"))));
+    storage.removeWorkspaceMember({
+      workspaceId: "trip",
+      actorUserId: "ana",
+      memberId: "member-ben",
+      nowMs: 2,
+    });
+    expect(await denialBytes(await h(patch("trip", account("ben"))))).toBe(missing);
+  });
+
+  it("goes with the Member's account when it is deleted", async () => {
+    const { storage, h } = await joined();
+    expect((await h(patch("trip", account("ben")))).status).toBe(200);
+    const hidden = () =>
+      storage.db
+        .prepare("SELECT owner_user_id FROM sync_relay_phone_hidden_workspaces")
+        .all()
+        .map((row) => row.owner_user_id);
+    expect(hidden()).toEqual(["ben"]);
+    initializeAccountDeletion(storage, "deletion-test");
+    purgeAccountRows(storage, "ben", "ben@dohc.test", {
+      workspaces: [],
+      shareIds: [],
+      datasets: [],
+      grantIds: [],
+      publicationIds: [],
+    });
+    expect(hidden()).toEqual([]);
   });
 });

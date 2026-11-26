@@ -900,7 +900,7 @@ export function createSyncRelayHandler({
         sockets: ownerSockets,
         hidden: (userId, workspaceId) => {
           phoneApps.end({ userId, workspaceId });
-          serverCopies()?.endHold(workspaceId);
+          serverCopies()?.endHold(workspaceId, userId);
         },
       })
     : undefined;
@@ -986,6 +986,7 @@ export function createSyncRelayHandler({
     discussionActivity,
     emailInvitation,
     browserOrigin: namedBrowser ? shareWebOrigin : undefined,
+    reachChanged: (workspaceId) => phoneApps.end({ joined: true, workspaceId }),
   });
   const respondToDirectMessages = createDirectMessageRoutes({
     storage,
@@ -1719,11 +1720,12 @@ export function createSyncRelayHandler({
         );
         // Withdrawing, reactivating, and changing Collection approval each move the authority revision.
         if (answer.ok && "publicationId" in route && route.action !== "read")
-          phoneApps.end({
-            userId: actor.userId,
-            workspaceId: route.workspaceId,
-            publicationId: route.publicationId,
-          });
+          for (const scope of [{ userId: actor.userId }, { joined: true as const }])
+            phoneApps.end({
+              ...scope,
+              workspaceId: route.workspaceId,
+              publicationId: route.publicationId,
+            });
         return answer;
       }
       if (route.route === "app-backend") {

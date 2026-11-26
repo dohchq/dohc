@@ -213,6 +213,8 @@ export function createWorkspaceMemberRoutes(options: {
   emailInvitation: (invitation: ShareInvitation) => Promise<ShareInvitationEmailAnswer>;
   /** The share site's origin, when people can sign in there to open their workspaces. */
   browserOrigin?: string;
+  /** Someone's role, level or rules in the workspace changed, or they left it: their phone apps launch again. */
+  reachChanged?(workspaceId: string): void;
 }) {
   const { storage, linkKey, shareWebOrigin } = options;
   const sealContext = (workspaceId: string, generation: number) =>
@@ -316,11 +318,12 @@ export function createWorkspaceMemberRoutes(options: {
     }
   };
 
-  const settle = (result: MemberChangeResult, workspaceId: string) => {
+  const settle = (result: MemberChangeResult, workspaceId: string, changesReach = true) => {
     if (result.ok) {
       // Held reads re-check their grant when woken, so a change that ends or
       // narrows access ends them now rather than at their deadline.
       options.discussionActivity.wakeLog(workspaceId);
+      if (changesReach) options.reachChanged?.(workspaceId);
       return;
     }
     switch (result.reason) {
@@ -448,6 +451,7 @@ export function createWorkspaceMemberRoutes(options: {
     if (result.ok) {
       // Held reads re-check their grant when woken, as `settle` explains.
       options.discussionActivity.wakeLog(workspaceId);
+      options.reachChanged?.(workspaceId);
       return;
     }
     if (result.reason === "forbidden") throw relayError("members_forbidden");
@@ -496,6 +500,7 @@ export function createWorkspaceMemberRoutes(options: {
       // Held reads and personal-agent waits recheck when woken, so a Group
       // that became hidden leaves them now.
       options.discussionActivity.wakeLog(route.workspaceId);
+      options.reachChanged?.(route.workspaceId);
       return respondWithView(route.workspaceId, userId);
     }
     if (route.route === "members-workspaces") {
@@ -641,7 +646,7 @@ export function createWorkspaceMemberRoutes(options: {
         // An account being deleted counts as no account: its address gets an email invite.
         if (!result.ok && result.reason === "account-unavailable" && resolved !== null)
           result = invite(null);
-        settle(result, workspaceId);
+        settle(result, workspaceId, false);
         if (!result.ok) throw notFound();
         const { invitation } = result;
         const browserInvitationUrl = options.browserOrigin
@@ -762,6 +767,7 @@ export function createWorkspaceMemberRoutes(options: {
             },
           }),
           workspaceId,
+          false,
         );
         return respondWithView(workspaceId, userId);
       }

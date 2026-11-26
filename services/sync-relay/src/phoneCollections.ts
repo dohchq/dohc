@@ -16,6 +16,7 @@ import { jsonResponse } from "@dohc/service-http";
 import type { AccountSession } from "@dohc/workspace-auth/session";
 import { hiddenFile } from "./accountFeed";
 import type { AppBackendAuth } from "./appBackendAuthority";
+import type { PhoneMember } from "./phoneMember";
 import type { RelayDatasetHost } from "./datasetHost";
 import { badRequest, notFound, relayError, RELAY_ERROR_MESSAGES } from "./errors";
 import type { SyncRelayStorage } from "./storage";
@@ -25,9 +26,10 @@ import type { StorageContext } from "./storage/context";
 
 // The phone reads its account's transactional Collections through each table's own read operation, changes one
 // field of a record through the field's edit operation, and adds and deletes records through the table's create and
-// delete operations, as the desktop does. The account route has checked the sign-in, its fence, the owner and Show on
-// phone. A Collection that is archived, still importing, or whose dataset.json is missing or under a hidden path
-// answers as one that doesn't exist.
+// delete operations, as the desktop does. The account route has checked the sign-in, its fence, the person's place in
+// the workspace and their Show on phone. A Member or an Admin acts through their own grant, so the dataset host gives
+// them their grants, the workspace's defaults and their folder ceiling, read-only below Edit. A Collection that is
+// archived, still importing, or whose dataset.json is missing or under a hidden path answers as one that doesn't exist.
 
 export const PHONE_COLLECTION_PAGE = 50;
 
@@ -112,13 +114,10 @@ export function createPhoneCollections(options: {
 }) {
   const storage = options.storage as StorageContext;
 
-  // The fence, the owner and Show on phone. Plain reads, so the dataset host runs this inside the read too.
+  // The fence, the person's place in the workspace and their Show on phone. Plain reads, so the dataset host runs this
+  // inside the read too.
   function holds(userId: string, workspaceId: string): void {
-    if (
-      accountIsFenced(storage, userId) ||
-      !storage.workspaceIsOwnedBy(workspaceId, userId) ||
-      !storage.showsOnPhone(userId, workspaceId)
-    )
+    if (accountIsFenced(storage, userId) || storage.phoneRole(userId, workspaceId) === null)
       throw notFound();
   }
   // Its dataset.json is on main, and neither where it was approved nor where it is now is hidden.
@@ -138,7 +137,16 @@ export function createPhoneCollections(options: {
     datasetId: string,
   ): DatasetDescription {
     if (!visible(workspaceId, datasetId)) throw notFound();
-    // The owner's authority, so an archived one is described, and answers as missing, rather than refused.
+    // The owner's authority describes an archived one, which answers as missing rather than refused. A Member's
+    // authority is refused one as archived, which answers the same.
+    if (auth.kind === "named" && auth.grantId !== undefined) {
+      try {
+        return host.describe(auth, { workspaceId, datasetId });
+      } catch (error) {
+        if (error instanceof DatasetHostError && error.code === "conflict") throw notFound();
+        throw error;
+      }
+    }
     const description = host.describe(auth, { workspaceId, datasetId, includeArchived: true });
     if (description.archived) throw notFound();
     return description;
@@ -208,6 +216,8 @@ export function createPhoneCollections(options: {
 
   async function run(input: {
     caller: AccountSession;
+    /** A Member's or an Admin's reach, or null for the owner. */
+    member: PhoneMember | null;
     workspaceId: string;
     operation: string;
     args: unknown;
@@ -222,6 +232,7 @@ export function createPhoneCollections(options: {
       kind: "named",
       workspaceId,
       userId,
+      ...(input.member ? { grantId: input.member.grantId } : {}),
       launch: { authorizeOperation: check, recheck: authorize },
     });
     const auth = guarded(() => holds(userId, workspaceId));

@@ -147,6 +147,8 @@ export function threadPathsInTransaction(
 ): {
   created: boolean;
   linkedObjectId: string | null;
+  /** The Group a thread on no file was created in, as its create names it. */
+  channelWireId: string | null;
   lastKnownPath: string | null;
   named: string[];
 } {
@@ -172,6 +174,7 @@ export function threadPathsInTransaction(
   return {
     created: create !== undefined,
     linkedObjectId: objectId ?? null,
+    channelWireId: text(create?.channelWireId)[0] ?? null,
     lastKnownPath:
       (objectId === undefined ? undefined : objectLastKnownPath(storage, workspaceId, objectId)) ??
       null,
