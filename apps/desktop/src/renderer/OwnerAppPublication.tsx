@@ -11,6 +11,7 @@ import {
   Table2,
   TriangleAlert,
   Unlink,
+  Users,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -56,6 +57,8 @@ const unconfirmedRemoval = (count: number) =>
   `dohc removed this app's approval but has not confirmed whether ${responses(count)} ${count === 1 ? "was" : "were"} saved.`;
 
 const PUBLICATION_ID = /^[a-f0-9]{64}$/;
+const MEMBERS = "workspace";
+const MEMBERS_LABEL = "Workspace members";
 const APP_LINK_SECRET = {
   what: "the app link",
   again: "Open Review app to copy it again.",
@@ -332,6 +335,7 @@ function PublicationDialog(
   const [reactivating, setReactivating] = useState(false);
   const [linkReads, setLinkReads] = useState<NonNullable<AppDatasetCapability["linkReads"]>>([]);
   const [preparedLink, setPreparedLink] = useState("");
+  const [preparedForMembers, setPreparedForMembers] = useState(false);
   const [busy, setBusy] = useState<
     "prepare" | "approve" | "withdraw" | "revokeCollection" | "open" | null
   >(null);
@@ -456,7 +460,9 @@ function PublicationDialog(
       } while (cursor);
       if (current) {
         setLinks(rows);
-        setSelected((value) => (rows.some((link) => link.grantId === value) ? value : ""));
+        setSelected((value) =>
+          value === MEMBERS || rows.some((link) => link.grantId === value) ? value : "",
+        );
       }
     })()
       .catch((error) => {
@@ -838,6 +844,7 @@ function PublicationDialog(
       setReactivating(false);
       setLinkReads([]);
       setPreparedLink(link);
+      setPreparedForMembers(input.audience === "workspace");
     } catch (cause) {
       if (alive.current && mine === request.current) {
         cancel(candidate.current);
@@ -857,18 +864,28 @@ function PublicationDialog(
     }
   };
   const prepare = () =>
-    selectedLink
+    selected === MEMBERS
       ? prepareWith(
           {
             action: "prepare",
             workspaceId: props.workspaceId,
             appRoot: props.appRoot,
-            shareId: selectedLink.shareId,
-            grantId: selectedLink.grantId,
+            audience: "workspace",
           },
-          linkLabel(selectedLink),
+          MEMBERS_LABEL,
         )
-      : undefined;
+      : selectedLink
+        ? prepareWith(
+            {
+              action: "prepare",
+              workspaceId: props.workspaceId,
+              appRoot: props.appRoot,
+              shareId: selectedLink.shareId,
+              grantId: selectedLink.grantId,
+            },
+            linkLabel(selectedLink),
+          )
+        : undefined;
 
   const reviewReactivation = async (publication: Publication) => {
     if (
@@ -902,7 +919,10 @@ function PublicationDialog(
       const verified = verifiedPrepared(result);
       setPrepared(verified);
       setReactivating(true);
-      setPreparedLink(`Link ${publication.grantId}`);
+      setPreparedForMembers(publication.audience === "workspace");
+      setPreparedLink(
+        publication.audience === "workspace" ? MEMBERS_LABEL : `Link ${publication.grantId}`,
+      );
     } catch (cause) {
       if (alive.current && mine === request.current) {
         cancel(candidate.current);
@@ -929,7 +949,9 @@ function PublicationDialog(
         workspaceId: props.workspaceId,
         approvalId: prepared.approvalId,
         candidateDigest: prepared.candidateDigest,
-        ...(!reactivating && prepared.capabilities.some((value) => value.kind === "dataset")
+        ...(!reactivating &&
+        !preparedForMembers &&
+        prepared.capabilities.some((value) => value.kind === "dataset")
           ? { linkReads }
           : {}),
       });
@@ -940,7 +962,13 @@ function PublicationDialog(
       localChanged();
       setPublicationsReload((value) => value + 1);
       setPrepared(null);
-      setNotice(reactivating ? "App republished." : "App published on the selected link.");
+      setNotice(
+        reactivating
+          ? "App republished."
+          : preparedForMembers
+            ? "App published for workspace members."
+            : "App published on the selected link.",
+      );
     } catch (cause) {
       if (alive.current && mine === request.current) {
         cancel(prepared);
@@ -991,7 +1019,11 @@ function PublicationDialog(
       if (local) localChanged();
       else {
         setPublicationsReload((value) => value + 1);
-        setNotice("App unpublished. The share link still works for its other shared content.");
+        setNotice(
+          "audience" in publication && publication.audience === "workspace"
+            ? "App unpublished for workspace members."
+            : "App unpublished. The share link still works for its other shared content.",
+        );
       }
     } catch (cause) {
       if (alive.current && mine === request.current) {
@@ -1389,7 +1421,11 @@ function PublicationDialog(
                             key={publication.publicationId}
                             className="flex items-center gap-2 px-3 py-2 text-[13px]"
                           >
-                            <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
+                            {publication.audience === "workspace" ? (
+                              <Users size={12} aria-hidden className="shrink-0 text-muted" />
+                            ) : (
+                              <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
+                            )}
                             <span
                               className={`min-w-0 flex-1 truncate ${publication.operatorTakedown || !publication.linkCurrent ? "text-warning" : "text-ink"}`}
                             >
@@ -1397,12 +1433,14 @@ function PublicationDialog(
                                 ? "Disabled by server operator"
                                 : !publication.linkCurrent
                                   ? "Link changed"
-                                  : "Published on a share link"}
+                                  : publication.audience === "workspace"
+                                    ? "Published for workspace members"
+                                    : "Published on a share link"}
                             </span>
                             <span className="shrink-0 text-[12px] text-muted">
                               {publication.grantId
                                 ? `Link ${publication.grantId.slice(0, 8)}`
-                                : "Workspace"}
+                                : MEMBERS_LABEL}
                             </span>
                             {directAppUrl ? (
                               <CopyButton
@@ -1539,7 +1577,9 @@ function PublicationDialog(
                   : "Publish this captured app. Later source edits need a new publication."}
               </p>
               <div className="text-[12px] text-muted">
-                <span className="font-medium text-ink">Link</span>
+                <span className="font-medium text-ink">
+                  {preparedForMembers ? "Who can open it" : "Link"}
+                </span>
                 <p className="m-0 break-words">{preparedLink}</p>
               </div>
               <div>
@@ -1569,7 +1609,7 @@ function PublicationDialog(
                         workspaceId={props.workspaceId}
                         key={collectionKey(prepared.approvalId, capability.datasetId)}
                         capability={capability}
-                        {...(reactivating ? {} : { linkReadChoice })}
+                        {...(reactivating || preparedForMembers ? {} : { linkReadChoice })}
                       />
                     ) : (
                       <CollectionPermissionCard
@@ -1656,7 +1696,7 @@ function PublicationDialog(
                               <p className="m-0 break-all">
                                 {publication.grantId
                                   ? `Link ${publication.grantId.slice(0, 8)}`
-                                  : "Workspace"}{" "}
+                                  : MEMBERS_LABEL}{" "}
                                 ·{" "}
                                 {publication.operatorTakedown
                                   ? "Disabled by server operator"
@@ -1816,17 +1856,17 @@ function PublicationDialog(
                 </div>
               ))}
               <div>
-                <h3 className="m-0 text-[13px] font-medium text-ink">Publish on a share link</h3>
+                <h3 className="m-0 text-[13px] font-medium text-ink">Publish this app</h3>
                 <p className="mb-0 mt-1 text-[12px] text-muted">
                   {synced === false
-                    ? "Sync this workspace to publish on a share link. Opening on this device does not need sync."
-                    : "Publishing on a link needs a connection to your dohc server. Approval for this device does not."}
+                    ? "Sync this workspace to publish this app. Opening on this device does not need sync."
+                    : "Publishing needs a connection to your dohc server. Approval for this device does not."}
                 </p>
               </div>
               {synced === false ? null : (
                 <>
                   <label className="text-[13px] text-ink">
-                    Share link
+                    Who can open it
                     <select
                       aria-label="Publication share link"
                       disabled={loading || !!busy || responsesBusy}
@@ -1834,7 +1874,8 @@ function PublicationDialog(
                       onChange={(event) => setSelected(event.target.value)}
                       className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink"
                     >
-                      <option value="">Choose a link</option>
+                      <option value="">Choose who can open it</option>
+                      <option value={MEMBERS}>{MEMBERS_LABEL}</option>
                       {links.map((link) => (
                         <option key={link.grantId} value={link.grantId}>
                           {linkLabel(link)}
@@ -1900,7 +1941,11 @@ function PublicationDialog(
                 )}
                 {synced === false ? null : (
                   <PrimaryButton
-                    disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError}
+                    disabled={
+                      !!busy ||
+                      responsesBusy ||
+                      (selected !== MEMBERS && (!selectedLink || loading || !!loadError))
+                    }
                     onClick={() => void prepare()}
                   >
                     {busy === "prepare" && !busyPublicationId ? "Preparing app…" : "Prepare app"}

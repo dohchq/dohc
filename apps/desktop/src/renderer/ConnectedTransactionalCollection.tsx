@@ -57,6 +57,7 @@ import { display, parsePage, type TransactionalRow } from "./transactionalCollec
 
 export interface ConnectedTransactionalCollectionProps {
   owner?: boolean;
+  managesAccess?: boolean;
   workspaceId: string;
   datasetPath: string;
   tableId: string;
@@ -115,6 +116,7 @@ function ScopedCollection({
   initialRecordPanelWidth,
   onRecordPanelWidthChange,
   owner = true,
+  managesAccess = owner,
 }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
@@ -743,7 +745,9 @@ function ScopedCollection({
           onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
           onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
           onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
-          onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
+          onManageAccess={
+            managesAccess && !copy?.offline ? () => setManagingAccess(true) : undefined
+          }
           onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
           onCustomAction={setCustomAction}
           confirmDelete={(row) =>

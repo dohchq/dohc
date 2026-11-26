@@ -235,3 +235,66 @@ it("shows bound app names, drift statuses, reasons, and incomplete notice", asyn
   ).toBeTruthy();
   expect(screen.getByText(/Some connected apps could not be checked right now/)).toBeTruthy();
 });
+
+it("sets what each workspace level gets by default, and only reads below Edit", async () => {
+  const edit = id(5);
+  api.dataset.mockImplementation(async (input) =>
+    input.action === "permissions"
+      ? {
+          kind: "permissions",
+          permissions: [],
+          nextCursor: null,
+          defaults: {
+            view: [],
+            comment: [],
+            edit: [id(2), "removed"],
+            revision: 1,
+            revisionSha256: "b".repeat(64),
+            generation: 3,
+          },
+          rules: {
+            revision: 2,
+            revisionSha256: "a".repeat(64),
+            actions: [
+              { operationId: id(2), name: "read", readOnly: true },
+              { operationId: edit, name: "edit", readOnly: false },
+            ],
+          },
+        }
+      : { kind: "grant-updated" },
+  );
+  api.listRelayShares.mockResolvedValue({ granted: [] });
+  render(
+    <CollectionPermissionsDialog
+      datasetPath="data/dataset.json"
+      workspaceId="w"
+      dataset={dataset}
+      onClose={vi.fn()}
+      onError={vi.fn()}
+    />,
+  );
+  const save = await screen.findByRole("button", { name: "Save for members" });
+  expect((save as HTMLButtonElement).disabled).toBe(true);
+  const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+  expect(box("Read orders for members with Edit").checked).toBe(true);
+  expect(box("edit for members with View").disabled).toBe(true);
+  expect(box("edit for members with Comment").disabled).toBe(true);
+  fireEvent.click(box("Read orders for members with View"));
+  fireEvent.click(box("edit for members with Edit"));
+  fireEvent.click(save);
+  await waitFor(() =>
+    expect(api.dataset).toHaveBeenCalledWith({
+      workspaceId: "w",
+      datasetPath: "data/dataset.json",
+      expectedDatasetId: id(1),
+      action: "setDefaults",
+      defaults: {
+        view: [id(2)],
+        comment: [],
+        edit: [id(2), edit].sort(),
+        revision: 2,
+        revisionSha256: "a".repeat(64),
+      },
+    }),
+  );
+});
