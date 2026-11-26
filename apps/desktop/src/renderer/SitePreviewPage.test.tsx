@@ -1016,6 +1016,22 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("app-view-review")).toBeNull();
   });
 
+  it("waits for a click before running a promoted app's code", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+      sourceFiles: ["report/index.html", "report/package.json", "report/app.publish.json"],
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" reviewForMembers />);
+
+    expect(await screen.findByText("This app did not start automatically.")).toBeTruthy();
+    expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
+    expect(screen.getByTestId("site-preview-restart").textContent).toBe("Run dev preview");
+  });
+
   it("keeps static preview for a workspace-root site even if app.publish.json exists at root", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({
       ...site,

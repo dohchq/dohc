@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AppWindow, FileCode, FileX, Undo2, X } from "lucide-react";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import {
@@ -524,9 +524,7 @@ function SourceView(props: { workspaceId: string; publicationId: string; path: s
               ? "This file is too large to show here."
               : "This file isn't text."
           }
-        >
-          Open the app in your browser to see it in use.
-        </SourceEmpty>
+        />
       ) : file.text === "" ? (
         <SourceEmpty title="This file is empty." />
       ) : (
@@ -551,12 +549,10 @@ function SourceView(props: { workspaceId: string; publicationId: string; path: s
   );
 }
 
-function SourceEmpty(props: { title: string; children?: ReactNode }) {
+function SourceEmpty(props: { title: string }) {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <EmptyState icon={FileX} title={props.title}>
-        {props.children}
-      </EmptyState>
+      <EmptyState icon={FileX} title={props.title} />
     </div>
   );
 }

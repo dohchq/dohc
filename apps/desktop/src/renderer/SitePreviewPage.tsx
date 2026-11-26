@@ -315,13 +315,15 @@ export function SitePreviewPage(props: {
     rawModes.every((mode) => mode === "static");
   const modes = useMemo(() => (needsPublication ? [] : rawModes), [needsPublication, rawModes]);
   const [forMembers, setForMembers] = useState(false);
+  const promoted = useRef(false);
+  if (props.reviewForMembers) promoted.current = true;
   const reviewable = !props.sharedView && site?.authority.kind === "workspace" && !versionPending;
   useEffect(() => {
-    if (!props.reviewForMembers || !reviewable) return;
+    if (!props.reviewForMembers || !reviewable || props.visible === false) return;
     setForMembers(true);
     setReviewOpen(true);
     props.onReviewForMembersOpened?.();
-  }, [props.reviewForMembers, reviewable]);
+  }, [props.reviewForMembers, reviewable, props.visible]);
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
   useEffect(() => {
@@ -610,6 +612,7 @@ export function SitePreviewPage(props: {
     const autoStartKey = `${siteContext}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
+    if (runsCode && promoted.current) return;
     if (!held) {
       void start(mode, false);
       return;
