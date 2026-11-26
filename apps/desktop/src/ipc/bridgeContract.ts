@@ -2331,6 +2331,7 @@ export const HistoryVersionMarker = z
     kind: z.enum(["main", "named"]),
     name: z.string(),
     createdAtMs: z.number().int(),
+    archivedAtMs: z.number().int().optional(),
     forkPoint: z
       .object({ versionId: OPAQUE_ID, momentId: OPAQUE_ID.optional() })
       .strict()
