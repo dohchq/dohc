@@ -214,3 +214,48 @@ impl ActorHandle {
         }).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::ydoc::reading_body_sequence_here;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+
+    fn format_two(file: &str) -> Ydoc {
+        let marked = yrs::Doc::new();
+        let meta = marked.get_or_insert_map("meta");
+        meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+        let doc = Ydoc::wire();
+        doc.apply(
+            &marked
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default()),
+        )
+        .unwrap();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+            .unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_format_two_body_edit_changes_the_held_change_fingerprint() {
+        reading_body_sequence_here(|| {
+            let doc = format_two("Waiting\n");
+            let before = document_fingerprint(&doc);
+            doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "Waiting more\n")
+                .unwrap();
+            assert_ne!(document_fingerprint(&doc), before);
+        });
+    }
+
+    #[test]
+    fn format_two_notes_that_read_differently_have_different_content() {
+        reading_body_sequence_here(|| {
+            let (one, two) = (format_two("One\n"), format_two("Two\n"));
+            assert_ne!(
+                one.canonical_content_sha256(),
+                two.canonical_content_sha256()
+            );
+        });
+    }
+}

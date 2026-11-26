@@ -4929,7 +4929,6 @@ mod tests {
     /// typing, deletes the line. Returns the kept text, its author_json, and
     /// whether the record names the author, for each merge-removal record.
     fn removals_after(order: &[&str]) -> Vec<(String, Option<String>, bool)> {
-        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
         let ana = Ydoc::with_client_id(2);
         let ben = Ydoc::with_client_id(3);
         let line = ana.richdoc_append_paragraph("Hello");
@@ -4937,6 +4936,17 @@ mod tests {
         let typed = ana.richdoc_insert_text(0, 5, " world").unwrap();
         let own = ana.richdoc_remove_block(0);
         let deleted = ben.richdoc_remove_block(0);
+        removals_merging(order, line, typed, own, deleted)
+    }
+
+    fn removals_merging(
+        order: &[&str],
+        line: Vec<u8>,
+        typed: Vec<u8>,
+        own: Vec<u8>,
+        deleted: Vec<u8>,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
         let relay = Ydoc::with_client_id(9);
         let mut frames = vec![("line", line)];
         for name in order {
@@ -5007,6 +5017,39 @@ mod tests {
     #[test]
     fn a_persons_own_delete_keeps_nothing() {
         assert_eq!(removals_after(&["typed", "own"]), vec![]);
+    }
+
+    #[test]
+    fn keeps_typing_a_collaborators_delete_removed_from_a_format_two_note() {
+        crate::ydoc::reading_body_sequence_here(|| {
+            let fold = |doc: &Ydoc, file: &str| {
+                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+                    .unwrap()
+            };
+            let ana = Ydoc::with_client_id(2);
+            use yrs::{Map as _, ReadTxn as _, Transact as _};
+            let marked = yrs::Doc::new();
+            let meta = marked.get_or_insert_map("meta");
+            meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+            let marked = marked
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default());
+            ana.apply(&marked).unwrap();
+            fold(&ana, "Hello\n\nKeep\n");
+            let line = ana.encode_full_state();
+            let ben = Ydoc::with_client_id(3);
+            ben.apply(&line).unwrap();
+            let typed = fold(&ana, "Hello world\n\nKeep\n");
+            let own = fold(&ana, "Keep\n");
+            let deleted = fold(&ben, "Keep\n");
+            let removals = removals_merging(&["typed", "deleted"], line, typed, own, deleted);
+            assert_eq!(removals.len(), 1, "{removals:?}");
+            assert_eq!(removals[0].0, " world");
+            assert!(removals[0]
+                .1
+                .as_deref()
+                .is_some_and(|author| author.contains("guest-2")));
+        });
     }
 
     #[test]

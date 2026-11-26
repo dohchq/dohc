@@ -308,6 +308,62 @@ mod tests {
         );
     }
 
+    fn format_two(file: &str) -> Ydoc {
+        let doc = Ydoc::wire();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        meta.insert(&mut doc.doc.transact_mut(), "schemaVersion", 2.0);
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+            .unwrap();
+        doc
+    }
+
+    fn reading(doc: &Ydoc) -> String {
+        doc.project(ContentKind::Richdoc).unwrap().content
+    }
+
+    #[test]
+    fn a_held_version_folds_onto_a_format_two_note() {
+        reading_body_sequence_here(|| {
+            let waiting = "# Kept\n\nWaiting text\n";
+            let note = format_two(waiting);
+            let point = Ydoc::wire();
+            point.apply(&note.encode_full_state()).unwrap();
+            note.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "# Kept\n\nDropped\n")
+                .unwrap();
+            let peer = Ydoc::wire();
+            peer.apply(&note.encode_full_state()).unwrap();
+            let typed = peer
+                .rewrite_content_to_markdown_for_fold(
+                    ContentKind::Richdoc,
+                    "# Kept here\n\nDropped\n",
+                )
+                .unwrap();
+            note.restore_held_content(ContentKind::Richdoc, &point)
+                .unwrap();
+            assert_eq!(reading(&note), waiting);
+            note.apply(&typed).unwrap();
+            assert_eq!(reading(&note), "# Kept here\n\nWaiting text\n");
+
+            let one = Ydoc::wire();
+            one.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "From format one\n")
+                .unwrap();
+            note.restore_held_content(ContentKind::Richdoc, &one)
+                .unwrap();
+            assert_eq!(reading(&note), "From format one\n");
+            assert_eq!(note.note_schema_version(), 2);
+
+            let older = Ydoc::wire();
+            older
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "A format one note\n")
+                .unwrap();
+            let before = older.encode_full_state();
+            assert!(older
+                .restore_held_content(ContentKind::Richdoc, &point)
+                .is_err());
+            assert_eq!(older.encode_full_state(), before);
+        });
+    }
+
     #[test]
     fn restore_copy_preserves_crlf_and_clears_stale_crlf() {
         for source in ["# Point\r\n\r\nText.\r\n", "# Point\n\nText.\n"] {

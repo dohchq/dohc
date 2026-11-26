@@ -304,3 +304,65 @@ pub(super) fn write(
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::{FileExportLane, LineageClaimStatus, Regime};
+    use yrs::{Any, Map as _, ReadTxn as _, Text as _, Transact as _, Xml as _, XmlElementPrelim};
+
+    fn linked(target: &str) -> Ydoc {
+        let written = yrs::Doc::new();
+        let meta = written.get_or_insert_map("meta");
+        let sequence = written.get_or_insert_text("sequence");
+        {
+            let mut txn = written.transact_mut();
+            meta.insert(&mut txn, "schemaVersion", 2.0);
+            let line = sequence.insert_embed(&mut txn, 0, XmlElementPrelim::empty("block"));
+            line.insert_attribute(&mut txn, "type", Any::from("paragraph"));
+            line.insert_attribute(&mut txn, "path", Any::from(Vec::<Any>::new()));
+            sequence.insert(&mut txn, 1, "See ");
+            let link = sequence.insert_embed(&mut txn, 5, XmlElementPrelim::empty("wikilink"));
+            link.insert_attribute(&mut txn, "target", Any::from(target));
+            sequence.insert(&mut txn, 6, " here");
+        }
+        let doc = Ydoc::wire();
+        doc.apply(
+            &written
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default()),
+        )
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_rename_rewrites_a_wikilink_in_a_format_two_note() {
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            let doc = linked("old");
+            let (before, after) = ("See [[old]] here\n", "See [[new]] here\n");
+            assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, before);
+            let marker = Marker {
+                file_export_lane: FileExportLane::Off,
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+                head_update_seq: 0,
+                head_snapshot_seq: 0,
+                lineage_claim_status: LineageClaimStatus::Unclaimed,
+                lineage_claim_id: None,
+                lineage_parent_claim_id: None,
+                lineage_epoch_tag: None,
+                path: None,
+                base_origin_id: None,
+                base_origin_seq: None,
+                base_relay_seq: None,
+                base_relay_confirmed_absent: false,
+            };
+            let edit = prepare_doc(&doc, marker, before, after)
+                .unwrap()
+                .expect("the rename");
+            doc.apply(&edit.update).unwrap();
+            assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, after);
+        });
+    }
+}
