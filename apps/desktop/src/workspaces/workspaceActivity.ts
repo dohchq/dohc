@@ -62,6 +62,8 @@ interface WatchedWorkspace {
   recoveryUnavailable: boolean;
   // Why protected files wait on the workspace secret key, or null.
   secretKeyUnavailable: string | null;
+  protectedFiles: NonNullable<SyncStatusResult["protectedFiles"]> | null;
+  protectedFilesPassphraseChecked: boolean;
   outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
   outsideWriteCopyReadError: string | null | undefined;
   protectedCopies: readonly (readonly [string, string, number])[] | null;
@@ -177,6 +179,7 @@ export interface WorkspaceCaptureHooks {
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onSecretKeyUnavailable?: (reason: string | null) => void;
+  onProtectedFilesLocked?: (locked: boolean) => void;
   onOutsideWriteCopies?: (
     paths: readonly (readonly [string, string, string])[] | null,
     readError: string | null,
@@ -344,6 +347,7 @@ export function createWorkspaceActivity(
       ...(w?.cloudSyncFolder ? { cloudSyncFolder: w.cloudSyncFolder } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       ...(w?.secretKeyUnavailable ? { secretKeyUnavailable: w.secretKeyUnavailable } : {}),
+      ...(w?.protectedFiles ? { protectedFiles: w.protectedFiles } : {}),
       ...(w && w.outsideWriteCopies !== null
         ? {
             outsideWriteCopies: w.outsideWriteCopies.map(
@@ -467,6 +471,8 @@ export function createWorkspaceActivity(
         cloudSyncFolder: null,
         recoveryUnavailable: false,
         secretKeyUnavailable: null,
+        protectedFiles: null,
+        protectedFilesPassphraseChecked: false,
         outsideWriteCopies: null,
         outsideWriteCopyReadError: undefined,
         protectedCopies: null,
@@ -522,6 +528,14 @@ export function createWorkspaceActivity(
             onSecretKeyUnavailable: (reason) => {
               if (state.entry !== entry || entry.secretKeyUnavailable === reason) return;
               entry.secretKeyUnavailable = reason;
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onProtectedFilesLocked: (locked) => {
+              if (state.entry !== entry) return;
+              const next = locked ? "locked" : null;
+              if (entry.protectedFiles === next || (!locked && entry.protectedFiles !== "locked"))
+                return;
+              entry.protectedFiles = next;
               notify({ workspaceId: workspace.workspaceId });
             },
             onOutsideWriteCopies: (paths, readError) => {
@@ -752,6 +766,46 @@ export function createWorkspaceActivity(
       console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error);
       return false;
     }
+  }
+
+  async function checkProtectedFilesPassphrase(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+    needsPassphrase: () => Promise<boolean | undefined>,
+  ): Promise<boolean> {
+    const entry = state.entry;
+    if (!entry || entry.protectedFilesPassphraseChecked) return false;
+    let needed: boolean | undefined;
+    try {
+      needed = await needsPassphrase();
+    } catch (error) {
+      console.error(
+        `[desktop] protected files passphrase check failed for ${workspace.workspaceId}:`,
+        error,
+      );
+      return false;
+    }
+    if (needed === undefined || state.entry !== entry) return false;
+    entry.protectedFilesPassphraseChecked = true;
+    if (!needed || entry.protectedFiles === "need-passphrase") return false;
+    entry.protectedFiles = "need-passphrase";
+    notify({ workspaceId: workspace.workspaceId });
+    return true;
+  }
+
+  async function protectedFilesUnlocked(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): Promise<void> {
+    const entry = state.entry;
+    if (!entry) return;
+    const wasLocked = entry.protectedFiles === "locked";
+    if (wasLocked) await entry.capture?.restoreLockedProtectedFiles();
+    if (state.entry !== entry) return;
+    entry.protectedFiles = null;
+    entry.protectedFilesPassphraseChecked = false;
+    notify({ workspaceId: workspace.workspaceId });
+    if (wasLocked) void retryCloudSync(state, "person").catch(() => undefined);
   }
 
   // The pause saved, but the workspace did not reopen while Collection
@@ -1225,6 +1279,8 @@ export function createWorkspaceActivity(
     recordSyncPauseReopenFailed,
     readCollectionsWaiting,
     syncPassEnded,
+    checkProtectedFilesPassphrase,
+    protectedFilesUnlocked,
     reconcileCloud,
     stopEngine,
     getStatus,

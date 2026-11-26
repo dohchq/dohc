@@ -22,6 +22,7 @@
     "./engine-path-floor": "./src/enginePathFloor.ts",
     "./secret-key-envelope": "./src/secretKeyEnvelope.ts",
     "./secret-prefix": "./src/secretPrefix.ts",
+    "./secret-passphrase": "./src/secretPassphrase.ts",
     "./chat-wire-ids": "./src/chatWireIds.ts",
     "./share-labels": "./src/shareLabels.ts",
     "./share-grant": "./src/shareGrant.ts",

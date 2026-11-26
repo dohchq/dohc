@@ -1156,6 +1156,7 @@ function WorkspaceShell(props: {
     showSavedTabsNotice,
     reportRecoveryUnavailable,
     reportSecretKeyUnavailable,
+    reportProtectedFiles,
     showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,
@@ -8453,6 +8454,10 @@ function WorkspaceShell(props: {
   useEffect(() => {
     reportSecretKeyUnavailable(secretKeyUnavailable, retrySecretKey);
   }, [secretKeyUnavailable, reportSecretKeyUnavailable, retrySecretKey]);
+  const protectedFiles = syncStatus?.protectedFiles ?? null;
+  useEffect(() => {
+    reportProtectedFiles(protectedFiles, openSyncSettings);
+  }, [protectedFiles, reportProtectedFiles, openSyncSettings]);
   // History stopped recording. Try again keeps its row, busy, until the
   // restart answers: one that runs again clears the row, and a failure shows
   // it again with its toast.

@@ -628,7 +628,7 @@ function identityQuery(replicationEpoch = EPOCH_1, streamIdentity = STREAM_1): s
   return `replicationEpoch=${encodeURIComponent(replicationEpoch)}&streamIdentity=${encodeURIComponent(streamIdentity)}`;
 }
 
-function keyEnvelopeJson(saltBase64: string): string {
+function keyEnvelopeJson(saltBase64: string, keyCheckByte?: number): string {
   return JSON.stringify({
     format: "dohc-key-envelope-v1",
     saltBase64,
@@ -638,6 +638,9 @@ function keyEnvelopeJson(saltBase64: string): string {
     ivBase64: "AA==",
     authTagBase64: "AA==",
     ciphertextBase64: "AA==",
+    ...(keyCheckByte === undefined
+      ? {}
+      : { keyCheckBase64: Buffer.alloc(32, keyCheckByte).toString("base64") }),
   });
 }
 
@@ -1200,6 +1203,37 @@ describe("sync relay handler", () => {
         replacedBySha256: sha256(second),
       },
     ]);
+  });
+
+  it("keeps no copy of an envelope replaced by one that wraps the same key", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const unmarked = keyEnvelopeJson("dW5tYXJrZWQ=");
+    const firstPassphrase = keyEnvelopeJson("Zmlyc3Q=", 1);
+    const secondPassphrase = keyEnvelopeJson("c2Vjb25k", 1);
+    const otherKey = keyEnvelopeJson("b3RoZXI=", 2);
+    const thirdPassphrase = keyEnvelopeJson("dGhpcmQ=", 1);
+    const fourthPassphrase = keyEnvelopeJson("Zm91cnRo", 1);
+    const history = () =>
+      keyEnvelopeHistory(storagePath(storage), "workspace-a").map((row) => row.envelopeJson);
+
+    expect((await h(putKeys(unmarked))).status).toBe(200);
+    expect((await h(putKeys(firstPassphrase, sha256(unmarked)))).status).toBe(200);
+    expect(history()).toEqual([unmarked]);
+
+    expect((await h(putKeys(secondPassphrase, sha256(firstPassphrase)))).status).toBe(200);
+    expect(history()).toEqual([unmarked]);
+
+    expect((await h(putKeys(otherKey, sha256(secondPassphrase)))).status).toBe(200);
+    expect((await h(putKeys(thirdPassphrase, sha256(otherKey)))).status).toBe(200);
+    expect(history()).toEqual([unmarked, secondPassphrase, otherKey]);
+
+    expect((await h(putKeys(fourthPassphrase, sha256(thirdPassphrase)))).status).toBe(200);
+    expect(history()).toEqual([unmarked, otherKey]);
+    await expect(
+      (await h(request("a", "/sync/workspace-a/keys", { method: "GET" }))).text(),
+    ).resolves.toBe(fourthPassphrase);
   });
 
   // Unclassified errors (auth DB hiccup, unexpected SQLite

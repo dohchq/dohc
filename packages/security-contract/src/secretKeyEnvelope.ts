@@ -1,7 +1,15 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+  scrypt,
+  timingSafeEqual,
+} from "node:crypto";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
 
 const SECRET_KEY_ENVELOPE_FORMAT = "dohc-key-envelope-v1";
+const KEY_CHECK_LABEL = "dohc-key-check-v1";
 const SECRET_KEY_ENVELOPE_SCRYPT_N = 2 ** 17;
 const SECRET_KEY_ENVELOPE_SCRYPT_R = 8;
 const SECRET_KEY_ENVELOPE_SCRYPT_P = 1;
@@ -42,6 +50,7 @@ interface SecretKeyEnvelopeJson {
   ivBase64: string;
   authTagBase64: string;
   ciphertextBase64: string;
+  keyCheckBase64?: string;
 }
 
 function aad(workspaceId: WorkspaceId): Buffer {
@@ -59,6 +68,26 @@ function parseBase64(value: unknown): Buffer {
   const bytes = Buffer.from(value, "base64");
   if (bytes.toString("base64") !== value) throw new SecretKeyEnvelopeError();
   return bytes;
+}
+
+function keyCheck(dataKey: Uint8Array, workspaceId: WorkspaceId): Buffer {
+  return createHmac("sha256", dataKey)
+    .update(`${KEY_CHECK_LABEL}\0${workspaceId}`, "utf8")
+    .digest();
+}
+
+export function workspaceDataKeyCheck(dataKey: Uint8Array, workspaceId: WorkspaceId): string {
+  return b64(keyCheck(dataKey, workspaceId));
+}
+
+/** The envelope's key check, or null for a legacy envelope or one that doesn't parse. */
+export function envelopeKeyCheck(envelopeJson: string): string | null {
+  try {
+    return parseEnvelope(envelopeJson).keyCheckBase64 ?? null;
+  } catch (error) {
+    if (error instanceof SecretKeyEnvelopeError) return null;
+    throw error;
+  }
 }
 
 function parseEnvelope(envelopeJson: string): SecretKeyEnvelopeJson {
@@ -82,6 +111,12 @@ function parseEnvelope(envelopeJson: string): SecretKeyEnvelopeJson {
   }
   for (const field of ["saltBase64", "ivBase64", "authTagBase64", "ciphertextBase64"]) {
     if (typeof envelope[field] !== "string") throw new SecretKeyEnvelopeError();
+  }
+  if (
+    envelope.keyCheckBase64 !== undefined &&
+    parseBase64(envelope.keyCheckBase64).length !== KEY_BYTES
+  ) {
+    throw new SecretKeyEnvelopeError();
   }
   return envelope as unknown as SecretKeyEnvelopeJson;
 }
@@ -152,6 +187,7 @@ export async function wrapWorkspaceDataKey(input: {
       ivBase64: b64(iv),
       authTagBase64: b64(cipher.getAuthTag()),
       ciphertextBase64: b64(ciphertext),
+      keyCheckBase64: b64(keyCheck(dataKey, input.workspaceId)),
     };
     return { envelopeJson: JSON.stringify(envelope) };
   } catch (error) {
@@ -191,6 +227,13 @@ export async function unwrapWorkspaceDataKey(input: {
     decipher.setAuthTag(authTag);
     const dataKey = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     if (dataKey.length !== KEY_BYTES) throw new SecretKeyEnvelopeError();
+    if (
+      envelope.keyCheckBase64 !== undefined &&
+      !timingSafeEqual(parseBase64(envelope.keyCheckBase64), keyCheck(dataKey, input.workspaceId))
+    ) {
+      dataKey.fill(0);
+      throw new SecretKeyEnvelopeError();
+    }
     return dataKey;
   } catch (error) {
     if (error instanceof SecretKeyEnvelopeError) throw error;

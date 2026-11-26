@@ -6094,7 +6094,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               secretState="protected-key-present"
               purpose="protect"
               passphrase="1234567"
-              error="Enter at least 8 characters to protect synced secrets."
+              error="Enter at least 12 characters to protect synced secrets."
               busy={false}
               onStart={noop}
               onPassphrase={noop}

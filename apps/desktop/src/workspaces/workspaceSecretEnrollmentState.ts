@@ -47,9 +47,10 @@ export async function readWorkspaceSecretState(
 export async function readWorkspaceDataKeyForEnrollment(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
-): Promise<Buffer | null> {
+): Promise<Buffer | "missing" | null> {
   const root = resolve(workspace.rootPath);
   if (!existsSync(join(root, SECRET_FILE_STORE_RELATIVE_PATH))) return null;
   if (!(await protectedRowsExist(workspace, sessions))) return null;
+  if (!existsSync(join(root, SECRET_KEY_RELATIVE_PATH))) return "missing";
   return await loadSecretDataKey(root, { createIfMissing: false });
 }

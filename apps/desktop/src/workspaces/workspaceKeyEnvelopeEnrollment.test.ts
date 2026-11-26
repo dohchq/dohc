@@ -19,6 +19,7 @@ import {
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./engineRelayClient";
+import { OTHER_KEY_PROTECTS } from "@dohc/security-contract/secret-passphrase";
 import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
 import { createTestScratch } from "./testTemp";
 
@@ -45,6 +46,7 @@ type KeyStep =
       method: "keys.download";
       result: "found" | "missing";
       etag?: string;
+      envelopeJson?: string;
     };
 
 function snapshotError(error: unknown): Record<string, unknown> {
@@ -173,7 +175,9 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
         const envelopeJson =
           this.behavior.kind === "accept"
             ? (this.behavior.envelopeJson ?? this.uploadedEnvelope)
-            : (this.uploadedEnvelope ?? '{"wrapped":"current"}');
+            : step?.method === "keys.download" && step.envelopeJson !== undefined
+              ? step.envelopeJson
+              : (this.uploadedEnvelope ?? '{"wrapped":"current"}');
         if (envelopeJson === null) {
           throw new Error("Boundary mock has no envelope to download.");
         }
@@ -447,6 +451,35 @@ describe("workspace key-envelope conflict retries", () => {
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.params).not.toHaveProperty("ifMatch");
     expect(uploads[1]?.params).toMatchObject({ ifMatch: fetchedEtag });
+    await context.sessions.closeAll();
+  });
+
+  it("refuses to replace an envelope that wraps a different key", async () => {
+    const { envelopeJson } = await wrapWorkspaceDataKey({
+      dataKey: Buffer.alloc(32, 3),
+      passphrase: "another computer's passphrase",
+      workspaceId: WORKSPACE_ID,
+    });
+    const context = await harness({
+      kind: "scripted",
+      steps: [
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "found", envelopeJson },
+      ],
+    });
+
+    await expect(
+      enrollWorkspaceKeyEnvelope({
+        workspaceId: WORKSPACE_ID,
+        dataKey: Buffer.from(SENTINEL),
+        passphrase: PASSPHRASE,
+        transport: context.client,
+        installDataKey: async () => undefined,
+      }),
+    ).rejects.toThrow(OTHER_KEY_PROTECTS);
+    expect(
+      context.daemon.outboundFrames.filter((frame) => frame.method === "keys.upload"),
+    ).toHaveLength(1);
     await context.sessions.closeAll();
   });
 

@@ -107,6 +107,7 @@ afterAll(async () => {
 
 export interface LiveDaemonCapture {
   workspace: LiveDaemonWorkspace["workspace"];
+  sessions: LiveDaemonWorkspace["sessions"];
   capture: WorkspaceEngineCapture;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayWorkspaceClient;
@@ -168,6 +169,7 @@ export async function openLiveDaemonCapture(input: {
   });
   return {
     workspace: workspace.workspace,
+    sessions: workspace.sessions,
     capture,
     chats: workspace.chats,
     relay,
@@ -208,6 +210,7 @@ export async function openJoinedDaemonCapture(input: {
   relay: { baseUrl: string; token: string };
   passphrase?: string;
   holdEditorResync?: boolean;
+  onProtectedFilesLocked?: (locked: boolean) => void;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, {
     maxRestarts: 0,
@@ -245,9 +248,13 @@ export async function openJoinedDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
+    ...(input.onProtectedFilesLocked
+      ? { onProtectedFilesLocked: input.onProtectedFilesLocked }
+      : {}),
   });
   return {
     workspace: workspace.workspace,
+    sessions: workspace.sessions,
     capture,
     chats: workspace.chats,
     relay,

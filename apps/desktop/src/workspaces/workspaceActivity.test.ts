@@ -101,6 +101,67 @@ describe("workspaceActivity capture hooks", () => {
       await activity.stopAll();
     }
   });
+  it("reports locked and unprotected files until an unlock restores them and syncs", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const restore = vi.fn(async () => {});
+    const retryNow = vi.fn(async () => undefined);
+    const service = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            stop: vi.fn(async () => {}),
+            settleAndCloseAllLiveSessions: vi.fn(async () => {}),
+            restoreLockedProtectedFiles: restore,
+          } as never,
+        };
+      },
+    });
+    const state = new WorkspaceActivityState();
+    await service.open(workspace(), state);
+    state.entry!.engine = { retryNow, snapshot: () => ({}), stop: async () => {} } as never;
+    const protectedFiles = () => service.getStatus(workspace(), state).protectedFiles;
+
+    hooks.onProtectedFilesLocked?.(false);
+    expect(protectedFiles()).toBeUndefined();
+    hooks.onProtectedFilesLocked?.(true);
+    expect(protectedFiles()).toBe("locked");
+    await service.protectedFilesUnlocked(workspace(), state);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(retryNow).toHaveBeenCalledOnce();
+    expect(protectedFiles()).toBeUndefined();
+
+    const noKeyYet = vi.fn(async () => undefined);
+    await expect(service.checkProtectedFilesPassphrase(workspace(), state, noKeyYet)).resolves.toBe(
+      false,
+    );
+    const unreachable = vi.fn(async () => {
+      throw new Error("relay down");
+    });
+    vi.spyOn(console, "error").mockImplementationOnce(() => {});
+    await service.checkProtectedFilesPassphrase(workspace(), state, unreachable);
+    const missing = vi.fn(async () => true);
+    await expect(service.checkProtectedFilesPassphrase(workspace(), state, missing)).resolves.toBe(
+      true,
+    );
+    expect(protectedFiles()).toBe("need-passphrase");
+    await service.checkProtectedFilesPassphrase(workspace(), state, missing);
+    expect(missing).toHaveBeenCalledOnce();
+
+    await service.protectedFilesUnlocked(workspace(), state);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(protectedFiles()).toBeUndefined();
+    const present = vi.fn(async () => false);
+    await expect(service.checkProtectedFilesPassphrase(workspace(), state, present)).resolves.toBe(
+      false,
+    );
+    expect(protectedFiles()).toBeUndefined();
+    await service.stop(state);
+  });
+
   it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
     let hooks!: WorkspaceCaptureHooks;
     const notify = vi.fn();

@@ -18,6 +18,8 @@ import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sy
 import { syncPauseFor } from "../workspaces/syncPauseFor";
 import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
 import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
+import { NO_PASSPHRASE_YET } from "@dohc/security-contract/secret-passphrase";
+import { wrapWorkspaceDataKey } from "@dohc/security-contract/secret-key-envelope";
 import { registerCloudIpcHandlers } from "./cloudIpc";
 import { ipcWireError } from "./errorWords";
 import { ipcErrorMessage } from "../renderer/ipcError";
@@ -228,6 +230,9 @@ async function harness() {
   const enable = vi.fn<Dependencies["activity"]["enableCloud"]>(async () => {
     steps.push("enable");
   });
+  const unlocked = vi.fn<Dependencies["activity"]["protectedFilesUnlocked"]>(async () => {
+    steps.push("unlocked");
+  });
   const sendUp = vi.fn<Dependencies["sendCollectionsUp"]>(async () => {
     steps.push("collections");
   });
@@ -348,7 +353,12 @@ async function harness() {
       return loaded.credentials;
     },
     closeAllRelayTransportWorkspaces: closeRelay,
-    activity: { stopEngines: stop, enableCloud: enable, getStatus: () => status },
+    activity: {
+      stopEngines: stop,
+      enableCloud: enable,
+      protectedFilesUnlocked: unlocked,
+      getStatus: () => status,
+    },
     currentWorkspaceId: () => (rendererSession.isCurrent() ? rendererSession.workspaceId : null),
     stopWorkspaceSync,
     syncPauseFor: (workspace) => syncPauseFor(workspace, "local"),
@@ -439,6 +449,7 @@ async function harness() {
     bindRelay,
     setRemote,
     enable,
+    unlocked,
     sendUp,
     sendUpLater,
     notify,
@@ -810,7 +821,7 @@ describe("registered cloud handlers", () => {
     expect(h.enroll).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }),
     );
-    expect(h.steps).toEqual(["claim", "enroll", "collections", "remote", "enable"]);
+    expect(h.steps).toEqual(["claim", "enroll", "collections", "remote", "enable", "unlocked"]);
   });
 
   it("starts sync only after the remote and its folder record are written, and not when that write fails", async () => {
@@ -1116,6 +1127,46 @@ it("requires enrollment when protected files were added while paused and no enve
     passphrase: "original new passphrase",
   });
   expect(h.uploadKeyEnvelope).toHaveBeenCalledOnce();
+});
+
+it("unlocks protected files that arrived without a key, then restores them after sync starts", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  const key = Buffer.alloc(32, 9);
+  const { envelopeJson } = await wrapWorkspaceDataKey({
+    dataKey: key,
+    passphrase: "the original passphrase",
+    workspaceId: "existing",
+  });
+  h.downloadKeyEnvelope.mockResolvedValue({ envelopeJson, etag: "b".repeat(64) });
+  h.readDataKey.mockResolvedValue("missing");
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+
+  await expect(
+    h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "a wrong guess!" }),
+  ).rejects.toThrow("Passphrase could not unlock synced secrets.");
+  expect(h.unlocked).not.toHaveBeenCalled();
+
+  await h.invoke(CHANNELS.cloudEnableSync, {
+    workspaceId: "existing",
+    passphrase: "the original passphrase",
+  });
+  expect(h.installDataKey).toHaveBeenCalledOnce();
+  expect(h.uploadKeyEnvelope).not.toHaveBeenCalled();
+  expect(h.steps.slice(-2)).toEqual(["enable", "unlocked"]);
+});
+
+it("says where to set a passphrase when protected files arrived and none protects them", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.downloadKeyEnvelope.mockRejectedValue(new RelayKeyEnvelopeMissingError());
+  h.readDataKey.mockResolvedValue("missing");
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  await expect(
+    h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "anything long" }),
+  ).rejects.toThrow(NO_PASSPHRASE_YET);
+  expect(h.installDataKey).not.toHaveBeenCalled();
+  expect(h.unlocked).not.toHaveBeenCalled();
 });
 
 it("keeps resume pinned to the original paused owner", async () => {

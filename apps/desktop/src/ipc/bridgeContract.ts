@@ -1734,6 +1734,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Why protected files such as `.env` wait on the workspace secret key, as
   // the engine's code, such as `key-missing`. Omitted while the key works.
   secretKeyUnavailable: z.string().min(1).optional(),
+  // "locked": protected files from other computers wait for this computer to
+  // unlock them with the workspace passphrase. "need-passphrase": this
+  // computer's protected files need a passphrase before other computers can
+  // open them.
+  protectedFiles: z.enum(["locked", "need-passphrase"]).optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
   // A protected file's change a sync replaced, kept on this computer, as

@@ -1,4 +1,5 @@
 import { createRelaySyncEngine } from "./relaySyncEngine";
+import { installWorkspaceDataKey } from "./workspaceDataKey";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import type { MomentAuthor } from "@dohc/workspace-contracts";
@@ -2268,6 +2269,11 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 });
 
+async function withSecretKey(root: string): Promise<void> {
+  await mkdir(join(root, ".dohc", "engine"), { recursive: true });
+  await installWorkspaceDataKey(root, Buffer.alloc(32, 1));
+}
+
 describe("workspaceEngineCapture relay sync materialization", () => {
   it("applies a pulled delete after this device's folder was removed", async () => {
     const root = await createTestScratch("relay-delete-missing-folder-");
@@ -2624,6 +2630,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     disk: string,
   ) {
     const root = await createTestScratch("relay-protected-copy-");
+    await withSecretKey(root);
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
     const loopback = new VersionedLoopbackEngine();
     for (const text of history)
@@ -2964,6 +2971,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
 
   async function protectedVersionFixture(mainText: string) {
     const root = await createTestScratch("dohc-engine-capture-");
+    await withSecretKey(root);
     const loopback = new VersionedLoopbackEngine();
     loopback.seedSecretFile({
       workspace: WORKSPACE_ID,
@@ -3109,6 +3117,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
 
   it("materializes protected writes and deletes before committing the relay cursor", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
+    await withSecretKey(root);
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     loopback.seedSecretFile({

@@ -12,6 +12,7 @@ import {
 } from "../cloudSyncWords";
 import { palette } from "../tokens";
 import { CloudSyncSettings, SYNC_ON_NEEDS_SERVER, type CloudSettings } from "./CloudSyncSettings";
+import { NO_PASSPHRASE_YET, OTHER_KEY_PROTECTS } from "@dohc/security-contract/secret-passphrase";
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 const sessionListeners = new Set<(event: SessionEvent) => void>();
@@ -372,22 +373,22 @@ describe("CloudSyncSettings", () => {
     fireEvent.click(syncSwitch());
     const input = await screen.findByTestId("cloud-sync-passphrase");
     expect(screen.getByTestId("cloud-sync-error").textContent).toBe(
-      "Enter at least 8 characters to protect synced secrets.",
+      "Enter at least 12 characters to protect synced secrets.",
     );
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
     const submit = screen.getByTestId("cloud-sync-passphrase-submit") as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: "1234567" } });
+    fireEvent.change(input, { target: { value: "12345678901" } });
     expect(submit.disabled).toBe(true);
 
-    fireEvent.change(input, { target: { value: "12345678" } });
+    fireEvent.change(input, { target: { value: "123456789012" } });
     expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
 
     await waitFor(() =>
       expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
         workspaceId: "ws-1",
-        passphrase: "12345678",
+        passphrase: "123456789012",
       }),
     );
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("true"));
@@ -418,6 +419,28 @@ describe("CloudSyncSettings", () => {
     );
     expect(await screen.findByTestId("cloud-protect-secrets")).toBeTruthy();
   });
+
+  it.each([NO_PASSPHRASE_YET, OTHER_KEY_PROTECTS])(
+    "shows main's reason when no passphrase can unlock yet: %s",
+    async (reason) => {
+      bridgeMock.cloudEnableSync.mockRejectedValue(new Error(reason));
+      render(
+        <CloudSyncSettings
+          workspaceId="ws-1"
+          cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-missing" })}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
+      fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), {
+        target: { value: "shared passphrase" },
+      });
+      fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
+
+      expect((await screen.findByTestId("cloud-sync-error")).textContent).toBe(reason);
+      expect(screen.getByTestId("cloud-sync-passphrase-submit").textContent).toBe("Unlock");
+    },
+  );
 
   it("keeps the passphrase field open when the passphrase cannot unlock", async () => {
     bridgeMock.cloudEnableSync.mockRejectedValue(

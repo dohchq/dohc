@@ -74,6 +74,7 @@ export function registerCloudIpcHandlers<
   activity: {
     stopEngines(): Promise<void>;
     enableCloud(workspace: RegistryEntry, options?: { joinBootstrap?: boolean }): Promise<unknown>;
+    protectedFilesUnlocked(workspace: RegistryEntry): Promise<void>;
     getStatus(workspaceId: string): SyncStatusResult;
   };
   currentWorkspaceId(sender: Sender): string | null;
@@ -367,6 +368,8 @@ export function registerCloudIpcHandlers<
           sendCollectionsUpLater(workspace);
           operation.assertCurrent();
           await activity.enableCloud(workspace);
+          operation.assertCurrent();
+          await activity.protectedFilesUnlocked(workspace);
           operation.assertCurrent();
           return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
         }),

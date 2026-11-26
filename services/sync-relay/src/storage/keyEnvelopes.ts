@@ -1,6 +1,7 @@
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { sha256Hex } from "@dohc/workspace-core/hash";
+import { envelopeKeyCheck } from "@dohc/security-contract/secret-key-envelope";
 import { SyncRelayConflictError } from "./errors";
 import type { KeyEnvelopeRow } from "./types";
 
@@ -24,11 +25,6 @@ export function putKeyEnvelope(
       // dropped response), not a replacement. No history entry.
       return { sha256: nextSha256 };
     }
-    // The envelope + its append-only history count toward the workspace
-    // quota: each rotation adds roughly the new
-    // envelope's size (the prior copy moves into history), so the cap now
-    // bounds unbounded rotation growth. workspaceUsageBytes already includes
-    // both tables, so the incremental bytes to charge is the new envelope.
     const envelopeAddedBytes = Buffer.byteLength(input.envelopeJson, "utf8");
     if (currentJson === null) {
       if (input.expectedSha256 !== null) {
@@ -56,6 +52,17 @@ export function putKeyEnvelope(
         "key envelope was replaced concurrently; refresh and retry with the current sha256",
       );
     }
+    const keyCheck = envelopeKeyCheck(input.envelopeJson);
+    if (keyCheck !== null && keyCheck === envelopeKeyCheck(currentJson)) {
+      const prunedBytes = deleteHistoryWithKeyCheck(storage, input.workspaceId, keyCheck);
+      assertWorkspaceQuota(
+        storage,
+        input.workspaceId,
+        envelopeAddedBytes - Buffer.byteLength(currentJson, "utf8") - prunedBytes,
+      );
+      replaceCurrentEnvelope(storage, input);
+      return { sha256: nextSha256 };
+    }
     assertWorkspaceQuota(storage, input.workspaceId, envelopeAddedBytes);
     storage.db
       .prepare(
@@ -70,15 +77,46 @@ export function putKeyEnvelope(
         Math.trunc(input.updatedAtMs),
         nextSha256,
       );
-    storage.db
-      .prepare(
-        `UPDATE sync_relay_key_envelopes
-           SET envelope_json = ?, updated_at_ms = ?
-           WHERE workspace_id = ?`,
-      )
-      .run(input.envelopeJson, Math.trunc(input.updatedAtMs), input.workspaceId);
+    replaceCurrentEnvelope(storage, input);
     return { sha256: nextSha256 };
   });
+}
+
+function replaceCurrentEnvelope(
+  storage: StorageContext,
+  input: { workspaceId: string; envelopeJson: string; updatedAtMs: number },
+): void {
+  storage.db
+    .prepare(
+      `UPDATE sync_relay_key_envelopes
+         SET envelope_json = ?, updated_at_ms = ?
+         WHERE workspace_id = ?`,
+    )
+    .run(input.envelopeJson, Math.trunc(input.updatedAtMs), input.workspaceId);
+}
+
+function deleteHistoryWithKeyCheck(
+  storage: StorageContext,
+  workspaceId: string,
+  keyCheck: string,
+): number {
+  const rows = storage.db
+    .prepare(
+      "SELECT history_seq, envelope_json FROM sync_relay_key_envelope_history WHERE workspace_id = ?",
+    )
+    .all(workspaceId);
+  const remove = storage.db.prepare(
+    "DELETE FROM sync_relay_key_envelope_history WHERE history_seq = ?",
+  );
+  let bytes = 0;
+  for (const row of rows) {
+    if (typeof row.envelope_json !== "string" || envelopeKeyCheck(row.envelope_json) !== keyCheck) {
+      continue;
+    }
+    remove.run(Number(row.history_seq));
+    bytes += Buffer.byteLength(row.envelope_json, "utf8");
+  }
+  return bytes;
 }
 
 export function getKeyEnvelope(

@@ -813,7 +813,10 @@ import {
   fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
-import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
+import {
+  enrollWorkspaceKeyEnvelope,
+  keyNeedsPassphrase,
+} from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaces/workspaceJoinEnrollment";
 import {
   readWorkspaceDataKeyForEnrollment,
@@ -3696,8 +3699,21 @@ function engineForWorkspace(
       const notSent = failed
         ? false
         : notSentWhileOpen.read(workspace.workspaceId, () => daemonRelay.firstExportsHeldOpen());
-      const [collectionsChanged, notSentChanged] = await Promise.all([collections, notSent]);
-      return collectionsChanged || notSentChanged;
+      const passphrase = failed
+        ? false
+        : (withWorkspaceAttachment(workspace, (lease) =>
+            workspaceActivity.checkProtectedFilesPassphrase(
+              canonicalWorkspaceFor(lease),
+              lease.state.activity,
+              () => keyNeedsPassphrase(workspace.rootPath, daemonRelay),
+            ),
+          ) ?? false);
+      const [collectionsChanged, notSentChanged, passphraseChanged] = await Promise.all([
+        collections,
+        notSent,
+        passphrase,
+      ]);
+      return collectionsChanged || notSentChanged || passphraseChanged;
     },
     capture,
     onChange: createRelayOnChange(workspace),
@@ -4042,6 +4058,10 @@ const activity = {
   enableCloud: (workspace: RegistryEntry, options?: { joinBootstrap?: boolean }) =>
     workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
       workspaceActivity.enableCloud(canonicalWorkspaceFor(lease), lease.state.activity, options),
+    ),
+  protectedFilesUnlocked: (workspace: RegistryEntry) =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+      workspaceActivity.protectedFilesUnlocked(canonicalWorkspaceFor(lease), lease.state.activity),
     ),
   prepareSyncPause: (workspace: RegistryEntry) =>
     workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
