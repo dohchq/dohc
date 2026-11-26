@@ -4321,7 +4321,8 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
 fn map_successor_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
     match error {
         dohc_engine_collab::CollabError::ReplayParityViolation { .. }
-        | dohc_engine_collab::CollabError::MalformedUpdate { .. } => SyncError::InvalidInput {
+        | dohc_engine_collab::CollabError::MalformedUpdate { .. }
+        | dohc_engine_collab::CollabError::OutsideFormatTwoRoots => SyncError::InvalidInput {
             reason: "ydoc-resolution-not-representable",
         },
         other => map_local_collab_error(other),

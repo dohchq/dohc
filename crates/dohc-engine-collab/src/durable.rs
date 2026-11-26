@@ -222,7 +222,7 @@ impl<'a> IncomingBase<'a> {
     fn checked(bytes: &[u8]) -> Result<Ydoc, CollabError> {
         validate_update_size(bytes)?;
         let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), bytes)?;
-        doc.check_format_two_note()?;
+        doc.check_format_two_roots()?;
         Ok(doc)
     }
 }
@@ -878,6 +878,7 @@ pub(crate) fn append_validated_and_index_update(
     // The one choke point every durable update write passes, local or remote:
     // an out-of-bounds attribution never reaches a row.
     validate_attribution(attribution)?;
+    base.refuse_a_newer_format()?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(
         conn,

@@ -936,23 +936,26 @@ export function createNoticeStore(deps: {
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           // A joined workspace's chat message, comment or reaction. It names no file.
           const chatRefused = refusal.reason === SHARE_CHAT_REFUSED;
+          const newerFormat = refusal.reason === "ydoc-note-uses-a-newer-body-format";
           const target =
             NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = chatRefused
             ? "dohc set it aside and sent the messages after it. Send it again if you still need it."
-            : markdownHeld
-              ? "Saving it would also change parts dohc cannot show."
-              : attributionRefused
-                ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
-                : bindingChanged
-                  ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
-                  : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${
-                      document?.conflictId
-                        ? "Open its conflict and choose a copy."
-                        : tooLarge
-                          ? "Make the file smaller, then try sync again."
-                          : "Review the file, then try sync again."
-                    }`;
+            : newerFormat
+              ? `${document?.path ? name : "This note"} uses a newer format than this version of dohc reads. dohc kept the change it received. Update dohc.`
+              : markdownHeld
+                ? "Saving it would also change parts dohc cannot show."
+                : attributionRefused
+                  ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
+                  : bindingChanged
+                    ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
+                    : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${
+                        document?.conflictId
+                          ? "Open its conflict and choose a copy."
+                          : tooLarge
+                            ? "Make the file smaller, then try sync again."
+                            : "Review the file, then try sync again."
+                      }`;
           rows.push(
             LocalRow.parse({
               noticeId: refusal.noticeId,
@@ -962,13 +965,15 @@ export function createNoticeStore(deps: {
               pendingRefusalDismissals,
               title: chatRefused
                 ? "The server did not accept a chat message"
-                : attributionRefused
-                  ? unattributedTitle(document?.path)
-                  : markdownHeld
-                    ? heldTitle(document?.path)
-                    : bindingChanged
-                      ? "dohc skipped an earlier save"
-                      : "A change needs your review",
+                : newerFormat
+                  ? "A note needs a newer version of dohc"
+                  : attributionRefused
+                    ? unattributedTitle(document?.path)
+                    : markdownHeld
+                      ? heldTitle(document?.path)
+                      : bindingChanged
+                        ? "dohc skipped an earlier save"
+                        : "A change needs your review",
               body,
               detail: [
                 refusal.reason,

@@ -671,19 +671,15 @@ impl Ydoc {
         .fits_a_live_note()
     }
 
-    fn refuse_a_newer_format(&self) -> Result<(), CollabError> {
+    pub(crate) fn refuse_a_newer_format(&self) -> Result<(), CollabError> {
         if !self.reads_body_sequence && self.note_schema_version() == 2 {
             return Err(CollabError::NewerBodyFormat);
         }
         Ok(())
     }
 
-    pub(crate) fn check_format_two_note(&self) -> Result<(), CollabError> {
-        self.refuse_a_newer_format()?;
-        self.check_format_two_roots()
-    }
-
     pub(crate) fn check_format_two_roots(&self) -> Result<(), CollabError> {
+        self.refuse_a_newer_format()?;
         let Some((sequence, containers)) = self.body_sequence_roots() else {
             return Ok(());
         };
@@ -691,9 +687,7 @@ impl Ydoc {
         if body_sequence::roots_hold_only_their_own_items(&body, &sequence, &containers) {
             return Ok(());
         }
-        Err(CollabError::MalformedUpdate {
-            reason: "an update writes outside a format-2 note's sequence and containers".into(),
-        })
+        Err(CollabError::OutsideFormatTwoRoots)
     }
 
     pub(crate) fn reads_as_format_two(&self) -> bool {
@@ -1875,6 +1869,7 @@ impl Ydoc {
     /// The caller checks the settled body and proves this source against the
     /// retained XML before journaling the returned update.
     pub fn replace_frontmatter_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
+        self.refuse_a_newer_format()?;
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
         self.stage_source_preserving_edit_bounded(markdown, None, false, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -1972,6 +1967,7 @@ impl Ydoc {
                 })
             }
             ContentKind::Richdoc => {
+                self.refuse_a_newer_format()?;
                 let meta = self.doc.get_or_insert_map(ROOT_META);
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let sequence_roots = self.body_sequence_roots();

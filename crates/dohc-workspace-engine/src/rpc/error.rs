@@ -802,6 +802,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
         | CollabError::LineageStateVectorMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
         | CollabError::NewerBodyFormat
+        | CollabError::OutsideFormatTwoRoots
         | CollabError::LineageIncomplete { .. }
         | CollabError::LeaseHeld
         | CollabError::NoMarker
