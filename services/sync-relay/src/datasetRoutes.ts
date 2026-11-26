@@ -13,7 +13,7 @@ import {
   isDatasetWorkerFailure,
 } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_MAX_METADATA_BYTES } from "@dohc/security-contract/app-publication";
-import { parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { APP_DATASET_MAX_BINDINGS, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import {
   APP_BACKEND_BULK_LIMITS,
@@ -38,7 +38,7 @@ import type { AppBackendRoute } from "./appBackendRoutes";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { badRequest, notFound, relayError } from "./errors";
 import type { AppEventWaits } from "./appEventWaits";
-import { parseCursor, parseLinkLogHold } from "./requestInputs";
+import { parseLinkLogHold } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 
 /** The largest JSON body a dataset action reads. */
@@ -933,6 +933,20 @@ function owningAgent(value: unknown): { depth: number; agentId?: string } | unde
     : { depth: Number(agent.depth), agentId: text(agent.agentId) };
 }
 
+function parseEventsSince(value: string | null): Map<string, number> | null {
+  if (value === null) return null;
+  const since = new Map<string, number>();
+  const pairs = value === "" ? [] : value.split(",");
+  if (pairs.length > APP_DATASET_MAX_BINDINGS) return null;
+  for (const pair of pairs) {
+    const match = /^((?:[a-z][a-z0-9_-]{0,63})?):(0|[1-9][0-9]{0,15})$/.exec(pair);
+    const revision = Number(match?.[2]);
+    if (!match || since.has(match[1]!) || !Number.isSafeInteger(revision)) return null;
+    since.set(match[1]!, revision);
+  }
+  return since;
+}
+
 function approvalAgent(value: unknown) {
   try {
     return parseApprovalAgent(value);
@@ -963,24 +977,31 @@ export function createDatasetAppRoutes(
     publishedOnly = false,
   ): Promise<Response> => {
     if (route.action === "events") {
-      if (auth.kind !== "link" || !options.events) throw notFound();
+      if (!options.events || !options.publications) throw notFound();
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const query = new URL(request.url).searchParams;
       const authorityRevision = Number(query.get("authorityRevision"));
-      const since = parseCursor(query.get("since"));
+      const since = parseEventsSince(query.get("since"));
       const hold = parseLinkLogHold(query.get("hold"));
-      if (query.size !== 3 || !Number.isSafeInteger(authorityRevision)) throw notFound();
+      if (query.size !== 3 || !Number.isSafeInteger(authorityRevision) || !since) throw notFound();
       const signal = AbortSignal.any([request.signal, storage.unavailable]);
       const deadlineAtMs = Date.now() + hold;
       for (;;) {
-        const current = host.appEventRevision(auth, route.publicationId, authorityRevision);
+        if (auth.kind === "named") await auth.launch?.recheck();
+        const current = host.appEventRevisions(auth, route.publicationId, authorityRevision);
+        const changed = current.collections
+          .filter(({ dataset, revision }) => revision !== (since.get(dataset) ?? 0))
+          .map(({ dataset, revision }) => ({ dataset, revision }));
         const holdMs = deadlineAtMs - Date.now();
-        if (current.revision !== since || holdMs <= 0 || signal.aborted)
-          return Response.json(
-            { dataset: current.dataset, revision: current.revision },
-            { headers },
-          );
-        await options.events.wait({ ...current, since, holdMs, signal });
+        if (changed.length || holdMs <= 0 || signal.aborted)
+          return Response.json({ changed }, { headers });
+        await options.events.wait({
+          workspaceId: current.workspaceId,
+          actor: current.actor,
+          since: current.collections,
+          holdMs,
+          signal,
+        });
       }
     }
     if (route.action === "external") {

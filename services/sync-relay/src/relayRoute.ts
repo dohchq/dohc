@@ -501,6 +501,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         parts[5] === "file" ||
         parts[5] === "attempt" ||
         parts[5] === "external" ||
+        parts[5] === "events" ||
         parts[5] === "descriptor" ||
         parts[5] === "summary" ||
         parts[5] === "consent" ||

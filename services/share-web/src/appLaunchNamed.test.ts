@@ -12,7 +12,8 @@ function fixture() {
     relayDown = false,
     materialDown = false,
     collectionMissing = false,
-    member = false;
+    member = false,
+    changed: unknown = [{ dataset: "trips", revision: 2 }];
   const requests: Request[] = [],
     resolutions: unknown[] = [];
   const bytes = Buffer.from("document.getElementById('root').textContent='Admin app';");
@@ -78,6 +79,7 @@ function fixture() {
             });
           if (url.pathname.endsWith(`/blobs/${file.sha256}`))
             return new Response(bytes, { headers: { "content-type": file.contentType } });
+          if (url.pathname.endsWith("/backend/events")) return Response.json({ changed });
           if (url.pathname.endsWith("/backend/invoke")) {
             const body = await request.json();
             return body.authorityRevision === revision
@@ -142,6 +144,9 @@ function fixture() {
     },
     narrow() {
       revision++;
+    },
+    change(value: unknown) {
+      changed = value;
     },
     disconnect() {
       relayDown = true;
@@ -265,6 +270,36 @@ it("rejects mixed launch authority, unsafe workspace identifiers, and untrusted 
   expect((await f.issue(undefined, { origin: "null" })).status).toBe(404);
   expect(f.resolutions).toHaveLength(0);
   expect((await f.issue(undefined, { cookie: "account=attacker" })).status).toBe(404);
+});
+
+it("watches a signed-in app's Collections through its own relay path, and stops once its access ends", async () => {
+  const f = fixture(),
+    app = await f.open();
+  expect(app.html).toContain("void watch();");
+  expect(app.html).toContain('const since={"trips":2};');
+  f.change([
+    { dataset: "trips", revision: 3 },
+    { dataset: "notes", revision: 1 },
+  ]);
+  const answer = await app.call("/events", { since: { trips: 2, notes: 0 } });
+  expect(await answer.json()).toEqual({
+    changed: [
+      { dataset: "trips", revision: 3 },
+      { dataset: "notes", revision: 1 },
+    ],
+  });
+  const relayed = new URL(f.requests.at(-1)!.url);
+  expect(relayed.pathname).toBe(`/sync/link/app-publications/${publicationId}/backend/events`);
+  expect(Object.fromEntries(relayed.searchParams)).toEqual({
+    authorityRevision: "1",
+    since: "trips:2,notes:0",
+    hold: "25000",
+  });
+  expect((await app.call("/events", { since: { Trips: 1 } })).status).toBe(400);
+  f.change({ trips: 3 });
+  expect((await app.call("/events", { since: {} })).status).toBe(503);
+  f.revoke();
+  expect((await app.call("/events", { since: {} })).status).toBe(404);
 });
 
 it("rechecks named authorization on backend, document, and status requests", async () => {

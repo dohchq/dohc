@@ -26,7 +26,7 @@ import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
-import { ClientClosedRequest, serveFetchHandler } from "@dohc/service-http";
+import { ClientClosedRequest, serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { hasRelayWriteObservers } from "./relayWriteChanges";
 import { APP_BACKEND_PROFILE_HEADER } from "@dohc/security-contract/app-backend";
@@ -1490,50 +1490,50 @@ it("wakes a parked link app poll on a Collection change, and answers only while 
   await f.bind(true);
   const events = (query: string, headers = f.publicHeaders) =>
     f.http(`link/app-publications/${f.publicationId}/backend/events?${query}`, undefined, headers);
-  const first = await events("authorityRevision=1&since=0&hold=0");
+  expect((await f.app("invoke", submitted(0))).status).toBe(200);
+  const first = await events("authorityRevision=1&since=&hold=0");
   expect(first.status).toBe(200);
-  const { revision: start } = await first.json();
-  expect(await (await events(`authorityRevision=1&since=${start}&hold=50`)).json()).toEqual({
-    dataset: "",
-    revision: start,
+  const [{ revision: start }] = (await first.json()).changed;
+  expect(await (await events(`authorityRevision=1&since=:${start}&hold=50`)).json()).toEqual({
+    changed: [],
   });
   const parked = Array.from({ length: 6 }, () =>
-    events(`authorityRevision=1&since=${start}&hold=20000`),
+    events(`authorityRevision=1&since=:${start}&hold=20000`),
   );
   const startedAtMs = Date.now();
   expect((await f.app("invoke", submitted(1))).status).toBe(200);
   for (const answer of await Promise.all(parked)) {
     expect(answer.status).toBe(200);
-    expect(await answer.json()).toEqual({ dataset: "", revision: start + 1 });
+    expect(await answer.json()).toEqual({ changed: [{ dataset: "", revision: start + 1 }] });
   }
   expect(Date.now() - startedAtMs).toBeLessThan(5_000);
-  expect((await events("authorityRevision=2&since=0&hold=0")).status).toBe(404);
-  expect((await events("authorityRevision=1&since=0&hold=0&extra=1")).status).toBe(404);
+  expect((await events("authorityRevision=2&since=&hold=0")).status).toBe(404);
+  expect((await events("authorityRevision=1&since=&hold=0&extra=1")).status).toBe(404);
   expect((await f.app("events", {})).status).toBe(405);
   const otherApp = f.publish("a".repeat(64));
   expect(
     (
       await f.http(
-        `link/app-publications/${otherApp}/backend/events?authorityRevision=1&since=0&hold=0`,
+        `link/app-publications/${otherApp}/backend/events?authorityRevision=1&since=&hold=0`,
         undefined,
         f.publicHeaders,
       )
     ).status,
   ).toBe(404);
-  const archived = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
+  const archived = events(`authorityRevision=1&since=:${start + 1}&hold=20000`);
   await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
   expect((await f.http(`${f.path}/archive`, {})).status).toBe(200);
   expect((await archived).status).toBe(404);
   expect((await f.http(`${f.path}/restore`, {})).status).toBe(200);
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
-  const revoked = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
+  const revoked = events(`authorityRevision=1&since=:${start + 1}&hold=20000`);
   await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
   const revokedAtMs = Date.now();
   expect(f.storage.revokeShareGrant({ shareId: "s", grantId: "g", revokedAtMs: 11 }).ok).toBe(true);
   expect((await revoked).status).toBe(404);
   expect(Date.now() - revokedAtMs).toBeLessThan(5_000);
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
-  expect((await events(`authorityRevision=1&since=${start + 1}&hold=0`)).status).toBe(404);
+  expect((await events(`authorityRevision=1&since=:${start + 1}&hold=0`)).status).toBe(404);
 });
 
 it("refuses change events to a link that can only write to its app's Collection", async () => {
@@ -1541,7 +1541,7 @@ it("refuses change events to a link that can only write to its app's Collection"
   await f.bind(true);
   expect((await f.app("invoke", submitted(1))).status).toBe(200);
   const answer = await f.http(
-    `link/app-publications/${f.publicationId}/backend/events?authorityRevision=1&since=0&hold=0`,
+    `link/app-publications/${f.publicationId}/backend/events?authorityRevision=1&since=&hold=0`,
     undefined,
     f.publicHeaders,
   );
@@ -1832,9 +1832,18 @@ it("admits a Collection request only once its body has arrived", async () => {
   }
 });
 
-async function multiCollectionFixture() {
-  const f = await httpFixture();
+async function multiCollectionFixture(
+  firstDefinition = definition,
+  workoutsRead: "owner" | "link" = "owner",
+) {
+  const f = await httpFixture(undefined, true, limits, firstDefinition);
   expect((await f.activate()).status).toBe(200);
+  const firstRevision = describeDatasetRevision({
+    definition: firstDefinition,
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
 
   const secondDef: DatasetDefinition = {
     formatVersion: 1,
@@ -1893,7 +1902,7 @@ async function multiCollectionFixture() {
         label: "Read",
         tableId: id(102),
         kind: "read",
-        access: "owner",
+        access: workoutsRead,
         readOnly: true,
         fieldIds: [id(103), id(104)],
       },
@@ -1945,10 +1954,10 @@ async function multiCollectionFixture() {
       alias: "expenses",
       datasetId: id(1),
       revision: 1,
-      revisionSha256: revision.revisionSha256,
+      revisionSha256: firstRevision.revisionSha256,
       operationIds: [id(5), id(6), id(8)],
     },
-    revision,
+    firstRevision,
   );
   const cap2 = resolveAppDatasetCapability(
     {
@@ -1983,6 +1992,154 @@ async function multiCollectionFixture() {
 
   return { f, multiCandidate, basePub };
 }
+
+async function liveTwoCollectionApp(workoutsRead: "owner" | "link") {
+  const { f, multiCandidate, basePub } = await multiCollectionFixture(linkReadable, workoutsRead);
+  const owner = basePub.owner as { shareId: string; grantId: string; generation: number };
+  const published = await f.http("w/app-publications", {
+    shareId: owner.shareId,
+    grantId: owner.grantId,
+    expectedGrantGeneration: owner.generation,
+    candidate: multiCandidate,
+  });
+  const app = (await published.json()) as { publicationId: string; authorityRevision: number };
+  expect(
+    (
+      await f.http(`w/app-publications/${app.publicationId}/backend/activate`, {
+        authorityRevision: app.authorityRevision,
+      })
+    ).status,
+  ).toBe(200);
+  const events = (since: string, hold = 0, caller: "link" | "owner" = "link") =>
+    f.http(
+      `${caller === "link" ? "link" : "w"}/app-publications/${app.publicationId}/backend/events?authorityRevision=${app.authorityRevision}&since=${since}&hold=${hold}`,
+      undefined,
+      caller === "link" ? f.publicHeaders : {},
+    );
+  const submit = async (dataset: "expenses" | "workouts", key: string) =>
+    expect(
+      (
+        await f.http(
+          `link/app-publications/${app.publicationId}/backend/invoke`,
+          {
+            authorityRevision: app.authorityRevision,
+            dataset,
+            operation: "submit",
+            input: dataset === "expenses" ? { name: key } : { title: key },
+            idempotencyKey: key,
+          },
+          f.publicHeaders,
+        )
+      ).status,
+    ).toBe(200);
+  const changed = async (answer: Promise<Response>) => {
+    const response = await answer;
+    expect(response.status).toBe(200);
+    return (await response.json()).changed;
+  };
+  const parked = () => vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
+  return { f, app, events, submit, changed, parked };
+}
+
+it("tells a two-Collection app which of its Collections changed, waking a held read on either", async () => {
+  const t = await liveTwoCollectionApp("link");
+  await t.submit("expenses", "e1");
+  await t.submit("workouts", "w1");
+  const both = [
+    { dataset: "expenses", revision: 1 },
+    { dataset: "workouts", revision: 1 },
+  ];
+  expect(await t.changed(t.events(""))).toEqual(both);
+  expect(await t.changed(t.events("", 0, "owner"))).toEqual(both);
+  expect(await t.changed(t.events("workouts:1,expenses:0"))).toEqual([both[0]]);
+  expect(await t.changed(t.events("expenses:1,workouts:1,other:4", 50))).toEqual([]);
+  const startedAtMs = Date.now();
+  const held = [
+    t.events("expenses:1,workouts:1", 20_000),
+    t.events("workouts:1,expenses:1", 20_000),
+    t.events("expenses:1,workouts:1", 20_000, "owner"),
+  ];
+  await t.parked();
+  await t.submit("workouts", "w2");
+  for (const answer of held)
+    expect(await t.changed(answer)).toEqual([{ dataset: "workouts", revision: 2 }]);
+  const next = t.events("expenses:1,workouts:2", 20_000);
+  await t.parked();
+  await t.submit("expenses", "e2");
+  expect(await t.changed(next)).toEqual([{ dataset: "expenses", revision: 2 }]);
+  expect(Date.now() - startedAtMs).toBeLessThan(5_000);
+  const narrowed = t.events("expenses:2,workouts:2", 20_000);
+  await t.parked();
+  expect((await t.f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  await t.submit("expenses", "e3");
+  expect(await t.changed(narrowed)).toEqual([{ dataset: "expenses", revision: 3 }]);
+  expect(await t.changed(t.events(""))).toEqual([{ dataset: "expenses", revision: 3 }]);
+  for (const since of [
+    "expenses",
+    "expenses:01",
+    "expenses:-1",
+    "Expenses:1",
+    "expenses:1,expenses:2",
+    "expenses:1;workouts:1",
+    "expenses:9007199254740993",
+    Array.from({ length: 17 }, (_, n) => `c${n}:0`).join(","),
+  ])
+    expect((await t.events(since)).status, since).toBe(404);
+});
+
+it("hides a Collection the link can only write to, and ends held reads once the app is withdrawn", async () => {
+  const t = await liveTwoCollectionApp("owner");
+  await t.submit("expenses", "e1");
+  await t.submit("workouts", "w1");
+  expect(await t.changed(t.events(""))).toEqual([{ dataset: "expenses", revision: 1 }]);
+  expect(await t.changed(t.events("", 0, "owner"))).toEqual([
+    { dataset: "expenses", revision: 1 },
+    { dataset: "workouts", revision: 1 },
+  ]);
+  const quiet = t.events("expenses:1,workouts:0", 1_500);
+  const owned = t.events("expenses:1,workouts:1", 20_000, "owner");
+  await t.parked();
+  await t.submit("workouts", "w2");
+  expect(await t.changed(owned)).toEqual([{ dataset: "workouts", revision: 2 }]);
+  expect(await t.changed(quiet)).toEqual([]);
+  const held = [t.events("expenses:1", 20_000), t.events("expenses:1,workouts:2", 20_000, "owner")];
+  await t.parked();
+  const withdrawnAtMs = Date.now();
+  expect(
+    (
+      await t.f.http(`w/app-publications/${t.app.publicationId}/withdraw`, {
+        expectedAuthorityRevision: t.app.authorityRevision,
+      })
+    ).status,
+  ).toBe(200);
+  for (const answer of held) expect((await answer).status).toBe(404);
+  expect(Date.now() - withdrawnAtMs).toBeLessThan(2_000);
+  expect(hasRelayWriteObservers(t.f.storage)).toBe(false);
+});
+
+it("ends a link's held read within about a second of the only Collection it reads being archived", async () => {
+  const t = await liveTwoCollectionApp("owner");
+  const held = t.events("expenses:0", 20_000);
+  await t.parked();
+  const archivedAtMs = Date.now();
+  expect((await t.f.http(`w/datasets/${id(1)}/archive`, {})).status).toBe(200);
+  expect((await held).status).toBe(404);
+  expect(Date.now() - archivedAtMs).toBeLessThan(2_000);
+});
+
+it("limits a signed-in person's reads of their app's Collection changes", async () => {
+  const f = await httpFixture(undefined, true, limits, linkReadable, {
+    appEventReadRateLimiter: new TokenBucketLimiter(2, 0.001, 8),
+  });
+  await f.activate();
+  const publicationId = f.publish();
+  await f.http(`${f.path}/binding`, { publicationId, enabled: true });
+  const events = () =>
+    f.http(`w/app-publications/${publicationId}/backend/events?authorityRevision=1&since=&hold=0`);
+  expect((await events()).status).toBe(200);
+  expect((await events()).status).toBe(200);
+  expect((await events()).status).toBe(429);
+});
 
 it("supports multi-Collection local apps on the relay and enforces isolation and deletion cleanup", async () => {
   const { f, multiCandidate } = await multiCollectionFixture();
@@ -2371,7 +2528,7 @@ it("publishes, activates, invokes, withdraws, and deletes a two-Collection link 
   expect(
     (
       await f.http(
-        `link/app-publications/${app.publicationId}/backend/events?authorityRevision=${authorityRevision}&since=0&hold=0`,
+        `link/app-publications/${app.publicationId}/backend/events?authorityRevision=${authorityRevision}&since=&hold=0`,
         undefined,
         f.publicHeaders,
       )

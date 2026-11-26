@@ -18,6 +18,7 @@ import {
   parseAppBackendUploadRequest,
   parseAppBackendRefusal,
 } from "@dohc/security-contract/app-backend";
+import { APP_DATASET_MAX_BINDINGS } from "@dohc/security-contract/dataset";
 
 const responseHeaders = {
   "cache-control": "private, no-store",
@@ -310,66 +311,99 @@ interface AppEventsRelay {
   relayUrl: string;
   publicationId: string;
   authorityRevision: number;
+  /** A link launch's refusals stay opaque. */
+  link: boolean;
   signal: AbortSignal;
   fetchRelay(request: Request): Promise<Response>;
 }
+export type AppEventRevisions = Array<{ dataset: string; revision: number }>;
 
-/** Waits for the link app's Collection to move past `since`, then answers its alias and revision. */
+const eventRevisions = (entries: unknown): AppEventRevisions | null => {
+  if (!Array.isArray(entries) || entries.length > APP_DATASET_MAX_BINDINGS) return null;
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (
+      !record(entry) ||
+      !exact(entry, ["dataset", "revision"]) ||
+      typeof entry.dataset !== "string" ||
+      !/^(?:[a-z][a-z0-9_-]{0,63})?$/.test(entry.dataset) ||
+      seen.has(entry.dataset) ||
+      !Number.isSafeInteger(entry.revision) ||
+      (entry.revision as number) < 0
+    )
+      return null;
+    seen.add(entry.dataset);
+  }
+  return entries as AppEventRevisions;
+};
+
+/** Waits for one of the app's Collections to move past its revision in `since`, then answers each that moved. */
 export async function forwardAppEvents(
   input: AppEventsRelay & { request: Request },
 ): Promise<Response> {
-  let since: unknown;
+  let since: AppEventRevisions | null;
   try {
     if (input.request.headers.get("content-type") !== "application/json") throw Error();
-    const body = await readBoundedJson(input.request, 256, input.signal);
-    if (!record(body) || !exact(body, ["since"])) throw Error();
-    since = body.since;
+    const body = await readBoundedJson(input.request, 4096, input.signal);
+    since =
+      record(body) && exact(body, ["since"]) && record(body.since)
+        ? eventRevisions(
+            Object.entries(body.since).map(([dataset, revision]) => ({ dataset, revision })),
+          )
+        : null;
   } catch {
-    return opaqueLinkRefusal();
+    since = null;
   }
-  if (!Number.isSafeInteger(since) || (since as number) < 0) return opaqueLinkRefusal();
-  return relayAppEvents(input, since as number, 25_000);
+  if (!since) return input.link ? opaqueLinkRefusal() : appError(400);
+  return relayAppEvents(input, since, 25_000);
 }
 
-/** The relay's answer for the link app's Collection after `since`, held up to `hold` ms. */
+/** The relay's answer for the app's Collections that moved past `since`, held up to `hold` ms. */
 export async function relayAppEvents(
   input: AppEventsRelay,
-  since: number,
+  since: AppEventRevisions,
   hold: number,
 ): Promise<Response> {
+  const query = new URLSearchParams({
+    authorityRevision: String(input.authorityRevision),
+    since: since.map(({ dataset, revision }) => `${dataset}:${revision}`).join(","),
+    hold: String(hold),
+  });
   const url = new URL(
-    `/sync/link/app-publications/${input.publicationId}/backend/events?authorityRevision=${input.authorityRevision}&since=${since}&hold=${hold}`,
+    `/sync/link/app-publications/${input.publicationId}/backend/events?${query}`,
     input.relayUrl,
   );
+  const malformed = () => (input.link ? opaqueLinkRefusal() : appError(503));
   let relay: Response;
   try {
     relay = await input.fetchRelay(new Request(url, { redirect: "manual", signal: input.signal }));
   } catch {
-    return unavailableLinkRefusal();
+    return input.link ? unavailableLinkRefusal() : appError(503);
   }
   try {
     if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
-      return await relayLinkRefusal(relay, input.signal);
+      return input.link || relay.status === 410
+        ? await relayLinkRefusal(relay, input.signal)
+        : appError(
+            relay.status === 401 || relay.status === 403
+              ? 404
+              : [400, 404, 409, 429].includes(relay.status)
+                ? relay.status
+                : 503,
+          );
     let value: unknown;
     try {
-      value = await readBoundedJson(relay, 256, input.signal);
+      value = await readBoundedJson(relay, 4096, input.signal);
     } catch (error) {
       return error instanceof RangeError || error instanceof SyntaxError
-        ? opaqueLinkRefusal()
-        : unavailableLinkRefusal();
+        ? malformed()
+        : input.link
+          ? unavailableLinkRefusal()
+          : appError(503);
     }
-    if (
-      !record(value) ||
-      !exact(value, ["dataset", "revision"]) ||
-      typeof value.dataset !== "string" ||
-      !Number.isSafeInteger(value.revision) ||
-      (value.revision as number) < 0
-    )
-      return opaqueLinkRefusal();
-    return Response.json(
-      { dataset: value.dataset, revision: value.revision },
-      { headers: responseHeaders },
-    );
+    const changed = record(value) && exact(value, ["changed"]) && eventRevisions(value.changed);
+    if (!changed) return malformed();
+    return Response.json({ changed }, { headers: responseHeaders });
   } finally {
     await relay.body?.cancel().catch(() => {});
   }

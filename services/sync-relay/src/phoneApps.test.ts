@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { AccountSessions } from "@dohc/workspace-auth/session";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { StorageContext } from "./storage/context";
+import { hasRelayWriteObservers } from "./relayWriteChanges";
 import {
   claimWorkspace,
   closeTestStorages,
@@ -171,7 +172,15 @@ async function relay() {
                 commits++;
                 return { result: { added: true }, revision: 1, replayed: false };
               }
-            : undefined,
+            : key === "appEventRevisions"
+              ? (auth: AppBackendAuth) => ({
+                  workspaceId: "trip",
+                  actor: `named:trip:${auth.kind === "named" ? auth.userId : ""}`,
+                  collections: [{ dataset: "", datasetId: capability.datasetId, revision: 1 }],
+                })
+              : key === "datasetRevision"
+                ? () => 1
+                : undefined,
     },
   ) as unknown as RelayDatasetHost;
   const h = testHandler(storage, {
@@ -642,6 +651,26 @@ it("ends a launch, on the relay and in share-web, at each way its reach ends", a
   await r.op("phone:ana", "appRevoke", { publicationId: r.publicationId });
   await r.approve(3);
   expect(await r.descriptor(before)).toBe(404);
+});
+
+it("ends a launch's held read of its Collection changes within about a second of the phone signing out", async () => {
+  const r = await relay();
+  const launchId = await r.launch();
+  const events = (since: string, hold: number) =>
+    r.shareWeb(`events?authorityRevision=1&since=${since}&hold=${hold}`, { launchId });
+  expect(await (await events("", 0)).json()).toEqual({ changed: [{ dataset: "", revision: 1 }] });
+  const held = events(":1", 20_000);
+  await vi.waitFor(() => expect(hasRelayWriteObservers(r.storage)).toBe(true));
+  const signedOutAtMs = Date.now();
+  await r.h(
+    request(null, "/sync/account/sessions/phone-session-ana/revoke", {
+      method: "POST",
+      headers: { authorization: "Bearer user:ana" },
+    }),
+  );
+  expect((await held).status).toBe(404);
+  expect(Date.now() - signedOutAtMs).toBeLessThan(2_000);
+  expect(await r.descriptor(launchId)).toBe(404);
 });
 
 it("keeps a launch's reach through its backend work, so revoking while it waits commits nothing", async () => {

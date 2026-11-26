@@ -8,7 +8,7 @@ function fixture() {
   let probes = 0,
     relayStatus = 200,
     relayEvents = (_request: Request): Promise<Response> =>
-      Promise.resolve(Response.json({ dataset: "", revision: 0 }));
+      Promise.resolve(Response.json({ changed: [] }));
   const bytes = Buffer.from("console.log('loaded')");
   const file = {
     path: "bundle.js",
@@ -226,15 +226,22 @@ it("reserves issue capacity for other addresses and document builds, and release
   expect((await f.issue("profile-recovered")).status).toBe(200);
 });
 
-it("starts a launch's change loop only when the relay answers its Collection's revision", async () => {
+it("starts a launch's change loop from its Collections' revisions only when the relay answers them", async () => {
   const f = fixture();
   const probes: string[] = [];
   f.relayEvents(async (request) => {
     probes.push(new URL(request.url).search);
-    return Response.json({ dataset: "", revision: 2 });
+    return Response.json({
+      changed: [
+        { dataset: "trips", revision: 2 },
+        { dataset: "notes", revision: 7 },
+      ],
+    });
   });
-  expect((await f.open("profile-collection")).html).toContain("void watch();");
-  expect(probes).toEqual(["?authorityRevision=1&since=0&hold=0"]);
+  const { html } = await f.open("profile-collection");
+  expect(html).toContain("void watch();");
+  expect(html).toContain('const since={"trips":2,"notes":7};');
+  expect(probes).toEqual(["?authorityRevision=1&since=&hold=0"]);
   f.relayEvents(async () => new Response(null, { status: 503 }));
   expect((await f.open("profile-busy")).html).toContain("void watch();");
   f.relayEvents(async () => new Response(null, { status: 404 }));
@@ -254,7 +261,7 @@ it("holds one change wait per launch, outside the document lane and the session'
       release = resolve;
     });
   });
-  const held = call("/events", { since: 3 });
+  const held = call("/events", { since: { trips: 3, notes: 0 } });
   await expect.poll(() => relayed.length).toBe(1);
   const url = new URL(relayed[0]!.url);
   expect(relayed[0]!.method).toBe("GET");
@@ -262,25 +269,58 @@ it("holds one change wait per launch, outside the document lane and the session'
   expect(url.pathname).toBe(`/sync/link/app-publications/${publicationId}/backend/events`);
   expect(Object.fromEntries(url.searchParams)).toEqual({
     authorityRevision: "1",
-    since: "3",
+    since: "trips:3,notes:0",
     hold: "25000",
   });
-  expect((await call("/events", { since: 3 })).status).toBe(429);
+  expect((await call("/events", { since: { trips: 3 } })).status).toBe(429);
   expect((await call("/status")).status).toBe(204);
-  release(Response.json({ dataset: "votes", revision: 4 }));
+  release(
+    Response.json({
+      changed: [
+        { dataset: "trips", revision: 4 },
+        { dataset: "notes", revision: 1 },
+      ],
+    }),
+  );
   const answer = await held;
   expect(answer.status).toBe(200);
-  expect(await answer.json()).toEqual({ dataset: "votes", revision: 4 });
-  f.relayEvents(async () => Response.json({ dataset: "", revision: 4 }));
+  expect(await answer.json()).toEqual({
+    changed: [
+      { dataset: "trips", revision: 4 },
+      { dataset: "notes", revision: 1 },
+    ],
+  });
+  f.relayEvents(async () => Response.json({ changed: [{ dataset: "", revision: 4 }] }));
   for (let wait = 0; wait < 20; wait++)
-    expect((await call("/events", { since: 4 })).status).toBe(200);
+    expect((await call("/events", { since: { "": 3 } })).status).toBe(200);
   expect((await call("/status")).status).toBe(204);
-  expect((await call("/events", { since: -1 })).status).toBe(404);
-  expect((await call("/events", { since: 4, dataset: "votes" })).status).toBe(404);
-  f.relayEvents(async () => Response.json({ dataset: "votes", revision: -1 }));
-  expect((await call("/events", { since: 4 })).status).toBe(404);
-  f.relayEvents(async () => new Response("{".repeat(300)));
-  expect((await call("/events", { since: 4 })).status).toBe(404);
+  const many = Object.fromEntries(Array.from({ length: 17 }, (_, n) => [`c${n}`, 0]));
+  for (const since of [
+    -1,
+    4,
+    [],
+    { trips: -1 },
+    { trips: 1.5 },
+    { Trips: 1 },
+    JSON.parse('{"__proto__":1}'),
+    many,
+  ])
+    expect((await call("/events", { since })).status, JSON.stringify(since)).toBe(404);
+  expect((await call("/events", { since: {}, dataset: "votes" })).status).toBe(404);
+  for (const changed of [
+    [{ dataset: "votes", revision: -1 }],
+    [{ dataset: "votes", revision: 1, rows: [] }],
+    [
+      { dataset: "votes", revision: 1 },
+      { dataset: "votes", revision: 2 },
+    ],
+    { votes: 1 },
+  ]) {
+    f.relayEvents(async () => Response.json({ changed }));
+    expect((await call("/events", { since: {} })).status).toBe(404);
+  }
+  f.relayEvents(async () => new Response("{".repeat(5000)));
+  expect((await call("/events", { since: {} })).status).toBe(404);
   f.relayEvents(
     async () =>
       new Response(
@@ -291,9 +331,9 @@ it("holds one change wait per launch, outside the document lane and the session'
         }),
       ),
   );
-  expect((await call("/events", { since: 4 })).status).toBe(503);
+  expect((await call("/events", { since: {} })).status).toBe(503);
   f.relayEvents(async () => Response.json(null, { status: 404 }));
-  expect((await call("/events", { since: 4 })).status).toBe(404);
+  expect((await call("/events", { since: {} })).status).toBe(404);
   f.relayEvents(() => Promise.reject(new Error("offline")));
-  expect((await call("/events", { since: 4 })).status).toBe(503);
+  expect((await call("/events", { since: {} })).status).toBe(503);
 });
