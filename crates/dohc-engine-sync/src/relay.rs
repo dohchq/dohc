@@ -5268,13 +5268,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // not offered again. Its later edits are, based on what it wrote. A
         // file a direct write still carries stops the scan, so this position
         // never passes a change the relay may yet refuse.
+        let marks = read_direct_write_marks(store, workspace_id, share_id)?;
+        let mut stop_at = read_direct_write_open_objects(store, workspace_id, share_id)?;
+        stop_at.extend(
+            marks
+                .iter()
+                .filter(|(_, mark)| mark.decided_through < 0)
+                .map(|(id, _)| id.clone()),
+        );
         let skips = ScanSkips {
-            settled: read_direct_write_marks(store, workspace_id, share_id)?
+            settled: marks
                 .into_iter()
                 .filter(|(_, mark)| mark.delivered_through >= 0)
                 .map(|(object_id, mark)| (object_id, mark.delivered_through))
                 .collect(),
-            stop_at: read_direct_write_open_objects(store, workspace_id, share_id)?,
+            stop_at,
         };
         let scan = collect_share_proposal_changes(
             store,
@@ -5284,6 +5292,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             scanned,
             submit_through,
             max_read_bytes,
+            crate::MAX_SHARE_PROPOSAL_OPS,
             &skips,
         )?;
         let mut changes: Vec<ShareProposalChange> =
@@ -7758,12 +7767,6 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// followed by a rename leaves as one change from the original path to the new
 /// one.
 ///
-/// The scan holds at most `MAX_SHARE_PROPOSAL_OPS` files, which is what one
-/// submit carries. It stops at the op that would admit one file too many, and
-/// reports the position it stopped at, so the next submit resumes from exactly
-/// there. Folding more ops into files it already holds is not what the bound
-/// counts, so no file is ever offered half consolidated.
-///
 /// `skips` says what the other lane decided (see `ScanSkips`).
 #[allow(clippy::too_many_arguments)]
 fn collect_share_proposal_changes(
@@ -7774,6 +7777,7 @@ fn collect_share_proposal_changes(
     scanned_seq: i64,
     submit_through: i64,
     max_read_bytes: usize,
+    max_changes: usize,
     skips: &ScanSkips,
 ) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
@@ -7824,9 +7828,7 @@ fn collect_share_proposal_changes(
                     by_object.remove(&object_id);
                     outside_share.insert(object_id);
                 } else {
-                    if !by_object.contains_key(&object_id)
-                        && by_object.len() >= crate::MAX_SHARE_PROPOSAL_OPS
-                    {
+                    if !by_object.contains_key(&object_id) && by_object.len() >= max_changes {
                         more_pending = true;
                         break 'pages;
                     }

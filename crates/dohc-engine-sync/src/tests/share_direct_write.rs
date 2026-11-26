@@ -1319,11 +1319,114 @@ fn admin_plans_all_transactional_collection_sources_together() {
 }
 
 #[test]
+fn admin_waits_for_all_new_dataset_sources_before_writing_or_proposing() {
+    let descriptor = r#"{"formatVersion":2,"operationsPath":"rules.ts"}"#;
+    let paths = [
+        "docs/people/dataset.json",
+        "docs/people/schema.sql",
+        "docs/people/rules.ts",
+    ];
+    for (scan_cut, all_pending) in [(true, true), (false, false), (true, false)] {
+        let (_scratch, _path, mut engine) = proposal_fixture(&[descriptor, "SELECT 1;"]);
+        let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+        let push = |engine: &mut EngineStore| {
+            client
+                .push_direct_writes(engine, "ws", SHARE, &workspace_grant(), true, &NoFaults, 0)
+                .unwrap()
+        };
+        let hold_descriptor = |engine: &mut EngineStore, object: &str, path: &str| {
+            VersionedTextStore::new(engine)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object.to_owned(),
+                        path: path.to_owned(),
+                        text: descriptor.to_owned(),
+                        moment_id: format!("local-{object}"),
+                        metadata_origin: "local-file".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_500,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        hold_descriptor(&mut engine, "descriptor", paths[0]);
+        let add_descriptor = |engine: &mut EngineStore| {
+            journal_local_moment(
+                engine,
+                &create_moment("descriptor", "descriptor", paths[0], descriptor),
+                2_000,
+            );
+        };
+        let add_sources = |engine: &mut EngineStore| {
+            for (id, path) in ["schema", "operations"].into_iter().zip(&paths[1..]) {
+                journal_local_moment(engine, &create_moment(id, id, path, "SELECT 1;"), 2_000);
+            }
+        };
+        if scan_cut {
+            add_sources(&mut engine);
+            if all_pending {
+                let path = "docs/unfinished/dataset.json";
+                hold_descriptor(&mut engine, "unfinished", path);
+                journal_local_moment(
+                    &mut engine,
+                    &create_moment("unfinished", "unfinished", path, descriptor),
+                    2_000,
+                );
+            }
+            for i in (2 + usize::from(all_pending))..crate::MAX_SHARE_PROPOSAL_OPS {
+                let id = format!("filler-{i}");
+                let path = if all_pending {
+                    format!("docs/unfinished/{id}.sql")
+                } else {
+                    format!("docs/{id}.txt")
+                };
+                journal_local_moment(
+                    &mut engine,
+                    &create_moment(&id, &id, &path, "SELECT 1;"),
+                    2_000,
+                );
+            }
+            add_descriptor(&mut engine);
+        } else {
+            add_descriptor(&mut engine);
+        }
+
+        let first = push(&mut engine);
+        assert!(first.writes.is_empty());
+        assert_eq!(first.more_pending, scan_cut);
+        let proposal = client
+            .submit_share_proposal(
+                &mut engine,
+                "ws",
+                SHARE,
+                &workspace_grant(),
+                "submit-1",
+                &NoFaults,
+                0,
+            )
+            .unwrap();
+        assert_eq!(proposal.submitted, 0);
+        if !scan_cut {
+            add_sources(&mut engine);
+        }
+        push(&mut engine);
+        assert_eq!(written_paths(&client), [paths.map(str::to_owned).to_vec()]);
+    }
+}
+
+#[test]
 fn admin_plans_a_new_sql_migration_with_existing_collection_edits() {
     let descriptor = r#"{"formatVersion":2,"name":"People"}"#;
     let updated = r#"{"formatVersion":2,"name":"Volunteers"}"#;
+    let repointed = r#"{"formatVersion":2,"operationsPath":"frontend.ts"}"#;
     let (_scratch, _path, mut engine) =
-        proposal_fixture(&[descriptor, updated, "SELECT 1;", "SELECT 2;"]);
+        proposal_fixture(&[descriptor, updated, repointed, "SELECT 1;", "SELECT 2;"]);
     VersionedTextStore::new(&mut engine)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1396,6 +1499,77 @@ fn admin_plans_a_new_sql_migration_with_existing_collection_edits() {
             "docs/people/schema.sql".to_owned(),
             "docs/people/migrations/002-x.sql".to_owned(),
         ]]
+    );
+
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "descriptor".to_owned(),
+                path: "docs/people/dataset.json".to_owned(),
+                text: repointed.to_owned(),
+                moment_id: "local-repointed".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    for moment in [
+        edit_moment(
+            "repoint",
+            "descriptor",
+            "docs/people/dataset.json",
+            updated,
+            repointed,
+        ),
+        edit_moment(
+            "frontend",
+            "frontend",
+            "docs/people/frontend.ts",
+            "SELECT 1;",
+            "SELECT 2;",
+        ),
+        create_moment("stale", "stale", "docs/people/stale.sql", "SELECT 2;"),
+    ] {
+        journal_local_moment(&mut engine, &moment, 4_000);
+    }
+    client
+        .transport()
+        .collection_write_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(ShareCollectionWriteResponse::Stale {
+            path: "docs/people/stale.sql".to_owned(),
+            current_blob_sha256: None,
+        }));
+    let next = client
+        .push_direct_writes(
+            &mut engine,
+            "ws",
+            SHARE,
+            &workspace_grant(),
+            true,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+    assert_eq!(next.writes[0].paths, ["docs/people/stale.sql"]);
+    let reason = engine.read_with(|conn| {
+        conn.query_row(
+            "SELECT refusal_reason FROM share_direct_write_marks WHERE workspace_id='ws' AND share_id=?1 AND object_id='stale'",
+            [SHARE],
+            |row| row.get::<_, String>(0),
+        )
+    }).unwrap();
+    assert_eq!(
+        reason,
+        "A Collection rule file changed or the path is already in use."
     );
 }
 

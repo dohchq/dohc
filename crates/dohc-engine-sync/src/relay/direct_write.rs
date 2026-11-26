@@ -724,8 +724,13 @@ fn build_direct_write_plan(
     origin_id: &str,
     max_read_bytes: usize,
 ) -> Result<(DirectWritePlan, Vec<(String, i64)>), RelayError> {
+    let marks = read_direct_write_marks(store, workspace_id, share_id)?;
+    let pending = marks
+        .values()
+        .filter(|mark| mark.decided_through < 0)
+        .count();
     let skips = ScanSkips {
-        settled: read_direct_write_marks(store, workspace_id, share_id)?
+        settled: marks
             .into_iter()
             .filter(|(_, mark)| mark.decided_through >= 0)
             .map(|(object_id, mark)| (object_id, mark.decided_through))
@@ -744,10 +749,11 @@ fn build_direct_write_plan(
         start,
         submit_through,
         max_read_bytes,
+        crate::MAX_SHARE_PROPOSAL_OPS + pending,
         &skips,
     )?;
 
-    let groups = plan_direct_writes(store, workspace_id, granted, admin, &scan.changes)?;
+    let groups = plan_direct_writes(store, workspace_id, share_id, granted, admin, &scan.changes)?;
     // A new Collection the scan bound may have cut waits for the next push,
     // which reads it again whole. That only helps when this push still moves
     // on: it writes something, or it leaves files to proposals. A scan that is
@@ -758,7 +764,7 @@ fn build_direct_write_plan(
         .flat_map(|group| group.changes.iter().map(|net| net.object_id.as_str()))
         .collect();
     let defer = scan.more_pending
-        && (groups.iter().any(|group| !group.new_collection)
+        && (groups.iter().any(|group| group.kind == GroupKind::Ready)
             || scan
                 .changes
                 .iter()
@@ -766,8 +772,14 @@ fn build_direct_write_plan(
     let mut position = scan.scanned_through;
     let mut carried = BTreeSet::new();
     let mut writes = Vec::new();
+    let mut left = Vec::new();
     for group in groups {
-        if defer && group.new_collection {
+        if group.kind == GroupKind::PendingDataset {
+            left.extend(group.changes.iter().map(|net| (net.object_id.clone(), -1)));
+        }
+        if group.kind == GroupKind::PendingDataset
+            || (defer && group.kind == GroupKind::NewCollection)
+        {
             // The scan stopped at its bound, so more of this Collection's
             // records may follow. The next push reads it again whole.
             if let Some(first) = group.changes.iter().map(|net| net.first_seq).min() {
@@ -798,12 +810,12 @@ fn build_direct_write_plan(
             result: None,
         });
     }
-    let left = scan
-        .changes
-        .iter()
-        .filter(|net| !carried.contains(&net.object_id))
-        .map(|net| (net.object_id.clone(), net.last_seq))
-        .collect();
+    left.extend(
+        scan.changes
+            .iter()
+            .filter(|net| !carried.contains(&net.object_id))
+            .map(|net| (net.object_id.clone(), net.last_seq)),
+    );
     Ok((
         DirectWritePlan {
             writes,
@@ -816,8 +828,15 @@ fn build_direct_write_plan(
 
 /// A group of changes the relay takes as one write.
 struct PlannedGroup<'a> {
-    new_collection: bool,
+    kind: GroupKind,
     changes: Vec<&'a NetChange>,
+}
+
+#[derive(PartialEq)]
+enum GroupKind {
+    Ready,
+    NewCollection,
+    PendingDataset,
 }
 
 /// Group the scan's changes into the writes the relay takes, in the order it
@@ -828,6 +847,7 @@ struct PlannedGroup<'a> {
 fn plan_direct_writes<'a>(
     store: &EngineStore,
     workspace_id: &str,
+    share_id: &str,
     granted: &crate::ShareGrant,
     admin: bool,
     changes: &'a [NetChange],
@@ -836,7 +856,7 @@ fn plan_direct_writes<'a>(
     let mut groups = Vec::new();
     let whole_workspace = granted.scope == crate::ShareScope::Workspace;
     if admin && whole_workspace {
-        for group in plan_dataset_rules(store, workspace_id, changes)? {
+        for group in plan_dataset_rules(store, workspace_id, share_id, changes)? {
             used.extend(group.1);
             groups.push(group.0);
         }
@@ -900,7 +920,7 @@ fn plan_direct_writes<'a>(
             batch.push(&changes[other_index]);
         }
         groups.push(PlannedGroup {
-            new_collection: true,
+            kind: GroupKind::NewCollection,
             changes: batch,
         });
     }
@@ -911,7 +931,7 @@ fn plan_direct_writes<'a>(
         }
         if whole_workspace && is_new_page(store, workspace_id, net)? {
             groups.push(PlannedGroup {
-                new_collection: false,
+                kind: GroupKind::Ready,
                 changes: vec![net],
             });
             continue;
@@ -932,7 +952,7 @@ fn plan_direct_writes<'a>(
         };
         if direct {
             groups.push(PlannedGroup {
-                new_collection: false,
+                kind: GroupKind::Ready,
                 changes: vec![net],
             });
         }
@@ -943,20 +963,34 @@ fn plan_direct_writes<'a>(
 fn plan_dataset_rules<'a>(
     store: &EngineStore,
     workspace_id: &str,
+    share_id: &str,
     changes: &'a [NetChange],
 ) -> Result<Vec<(PlannedGroup<'a>, Vec<usize>)>, RelayError> {
     store
         .read_with(|conn| {
-            let mut folders = BTreeMap::<String, (RuleSources, Vec<(usize, &NetChange)>)>::new();
+            let mut folders =
+                BTreeMap::<String, (RuleSources, bool, Vec<(usize, &NetChange)>)>::new();
+            let mut descriptor_base = conn
+                .prepare_cached(
+                    "SELECT json_extract(l.payload_json,'$.payloadBeforeBlobSha256'),
+                        l.origin_seq > coalesce(w.decided_through,-1)
+                 FROM snapshots s JOIN replication_log l ON l.workspace_id=s.workspace_id
+                 LEFT JOIN share_direct_write_marks w
+                   ON w.workspace_id=s.workspace_id AND w.share_id=?2 AND w.object_id=s.object_id
+                 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?3
+                   AND l.op_kind='moment.append' AND l.imported=0
+                   AND json_extract(l.payload_json,'$.versionId')=s.version_id
+                   AND json_extract(l.payload_json,'$.objectId')=s.object_id
+                   AND json_extract(l.payload_json,'$.payloadAfterPath')=s.path
+                   AND l.origin_seq > coalesce(w.delivered_through,-1)
+                 ORDER BY l.origin_seq LIMIT 1",
+                )
+                .map_err(SyncError::corrupt)?;
             for (index, net) in changes.iter().enumerate() {
                 let Some((_, name)) = text_write_path(net) else {
                     continue;
                 };
-                if name != DATASET_SCHEMA_FILE
-                    && ![".sql", ".js", ".ts"]
-                        .into_iter()
-                        .any(|ext| name.ends_with(ext))
-                {
+                if !is_dataset_rule_name(name) {
                     continue;
                 }
                 let path = net.change.after_path.as_deref().unwrap_or_default();
@@ -966,51 +1000,90 @@ fn plan_dataset_rules<'a>(
                 else {
                     continue;
                 };
-                let (sources, files) = match folders.entry(folder.clone()) {
+                let (sources, creates, files) = match folders.entry(folder.clone()) {
                     std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::btree_map::Entry::Vacant(entry) => {
+                        let base: Option<(Option<String>, bool)> = descriptor_base
+                            .query_row(
+                                params![
+                                    workspace_id,
+                                    share_id,
+                                    format!("{folder}/{DATASET_SCHEMA_FILE}")
+                                ],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .optional()
+                            .map_err(SyncError::corrupt)?;
+                        let (digest, creates) = match base {
+                            Some((Some(base), _)) => (base, false),
+                            Some((None, false)) => continue,
+                            Some((None, true)) => (digest, true),
+                            None => (digest, false),
+                        };
                         let Some(sources) = RuleSources::read(conn, &digest, &folder)
                             .map_err(SyncError::corrupt)?
                         else {
                             continue;
                         };
-                        entry.insert((sources, Vec::new()))
+                        entry.insert((sources, creates, Vec::new()))
                     }
                 };
-                if sources.allows(&folder, path) {
-                    files.push((index, net));
+                let change = &net.change;
+                if !sources.allows(&folder, path)
+                    || (*creates != change.based_on_path.is_none()
+                        && (*creates || !path.ends_with(".sql")))
+                {
+                    continue;
                 }
+                if name == DATASET_SCHEMA_FILE
+                    && RuleSources::read(
+                        conn,
+                        change.after_blob_sha256.as_deref().unwrap_or_default(),
+                        &folder,
+                    )
+                    .map_err(SyncError::corrupt)?
+                    .as_ref()
+                        != Some(sources)
+                {
+                    continue;
+                }
+                files.push((index, net));
             }
             let mut groups = Vec::new();
-            for (folder, (_, mut files)) in folders {
-                let descriptor = format!("{folder}/{DATASET_SCHEMA_FILE}");
-                files.sort_by_key(|(_, net)| {
-                    net.change.after_path.as_deref() != Some(descriptor.as_str())
-                });
-                let creates = files.first().is_some_and(|(_, net)| {
-                    net.change.after_path.as_deref() == Some(descriptor.as_str())
-                        && net.change.based_on_path.is_none()
-                });
-                files.retain(|(_, net)| {
-                    let change = &net.change;
-                    let path = change.after_path.as_deref().unwrap_or_default();
-                    change.based_on_path.is_none() == creates
-                        || (!creates && path.ends_with(".sql"))
-                });
-                if !files.is_empty() {
-                    let (indices, changes) = files.into_iter().unzip();
-                    groups.push((
-                        PlannedGroup {
-                            new_collection: creates,
-                            changes,
-                        },
-                        indices,
-                    ));
+            for (folder, (sources, creates, mut files)) in folders {
+                if files.is_empty() {
+                    continue;
                 }
+                let descriptor = format!("{folder}/{DATASET_SCHEMA_FILE}");
+                files.sort_by_key(|(_, net)| net.change.after_path.as_deref() != Some(&descriptor));
+                let pending = creates
+                    && (files[0].1.change.after_path.as_deref() != Some(&descriptor)
+                        || !sources.complete(
+                            files
+                                .iter()
+                                .filter_map(|(_, net)| net.change.after_path.as_deref()),
+                        ));
+                let (indices, changes) = files.into_iter().unzip();
+                groups.push((
+                    PlannedGroup {
+                        kind: if pending {
+                            GroupKind::PendingDataset
+                        } else {
+                            GroupKind::Ready
+                        },
+                        changes,
+                    },
+                    indices,
+                ));
             }
             Ok(groups)
         })
         .map_err(local)
+}
+
+fn is_dataset_rule_name(name: &str) -> bool {
+    name.rsplit('/').next() == Some(DATASET_SCHEMA_FILE)
+        || [".sql", ".js", ".ts"].iter().any(|ext| name.ends_with(ext))
 }
 
 /// The folder and file name of a change the direct lane can carry: a text
@@ -1345,6 +1418,12 @@ fn record_direct_write_plan(
     }
     let outcome = store
         .write_with(faults, |tx| {
+            tx.execute(
+                "DELETE FROM share_direct_write_marks
+                 WHERE workspace_id=?1 AND share_id=?2 AND decided_through=-1",
+                params![workspace_id, share_id],
+            )
+            .map_err(SyncError::persist)?;
             for (object_id, last_seq) in left {
                 upsert_mark(
                     tx,
@@ -1432,6 +1511,14 @@ fn record_direct_write_result(
                 )?;
                 let reason = match result {
                     DirectWriteResult::Refused { reason } => Some(reason.as_str()),
+                    DirectWriteResult::Stale { .. }
+                        if write.request.changes[0]
+                            .after_path
+                            .as_deref()
+                            .is_some_and(is_dataset_rule_name) =>
+                    {
+                        Some("A Collection rule file changed or the path is already in use.")
+                    }
                     DirectWriteResult::Stale { .. } if page => {
                         Some("This page name is taken. Use New page to create another page.")
                     }

@@ -2237,6 +2237,8 @@ export function isDatasetRulePath(path: string): boolean {
   return (
     /(?:^|\/)dataset\.json$|\.(?:sql|js|ts)$/u.test(path) &&
     prepareSharePath(path)?.path === path &&
+    Buffer.byteLength(path) <= 1024 &&
+    !/[\x00-\x1f\x7f]/u.test(path) &&
     path.split("/").every((part) => {
       const key = pathCollisionKey(part);
       return (

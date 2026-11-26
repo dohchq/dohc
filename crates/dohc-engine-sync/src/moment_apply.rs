@@ -2467,24 +2467,27 @@ fn writes_collection_rule(
     let Some(creates) = direct_text_write_coordinates(tx, workspace_id, payload)? else {
         return Ok(false);
     };
-    let sources = if *path == format!("{folder}/{DESCRIPTOR}") {
-        if creates && folder_holds_any_file(tx, workspace_id, "main", folder)? {
-            return Ok(false);
+    if *path == format!("{folder}/{DESCRIPTOR}") {
+        let next = RuleSources::read(tx, &payload.payload_after_blob_sha256, folder)
+            .map_err(SyncError::corrupt)?;
+        if creates {
+            return Ok(next.is_some() && !folder_holds_any_file(tx, workspace_id, "main", folder)?);
         }
-        RuleSources::read(tx, &payload.payload_after_blob_sha256, folder)
-    } else {
-        let Some((nearest, digest)) =
-            collection_rules::descriptor_at(tx, workspace_id, path).map_err(SyncError::corrupt)?
-        else {
+        let Some(current) = select_snapshot_by_path(tx, workspace_id, "main", path)? else {
             return Ok(false);
         };
-        if nearest != folder {
-            return Ok(false);
-        }
-        RuleSources::read(tx, &digest, folder)
+        let before = RuleSources::read(tx, &current.digest, folder).map_err(SyncError::corrupt)?;
+        return Ok(next.is_some() && next == before);
     }
-    .map_err(SyncError::corrupt)?;
-    Ok(sources.is_some_and(|sources| sources.allows(folder, path)))
+    let Some((nearest, digest)) =
+        collection_rules::descriptor_at(tx, workspace_id, path).map_err(SyncError::corrupt)?
+    else {
+        return Ok(false);
+    };
+    Ok(nearest == folder
+        && RuleSources::read(tx, &digest, folder)
+            .map_err(SyncError::corrupt)?
+            .is_some_and(|sources| sources.allows(folder, path)))
 }
 
 /// A personal agent's write from `relay:personal-collection:<agentId>`: its

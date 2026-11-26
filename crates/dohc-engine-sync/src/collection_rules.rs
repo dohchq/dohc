@@ -18,17 +18,19 @@ pub(crate) fn safe_path(path: &str) -> bool {
         })
 }
 
+#[derive(PartialEq)]
 pub(crate) struct RuleSources {
+    schema: String,
     operations: String,
 }
 
 impl RuleSources {
     fn parse(text: &str, folder: &str) -> Option<Self> {
         let descriptor: serde_json::Value = serde_json::from_str(text).ok()?;
-        let format = descriptor.get("formatVersion")?.as_u64()?;
+        let format = descriptor.get("formatVersion")?.as_f64()?;
         let source = |key: &str, default: &str| match format {
-            1 => Some(descriptor.get(key)?.as_str()?.to_owned()),
-            2 => {
+            1.0 => Some(descriptor.get(key)?.as_str()?.to_owned()),
+            2.0 => {
                 let relative = match descriptor.get(key) {
                     Some(value) => value.as_str()?,
                     None => default,
@@ -45,7 +47,7 @@ impl RuleSources {
             && [&schema, &operations]
                 .into_iter()
                 .all(|path| path.starts_with(&prefix) && safe_path(path)))
-        .then_some(Self { operations })
+        .then_some(Self { schema, operations })
     }
 
     pub(crate) fn read(
@@ -57,6 +59,12 @@ impl RuleSources {
             .optional()?
             .and_then(|(_, _, text)| text);
         Ok(raw.and_then(|text| Self::parse(&text, folder)))
+    }
+
+    pub(crate) fn complete<'a>(&self, paths: impl Iterator<Item = &'a str> + Clone) -> bool {
+        [&self.schema, &self.operations]
+            .into_iter()
+            .all(|required| paths.clone().any(|path| path == required))
     }
 
     pub(crate) fn allows(&self, folder: &str, path: &str) -> bool {

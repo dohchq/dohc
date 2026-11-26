@@ -1,5 +1,5 @@
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
-import { rmdir } from "node:fs/promises";
+import { removeEmptyWorkspaceFolder } from "../workspaces/workspaceFiles";
 import { randomUUID } from "node:crypto";
 import { durableBatch } from "@dohc/automation-executor/durable-batch";
 import { restoreRequestId } from "../workspaces/restoreWriteIdentity";
@@ -1024,8 +1024,9 @@ export function registerStopAndRestoreIpc<
                 }
               },
               folderEntries: (path) => folderEntriesOrNone(join(root, path)),
-              removeEmptyFolder: async (path) =>
-                await rmdir(join(root, path)).catch(() => undefined),
+              removeEmptyFolder: async (path) => {
+                await removeEmptyWorkspaceFolder(root, path).catch(() => false);
+              },
               undoRuns: (definitions) =>
                 retentionError !== null
                   ? Promise.resolve({

@@ -1962,6 +1962,48 @@ describe("a new page in the owner's workspace", () => {
     });
   });
 
+  it.each([
+    ["operationsPath", "frontend.ts", rulesSource],
+    ["schemaPath", "other.sql", rulesSchema],
+  ])("pins the descriptor's %s on its own and in a batch", async (key, name, original) => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    await r.owner.write("other-source", `docs/people/${name}`, original);
+    const descriptor = rulesDescriptor({ [key]: name });
+    await uploadAs(r, admin, descriptor);
+    const retarget = edit("docs/people/dataset.json", rulesDescriptor(), descriptor);
+    for (const batch of [
+      [retarget],
+      [edit(`docs/people/${name}`, original, rulesSchema), retarget],
+    ]) {
+      await expectCode(await ruleWrite(r, admin, batch, "retarget"), 403, "share_op_rejected");
+    }
+    expect(await r.owner.directMoments()).toHaveLength(4);
+  });
+
+  it("refuses a create under a differently spelled current folder", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    const batch = Object.entries(ruleFiles("Docs/People")).map(([path, text]) =>
+      create(path, text),
+    );
+    await expectCode(await ruleWrite(r, admin, batch), 409, "stale");
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+  });
+
+  it.each([
+    ["migrations", "Migrations"],
+    ["café", "café"],
+  ])("refuses sibling folders spelled %s and %s in one batch", async (left, right) => {
+    const { r, admin, changes } = await rulesSetup();
+    const batch = [
+      ...changes.filter((change) => !change.afterPath!.endsWith("001.sql")),
+      create(`docs/people/${left}/001.sql`, rulesSchema),
+      create(`docs/people/${right}/002.sql`, rulesSchema),
+    ];
+    await expectCode(await ruleWrite(r, admin, batch), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
   it("refuses migration creates with occupied paths, another Collection, or a non-SQL file", async () => {
     const { r, admin, changes } = await rulesSetup();
     expect((await ruleWrite(r, admin, changes)).status).toBe(200);
@@ -2073,6 +2115,9 @@ describe("a new page in the owner's workspace", () => {
     "docs/people/.env/one.sql",
     "docs/people/.dohc-access",
     "docs/people/.DOHC-ACCESS/one.sql",
+    "docs/people/.dohc/migration.sql",
+    "docs/people/mig\tration.sql",
+    `docs/people/${"é".repeat(510)}.sql`,
     "docs/people/other.ts",
   ])("refuses a whole batch containing %s", async (path) => {
     const { r, admin, changes } = await rulesSetup();
@@ -2105,12 +2150,20 @@ describe("a new page in the owner's workspace", () => {
     expect(await r.owner.directMoments()).toEqual([]);
   });
 
-  it("refuses a dataset ID already in the workspace before it has an approval", async () => {
-    const { r, admin, changes } = await rulesSetup();
-    await r.owner.write("other-dataset", "another/dataset.json", rulesDescriptor());
-    await expectCode(await ruleWrite(r, admin, changes), 403, "share_op_rejected");
-    expect(await r.owner.directMoments()).toEqual([]);
-  });
+  it.each(["", '"datasetId":"00000000-0000-4000-8000-000000000002",'])(
+    "refuses a dataset ID already in the workspace before approval with prefix %s",
+    async (duplicateKey) => {
+      const { r, admin, changes } = await rulesSetup();
+      const descriptor = rulesDescriptor().replace("{", `{${duplicateKey}`);
+      await uploadAs(r, admin, descriptor);
+      const first = Object.entries(ruleFiles("another", descriptor)).map(([path, text]) =>
+        create(path, text),
+      );
+      expect((await ruleWrite(r, admin, first, "first")).status).toBe(200);
+      await expectCode(await ruleWrite(r, admin, changes), 403, "share_op_rejected");
+      expect(await r.owner.directMoments()).toHaveLength(4);
+    },
+  );
 
   it("refuses a partial create and names the actual size and byte limit for an over-cap batch", async () => {
     const { r, admin, changes } = await rulesSetup();

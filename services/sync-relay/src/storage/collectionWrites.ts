@@ -1019,7 +1019,7 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
     if (spellingTaken(storage, workspaceId, write.collectionPath)) {
       throw new CollectionWriteStaleError(write.collectionPath, null);
     }
-    return;
+    if (write.kind === "new-collection") return;
   }
   if (write.kind === "dataset-rules") {
     for (const change of write.changes) {
@@ -1093,9 +1093,9 @@ function validateDatasetRules(
   if (!next || (before && before.datasetId !== next.datasetId))
     throw refusal("The Collection ID must stay the same.");
   const { schemaPath, operationsPath } = next;
+  if (before && (before.schemaPath !== schemaPath || before.operationsPath !== operationsPath))
+    throw refusal("The Collection must keep the same schema and operations files.");
   if (
-    !schemaPath.endsWith(".sql") ||
-    !/\.(?:js|ts)$/u.test(operationsPath) ||
     ![schemaPath, operationsPath].every(
       (path) => path.startsWith(`${write.collectionPath}/`) && isDatasetRulePath(path),
     ) ||
@@ -1106,10 +1106,19 @@ function validateDatasetRules(
     throw refusal(
       "Write only the Collection descriptor, schema, operations, and SQL migrations in its folder.",
     );
-  const keys = new Set([...texts.keys()].map(pathCollisionKey));
-  for (const key of keys) {
+  const files = new Set([...texts.keys()].map(pathCollisionKey));
+  const folders = new Map<string, string>();
+  for (const path of texts.keys()) {
+    const key = pathCollisionKey(path);
     for (let end = key.lastIndexOf("/"); end > 0; end = key.lastIndexOf("/", end - 1)) {
-      if (keys.has(key.slice(0, end))) throw refusal("A Collection file cannot also be a folder.");
+      if (files.has(key.slice(0, end))) throw refusal("A Collection file cannot also be a folder.");
+    }
+    for (let end = path.lastIndexOf("/"); end > 0; end = path.lastIndexOf("/", end - 1)) {
+      const folder = path.slice(0, end);
+      const key = pathCollisionKey(folder);
+      if (folders.has(key) && folders.get(key) !== folder)
+        throw refusal("Use one spelling for each folder in a Collection write.");
+      folders.set(key, folder);
     }
   }
   if (!write.creates) return;
@@ -1118,22 +1127,30 @@ function validateDatasetRules(
   const catalogExists = storage.db
     .prepare("SELECT 1 FROM sqlite_schema WHERE name = 'dohc_dataset_catalog' AND type = 'table'")
     .get();
+  const duplicate = () => refusal("This Collection ID already exists in the workspace.");
   if (
-    (catalogExists &&
-      storage.db
-        .prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id = ? AND dataset_id = ?")
-        .get(workspaceId, next.datasetId)) ||
+    catalogExists &&
     storage.db
-      .prepare(
-        `SELECT 1 FROM sync_relay_current_files f JOIN sync_relay_blobs b
+      .prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id = ? AND dataset_id = ?")
+      .get(workspaceId, next.datasetId)
+  )
+    throw duplicate();
+  for (const row of storage.db
+    .prepare(
+      `SELECT b.content FROM sync_relay_current_files f JOIN sync_relay_blobs b
        ON b.workspace_id = f.workspace_id AND b.sha256 = f.blob_sha256
        WHERE f.workspace_id = ? AND f.version_id = ? AND (f.path = 'dataset.json' OR f.path GLOB '*/dataset.json')
-       AND json_extract(CASE WHEN b.byte_length <= ? AND json_valid(CAST(b.content AS TEXT))
-         THEN CAST(b.content AS TEXT) END, '$.datasetId') = ? LIMIT 1`,
-      )
-      .get(workspaceId, MAIN_VERSION_ID, DATASET_METADATA_MAX_BYTES, next.datasetId)
-  )
-    throw refusal("This Collection ID already exists in the workspace.");
+       AND b.byte_length <= ?`,
+    )
+    .iterate(workspaceId, MAIN_VERSION_ID, DATASET_METADATA_MAX_BYTES)) {
+    let id: unknown;
+    try {
+      id = JSON.parse(utf8(row.content as Uint8Array) ?? "null")?.datasetId;
+    } catch {
+      continue;
+    }
+    if (id === next.datasetId) throw duplicate();
+  }
 }
 
 export function automationSwitchableFolder(

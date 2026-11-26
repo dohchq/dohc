@@ -1277,13 +1277,47 @@ const NAMED_ORIGIN: &str = "relay:collection-file:grant";
 const TRIP_SCHEMA: &str = "name: Trip\n";
 
 #[test]
+fn collection_rule_writes_accept_integral_json_numbers_as_format_versions() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = r#"{"formatVersion":2.0}"#;
+    hydrate_texts(&mut store, &[descriptor]);
+    let mut payload =
+        absent_text_payload("descriptor", "descriptor", "trip/dataset.json", descriptor);
+    payload["collectionRulesFolder"] = json!("trip");
+    let op = envelope(
+        NAMED_ORIGIN,
+        0,
+        "ws",
+        with_author(payload, named_author("grant")),
+    );
+    let result = apply_moment_envelope(&mut store, &op, &NoFaults).unwrap();
+    assert_eq!(result.primary, ApplyDisposition::Applied(0));
+}
+
+#[test]
 fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
     let (_scratch, mut store) = test_store();
     let descriptor = r#"{"formatVersion":2,"operationsPath":"code/actions.ts"}"#;
     let escaping = r#"{"formatVersion":2,"operationsPath":"../actions.ts"}"#;
+    let repointed_operations = r#"{"formatVersion":2,"operationsPath":"other.ts"}"#;
+    let repointed_schema =
+        r#"{"formatVersion":2,"operationsPath":"code/actions.ts","schemaPath":"other.sql"}"#;
+    let same_sources =
+        r#"{"formatVersion":2.0,"operationsPath":"code/actions.ts","schemaPath":"schema.sql"}"#;
     let sql = "SELECT 1;";
     let next = "SELECT 2;";
-    hydrate_texts(&mut store, &[descriptor, escaping, sql, next]);
+    hydrate_texts(
+        &mut store,
+        &[
+            descriptor,
+            escaping,
+            repointed_operations,
+            repointed_schema,
+            same_sources,
+            sql,
+            next,
+        ],
+    );
     let paths = [
         ("descriptor", "trip/people/dataset.json", descriptor),
         ("schema", "trip/people/schema.sql", sql),
@@ -1351,6 +1385,39 @@ fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
     .expect("append a migration to the existing Collection");
     assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
     seq += 1;
+
+    for body in [repointed_operations, repointed_schema, same_sources] {
+        let edit = present_text_payload(
+            "edit-descriptor",
+            "descriptor",
+            "write",
+            paths[0].1,
+            paths[0].1,
+            descriptor,
+            "descriptor",
+            body,
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(
+                NAMED_ORIGIN,
+                seq,
+                "ws",
+                tag(edit, named_author("grant"), "trip/people"),
+            ),
+            &NoFaults,
+        )
+        .unwrap();
+        if body == same_sources {
+            assert_eq!(result.primary, ApplyDisposition::Applied(0));
+        } else {
+            assert!(
+                matches!(result.primary, ApplyDisposition::Refused(_)),
+                "{body}"
+            );
+        }
+        seq += 1;
+    }
 
     for (path, body, folder, author) in [
         ("trip/other.sql", sql, "trip/people", named_author("grant")),
