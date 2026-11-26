@@ -79,7 +79,7 @@ import { personalLiveRefusal } from "./personalLiveDocumentRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
-import { NoteFormatOff, type LiveRooms } from "./liveRoom.js";
+import type { LiveRooms } from "./liveRoom.js";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -817,10 +817,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       // A WebSocket has no status, so a personal agent's 503 is the close that says to try again later.
       if (personalUnavailable(error)) {
         refuseOpen(TRY_AGAIN_LATER_CLOSE_CODE, "personal_agent_unavailable");
-        return true;
-      }
-      if (error instanceof NoteFormatOff) {
-        refuseOpen(TRY_AGAIN_LATER_CLOSE_CODE, "note_format_off");
         return true;
       }
       return false;

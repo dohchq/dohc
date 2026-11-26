@@ -7,6 +7,8 @@ import {
 } from "@dohc/ydoc-projection/live-journal-validation";
 import { replaceLiveText } from "./liveTextEdit";
 
+type Part = { insert?: unknown };
+
 const replace = (doc: Y.Doc, find: string, replacement: string) =>
   replaceLiveText(doc, find, replacement);
 
@@ -63,8 +65,14 @@ describe("a format-2 note", () => {
 
   const note = (markdown: string) => markdownToYDoc(markdown, { bodySequence: true });
   /** Replaces in the note, and checks each change it makes as the relay checks a page's edit. */
-  function replaced(markdown: string, find: string, replacement: string) {
+  function replaced(
+    markdown: string,
+    find: string,
+    replacement: string,
+    change: (doc: Y.Doc) => void = () => {},
+  ) {
     const doc = note(markdown);
+    doc.transact(() => change(doc));
     const copy = new Y.Doc({ gc: false });
     Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
     const updates: Uint8Array[] = [];
@@ -111,21 +119,36 @@ describe("a format-2 note", () => {
   });
 
   it("replaces text that stands before the note's first boundary", () => {
-    const doc = note("Second line.");
-    doc.transact(() => doc.getText("sequence").insert(0, "First "));
-    const copy = new Y.Doc({ gc: false });
-    Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
-    const updates: Uint8Array[] = [];
-    doc.on("update", (update: Uint8Array) => updates.push(update));
-    replace(doc, "First", "Opening");
-    for (const update of updates) {
-      expect(liveEditRefusal(copy, update)).toBeUndefined();
-      Y.applyUpdate(copy, update);
+    const after = replaced("Second line.", "First", "Opening", (doc) =>
+      doc.getText("sequence").insert(0, "First "),
+    );
+    expect(after).toContain("Opening ");
+    expect(after).not.toContain("First");
+  });
+
+  const format = (doc: Y.Doc, word: string, attributes: Record<string, unknown>) => {
+    let at = 0;
+    for (const part of doc.getText("sequence").toDelta() as Part[]) {
+      const found = typeof part.insert === "string" ? part.insert.indexOf(word) : -1;
+      if (found >= 0) return doc.getText("sequence").format(at + found, word.length, attributes);
+      at += typeof part.insert === "string" ? part.insert.length : 1;
     }
-    expect(yDocToMarkdown(doc)).toContain("Opening ");
-    expect(yDocToMarkdown(doc)).not.toContain("First");
-    doc.destroy();
-    copy.destroy();
+    throw new Error(`${word} is not in the note`);
+  };
+
+  it("replaces linked text whose stored link the editor reads differently", () => {
+    const after = replaced("Hello world.", "world", "friend", (doc) =>
+      format(doc, "world", { link: { href: 5 } }),
+    );
+    expect(after).toContain("friend");
+    expect(after).not.toContain("world");
+  });
+
+  it("replaces text in a code block that holds formatting the editor does not show", () => {
+    const after = replaced("~~~\nlet a = 1\n~~~", "a = 1", "b = 2", (doc) =>
+      format(doc, "= ", { bold: true }),
+    );
+    expect(after).toContain("let b = 2\n");
   });
 
   it.each([

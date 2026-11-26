@@ -103,8 +103,6 @@ export function admitBodySequenceNotes(admitted: boolean): void {
   bodySequenceNotesAdmitted = admitted;
 }
 
-export const admitsBodySequenceNotes = (): boolean => bodySequenceNotesAdmitted;
-
 /** Each key's own rule from `validateMetadata`, for one item of a body-sequence note's metadata. */
 function bodySequenceMetadata(
   engineReader: boolean,

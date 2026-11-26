@@ -31,5 +31,6 @@ export {
   settledDocumentMarkdown,
   type DocumentEditOptions,
   documentMarkdown,
+  documentMarkdownOf,
   type DocumentEdit,
 } from "./document-edit.js";

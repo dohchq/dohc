@@ -68,6 +68,12 @@ export function documentMarkdown(state: Uint8Array): string {
   return withDoc(state, (doc) => savedForm(layoutOf(doc)));
 }
 
+/** The same, for a doc the caller owns. Takes the doc's empty shells out. */
+export function documentMarkdownOf(doc: Y.Doc): string {
+  deleteEmptyShells(getDohcYDocBodyFragment(doc));
+  return savedForm(layoutOf(doc));
+}
+
 /** A settled Markdown file as the Markdown an edit to it would match against. */
 export function settledDocumentMarkdown(markdown: string): string {
   const doc = markdownToYDoc(markdown);

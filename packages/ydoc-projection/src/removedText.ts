@@ -175,6 +175,7 @@ export function findUnsentText(doc: Y.Doc, unsent: Uint8Array, deleted: DeletedT
 /** Pieces joined as the note shows them, a line break between lines. */
 function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string {
   const places = new Places();
+  const lineOf = lineFinder();
   const sorted = pieces
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
     .sort((left, right) => compare(left.at, right.at));
@@ -229,20 +230,28 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
   return ranges;
 }
 
-/** A note's line: a paragraph's element, or in a format-2 note the boundary before the item. */
-function lineOf(item: Y.Item): unknown {
-  const parent = item.parent as Y.AbstractType<unknown>;
-  if (parent instanceof Y.XmlText) return parent._item!.parent;
-  if (!(parent instanceof Y.Text)) return parent;
-  for (let left = item.left; left; left = left.left)
-    if (
-      !left.deleted &&
-      left.content instanceof Y.ContentType &&
-      left.content.type instanceof Y.XmlElement &&
-      left.content.type.nodeName === BLOCK_ELEMENT
-    )
-      return left;
-  return parent;
+/**
+ * An item's line: a paragraph's element, or in a format-2 note the boundary before the item. It
+ * remembers the line of each item it passes, so items of one long line cost one walk.
+ */
+function lineFinder() {
+  const lines = new Map<Y.Item, unknown>();
+  const isBoundary = (item: Y.Item) =>
+    !item.deleted &&
+    item.content instanceof Y.ContentType &&
+    item.content.type instanceof Y.XmlElement &&
+    item.content.type.nodeName === BLOCK_ELEMENT;
+  return (item: Y.Item): unknown => {
+    const parent = item.parent as Y.AbstractType<unknown>;
+    if (parent instanceof Y.XmlText) return parent._item!.parent;
+    if (!(parent instanceof Y.Text)) return parent;
+    const passed: Y.Item[] = [];
+    let left: Y.Item | null = item;
+    for (; left && !lines.has(left) && !isBoundary(left); left = left.left) passed.push(left);
+    const line = left === null ? parent : lines.has(left) ? lines.get(left) : left;
+    for (const each of passed) lines.set(each, line);
+    return line;
+  };
 }
 
 /** Note positions, counting deleted items, so removed text sorts the way it stood. */
@@ -312,7 +321,7 @@ function render({ item, start, end }: Piece): string {
 /** A deleted element's attributes are deleted too; read the last value written. */
 function attribute(element: Y.XmlElement, key: string): string {
   const item = element._map.get(key);
-  const values = item ? item.content.getContent() : [];
+  const values = item && (!item.deleted || element._item?.deleted) ? item.content.getContent() : [];
   const value: unknown = values[values.length - 1];
   return typeof value === "string" ? value : "";
 }

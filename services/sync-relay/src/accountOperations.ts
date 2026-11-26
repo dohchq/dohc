@@ -33,7 +33,7 @@ import {
   type FilesHost,
   type TextReadResult,
 } from "@dohc/workspace-operations/documents";
-import { documentMarkdown, settledDocumentMarkdown, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { documentMarkdownOf, settledDocumentMarkdown, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import * as Y from "yjs";
@@ -497,7 +497,7 @@ function acceptedMarkdown(state: Uint8Array): string {
   const doc = new Y.Doc();
   try {
     Y.applyUpdate(doc, state);
-    return readsBodySequence(doc) ? yDocToMarkdown(doc) : documentMarkdown(state);
+    return readsBodySequence(doc) ? yDocToMarkdown(doc) : documentMarkdownOf(doc);
   } finally {
     doc.destroy();
   }
@@ -546,11 +546,12 @@ function serverDocuments(
           ? storage.readAcceptedLiveDocument(workspaceId, path)
           : { kind: "none" as const };
       if (live.kind === "cut" && live.cut.document.objectId === file.objectId) {
-        const state = Y.mergeUpdates([
-          live.cut.checkpoint.bytes,
-          ...live.cut.suffix.map((row) => row.bytes),
-        ]);
-        return { path, markdown: acceptedMarkdown(state) };
+        return {
+          path,
+          markdown: acceptedMarkdown(
+            Y.mergeUpdates([live.cut.checkpoint.bytes, ...live.cut.suffix.map((row) => row.bytes)]),
+          ),
+        };
       }
       return { path, markdown: settledDocumentMarkdown(file.text) };
     },

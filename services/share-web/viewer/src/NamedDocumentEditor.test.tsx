@@ -189,29 +189,6 @@ it("says live editing is off and only the owner can start it again, with no Try 
   expect(container.querySelector("button")).toBeNull();
 });
 
-it("says this server cannot edit the note live yet, with no Try again", async () => {
-  const live = session("Body");
-  const off: NamedLiveBrowserState = {
-    ...live.state(),
-    status: "disconnected",
-    reason: "note-format-off",
-  };
-  await act(async () =>
-    root.render(
-      <NamedDocumentEditor
-        session={{ ...live, state: () => off }}
-        path="docs/a.md"
-        link
-        onState={() => {}}
-      />,
-    ),
-  );
-  expect(container.querySelector('[role="status"]')?.textContent).toBe(
-    "This server cannot edit this file live yet. You can still read and comment here.",
-  );
-  expect(container.querySelector("button")).toBeNull();
-});
-
 it("says the server could not open the file, not that the connection failed, while the server is busy", async () => {
   const live = session("Body");
   const busy: NamedLiveBrowserState = {

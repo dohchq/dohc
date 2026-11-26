@@ -16,11 +16,13 @@ import {
   type NamedLiveProviderLimits,
 } from "@dohc/ydoc-projection/named-live-provider";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { bodySequenceReading } from "@dohc/ydoc-projection/body-sequence-yjs";
 import {
   admitBodySequenceNotes,
+  createLiveMarkdownJournalValidator,
   liveEditRefusal,
+  WORKER_LIVE_VALIDATION_POLICY,
 } from "@dohc/ydoc-projection/live-journal-validation";
 import { replaceLiveText } from "../../src/liveTextEdit";
 
@@ -1545,16 +1547,23 @@ describe("a format-2 note in the browser provider", () => {
     expect(removed).toEqual([]);
   });
 
-  it("sends a replacement as one change the relay takes, never a delete on its own", async () => {
+  it("sends a replacement after its line's new boundary, and a refused replacement keeps the text", async () => {
     admitBodySequenceNotes(true);
     cleanup.push(() => admitBodySequenceNotes(false));
-    const doc = note("Hello world.");
+    const doc = note("Second line.");
+    doc.transact(() => sequenceOf(doc).insert(0, "First "));
+    const checkpoint = Y.encodeStateAsUpdate(doc);
     const { value, host } = await live(provider(), doc);
     const copy = new Y.Doc({ gc: false });
     cleanup.push(() => copy.destroy());
-    Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
-    replace(value, "world", "friend");
-    const sent = await host.submitted();
+    Y.applyUpdate(copy, checkpoint);
+    replace(value, "First", "Opening");
+    const boundary = await host.submitted();
+    expect(liveEditRefusal(copy, boundary.bytes)).toBeUndefined();
+    Y.applyUpdate(copy, boundary.bytes);
+    Y.applyUpdate(doc, boundary.bytes);
+    await host.ack(boundary, 1, 2);
+    const sent = await host.submitted(2);
     if (sent.begin.purpose !== "submit-update") throw new Error("Expected a submit.");
     await host.send({
       kind: "result",
@@ -1563,10 +1572,23 @@ describe("a format-2 note in the browser provider", () => {
       updateDigest: sent.begin.digest,
       reason: "invalid-update",
     });
-    expect(host.submissions()).toHaveLength(1);
+    expect(host.submissions()).toHaveLength(2);
     expect(Y.decodeUpdate(sent.bytes).ds.clients.size).toBeGreaterThan(0);
     expect(liveEditRefusal(copy, sent.bytes)).toBeUndefined();
-    expect(sequenceOf(copy).toString()).toContain("Hello friend.");
-    expect(sequenceOf(doc).toString()).toContain("Hello world.");
+    expect(yDocToMarkdown(doc)).toContain("First");
+    expect(yDocToMarkdown(doc)).not.toContain("Opening");
+    const verdict = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY)({
+      document: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: createHash("sha256").update(checkpoint).digest("hex"),
+      },
+      currentPath: "notes/shared.md",
+      checkpoint,
+      suffix: [],
+      candidate: Y.mergeUpdates([boundary.bytes, sent.bytes]),
+    });
+    expect(verdict).toMatchObject({ kind: "accepted" });
   });
 });

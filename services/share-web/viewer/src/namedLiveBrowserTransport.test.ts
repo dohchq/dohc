@@ -761,22 +761,6 @@ it.each(Object.keys(LIVE_CONNECTION_LIMIT_MESSAGES))(
   },
 );
 
-it("stays disconnected without reconnecting when the server has the note's format switched off", async () => {
-  const f = fixture(),
-    connecting = f.value.reconnect(),
-    socket = await f.socketAt(0);
-  socket.open();
-  await connecting;
-  vi.useFakeTimers();
-  const event = new Event("close");
-  Object.assign(event, { code: 1013, reason: "note_format_off" });
-  socket.dispatchEvent(event);
-  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "note-format-off" });
-  await vi.advanceTimersByTimeAsync(20_000);
-  expect(f.sockets).toHaveLength(1);
-  f.value.disconnect();
-});
-
 // The desktop's editor has its own doc and applies its changes here through edit(), so its
 // typing carries the editor's client, not the session's.
 it("counts a desktop editor's typing as its own when someone else's change removes it", async () => {

@@ -331,6 +331,26 @@ describe("what a page's unsaved changes typed", () => {
     });
   });
 
+  it("reads a new image without an attribute taken off it, where deleted content is kept", () => {
+    const ana = new Y.Doc({ gc: false });
+    const unsent = page(ana);
+    const image = new Y.XmlElement("image");
+    const typed = change(ana, (body) => {
+      image.setAttribute("src", "a.png");
+      image.setAttribute("alt", "old");
+      const line = new Y.XmlElement("paragraph");
+      line.insert(0, [image]);
+      body.insert(0, [line]);
+    });
+
+    const removed = change(ana, () => image.removeAttribute("alt"));
+
+    expect(unsent(typed, removed)).toEqual({
+      text: "![](a.png)",
+      deletes: false,
+    });
+  });
+
   it("reads a replaced attribute as no words and no deletes", () => {
     const [ana] = pair("Hello");
     const unsent = page(ana);
