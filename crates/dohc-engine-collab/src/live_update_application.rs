@@ -5040,17 +5040,27 @@ mod tests {
             let ben = Ydoc::with_client_id(3);
             ben.apply(&line).unwrap();
             let typed = fold(&ana, "Hello world\n\nKeep\n");
-            let own = fold(&ana, "Keep\n");
             let deleted = fold(&ben, "Keep\n");
-            let merged = Ydoc::wire();
-            for update in [&line, &typed, &deleted] {
-                merged.apply(update).unwrap();
+            for order in [["typed", "deleted"], ["deleted", "typed"]] {
+                let merged = Ydoc::wire();
+                merged.apply(&line).unwrap();
+                for name in order {
+                    merged
+                        .apply(if name == "typed" { &typed } else { &deleted })
+                        .unwrap();
+                }
+                let read = merged.project(ContentKind::Richdoc).unwrap().content;
+                assert!(read.contains("world") && read.contains("Keep"), "{read:?}");
+                assert!(!read.contains("Hello"), "{read:?}");
+                let removals = removals_merging(
+                    &order,
+                    line.clone(),
+                    typed.clone(),
+                    Vec::new(),
+                    deleted.clone(),
+                );
+                assert_eq!(removals, vec![]);
             }
-            let read = merged.project(ContentKind::Richdoc).unwrap().content;
-            assert!(read.contains("world") && read.contains("Keep"), "{read:?}");
-            assert!(!read.contains("Hello"), "{read:?}");
-            let removals = removals_merging(&["typed", "deleted"], line, typed, own, deleted);
-            assert_eq!(removals, vec![]);
         });
     }
 

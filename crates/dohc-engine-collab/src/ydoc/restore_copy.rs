@@ -386,6 +386,66 @@ mod tests {
     }
 
     #[test]
+    fn restoring_a_blank_point_leaves_a_peers_concurrent_paragraph_alone() {
+        reading_body_sequence_here(|| {
+            let note = format_two("# Title\n");
+            let peer = Ydoc::wire();
+            peer.apply(&note.encode_full_state()).unwrap();
+            peer.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "# Title\n\nPeer\n")
+                .unwrap();
+            let point = Ydoc::wire();
+            let meta = point.doc.get_or_insert_map(ROOT_META);
+            meta.insert(&mut point.doc.transact_mut(), "schemaVersion", 2.0);
+            note.restore_held_content(ContentKind::Richdoc, &point)
+                .unwrap();
+            for (first, second) in [(&note, &peer), (&peer, &note)] {
+                let merged = Ydoc::wire();
+                merged.apply(&first.encode_full_state()).unwrap();
+                merged.apply(&second.encode_full_state()).unwrap();
+                assert_eq!(reading(&merged), "Peer\n");
+            }
+        });
+    }
+
+    #[test]
+    fn a_rich_format_one_point_restores_onto_a_format_two_note_with_crlf() {
+        reading_body_sequence_here(|| {
+            let note = format_two("---\ntitle: Later\n---\n\nLater text\n");
+            let point = Ydoc::wire();
+            point
+                .rewrite_content_to_markdown_preserving_source(
+                    ContentKind::Richdoc,
+                    "---\r\ntitle: Point\r\n---\r\n\r\n- one **bold**\r\n- [a link](https://example.com)\r\n\r\n> quoted\r\n",
+                )
+                .unwrap();
+            assert_eq!(point.note_schema_version(), 1);
+            note.restore_held_content(ContentKind::Richdoc, &point)
+                .unwrap();
+            assert_eq!(reading(&note), reading(&point));
+            assert!(reading(&note).contains("title: Point\r\n"));
+            assert_eq!(note.note_schema_version(), 2);
+        });
+    }
+
+    #[test]
+    fn format_two_notes_that_read_differently_have_different_content() {
+        reading_body_sequence_here(|| {
+            for (one, two) in [
+                ("One\n", "Two\n"),
+                ("# Title\n", "## Title\n"),
+                ("- [ ] Task\n", "- [x] Task\n"),
+            ] {
+                let (one, two) = (format_two(one), format_two(two));
+                assert_ne!(reading(&one), reading(&two));
+                assert_ne!(
+                    one.canonical_content_sha256(),
+                    two.canonical_content_sha256()
+                );
+            }
+        });
+    }
+
+    #[test]
     fn restore_copy_preserves_crlf_and_clears_stale_crlf() {
         for source in ["# Point\r\n\r\nText.\r\n", "# Point\n\nText.\n"] {
             let point = Ydoc::wire();
