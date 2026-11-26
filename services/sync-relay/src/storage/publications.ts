@@ -473,7 +473,7 @@ function placeOwnerPublication(
   storage.db
     .prepare(`UPDATE sync_relay_app_publications SET owner_state=CASE WHEN publication_id=?1 THEN ?2 ELSE 'replaced' END
     WHERE workspace_id=?3 AND owner_user_id=?4 AND audience='owner' AND app_root=?5 AND active=1
-    AND (?2='current' OR owner_state<>'current' OR publication_id=?1)`)
+    AND (?2='current' OR owner_state<>'current')`)
     .run(publicationId, state, owner.workspaceId, owner.ownerUserId, appRoot);
   reclaimOwnerPublications(storage, owner.workspaceId, nowMs);
 }
@@ -702,11 +702,12 @@ export function withdrawAppPublication(
         "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?",
       )
       .run(input.publicationId);
-    storage.db
-      .prepare(`UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1
-      WHERE audience='owner' AND owner_state='pending' AND active=1 AND workspace_id=? AND owner_user_id=?
-      AND app_root=(SELECT app_root FROM sync_relay_app_publications WHERE publication_id=?)`)
-      .run(input.workspaceId, input.ownerUserId, input.publicationId);
+    if (current.ownerState === "current")
+      storage.db
+        .prepare(`UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1
+        WHERE audience='owner' AND owner_state='pending' AND active=1 AND workspace_id=? AND owner_user_id=?
+        AND app_root=(SELECT app_root FROM sync_relay_app_publications WHERE publication_id=?)`)
+        .run(input.workspaceId, input.ownerUserId, input.publicationId);
     return { ...current, active: false, authorityRevision: current.authorityRevision + 1 };
   });
 }

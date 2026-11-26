@@ -1421,6 +1421,40 @@ it("keeps an owner whose publishing is held from making an earlier version curre
   expect(f.storage.readAppPublication(ownRead(first)).ownerState).toBe("replaced");
 });
 
+it("keeps the current version current when it is sent again over a staged one", () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  const second = f.storage.publishAppPublication(ownRequest("2".repeat(64), 20, first));
+  const state = f.raw.prepare(
+    "UPDATE sync_relay_app_publications SET owner_state=? WHERE publication_id=?",
+  );
+  state.run("current", first);
+  state.run("pending", second.publicationId);
+  f.storage.publishAppPublication(ownRequest("1".repeat(64), 30, second.publicationId));
+  expect(f.storage.readAppPublication(ownRead(first)).ownerState).toBe("current");
+  expect(listed(f, "owner")).toEqual([first]);
+});
+
+it("withdraws a replaced version without withdrawing a newer staged one", () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  expect(phone(f, first, "a".repeat(32))("running")()).not.toBeNull();
+  const second = f.storage.publishAppPublication(ownRequest("2".repeat(64), 20, first));
+  const third = f.storage.publishAppPublication(
+    ownRequest("3".repeat(64), 30, second.publicationId),
+  );
+  const state = f.raw.prepare(
+    "UPDATE sync_relay_app_publications SET owner_state=? WHERE publication_id=?",
+  );
+  state.run("current", second.publicationId);
+  state.run("pending", third.publicationId);
+  f.storage.withdrawAppPublication({ ...ownRead(first), expectedAuthorityRevision: 1 });
+  expect(f.storage.readAppPublication(ownRead(third.publicationId))).toMatchObject({
+    active: true,
+    ownerState: "pending",
+  });
+});
+
 it("refuses a grant whose publication is gone", () => {
   const f = fixture();
   const first = f.storage.publishAppPublication(ownRequest()).publicationId;
