@@ -54,6 +54,7 @@ export async function spawnSyncRelay(input: {
   editLinks?: { engineExecutable: string; publicOrigin: string; trustEnv?: Record<string, string> };
   /** Lets `kill()` end the relay together with the engine it started. */
   hardKill?: boolean;
+  env?: Record<string, string>;
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
   const deployment = `${dirname(input.dbPath)}-deployment`;
@@ -126,6 +127,7 @@ export async function spawnSyncRelay(input: {
             }
           : {}),
         FORCE_COLOR: "0",
+        ...input.env,
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true,

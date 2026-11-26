@@ -57,7 +57,7 @@ export function createLocalApps(
       const operation = store
         .row(publicationId, input.authorityRevision)
         .candidate.external?.find((value) => value.name === input.operation);
-      if (!operation || operation.access !== "owner" || !external)
+      if (!operation || !external)
         throw new AppBackendRuntimeError({
           code: "external_not_approved",
           message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,

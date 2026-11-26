@@ -479,13 +479,9 @@ import {
   createLocalHttpApprovalStore,
   type LocalHttpApprovalStore,
 } from "./workspaces/localHttpApprovalStore";
-import {
-  createLocalAppExternal,
-  loopbackAppExternalTransport,
-  type LocalAppExternal,
-} from "./workspaces/localAppExternal";
+import { createLocalAppExternal, type LocalAppExternal } from "./workspaces/localAppExternal";
 import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
-import { readBoundedJson } from "@dohc/service-http";
+import { loopbackDeclaredHttpsTransport, readBoundedJson } from "@dohc/service-http";
 import { MAX_HTTP_RESPONSE_BYTES } from "@dohc/workspace-contracts/automations";
 import {
   OutboundWebhookDispatchResponse,
@@ -6755,7 +6751,7 @@ function localAppExternalFor(workspaceId: string): LocalAppExternal {
         return "Apps in synced workspaces can't call outside services yet.";
       return null;
     },
-    ...(origin ? { transport: loopbackAppExternalTransport(origin) } : {}),
+    ...(origin ? { transport: loopbackDeclaredHttpsTransport(origin) } : {}),
   });
 }
 

@@ -13,7 +13,9 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
+import { localOwnerCliCaller } from "./localOwnerAppPublication";
 import {
+  createOwnerAppPublicationHandler,
   publicationListUnavailable,
   registerOwnerAppPublicationIpc,
 } from "./ownerAppPublicationIpc";
@@ -131,6 +133,28 @@ function harness() {
     }),
   );
   let handler!: (event: { sender: { id: number } }, payload: unknown) => unknown;
+  const shared = {
+    remoteForWorkspace: remote,
+    currentCredentialGeneration: () => credentialGeneration,
+    flushCapture: flush,
+    withAdapter: async <T>(_workspace: unknown, work: (value: typeof adapter) => Promise<T>) =>
+      work(adapter),
+    compile,
+    relayJson: relay,
+    relayJsonOrUnavailable: relayOrUnavailable,
+    upload,
+  };
+  const cli = createOwnerAppPublicationHandler({
+    ...shared,
+    callerKey: localOwnerCliCaller,
+    withWorkspaceOperation: (_caller, _workspaceId, work) =>
+      work({
+        workspace,
+        signal: controller.signal,
+        scope: "cli",
+        assertCurrent() {},
+      }),
+  });
   registerOwnerAppPublicationIpc({
     registerHandler(_channel, fn) {
       handler = fn;
@@ -148,14 +172,7 @@ function harness() {
         },
       });
     },
-    remoteForWorkspace: remote,
-    currentCredentialGeneration: () => credentialGeneration,
-    flushCapture: flush,
-    withAdapter: async (_workspace, work) => work(adapter),
-    compile,
-    relayJson: relay,
-    relayJsonOrUnavailable: relayOrUnavailable,
-    upload,
+    ...shared,
   });
   const invoke = async (input: unknown, senderId = 1) =>
     OwnerAppPublicationResult.parse(await handler({ sender: { id: senderId } }, input));
@@ -184,6 +201,7 @@ function harness() {
     relayOrUnavailable,
     flush,
     invoke,
+    cli,
     prepare,
     approve,
     setBeforeCapture(fn: typeof beforeCapture) {
@@ -565,6 +583,30 @@ describe("owner app publication", () => {
         expectedAuthorityRevision: 1,
       }),
     ).toMatchObject({ kind: "withdrawn", authorityRevision: 2 });
+  });
+
+  it("shows the outside calls for review, and leaves sharing them to the dohc window", async () => {
+    const h = harness();
+    h.source.set(
+      "app/app.publish.json",
+      Buffer.from(
+        JSON.stringify({
+          entryPath: "index.js",
+          inputs: ["index.js"],
+          packageMap: {},
+          external: {
+            usage: {
+              method: "GET",
+              url: "https://api.example.com/v1/usage",
+              secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+              access: "viewers",
+            },
+          },
+        }),
+      ),
+    );
+    expect((await h.prepare()).external).toMatchObject([{ name: "usage", access: "viewers" }]);
+    await expect(h.cli("w", prepareInput)).rejects.toThrow("Share it in the dohc window");
   });
 
   it("revokes collection access with the current authority revision", async () => {

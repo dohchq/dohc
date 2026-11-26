@@ -4,6 +4,8 @@ export type AppBackendAction =
   | "upload"
   | "file"
   | "attempt"
+  /** A published app's declared outside call, sent with a workspace secret. */
+  | "external"
   /** A link app waits here for its Collection to change. */
   | "events"
   | "descriptor"

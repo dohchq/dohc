@@ -12,6 +12,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
+import { localOwnerCliCaller } from "./localOwnerAppPublication";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { RelayShareLinkListResponse } from "./bridgeContract";
@@ -334,6 +335,10 @@ export function createOwnerAppPublicationHandler<
         session.assertCurrent();
         operation.signal.throwIfAborted();
         const candidate = prepared.candidate;
+        if (candidate.external && callerKey === localOwnerCliCaller(selection.workspaceId))
+          throw new Error(
+            "This app calls outside services with a workspace secret. Share it in the dohc window: open the app and choose Share.",
+          );
         const capabilities = await Promise.all(
           candidate.capabilities.map(async (capability) => {
             if (capability.kind !== "dataset") return capability;
@@ -411,6 +416,7 @@ export function createOwnerAppPublicationHandler<
           sourcePaths: candidate.inputs.map((file) => file.path),
           likelySecrets: prepared.likelySecrets,
           capabilities,
+          ...(candidate.external ? { external: candidate.external } : {}),
           externalNetwork: true,
           ...(audience === "workspace"
             ? { audience }

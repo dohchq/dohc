@@ -1,3 +1,4 @@
+import { createAppExternalCalls } from "./appExternalCalls";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { parseRoute } from "./relayRoute";
 import { RELAY_ROUTE_PATTERNS, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
@@ -36,7 +37,7 @@ import { createPushDeviceRoutes } from "./pushDeviceRoutes";
 import { PUSH_DEVICES_PATH } from "@dohc/workspace-contracts/push-subscriptions";
 import type { ApnsConfig } from "./pushConfig";
 import { createNamedRecipientDocuments } from "./namedRecipientDocuments";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { TokenBucketLimiter, type DeclaredHttpsTransport } from "@dohc/service-http";
 import {
   createCollectionWriteRateLimiter,
   createCollectionWriteRoutes,
@@ -291,6 +292,7 @@ export interface CreateSyncRelayHandlerOptions {
   resolveOutboundDestination?: OutboundWebhookExecutionDependencies["resolveDestination"];
   sendOutboundRequest?: OutboundWebhookExecutionDependencies["sendRequest"];
   readOutboundRequest?: OutboundWebhookExecutionDependencies["readRequest"];
+  appExternalTransport?: DeclaredHttpsTransport;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
@@ -427,6 +429,7 @@ export function createSyncRelayHandler({
   resolveOutboundDestination,
   sendOutboundRequest,
   readOutboundRequest,
+  appExternalTransport,
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -521,6 +524,12 @@ export function createSyncRelayHandler({
         shareSenderLabel,
         publications: appPublicationLimits !== undefined,
         events: appEventWaits,
+        external: createAppExternalCalls({
+          storage,
+          keyring: secretKeyring,
+          nowMs,
+          ...(appExternalTransport ? { transport: appExternalTransport } : {}),
+        }),
       })
     : undefined;
   if (

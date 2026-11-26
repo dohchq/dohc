@@ -30,6 +30,8 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import { authorizeLinkSession } from "../linkSecurity";
 import { readLinkEnrollment } from "./linkEnrollment";
 import { readCurrentShareGrant } from "./currentShareGrant";
+import { readWorkspaceSecretForExecution } from "./workspaceSecrets";
+import { workspaceSecretApprovalBinding } from "@dohc/workspace-contracts/http-step-approvals";
 
 export interface LinkPublicationOwner {
   workspaceId: string;
@@ -269,7 +271,10 @@ function header(
       "SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? ORDER BY authority_revision DESC LIMIT 1",
     )
     .get(publicationId);
-  if (approval) state.approvalProvenance = JSON.parse(String(approval.facts_json));
+  if (approval) {
+    const { secretBindings: _, ...facts } = JSON.parse(String(approval.facts_json));
+    state.approvalProvenance = facts;
+  }
   return { row, state };
 }
 function withOperatorTakedown<State extends AppPublicationState>(
@@ -684,12 +689,43 @@ export function recordApproval(
     sourceRevision: candidate.sourceRevision,
     capabilities: candidate.capabilities,
   };
+  const secretBindings = candidate.external && {
+    secretBindings: Object.fromEntries(
+      candidate.external.map(({ host, secret: { name } }) => {
+        const stored = readWorkspaceSecretForExecution(storage, owner.workspaceId, name);
+        if (
+          !stored ||
+          stored.summary.usage !== "http-header" ||
+          !stored.summary.allowedHosts.includes(host)
+        )
+          throw relayError(
+            "conflict",
+            `Add secret ${name} in Settings > Secrets as a header value allowed for ${host}, then share this app again.`,
+          );
+        return [name, workspaceSecretApprovalBinding(stored.summary)];
+      }),
+    ),
+  };
   storage.db
     .prepare(
       "INSERT INTO sync_relay_app_publication_approvals(publication_id,authority_revision,facts_json) VALUES(?,?,?)",
     )
-    .run(publicationId, authorityRevision, JSON.stringify(facts));
+    .run(publicationId, authorityRevision, JSON.stringify({ ...facts, ...secretBindings }));
   return facts;
+}
+
+/** The identity of each secret an app's outside calls use, as the owner approved them at this revision. */
+export function approvedSecretBindings(
+  storage: StorageContext,
+  publicationId: string,
+  authorityRevision: number,
+): Record<string, string> {
+  const row = storage.db
+    .prepare(
+      "SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? AND authority_revision=?",
+    )
+    .get(publicationId, authorityRevision);
+  return (row && JSON.parse(String(row.facts_json)).secretBindings) ?? {};
 }
 
 export function reactivateAppPublication(

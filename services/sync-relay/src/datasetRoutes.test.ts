@@ -1,4 +1,9 @@
-import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
+import {
+  parseAppExternalDeclaration,
+  sortAppExternalOperations,
+} from "@dohc/security-contract/app-external";
+import type { SafeOutboundRequest } from "@dohc/service-http";
+import { sealWorkspaceSecret, workspaceSecretKeyring } from "./workspaceSecretCrypto";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -293,6 +298,7 @@ async function httpFixture(
   publications = true,
   hostLimits: AppPublicationLimits = limits,
   appDefinition = definition,
+  handlerOptions: Partial<Parameters<typeof createSyncRelayHandler>[0]> = {},
 ) {
   const revision = describeDatasetRevision({
     definition: appDefinition,
@@ -349,6 +355,7 @@ async function httpFixture(
         throw new UnauthorizedError();
       return { workspaceId, userId: credential.slice(7) };
     },
+    ...handlerOptions,
   });
   const http = (path: string, body?: unknown, headers: Record<string, string> = {}) =>
     handler(
@@ -567,6 +574,133 @@ it("approves an app on the owner's computer whose candidate is up to the publica
   // Over the bound the candidate is refused, by its parser and then by the body limit.
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 1)).toBe(400);
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 2 * 1024)).toBe(413);
+});
+
+it("runs a shared app's outside calls on the server with the secret its owner approved", async () => {
+  const sent: SafeOutboundRequest[] = [];
+  const f = await httpFixture(undefined, true, limits, definition, {
+    appExternalTransport: {
+      resolve: async (rawUrl) => {
+        const url = new URL(rawUrl);
+        return {
+          href: url.href,
+          url,
+          canonicalHost: url.hostname,
+          address: "93.184.216.34",
+          family: 4,
+        };
+      },
+      read: async (request) => {
+        sent.push(request);
+        return {
+          status: 200,
+          contentType: "application/json",
+          contentEncoding: null,
+          body: Buffer.from('{"events":3}'),
+        };
+      },
+    },
+  });
+  const keyring = workspaceSecretKeyring({ linkKey: "dataset-http-test-key" })!;
+  const saveSecret = (value: string, mode: "create" | "replace", nowMs: number) =>
+    f.storage.upsertWorkspaceSecret({
+      workspaceId: "w",
+      ownerUserId: "owner",
+      name: "POSTHOG_KEY",
+      mode,
+      usage: "http-header",
+      allowedHosts: ["us.posthog.com"],
+      keyId: keyring.activeId,
+      seal: (generation) =>
+        sealWorkspaceSecret({
+          keyring,
+          keyId: keyring.activeId,
+          workspaceId: "w",
+          ownerUserId: "owner",
+          name: "POSTHOG_KEY",
+          usage: "http-header",
+          allowedHosts: ["us.posthog.com"],
+          generation,
+          plaintext: value,
+        }),
+      nowMs,
+    });
+  const external = sortAppExternalOperations(
+    parseAppExternalDeclaration({
+      count: {
+        method: "GET",
+        url: "https://us.posthog.com/api/events/",
+        secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+        access: "viewers",
+      },
+      erase: {
+        method: "POST",
+        url: "https://us.posthog.com/api/erase/",
+        secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+      },
+    }),
+  );
+  const { candidate: previous } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const publish = () =>
+    f.storage.publishAppPublication({
+      workspaceId: "w",
+      ownerUserId: "owner",
+      shareId: "s",
+      grantId: "g",
+      generation: 1,
+      candidate: { ...previous, sourceRevision: "e".repeat(64), capabilities: [], external },
+      blobs: [],
+      limits,
+      nowMs: 10,
+    }).publicationId;
+  // Sharing names a secret the server must hold.
+  expect(publish).toThrow(/Add secret POSTHOG_KEY/);
+  expect(saveSecret("phx_first", "create", 10).ok).toBe(true);
+  const publicationId = publish();
+  const call = (operation: string, headers: Record<string, string>, authorityRevision = 1) =>
+    f.http(
+      headers.authorization?.startsWith("Bearer")
+        ? `w/app-publications/${publicationId}/backend/external`
+        : `link/app-publications/${publicationId}/backend/external`,
+      { authorityRevision, operation, input: {} },
+      headers,
+    );
+  const owner = { authorization: "Bearer owner" };
+  // Anyone with the link runs a call open to viewers, with the secret added on the server.
+  const viewed = await call("count", f.publicHeaders);
+  expect(viewed.status).toBe(200);
+  expect(await viewed.json()).toEqual({ status: 200, data: { events: 3 } });
+  expect(sent[0]).toMatchObject({
+    method: "GET",
+    headers: { Authorization: "Bearer phx_first" },
+  });
+  expect(sent[0]!.destination.url.href).toBe("https://us.posthog.com/api/events/");
+  // A call kept for its owner runs only for the owner, and a stale app runs nothing.
+  const kept = await call("erase", f.publicHeaders);
+  expect(kept.status).toBe(409);
+  expect(await kept.json()).toMatchObject({ code: "external_not_approved" });
+  expect((await call("erase", owner)).status).toBe(200);
+  expect(await (await call("count", f.publicHeaders, 2)).json()).toMatchObject({
+    code: "external_input",
+  });
+  // A new value for the same secret keeps working; a secret made again under its name waits for the owner.
+  expect(saveSecret("phx_second", "replace", 20).ok).toBe(true);
+  expect((await call("count", f.publicHeaders)).status).toBe(200);
+  expect(sent.at(-1)!.headers).toMatchObject({ Authorization: "Bearer phx_second" });
+  f.storage.deleteWorkspaceSecret("w", "owner", "POSTHOG_KEY");
+  expect(saveSecret("phx_other", "create", 30).ok).toBe(true);
+  const visitor = await (await call("count", f.publicHeaders)).json();
+  expect(visitor).toEqual({
+    code: "external_unavailable",
+    message: "This app's outside service isn't available right now.",
+  });
+  expect((await (await call("count", owner)).json()).message).toMatch(/replaced after you shared/);
+  expect(sent).toHaveLength(3);
 });
 
 it("runs an app on the owner's computer as that app, within its approval, for the owner alone", async () => {
