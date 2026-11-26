@@ -379,6 +379,7 @@ describe("T3 Code's thread tools", () => {
       delivery: "started",
     });
     t3.tools.t3_thread_read = () => ({
+      items: [],
       recentRuns: [
         {
           runId: "run-9",
@@ -534,6 +535,7 @@ describe("T3 Code's thread tools", () => {
     t3.eventStream = true;
     t3.tools.t3_thread_read = () => ({
       recentRuns: [],
+      items: [],
       thread: {
         title: "Quiet",
         activeRunId: null,
@@ -589,6 +591,7 @@ describe("T3 Code's thread tools", () => {
     let pending = 0;
     t3.tools.t3_thread_read = () => ({
       recentRuns: [],
+      items: [],
       thread: {
         title: "Chief",
         activeRunId: "run-1",

@@ -137,6 +137,7 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       requestedAt: new Date().toISOString(),
       startedAt: new Date().toISOString(),
     })),
+    items: [],
   });
   t3.tools.t3_thread_wait = (args) => {
     const run = runs.find((entry) => entry.runId === args.runId);

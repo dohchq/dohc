@@ -824,9 +824,7 @@ const ThreadRead = z.object({
     }),
   ),
   // The thread's newest activity, read only for a private box that waits.
-  items: z
-    .array(z.object({ type: z.string(), status: z.string(), runId: z.string().nullable() }))
-    .default([]),
+  items: z.array(z.object({ type: z.string(), status: z.string(), runId: z.string().nullable() })),
 });
 
 // How much of a thread's newest activity dohc reads for a private box. The
@@ -1039,11 +1037,12 @@ export async function readT3CodeThread(
   // private box, an answer here would leave the thread waiting, on something
   // the chat cannot show.
   const questions =
-    thread.pendingRequestCount > 0 ? await listT3CodeQuestions(session, threadId) : [];
+    thread.pendingRequestCount > 0 && !privateBoxWaits
+      ? await listT3CodeQuestions(session, threadId)
+      : [];
   const first = questions[0];
   const questionId =
     first !== undefined &&
-    !privateBoxWaits &&
     questions.length === thread.pendingRequestCount &&
     first.length <= MAX_ID_CHARS
       ? first
