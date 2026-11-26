@@ -5844,9 +5844,10 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_that_does_not_read_format_two_resolves_a_format_two_note_in_format_one() {
+    fn an_engine_that_does_not_read_format_two_refuses_to_resolve_a_format_two_note() {
         use yrs::{Map as _, ReadTxn as _, Transact as _};
-        let (current, incoming) = ("Current text\n", "Incoming text\n");
+        let current = "Current text
+";
         let (_scratch, mut store, key) =
             dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
                 let marked = yrs::Doc::new();
@@ -5864,28 +5865,39 @@ mod tests {
                 assert_eq!(doc.note_schema_version(), 2);
                 content_conflict_store(
                     current,
-                    incoming,
+                    "Incoming text
+",
                     Some(&doc.encode_full_state()),
                     ContentKind::Richdoc,
                 )
             });
-        resolve_content_conflict(&mut store, "document-conflict", "document-object", 20);
-        let loaded = dohc_engine_collab::load_persisted(&store, &key)
-            .expect("load successor")
-            .expect("active successor");
-        assert_eq!(loaded.doc.note_schema_version(), 1);
-        assert_eq!(
-            store
-                .read_with(|tx| crate::project_ydoc_with_store(
-                    tx,
-                    &key,
-                    &loaded.doc,
-                    ContentKind::Richdoc,
-                ))
-                .expect("project successor")
-                .content,
-            incoming,
+        let state = |store: &EngineStore| {
+            let marker = dohc_engine_collab::read_marker(store, &key)
+                .unwrap()
+                .unwrap();
+            let note = dohc_engine_collab::load_persisted(store, &key)
+                .unwrap()
+                .unwrap();
+            (marker.lineage_claim_id, note.doc.encode_full_state())
+        };
+        let before = state(&store);
+        let result = try_resolve_content_conflict(
+            &mut store,
+            "document-conflict",
+            "document-object",
+            20,
+            None,
         );
+        assert!(
+            matches!(
+                result,
+                Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-note-uses-a-newer-body-format"
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(state(&store), before);
     }
 
     #[test]
