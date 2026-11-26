@@ -3089,9 +3089,13 @@ async function makeLink(
       try {
         return await made("collection", { kind: "documentCollection", path: target.path });
       } catch {
-        // Not a document Collection: try an app or a data Collection by its
-        // folder, then the path as a file.
+        // Not a document Collection: try the path as a file, then as an
+        // app's or a data Collection's folder.
       }
+      // Only a file the engine cannot find is missing; another failure, such
+      // as a cancelled workspace, says what it is.
+      const file = await missingAsNull(() => made("file", { kind: "file", path: target.path }));
+      if (file) return file;
       const inFolder = (name: string) => (target.path ? `${target.path}/${name}` : name);
       // An app link names a file that marks its folder as an app, so it
       // moves with the folder.
@@ -3101,10 +3105,6 @@ async function makeLink(
       }
       const table = await dataCollectionTable(context, target.path, inFolder("dataset.json"));
       if (table) return made("collection", { kind: "transactionalCollection", ...table });
-      // Only a file the engine cannot find is missing; another failure, such
-      // as a cancelled workspace, says what it is.
-      const file = await missingAsNull(() => made("file", { kind: "file", path: target.path }));
-      if (file) return file;
       throw new CliCommandError(
         `dohc could not find ${target.path}. Link a tracked file, or an app or a Collection by its folder.`,
       );
@@ -3112,8 +3112,9 @@ async function makeLink(
   }
 }
 
-// The files that make a folder an app, as discoverSites reads them.
-const APP_MARKERS = ["app.publish.json", "dohc.json", "index.html"] as const;
+// The files that make a folder an app, as discoverSites reads them. A
+// dohc.json alone may name a workflow rather than an app.
+const APP_MARKERS = ["app.publish.json", "index.html"] as const;
 
 async function missingAsNull<T>(make: () => Promise<T>): Promise<T | null> {
   try {

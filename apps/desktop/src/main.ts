@@ -12568,19 +12568,26 @@ function registerIpcHandlers(): void {
                 reference,
                 signal: operation.signal,
               });
+              if (
+                resolution?.status !== "found" ||
+                resolution.target.kind !== "transactionalCollection"
+              )
+                return workReferenceView(reference, resolution);
               // A data Collection opens at its dataset.json. One this
-              // workspace can't place shows, but opens nothing.
-              const datasetPath =
-                resolution?.status === "found" &&
-                resolution.target.kind === "transactionalCollection"
-                  ? await datasetPathOf(
-                      adapter,
-                      workspaceId,
-                      resolution.target.datasetId,
-                      operation.signal,
-                    ).catch(() => null)
-                  : null;
-              return workReferenceView(reference, resolution, datasetPath);
+              // workspace can't place shows, but opens nothing. A failed
+              // lookup reads as unavailable, which the chip asks again.
+              const datasetPath = await datasetPathOf(
+                adapter,
+                workspaceId,
+                resolution.target.datasetId,
+                operation.signal,
+              ).then(
+                (path) => ({ path }),
+                () => null,
+              );
+              return datasetPath === null
+                ? workReferenceView(reference, null)
+                : workReferenceView(reference, resolution, datasetPath.path);
             }),
           ),
       );

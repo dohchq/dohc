@@ -131,7 +131,6 @@ test("an agent links an app and a data Collection by their folders, and each chi
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const sentinel = "Log your next workout.";
   try {
-    await seedWorkspaceManifest(temp, "work-links-apps");
     await mkdir(join(temp.rootPath, "Workouts"), { recursive: true });
     await writeFile(
       join(temp.rootPath, "Workouts", "index.html"),
@@ -194,15 +193,20 @@ test("an agent links an app and a data Collection by their folders, and each chi
       }).toPass();
     };
     await openPost();
-    await thread.getByRole("button", { name: "Open Workouts", exact: true }).click();
+    await thread
+      .getByTestId("chats-message-body")
+      .getByRole("button", { name: "Open Workouts", exact: true })
+      .click();
     await expect(
       page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
     ).toHaveText(sentinel, { timeout: 20_000 });
     await shoot(page, "g-app");
 
-    await page.getByTestId(activityPin("chats")).click();
     await openPost();
-    await thread.getByRole("button", { name: "Open Workout log", exact: true }).click();
+    await thread
+      .getByTestId("chats-message-body")
+      .getByRole("button", { name: "Open Workout log", exact: true })
+      .click();
     await expect(page.getByRole("region", { name: "Workout log", exact: true })).toBeVisible();
     await shoot(page, "h-collection");
   } finally {

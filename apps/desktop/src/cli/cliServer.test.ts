@@ -1369,7 +1369,11 @@ describe("CLI socket server", () => {
           : undefined;
       if (target.kind === "app" && path !== "Workouts/app.publish.json")
         throw new Error("work-target-not-found");
-      if (path === "missing.md") throw new Error("work-target-not-found");
+      if (
+        target.kind === "file" &&
+        ["missing.md", "Workouts", "Workout log", "Two"].includes(path!)
+      )
+        throw new Error("work-target-not-found");
       if (path === "stopped.md") throw new Error("The workspace engine is not running.");
       made.push(target);
       return String(made.length).padStart(43, "R");
