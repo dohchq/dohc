@@ -78,6 +78,59 @@ export function declareBodySequence(doc: Y.Doc): void {
   doc.once("destroy", release);
 }
 
+const byKey = (entries: [string, unknown][]): Record<string, unknown> =>
+  Object.fromEntries(entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
+const asText = (_key: string, value: unknown) =>
+  typeof value === "bigint" ? `${value.toString()}n` : value;
+
+/**
+ * What a format-2 note's body reads as, as a string: its letters with their formatting, its
+ * boundaries and inline items with their attributes, and the containers they name, each named by
+ * where it first appears. Two notes whose bodies read the same give the same string, whatever ids
+ * their containers have and however their items are split.
+ */
+export function bodySequenceReading(doc: Y.Doc): string {
+  const records = doc.share.get(BODY_CONTAINERS_FIELD);
+  const keys = records ? [...records._map.keys()] : [];
+  const names = new Map<string, number>();
+  const containers: unknown[] = [];
+  const nameOf = (id: unknown) => {
+    if (typeof id !== "string") return id;
+    if (!names.has(id)) {
+      names.set(id, names.size);
+      const attributes = keys
+        .filter((key) => key.startsWith(`${id}.`))
+        .map((key): [string, unknown] => [key.slice(id.length + 1), storedValue(records, key)]);
+      containers.push([storedValue(records, id), byKey(attributes)]);
+    }
+    return names.get(id);
+  };
+  const pieces: ({ text: string; marks: string } | { item: string; attrs: object })[] = [];
+  const marks = new Map<string, unknown>();
+  for (let item = doc.share.get(BODY_SEQUENCE_FIELD)?._start ?? null; item; item = item.right) {
+    if (item.deleted) continue;
+    const content = item.content;
+    if (content instanceof Y.ContentFormat) {
+      if (content.value === null) marks.delete(content.key);
+      else marks.set(content.key, content.value);
+    } else if (content instanceof Y.ContentString) {
+      const formatting = JSON.stringify(byKey([...marks]), asText);
+      const last = pieces.at(-1);
+      if (last && "text" in last && last.marks === formatting) last.text += content.str;
+      else pieces.push({ text: content.str, marks: formatting });
+    } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const element = content.type;
+      const attributes = [...element._map.keys()].map((key): [string, unknown] => {
+        const value = storedValue(element, key);
+        return [key, key === "path" && Array.isArray(value) ? value.map(nameOf) : value];
+      });
+      pieces.push({ item: element.nodeName, attrs: byKey(attributes) });
+    }
+  }
+  return JSON.stringify([pieces, containers], asText);
+}
+
 const INLINE_ITEMS = new Set([
   "hardBreak",
   "image",

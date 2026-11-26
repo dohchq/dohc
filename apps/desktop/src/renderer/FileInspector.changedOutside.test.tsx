@@ -199,6 +199,30 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(retryKeys).toEqual([0, 1]);
   });
 
+  it.each([
+    ["1", (text: string) => markdownToYDoc(text), "# Plan\r\n\r\n- Pack\r\n"],
+    ["2", (text: string) => markdownToYDoc(text, { bodySequence: true }), "# Plan\n\n- Pack\n"],
+  ])(
+    "asks before reloading a format-%s note again when its reload came back the same",
+    async (_format, note, reloaded) => {
+      engine.state = engineState(note("# Plan\n\n- Pack\n"), null);
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"),
+      );
+      setEngine(engineState(note("# Plan\n\n- Pack\n"), "saved"));
+      await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+      setEngine(engineState(note(reloaded), null));
+      await act(async () => {
+        await vi.dynamicImportSettled();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      setEngine(engineState(note(reloaded), "saved"));
+      expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
+      expect(retryKeys).toEqual([0, 1]);
+    },
+  );
+
   it("does not reload by itself over an edit main has not confirmed", async () => {
     await openNote();
     setEngine({

@@ -64,8 +64,11 @@ import {
   type LazyExoticComponent,
 } from "react";
 import * as Y from "yjs";
-import { declareBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
-import { markdownFromSnapshot } from "./collab/recoverySnapshot";
+import {
+  bodySequenceReading,
+  declareBodySequence,
+  readsBodySequence,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
@@ -218,30 +221,24 @@ const RELOADED_SIGN_MS = 4_000;
 const READING_POSITION_HOLD_MS = 1_500;
 
 // A note's content, to tell a reload that took in a change from one that
-// came back the same: what it reads as, in either format, and its frontmatter
-// values as the model holds them, bigints and negative zero included.
-type NoteContent = { snapshot: Uint8Array; frontmatter: Record<string, unknown> };
+// came back the same: its body, and its frontmatter values as the model
+// holds them, bigints and negative zero included.
+type NoteContent = { body: string; frontmatter: Record<string, unknown> };
 
 function noteContent(doc: Y.Doc | null): NoteContent | null {
   return doc
     ? {
-        snapshot: Y.encodeStateAsUpdate(doc),
+        body: readsBodySequence(doc)
+          ? bodySequenceReading(doc)
+          : doc.getXmlFragment("body").toString(),
         frontmatter: frontmatterMapValues(doc.getMap("frontmatter")),
       }
     : null;
 }
 
-async function sameNoteContent(
-  left: NoteContent | null,
-  right: NoteContent | null,
-): Promise<boolean> {
+function sameNoteContent(left: NoteContent | null, right: NoteContent | null): boolean {
   if (left === null || right === null) return left === right;
-  if (!sameFrontmatterValue(left.frontmatter, right.frontmatter)) return false;
-  const [before, after] = await Promise.all([
-    markdownFromSnapshot(left.snapshot),
-    markdownFromSnapshot(right.snapshot),
-  ]);
-  return before === after;
+  return left.body === right.body && sameFrontmatterValue(left.frontmatter, right.frontmatter);
 }
 
 function ChangedOutsideNotice(props: { onReload: () => void }) {
@@ -856,9 +853,7 @@ export function MarkdownView(props: {
   const engineDocRef = useRef(engine.doc);
   engineDocRef.current = engine.doc;
   const replacedText = useRef<NoteContent | null>(null);
-  const reloadCheck = useRef(0);
   const reloadChangedOutside = useCallback(() => {
-    reloadCheck.current += 1;
     replacedText.current = noteContent(engineDocRef.current) ?? replacedText.current;
     setReloading(true);
     onReloadChangedOutside();
@@ -880,13 +875,7 @@ export function MarkdownView(props: {
     if (!reloadedBound) return;
     setReloading(false);
     setReloadedSign((count) => count + 1);
-    const check = ++reloadCheck.current;
-    void sameNoteContent(noteContent(engine.doc), replacedText.current).then(
-      (same) => {
-        if (!same && check === reloadCheck.current) setReloadedItself(false);
-      },
-      () => undefined,
-    );
+    if (!sameNoteContent(noteContent(engine.doc), replacedText.current)) setReloadedItself(false);
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
   useEffect(() => {

@@ -774,6 +774,22 @@ describe("gutter '+' on a format-2 note", () => {
     destroy();
   });
 
+  it("closes when a peer lifts the first line of the list it was opened on out of the list", () => {
+    const { editor, stateRef, peerText, destroy } = makeSequenceSlashEditor(
+      "Lead\n\n- one\n- two\n\nTail",
+    );
+    insertBlockAfter(editor, editor.state.doc.child(0).nodeSize);
+    expect(stateRef.current.open).toBe(true);
+    const delta = peerText.toDelta() as Array<{ insert: string | object }>;
+    const one = delta.findIndex(({ insert }) => insert === "one");
+    (delta[one - 1]!.insert as Y.XmlElement).setAttribute("path", [] as never);
+    expect(editor.state.doc.child(1).toJSON()).toMatchObject({ type: "paragraph" });
+    expect(editor.state.doc.child(1).textContent).toBe("one");
+    expect(editor.state.doc.child(2).type.name).toBe("bulletList");
+    expect(stateRef.current.open).toBe(false);
+    destroy();
+  });
+
   it("keeps a dismissed '/' closed through a peer's edit before it", () => {
     const { editor, stateRef, editLead, destroy } = makeSequenceSlashEditor("Lead\n\nTail");
     editor.commands.setTextSelection(editor.state.doc.content.size - 1);

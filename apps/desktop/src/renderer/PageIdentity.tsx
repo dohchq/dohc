@@ -133,9 +133,8 @@ function isH1(node: unknown): boolean {
 
 // In a live document, the body fragment's first child. The fragment reports
 // blocks added or removed, and the first block reports its own attributes;
-// typing inside a block reports to neither. A format-2 note reports every
-// change to its sequence and container records. The snapshot is a boolean,
-// so a report that leaves the answer unchanged renders nothing.
+// typing inside a block reports to neither. The snapshot is a boolean, so a
+// report that leaves the answer unchanged renders nothing.
 function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
   const subscribe = useCallback(
     (onChange: () => void) => {

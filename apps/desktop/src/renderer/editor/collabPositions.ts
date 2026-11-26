@@ -1,7 +1,15 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
-import type { Doc, RelativePosition, XmlFragment } from "yjs";
+import {
+  ContentType,
+  getItem,
+  XmlElement,
+  type Doc,
+  type RelativePosition,
+  type XmlFragment,
+} from "yjs";
+import { storedValue } from "@dohc/ydoc-projection/body-sequence-yjs";
 import type { BodySequenceModules } from "./collaborationExtensions";
 
 type YTiptap = typeof import("@tiptap/y-tiptap");
@@ -96,16 +104,28 @@ function firstLeafStart(doc: ProseMirrorNode, blockPos: number): number {
   return pos;
 }
 
+type TopLevelBlock = { leaf: RelativePosition; container: unknown };
+
 export function bodySequencePositions(ydoc: Doc, { editor }: BodySequenceModules): CollabPositions {
+  const topLevelContainer = (leaf: RelativePosition) => {
+    const item = leaf.item ? getItem(ydoc.store, leaf.item) : null;
+    const boundary = item?.content instanceof ContentType ? item.content.type : null;
+    const path = boundary instanceof XmlElement ? storedValue(boundary, "path") : undefined;
+    return Array.isArray(path) ? path[0] : undefined;
+  };
   return {
     isShownChange: editor.isBodySequenceChange,
     doc: () => ydoc,
     anchor: (state, _oldState, pos, assoc) => editor.bodySequenceAnchor(state, pos, assoc),
     position: (state, _oldState, anchor) => editor.bodySequenceAnchorPosition(state, anchor),
-    anchorTopLevelBlock: (state, _oldState, blockPos) =>
-      editor.bodySequenceBlockAnchor(state, firstLeafStart(state.doc, blockPos)),
+    anchorTopLevelBlock: (state, _oldState, blockPos): TopLevelBlock | null => {
+      const leaf = editor.bodySequenceBlockAnchor(state, firstLeafStart(state.doc, blockPos));
+      return leaf && { leaf, container: topLevelContainer(leaf) };
+    },
     resolveTopLevelBlock: (state, _oldState, anchor) => {
-      const leaf = editor.bodySequenceBlockPosition(state, anchor as RelativePosition);
+      const { leaf: held, container } = anchor as TopLevelBlock;
+      if (topLevelContainer(held) !== container) return null;
+      const leaf = editor.bodySequenceBlockPosition(state, held);
       if (leaf === null || leaf > state.doc.content.size) return null;
       const $leaf = state.doc.resolve(leaf);
       return $leaf.depth === 0 ? leaf : $leaf.before(1);
