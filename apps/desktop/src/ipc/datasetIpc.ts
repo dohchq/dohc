@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { datasetBaseFolder } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
@@ -8,6 +8,7 @@ import {
   type SourceCreationProgress,
 } from "../workspaces/datasetSourceCreation";
 import {
+  DATASET_ADMIN_ACTIONS,
   DatasetRequest,
   DatasetHistoryRevision,
   DatasetInvocationResult,
@@ -20,7 +21,7 @@ import {
   type DatasetPermissionsPage,
   type DatasetPlace,
 } from "@dohc/cli/dataset";
-import type { DatasetRevision } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import {
   localDatasetStoreExists,
@@ -94,6 +95,47 @@ function listRefusalOf(error: unknown): DatasetListRefusal | null {
     : { kind: refusal.kind, words };
 }
 
+const NAMED_ACTIONS: readonly string[] = [
+  "list",
+  "describe",
+  "types",
+  "invoke",
+  "upload",
+  "file",
+  "permissions",
+  "setGrant",
+  "removeGrant",
+  "setDefaults",
+  "approval",
+];
+
+function inPlace<
+  T extends {
+    definition: DatasetDefinition;
+    schemaSql: string;
+    operationSource: string;
+    migrationSql: string;
+    migrationPath: string;
+  },
+>(change: T, descriptorPath: string, pinned: DatasetDefinition) {
+  const definition = parseDatasetDefinition({
+    ...change.definition,
+    schemaPath: pinned.schemaPath,
+    operationsPath: pinned.operationsPath,
+  });
+  return {
+    ...change,
+    definition,
+    descriptorPath,
+    files: {
+      [descriptorPath]: JSON.stringify(definition, null, 2) + "\n",
+      [pinned.schemaPath]: change.schemaSql,
+      [pinned.operationsPath]: change.operationSource,
+      [change.migrationPath]: change.migrationSql,
+    },
+  };
+}
+
 class DatasetScopeError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
@@ -145,6 +187,12 @@ export function createDatasetHandler<
     files: Record<string, string>,
     signal: AbortSignal,
     progress?: SourceCreationProgress,
+  ): Promise<void>;
+  /** Writes an Admin's Collection rule files in a joined copy, and returns once the Owner's workspace has them. */
+  writeSharedSources?(
+    workspace: W,
+    files: Record<string, string>,
+    signal: AbortSignal,
   ): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
@@ -269,7 +317,8 @@ export function createDatasetHandler<
               await requireMain();
               return work();
             };
-            return dependencies.withMainVersionLock
+            return dependencies.withMainVersionLock &&
+              !shareViewIsPresent(operation.workspace.shareView)
               ? dependencies.withMainVersionLock(operation.workspace, guarded)
               : guarded();
           };
@@ -365,23 +414,12 @@ export function createDatasetHandler<
             current();
             return { kind: "exported" as const, savedPath };
           }
-          if (shareViewIsPresent(operation.workspace.shareView)) {
-            if (
-              !dependencies.namedDataForWorkspace ||
-              ![
-                "list",
-                "describe",
-                "types",
-                "invoke",
-                "upload",
-                "file",
-                "permissions",
-                "setGrant",
-                "removeGrant",
-                "setDefaults",
-                "approval",
-              ].includes(input.action)
-            )
+          const governs =
+            shareViewIsPresent(operation.workspace.shareView) &&
+            DATASET_ADMIN_ACTIONS.has(input.action) &&
+            !NAMED_ACTIONS.includes(input.action);
+          if (shareViewIsPresent(operation.workspace.shareView) && !governs) {
+            if (!dependencies.namedDataForWorkspace || !NAMED_ACTIONS.includes(input.action))
               throw datasetOwnerOnlyError();
             const data = await dependencies.namedDataForWorkspace(
               operation.workspace,
@@ -457,6 +495,21 @@ export function createDatasetHandler<
             }
             throw new Error("This Collection action is unavailable.");
           }
+          let shared: { workspaceId: string; data: RemoteDatasetData } | null = null;
+          if (governs) {
+            if (!dependencies.namedDataForWorkspace) throw datasetOwnerOnlyError();
+            shared = (
+              await dependencies.namedDataForWorkspace(operation.workspace, operation.signal)
+            ).governance();
+            current();
+          }
+          const authorityWorkspaceId = shared?.workspaceId ?? input.workspaceId;
+          const writeSources = (files: Record<string, string>) => {
+            if (!shared)
+              return dependencies.createSources(operation.workspace, files, operation.signal);
+            if (!dependencies.writeSharedSources) throw datasetOwnerOnlyError();
+            return dependencies.writeSharedSources(operation.workspace, files, operation.signal);
+          };
           if (
             agent &&
             agent.depth > 0 &&
@@ -473,6 +526,7 @@ export function createDatasetHandler<
           // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
           let opened: Promise<LocalDatasetHost> | undefined;
           const localHost = async () => {
+            if (shared) throw datasetOwnerOnlyError();
             const host = await (opened ??= dependencies.hostForWorkspace(
               operation.workspace,
               operation.signal,
@@ -611,9 +665,11 @@ export function createDatasetHandler<
             "approval",
           ].includes(input.action);
           const openData = async () =>
-            readsData && dependencies.dataForWorkspace
-              ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
-              : await localHost();
+            shared
+              ? shared.data
+              : readsData && dependencies.dataForWorkspace
+                ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
+                : await localHost();
           if (input.action === "list") {
             try {
               const data = await openData();
@@ -671,6 +727,7 @@ export function createDatasetHandler<
           const lookupLocalApps = async (
             ids: readonly string[],
           ): Promise<Map<string, LocalAppRow> | null> => {
+            if (shared) return null;
             if (
               operation.workspace.rootPath &&
               !(await localDatasetStoreExists(operation.workspace.rootPath))
@@ -737,9 +794,29 @@ export function createDatasetHandler<
               })),
             }),
           });
+          const descriptorAt = async (path: string) => {
+            const [file] = await withSourceAdapter(async (adapter) =>
+              adapter.hydrateCapturedSources(
+                await adapter.captureSourceMetadata({
+                  workspaceId: input.workspaceId,
+                  versionId: "main",
+                  paths: [path],
+                  bounds: { maxInputFiles: 1, maxInputBytes: 256 * 1024 },
+                  signal: operation.signal,
+                }),
+                operation.signal,
+              ),
+            );
+            current();
+            if (!file) throw new Error(`Collection source unavailable: ${path}.`);
+            return parseDatasetDefinition(JSON.parse(new TextDecoder().decode(file.bytes)), {
+              descriptorPath: path,
+            });
+          };
           const credentialGeneration = dependencies.currentCredentialGeneration?.();
           const migrationAuthority = {
-            workspaceId: input.workspaceId,
+            workspaceId: authorityWorkspaceId,
+            sourceWorkspaceId: input.workspaceId,
             assertCurrent() {
               current();
               if (dependencies.currentCredentialGeneration?.() !== credentialGeneration)
@@ -788,7 +865,7 @@ export function createDatasetHandler<
               throw new Error("This Collection review expired. Prepare the change again.");
             }
             const candidate = {
-              workspaceId: input.workspaceId,
+              workspaceId: authorityWorkspaceId,
               datasetId: pending.review.revision.datasetId,
               candidateId: pending.review.candidate.candidateId,
               signal: operation.signal,
@@ -1008,7 +1085,7 @@ export function createDatasetHandler<
             ) {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1290,7 +1367,7 @@ export function createDatasetHandler<
               throw new Error(
                 "Collection rules changed. Refresh the Collection before changing fields.",
               );
-            const generated =
+            const changed =
               input.action === "prepareSchemaChange"
                 ? generateDatasetSchemaChange({ ...approved, change: input.change })
                 : generateDatasetRelationChoices({
@@ -1299,15 +1376,17 @@ export function createDatasetHandler<
                     fieldId: input.fieldId,
                     labelFieldId: input.labelFieldId,
                   });
+            const generated =
+              shared && "datasetPath" in request
+                ? inPlace(changed, request.datasetPath, await descriptorAt(request.datasetPath))
+                : changed;
             const expected = describeDatasetRevision({
               definition: generated.definition,
               revision: input.revision + 1,
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await onMainLocked(() =>
-              dependencies.createSources(operation.workspace, generated.files, operation.signal),
-            );
+            await onMainLocked(() => writeSources(generated.files));
             current();
             const prepared = await prepareMigration({
               datasetId: input.datasetId,
@@ -1322,7 +1401,7 @@ export function createDatasetHandler<
             ) {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1364,7 +1443,7 @@ export function createDatasetHandler<
             } finally {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1402,6 +1481,27 @@ export function createDatasetHandler<
                 return { kind: "refused" as const, ...error.refusal };
               throw error;
             }
+          }
+          if (input.action === "create" && shared) {
+            const generated = generateDatasetSources(input.definition);
+            const schemaSql = generated.files[generated.definition.schemaPath]!,
+              operationSource = generated.files[generated.definition.operationsPath]!;
+            const revision = describeDatasetRevision({
+              definition: generated.definition,
+              revision: 1,
+              schemaSql,
+              operationSource,
+            });
+            await onMainLocked(() => writeSources(generated.files));
+            current();
+            const approved = await shared.data.activate({
+              revision,
+              schemaSql,
+              operationSource,
+              approvalAgent,
+            });
+            current();
+            return { kind: "approved" as const, revision: approved };
           }
           const host = await localHost();
           if (input.action === "approve") {

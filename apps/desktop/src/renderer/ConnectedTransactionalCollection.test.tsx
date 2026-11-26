@@ -350,7 +350,7 @@ describe("a dataset table's saved views", () => {
   const renderPage = (owner: boolean, onError = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1537,7 +1537,7 @@ it.each([
     backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline } });
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1551,6 +1551,32 @@ it.each([
     expect(screen.queryByText("Opening Collection…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
+  },
+);
+
+it.each([
+  { role: "owner", fields: true, recovery: true },
+  { role: "admin", fields: true, recovery: false },
+  { role: "member", fields: false, recovery: false },
+] as const)(
+  "offers the $role the rule controls they can use",
+  async ({ role, fields, recovery }) => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    render(
+      <ConnectedTransactionalCollection
+        role={role}
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+    await screen.findByLabelText("Collection view state");
+    expect(!!screen.queryByRole("button", { name: "Fields and names" })).toBe(fields);
+    expect(!!screen.queryByRole("button", { name: "Export recovery" })).toBe(recovery);
   },
 );
 
@@ -1747,7 +1773,7 @@ it.each([
   });
   render(
     <ConnectedTransactionalCollection
-      owner={owner}
+      role={owner ? "owner" : "member"}
       workspaceId="workspace-a"
       datasetPath="data/dataset.json"
       tableId={id(2)}
@@ -2967,7 +2993,7 @@ describe("who approved a Collection's rules", () => {
   const renderPage = (owner: boolean, onError = vi.fn(), onSettled = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}

@@ -99,6 +99,7 @@ import {
   createWorkspaceForget,
 } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
+import { writeSharedCollectionRules } from "./workspaces/sharedCollectionRules";
 import {
   createDesktopWorkspaceCallbacks,
   type DesktopWorkspaceCallbacksDependencies,
@@ -108,6 +109,7 @@ import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetRes
 import {
   CollectionMoveUnfinishedError,
   CollectionServerUnreachableError,
+  datasetOwnerOnlyError,
   ipcWireError,
   T3_CODE_CANNOT_ALLOW_HERE,
   markDatasetServerNotFound,
@@ -1441,6 +1443,7 @@ const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
 // Main's queue of direct pushes, once the IPC handlers are registered.
 let shareDirectWrites: {
   shareViewEdited(workspaceId: string): void;
+  pushNow(workspaceId: string): Promise<void>;
   recordCreated(workspaceId: string): void;
 } | null = null;
 
@@ -11531,6 +11534,62 @@ function registerIpcHandlers(): void {
             mainVersionLocks.delete(workspace.workspaceId);
           }
         }
+      });
+    },
+    writeSharedSources: async (
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      files: Record<string, string>,
+      signal: AbortSignal,
+    ) => {
+      const resolved = resolveRegisteredShareViewFilesTarget(workspace, {
+        kind: "standalone",
+        workspaceId: workspace.workspaceId,
+      });
+      const grant = recordedShareSelector(resolved?.grantedSelector);
+      if (memberRoleOf(workspace.workspaceId) !== "admin" || !resolved?.shareId || !grant)
+        throw datasetOwnerOnlyError();
+      const shareId = resolved.shareId;
+      await writeSharedCollectionRules({
+        workspaceId: workspace.workspaceId,
+        files,
+        shareViewFiles,
+        withLease: (work) => withStaleSensitiveWorkspaceOperation(workspace.rootPath, work),
+        push: async () => {
+          if (!shareDirectWrites) throw new Error("dohc is still starting. Try again.");
+          await shareDirectWrites.pushNow(workspace.workspaceId);
+        },
+        delivery: (paths) =>
+          requireEngineSessions().run(
+            {
+              workspaceId: resolved.storeWorkspaceId,
+              rootPath: resolved.rootPath,
+              shareMount: true,
+              attachmentId: workspace.attachmentId,
+            },
+            async (binding) =>
+              z
+                .record(
+                  z.string(),
+                  z.object({
+                    state: z.enum(["pending", "accepted", "refused"]),
+                    contentHash: z.string().nullable(),
+                    reason: z.string().optional(),
+                  }),
+                )
+                .parse(
+                  await new WorkspaceDaemonRequester(binding.client).request(
+                    "share.direct.statuses",
+                    {
+                      workspaceId: resolved.storeWorkspaceId,
+                      shareId,
+                      paths,
+                      grantedSelector: engineGrantedSelector(grant),
+                    },
+                    { workspace: binding.workspace },
+                  ),
+                ),
+          ),
+        signal,
       });
     },
     createSources: async (

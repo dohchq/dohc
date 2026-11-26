@@ -155,3 +155,31 @@ it("reads who approved a Collection's rules on the owner's workspace, and says w
     createNamedDatasetData({ ...deps, shareView: marker }).approval(datasetId),
   ).rejects.toThrow("Only an Admin of a joined workspace manages Collection access.");
 });
+
+it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them", async () => {
+  const deps = { ...input(), relayJson: vi.fn(async (..._: unknown[]): Promise<unknown> => ({})) };
+  const joined = {
+    ...marker,
+    grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    membersWorkspaceId: "owner-workspace",
+    role: "admin",
+  };
+  const datasetId = "00000000-0000-4000-8000-000000000001";
+  const governed = createNamedDatasetData({ ...deps, shareView: joined }).governance();
+  expect(governed.workspaceId).toBe("owner-workspace");
+  deps.relayJson.mockRejectedValueOnce(
+    markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" }),
+  );
+  await expect(governed.data.approvedArtifacts!(datasetId)).rejects.toThrow(
+    "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.",
+  );
+  expect(deps.relayJson).toHaveBeenCalledWith(
+    deps.credentials,
+    expect.stringMatching(/^\/sync\/owner-workspace\/datasets\//),
+    expect.anything(),
+  );
+  for (const shareView of [marker, { ...joined, role: "member" }])
+    expect(() => createNamedDatasetData({ ...deps, shareView }).governance()).toThrow(
+      "Open the original workspace to manage this Collection.",
+    );
+});

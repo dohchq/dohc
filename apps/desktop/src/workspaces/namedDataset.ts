@@ -2,6 +2,7 @@ import {
   createRemoteDatasetData,
   DatasetCatalogPage,
   type OwnerDatasetData,
+  type RemoteDatasetData,
 } from "./remoteDataset";
 import { recordedShareSelector } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
@@ -13,9 +14,11 @@ import type { NamedDatasetPageCache } from "./namedDatasetCache";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { joinedByAccount } from "./shareWriteGate";
-import { isDatasetServerNotFound } from "../ipc/errorWords";
+import { datasetOwnerOnlyError, isDatasetServerNotFound } from "../ipc/errorWords";
 import type { DatasetApproval } from "@dohc/cli/dataset";
 
+const KEPT_BY_OWNER =
+  "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.";
 const NOT_SHOWN =
   "The server didn't show you who approved this Collection's rules. You may no longer be an Admin, or the Owner keeps this Collection on their computer.";
 /** Source View/Edit and Collection data permissions are separate. The relay resolves the named grant. */
@@ -26,6 +29,8 @@ export type NamedDatasetData = Pick<
 > &
   Required<Pick<OwnerDatasetData, "permissions" | "setGrant" | "setDefaults">> & {
     approval(datasetId: string): Promise<DatasetApproval>;
+    /** An Admin's route to the rules of the joined workspace's Collections, where the server checks their role. */
+    governance(): { workspaceId: string; data: RemoteDatasetData };
   };
 export function createNamedDatasetData(input: {
   workspaceId: string;
@@ -52,6 +57,7 @@ export function createNamedDatasetData(input: {
     grantedSelector?: unknown;
     ended?: unknown;
     membersWorkspaceId?: unknown;
+    role?: unknown;
   } | null;
   if (marker?.ended === true)
     throw new Error("Your access to this share ended. Ask the owner to share it again.");
@@ -101,7 +107,10 @@ export function createNamedDatasetData(input: {
       throw new Error("Only an Admin of a joined workspace manages Collection access.");
     return createRemoteDatasetData({ ...input, workspaceId: membersWorkspaceId });
   };
-  const managed: Pick<NamedDatasetData, "permissions" | "setGrant" | "setDefaults" | "approval"> = {
+  const managed: Pick<
+    NamedDatasetData,
+    "permissions" | "setGrant" | "setDefaults" | "approval" | "governance"
+  > = {
     permissions: async (value) => manager().permissions(value),
     setGrant: async (value) => manager().setGrant(value),
     setDefaults: async (value) => manager().setDefaults(value),
@@ -111,6 +120,20 @@ export function createNamedDatasetData(input: {
         .catch((error: unknown) => {
           throw isDatasetServerNotFound(error) ? new Error(NOT_SHOWN) : error;
         }),
+    governance: () => {
+      if (!membersWorkspaceId || marker.role !== "admin") throw datasetOwnerOnlyError();
+      return {
+        workspaceId: membersWorkspaceId,
+        data: createRemoteDatasetData({
+          ...input,
+          workspaceId: membersWorkspaceId,
+          relayJson: (credentials, path, init) =>
+            input.relayJson(credentials, path, init).catch((error: unknown) => {
+              throw isDatasetServerNotFound(error) ? new Error(KEPT_BY_OWNER) : error;
+            }),
+        }),
+      };
+    },
   };
   const exposed = {
     list: data.list,

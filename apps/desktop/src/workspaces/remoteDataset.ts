@@ -166,8 +166,14 @@ export type RemoteDatasetData = OwnerDatasetData &
   Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">> &
   DatasetGovernance;
 
-/** Who approved the rules a Collection on the server runs. */
+/** A Collection's rules on the server: who approved the ones it runs, and a new Collection's first ones. */
 export interface DatasetGovernance {
+  activate(input: {
+    revision: DatasetRevision;
+    schemaSql: string;
+    operationSource: string;
+    approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
+  }): Promise<DatasetRevision>;
   approval(datasetId: string): Promise<DatasetApproval>;
   /** The Owner approves the rules the Collection runs again. */
   confirmApproval(datasetId: string, revisionSha256: string): Promise<DatasetApproval>;
@@ -521,6 +527,22 @@ export function createRemoteDatasetData(input: {
       )
         throw new Error("The server returned different Collection rules.");
       return result;
+    },
+    async activate({ revision, schemaSql, operationSource, approvalAgent }) {
+      if (input.shareId !== undefined)
+        throw new Error("Only the Owner or an Admin can create a Collection.");
+      verifyDatasetArtifacts({ revision, schemaSql, operationSource });
+      const approved = parseDatasetRevision(
+        await request(`${path(revision.datasetId)}/activate`, {
+          revision,
+          schemaSql,
+          operationSource,
+          ...(approvalAgent ? { approvalAgent } : {}),
+        }),
+      );
+      if (approved.revisionSha256 !== revision.revisionSha256)
+        throw new Error("The server answered the Collection's creation unexpectedly.");
+      return approved;
     },
     async approval(datasetId) {
       if (input.shareId !== undefined)
