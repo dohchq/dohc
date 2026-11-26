@@ -9,7 +9,12 @@ import {
   workspaceSecretApprovalBindings,
 } from "@dohc/workspace-contracts/http-step-approvals";
 import { definitionDigest } from "@dohc/automation-executor/automation-plan";
-import type { SafeOutboundDestination, SafeOutboundRequest } from "@dohc/service-http";
+import {
+  SafeOutboundError,
+  type SafeOutboundDestination,
+  type SafeOutboundRequest,
+  type SafeOutboundResponse,
+} from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fenceAccount,
@@ -1247,5 +1252,138 @@ automations:
     const listed = await handler(request(OWNER, `/sync/${WORKSPACE}/webhooks/http-approvals`));
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ ok: true, secrets: [], approvals: [secondDigest] });
+  });
+
+  it("fetches JSON with GET from the committed step, scrubs echoed secrets, fetches again for the same delivery, and refuses oversized answers and edited definitions", async () => {
+    const fetchYaml = `version: 1
+automations:
+  - id: pull-stats
+    name: Pull stats
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        secret-headers:
+          Authorization:
+            secret: STATS_KEY
+            prefix: 'Bearer '
+        as: stats
+      - add-record:
+          Count: '=stats.count'
+`;
+    const parsed = parseAutomationsFile(fetchYaml);
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("bad yaml");
+    const automation = parsed.entries[0].automation;
+    const reads: SafeOutboundRequest[] = [];
+    let answer: () => SafeOutboundResponse = () => ({
+      status: 200,
+      contentType: "application/json",
+      contentEncoding: null,
+      body: Buffer.from(
+        JSON.stringify({ count: reads.length, echoed: reads.at(-1)?.headers.Authorization }),
+      ),
+    });
+    const { storage, handler, sent } = await setup({
+      readOutboundRequest: async (req) => {
+        reads.push(req);
+        return answer();
+      },
+    });
+    await commitFiles(handler, [
+      { objectId: "obj-schema", path: `${COLLECTION}/collection.yaml`, text: COLLECTION_SCHEMA },
+      { objectId: "obj-auto", path: `${COLLECTION}/automations.yaml`, text: fetchYaml },
+    ]);
+    const secret = await handler(
+      request(OWNER, `/sync/${WORKSPACE}/secrets/STATS_KEY`, {
+        ...jsonBody({
+          mode: "create",
+          usage: "http-header",
+          value: "phx_live_relay_secret",
+          allowedHosts: ["api.example.com"],
+        }),
+        method: "PUT",
+      }),
+    );
+    expect(secret.status).toBe(200);
+    const digest = computeHttpStepApprovalDigest({
+      collectionId: "obj-schema",
+      collectionPath: COLLECTION,
+      automationId: automation.id,
+      stepOrdinal: 0,
+      step: automation.do[0] as AutomationHttpStep,
+      definitionDigest: definitionDigest(automation),
+      codeFileHashes: [],
+      secretBindings: secretBindingsIn(storage),
+    })!;
+    const approved = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/http-approvals`,
+        jsonBody({
+          approvalDigest: digest,
+          collectionId: "obj-schema",
+          collectionPath: COLLECTION,
+          automationId: "pull-stats",
+          stepOrdinal: 0,
+        }),
+      ),
+    );
+    expect(approved.status).toBe(200);
+    const dispatch = () =>
+      handler(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+          jsonBody({
+            collectionId: "obj-schema",
+            collectionPath: COLLECTION,
+            automationId: "pull-stats",
+            stepOrdinal: 0,
+            approvalDigest: digest,
+            deliveryId: createHash("sha256").update("fetch-1").digest("hex"),
+            chainDepth: 0,
+            evaluatedSafeHeaders: [],
+            evaluatedBody: null,
+            defaultContentType: null,
+          }),
+        ),
+      );
+
+    const first = await dispatch();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({
+      ok: true,
+      status: 200,
+      response: { count: 1, echoed: "Bearer [redacted]" },
+    });
+    expect(reads[0]).toMatchObject({
+      method: "GET",
+      body: undefined,
+      maxResponseBytes: 192 * 1024,
+    });
+    expect(reads[0]?.headers.Authorization).toBe("Bearer phx_live_relay_secret");
+    expect(sent).toHaveLength(0);
+
+    const again = await dispatch();
+    expect(await again.json()).toMatchObject({ ok: true, response: { count: 2 } });
+
+    answer = () => {
+      throw new SafeOutboundError("response_too_large", "too large");
+    };
+    const oversized = (await (await dispatch()).json()) as { ok: boolean; reason: string };
+    expect(oversized).toMatchObject({ ok: false, error: "response_too_large" });
+    expect(oversized.reason).toContain("192 KiB");
+
+    await commitFiles(handler, [
+      {
+        objectId: "obj-auto",
+        path: `${COLLECTION}/automations.yaml`,
+        text: fetchYaml.replace("/stats", "/everything"),
+      },
+    ]);
+    const edited = await dispatch();
+    expect(edited.status).toBe(409);
+    expect(await edited.json()).toMatchObject({ ok: false, error: "definition_not_synced" });
+    expect(reads).toHaveLength(3);
   });
 });

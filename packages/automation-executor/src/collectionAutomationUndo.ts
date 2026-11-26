@@ -305,7 +305,9 @@ export async function undoCollectionAutomationRuns(
         total +
         run.applied.reduce(
           (stepTotal, applied) =>
-            stepTotal + applied.writes.filter((write) => write.kind === "http-sent").length,
+            stepTotal +
+            applied.writes.filter((write) => write.kind === "http-sent" && write.method !== "GET")
+              .length,
           0,
         ),
       0,

@@ -2,7 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SafeOutboundError, type SafeOutboundDestination } from "@dohc/service-http";
+import {
+  SafeOutboundError,
+  type SafeOutboundDestination,
+  type SafeOutboundRequest,
+  type SafeOutboundResponse,
+} from "@dohc/service-http";
 import type { TokenCipher } from "./cloudCredentialStore";
 import { createLocalWorkspaceSecretStore } from "./localWorkspaceSecretStore";
 import { createLocalOutboundWebhookExecutor } from "./localOutboundWebhookExecutor";
@@ -93,6 +98,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: await secrets.list("ws-1"),
       effect: baseEffect,
+      method: "POST",
+      readResponse: false,
       depth: 1,
       signal: new AbortController().signal,
     });
@@ -124,6 +131,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: approvedSecrets,
       effect: baseEffect,
+      method: "POST",
+      readResponse: false,
       depth: 1,
       signal: new AbortController().signal,
     });
@@ -176,6 +185,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: approved,
       effect: { ...baseEffect, url: { kind: "secret", secret: "SLACK_HOOK" }, secretHeaders: [] },
+      method: "POST",
+      readResponse: false,
       depth: 0,
       signal: new AbortController().signal,
     });
@@ -218,6 +229,8 @@ describe("localOutboundWebhookExecutor", () => {
         ...baseEffect,
         url: { kind: "literal", url: "https://evil.example.com/steal" },
       },
+      method: "POST",
+      readResponse: false,
       depth: 0,
       signal: new AbortController().signal,
     });
@@ -238,6 +251,8 @@ describe("localOutboundWebhookExecutor", () => {
       codeFileHashes: [],
       secrets: await secrets.list("ws-1"),
       effect: baseEffect,
+      method: "POST",
+      readResponse: false,
       depth: 4,
       signal: new AbortController().signal,
     });
@@ -284,6 +299,8 @@ describe("localOutboundWebhookExecutor", () => {
         url: { kind: "secret", secret: "SLACK_HOOK" },
         secretHeaders: [],
       },
+      method: "POST",
+      readResponse: false,
       depth: 0,
       signal: new AbortController().signal,
     });
@@ -312,6 +329,8 @@ describe("localOutboundWebhookExecutor", () => {
         ...baseEffect,
         url: { kind: "secret", secret: "SLACK_HOOK" },
       },
+      method: "POST",
+      readResponse: false,
       depth: 0,
       signal: new AbortController().signal,
     });
@@ -322,5 +341,82 @@ describe("localOutboundWebhookExecutor", () => {
       expect(secretUrlHostDenied.reason).not.toContain("SUPERSECRET999");
       expect(secretUrlHostDenied.beforeSend).toBe(true);
     }
+  });
+  it("fetches JSON with GET under the fetch cap, scrubs echoed secrets, and refuses a non-JSON answer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-local-fetch-"));
+    dirs.push(dir);
+    const secrets = createLocalWorkspaceSecretStore({ dir, cipher: fakeCipher() });
+    await secrets.set("ws-1", {
+      name: "STATS_KEY",
+      mode: "create",
+      usage: "http-header",
+      value: "phx_live_secret_abc",
+      allowedHosts: ["api.example.com"],
+    });
+    const requests: SafeOutboundRequest[] = [];
+    let answer: SafeOutboundResponse = {
+      status: 200,
+      contentType: "application/json; charset=utf-8",
+      contentEncoding: null,
+      body: Buffer.from(
+        JSON.stringify({ count: 7, echoed: { authorization: "Bearer phx_live_secret_abc" } }),
+      ),
+    };
+    const executor = createLocalOutboundWebhookExecutor({
+      workspaceId: "ws-1",
+      secrets,
+      resolveDestination: async (raw) => fakeDestination(raw),
+      sendRequest: async () => {
+        throw new Error("a fetch must read its response");
+      },
+      readRequest: async (request) => {
+        requests.push(request);
+        return answer;
+      },
+    });
+    const approved = await secrets.list("ws-1");
+    const fetch = () =>
+      executor.execute({
+        collectionId: "col-1",
+        collectionPath: "Tasks",
+        automation: dummyAutomation,
+        definitionDigest: "b".repeat(64),
+        approvalDigest: "c".repeat(64),
+        codeFileHashes: [],
+        secrets: approved,
+        effect: {
+          ...baseEffect,
+          targetLabel: "api.example.com",
+          url: { kind: "literal", url: "https://api.example.com/stats" },
+          headers: [],
+          secretHeaders: [{ name: "Authorization", secret: "STATS_KEY", prefix: "Bearer " }],
+          body: null,
+          defaultContentType: null,
+        },
+        method: "GET",
+        readResponse: true,
+        depth: 0,
+        signal: new AbortController().signal,
+      });
+
+    expect(await fetch()).toEqual({
+      ok: true,
+      status: 200,
+      response: { count: 7, echoed: { authorization: "Bearer [redacted]" } },
+    });
+    expect(requests[0]).toMatchObject({
+      method: "GET",
+      body: undefined,
+      maxResponseBytes: 192 * 1024,
+    });
+    expect(requests[0]?.headers.Authorization).toBe("Bearer phx_live_secret_abc");
+
+    answer = { ...answer, contentType: "text/html" };
+    const html = await fetch();
+    expect(html).toMatchObject({ ok: false });
+    if (!html.ok) expect(html.reason).toContain("JSON");
+
+    answer = { ...answer, status: 401, contentType: "application/json", body: Buffer.from("{}") };
+    expect(await fetch()).toMatchObject({ ok: false, status: 401 });
   });
 });

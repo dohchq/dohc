@@ -1078,9 +1078,14 @@ const AUTOMATION_CASES: AutomationCase[] = [
     expected: [{ code: "invalid-http-url", path: at("/do/0/http") }],
   },
   {
-    name: "a non-POST webhook method",
-    item: withStep("http: https://hooks.example.com/events\nmethod: GET"),
+    name: "a webhook method other than GET or POST",
+    item: withStep("http: https://hooks.example.com/events\nmethod: DELETE"),
     expected: [{ code: "invalid-http-method", path: at("/do/0/method") }],
+  },
+  {
+    name: "a GET request with a body",
+    item: withStep("http: https://api.example.com/stats\nmethod: GET\nbody: hi"),
+    expected: [{ code: "http-get-with-body", path: at("/do/0/body") }],
   },
   {
     name: "an invalid webhook secret name",
@@ -1773,6 +1778,37 @@ describe("automations.yaml diagnostics", () => {
       timezone: "UTC",
     });
     expect(hourly?.when).toEqual({ kind: "schedule", every: "hour", at: ":00", timezone: "UTC" });
+  });
+
+  it("reads and writes a GET fetch that saves its response", () => {
+    const text = `version: 1
+automations:
+  - id: pull
+    name: Pull stats
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        secret-headers:
+          Authorization: { secret: STATS_KEY, prefix: "Bearer " }
+        as: stats
+      - add-record:
+          Count: =stats.count
+`;
+    const [automation] = validAutomations(text);
+    expect(automation?.do[0]).toEqual({
+      kind: "http",
+      url: { kind: "literal", url: "https://api.example.com/stats" },
+      method: "GET",
+      headers: [],
+      secretHeaders: [{ name: "Authorization", secret: "STATS_KEY", prefix: "Bearer " }],
+      body: null,
+      as: "stats",
+    });
+    const again = written(entries(text));
+    expect(again).toContain("method: GET");
+    expect(again).toContain("as: stats");
+    expect(validAutomations(again)).toEqual(validAutomations(text));
   });
 
   it("has a case for every diagnostic code", () => {

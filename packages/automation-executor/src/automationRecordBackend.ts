@@ -6,6 +6,7 @@ import {
   MAX_HTTP_HEADER_VALUE_BYTES,
   MAX_HTTP_TOTAL_HEADER_BYTES,
   httpStepTargetLabel,
+  type Automation,
   type AutomationHttpStep,
 } from "@dohc/workspace-contracts/automations";
 import {
@@ -14,7 +15,7 @@ import {
   workspaceSecretApprovalBindings,
 } from "@dohc/workspace-contracts/http-step-approvals";
 import { changedSincePressed } from "./automationButtons";
-import type { StoredRun } from "./automationRunStore";
+import type { RunWrite, StoredRun } from "./automationRunStore";
 import {
   datasetUndoDeletes,
   datasetCodeTable,
@@ -184,9 +185,14 @@ function savedHttpHeadersAndBodyMatchDeclaration(
       return false;
     }
   }
-  if (step.body === undefined) return effect.body === null;
+  if (step.body === null) return effect.body === null;
   if (effect.body === null) return false;
   return Buffer.byteLength(effect.body, "utf8") <= MAX_HTTP_BODY_BYTES;
+}
+
+function refetches(automation: Automation, ordinal: number): boolean {
+  const entry = stepsInOrder(automation).find((step) => step.ordinal === ordinal);
+  return entry?.step.kind === "http" && entry.step.method === "GET";
 }
 
 export async function prepareRecordBackend(
@@ -1391,6 +1397,49 @@ export async function prepareRecordBackend(
         )?.readOnly === false
       );
     },
+    async fetchAllowed(ordinal, file, sha256) {
+      const collectionId =
+        parseCollectionAutomationId(claim.automationId)?.collectionId ??
+        source.datasetId ??
+        deps.collectionIdOf?.(collection.path) ??
+        null;
+      const ordered = stepsInOrder(automation);
+      const fetch = ordered.find((entry) => entry.ordinal === ordinal)?.step;
+      if (collectionId === null || fetch?.kind !== "http" || !deps.readHttpApprovals)
+        return "unavailable";
+      const files = new Set(
+        ordered.flatMap(({ step }) => (step.kind === "run-file" ? [step.file] : [])),
+      );
+      const codeFileHashes: Array<{ file: string; sha256: string }> = [];
+      for (const name of files) {
+        const read = await deps.readCode(`${collection.path}/${name}`);
+        if (read === null || read.truncated) return "unavailable";
+        const hash = createHash("sha256").update(read.text).digest("hex");
+        if (name === file && hash !== sha256) return "unavailable";
+        codeFileHashes.push({ file: name, sha256: hash });
+      }
+      const approvals = await deps.readHttpApprovals();
+      const approvalDigest =
+        approvals === null
+          ? null
+          : computeHttpStepApprovalDigest({
+              collectionId,
+              collectionPath: collection.path,
+              automationId: automation.id,
+              stepOrdinal: ordinal,
+              step: fetch,
+              definitionDigest: definitionDigest(automation),
+              codeFileHashes,
+              secretBindings: workspaceSecretApprovalBindings(approvals.secrets),
+            });
+      if (approvals === null || approvalDigest === null) return "unavailable";
+      if (approvals.approved.has(approvalDigest)) return "approved";
+      await deps.checkReach?.(
+        [{ kind: "http", target: httpStepTargetLabel(fetch), stepOrdinal: ordinal }],
+        roster,
+      );
+      return "unapproved";
+    },
     async apply(run, effect, place, chat) {
       if (
         current !== null &&
@@ -1405,7 +1454,11 @@ export async function prepareRecordBackend(
           },
         ];
       }
-      if (effect.kind === "http" && place.mode !== "fresh") {
+      if (
+        effect.kind === "http" &&
+        place.mode !== "fresh" &&
+        !refetches(automation, place.ordinal)
+      ) {
         return {
           outcome: failed(
             `dohc stopped while sending the webhook in step ${place.ordinal + 1}. The request may have reached its destination, so dohc did not send it again. Check the destination before choosing Try again.`,
@@ -1667,6 +1720,7 @@ export async function prepareRecordBackend(
           body: effect.body,
           defaultContentType: expectedDefaultContentType,
         };
+        const readResponse = declaredStep.as !== null;
         const sent = await deps.httpWebhook.execute({
           collectionId,
           collectionPath: collection.path,
@@ -1676,10 +1730,15 @@ export async function prepareRecordBackend(
           codeFileHashes,
           secrets: approvals.secrets ?? [],
           effect: boundEffect,
+          method: declaredStep.method,
+          readResponse,
           depth: claim.depth,
           signal,
         });
         if (!sent.ok) {
+          if (declaredStep.method === "GET" && input.stopped.aborted) {
+            return { outcome: { kind: "wait", reason: "stopped" } };
+          }
           if (sent.waitReason !== undefined) {
             return {
               outcome: { kind: "wait", reason: sent.waitReason },
@@ -1691,14 +1750,23 @@ export async function prepareRecordBackend(
             ...(sent.beforeSend ? { httpRefusedBeforeSend: true as const } : {}),
           };
         }
-        return [
-          {
-            kind: "http-sent",
-            target: effect.targetLabel,
-            status: sent.status,
-            deliveryId: effect.deliveryId,
-          },
-        ];
+        const httpSent: RunWrite = {
+          kind: "http-sent",
+          target: effect.targetLabel,
+          status: sent.status,
+          deliveryId: effect.deliveryId,
+          ...(declaredStep.method === "GET" ? { method: "GET" as const } : {}),
+          ...(readResponse ? { fetched: true as const } : {}),
+        };
+        if (!readResponse) return [httpSent];
+        if (sent.response === undefined) {
+          return {
+            outcome: failed(
+              `The website in step ${place.ordinal + 1} answered without the JSON this step saves.`,
+            ),
+          };
+        }
+        return { writes: [httpSent], response: sent.response, code: codeFileHashes };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
         if (current !== null && currentRoster !== null) {

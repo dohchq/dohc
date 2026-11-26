@@ -475,6 +475,8 @@ import {
   type LocalHttpApprovalStore,
 } from "./workspaces/localHttpApprovalStore";
 import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
+import { readBoundedJson } from "@dohc/service-http";
+import { MAX_HTTP_RESPONSE_BYTES } from "@dohc/workspace-contracts/automations";
 import {
   OutboundWebhookDispatchResponse,
   type HttpStepApprovalWriteInput,
@@ -6796,11 +6798,18 @@ function workspaceHttpWebhookExecutorFor(workspaceId: string): AutomationHttpWeb
           beforeSend: true,
         };
       }
-      const rawBody: unknown = await response.json().catch(() => undefined);
+      const rawBody: unknown = await readBoundedJson(
+        response,
+        MAX_HTTP_RESPONSE_BYTES + 16 * 1024,
+        input.signal,
+      ).catch(() => undefined);
       const parsed = OutboundWebhookDispatchResponse.safeParse(rawBody);
       if (parsed.success) {
         if (parsed.data.ok) {
-          return { ok: true, status: parsed.data.status };
+          const { status, response: fetched } = parsed.data;
+          return fetched === undefined
+            ? { ok: true, status }
+            : { ok: true, status, response: fetched };
         }
         return {
           ok: false,

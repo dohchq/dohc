@@ -95,12 +95,31 @@ export function HttpStepEditor(props: {
   const headersProblem = problem(`step-${stepKey}/headers`);
   const secretHeadersProblem = problem(`step-${stepKey}/secret-headers`);
   const bodyProblem = problem(`step-${stepKey}/body`);
+  const methodProblem = problem(`step-${stepKey}/method`);
+  const asProblem = problem(`step-${stepKey}/as`);
   const bodyKind = step.body === null ? "none" : step.body.kind;
 
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-col gap-1">
         <div className="flex flex-col gap-1">
+          <select
+            aria-label={`Step ${number}, method`}
+            value={step.method}
+            onChange={(event) =>
+              onChange(
+                event.target.value === "GET"
+                  ? { ...step, method: "GET", body: null }
+                  : { ...step, method: "POST" },
+              )
+            }
+            className={selectClass}
+            {...invalid(methodProblem)}
+          >
+            <option value="POST">POST: send data</option>
+            <option value="GET">GET: read data</option>
+          </select>
+          <Problem shown={methodProblem} />
           <select
             aria-label={`Step ${number}, destination type`}
             value={step.url.kind}
@@ -341,140 +360,166 @@ export function HttpStepEditor(props: {
         <Problem shown={secretHeadersProblem} />
       </div>
 
-      <div className="flex flex-col gap-1">
-        <span className="text-[12px] font-medium text-muted">Body</span>
-        <select
-          aria-label={`Step ${number}, body type`}
-          value={bodyKind}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (next === "none") {
-              onChange({ ...step, body: null });
-            } else if (next === "json") {
-              onChange({
-                ...step,
-                body: {
-                  kind: "json",
-                  fields: [
-                    { key: "title", value: { kind: "formula", expression: "record.Title" } },
-                  ],
-                },
-              });
-            } else {
-              onChange({ ...step, body: { kind: "text", template: "" } });
-            }
-          }}
-          className={selectClass}
-        >
-          <option value="none">No body</option>
-          <option value="json">JSON fields</option>
-          <option value="text">Text template</option>
-        </select>
-
-        {step.body?.kind === "json" ? (
-          <div className="flex flex-col gap-1.5 pt-1">
-            {step.body.fields.map((entry, index) => (
-              <div key={`bf-${index}`} className="flex items-start gap-1">
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
-                  <input
-                    aria-label={`Step ${number}, body field ${index + 1} name`}
-                    value={entry.key}
-                    spellCheck={false}
-                    placeholder="Field name"
-                    onChange={(event) =>
-                      onChange({
-                        ...step,
-                        body: {
-                          kind: "json",
-                          fields:
-                            step.body?.kind === "json"
-                              ? step.body.fields.map((row, at) =>
-                                  at === index ? { ...row, key: event.target.value } : row,
-                                )
-                              : [],
-                        },
-                      })
-                    }
-                    className={inputClass}
-                  />
-                  <SimpleValueRow
-                    label={`Step ${number}, body field ${index + 1} value`}
-                    value={entry.value}
-                    onChange={(value) =>
-                      onChange({
-                        ...step,
-                        body: {
-                          kind: "json",
-                          fields:
-                            step.body?.kind === "json"
-                              ? step.body.fields.map((row, at) =>
-                                  at === index ? { ...row, value } : row,
-                                )
-                              : [],
-                        },
-                      })
-                    }
-                  />
-                </div>
-                <IconButton
-                  aria-label={`Remove body field ${index + 1}`}
-                  title="Remove"
-                  onClick={() =>
-                    onChange({
-                      ...step,
-                      body: {
-                        kind: "json",
-                        fields:
-                          step.body?.kind === "json"
-                            ? step.body.fields.filter((_, at) => at !== index)
-                            : [],
-                      },
-                    })
-                  }
-                >
-                  <Trash2 size={13} aria-hidden />
-                </IconButton>
-              </div>
-            ))}
-            <SecondaryButton
-              size="compact"
-              className="flex items-center gap-1 self-start"
-              onClick={() =>
+      {step.method === "GET" ? null : (
+        <div className="flex flex-col gap-1">
+          <span className="text-[12px] font-medium text-muted">Body</span>
+          <select
+            aria-label={`Step ${number}, body type`}
+            value={bodyKind}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (next === "none") {
+                onChange({ ...step, body: null });
+              } else if (next === "json") {
                 onChange({
                   ...step,
                   body: {
                     kind: "json",
-                    fields:
-                      step.body?.kind === "json"
-                        ? [...step.body.fields, { key: "", value: { kind: "literal", value: "" } }]
-                        : [{ key: "", value: { kind: "literal", value: "" } }],
+                    fields: [
+                      { key: "title", value: { kind: "formula", expression: "record.Title" } },
+                    ],
                   },
-                })
+                });
+              } else {
+                onChange({ ...step, body: { kind: "text", template: "" } });
               }
-            >
-              <Plus size={12} aria-hidden />
-              Add field
-            </SecondaryButton>
-          </div>
-        ) : step.body?.kind === "text" ? (
-          <textarea
-            aria-label={`Step ${number}, body text`}
-            rows={3}
-            value={step.body.template}
-            placeholder="Record {record.Title} was added."
-            onChange={(event) =>
-              onChange({ ...step, body: { kind: "text", template: event.target.value } })
-            }
-            className={`${inputClass} resize-y`}
-            {...invalid(bodyProblem)}
-          />
-        ) : null}
-        <Problem shown={bodyProblem} />
-      </div>
+            }}
+            className={selectClass}
+          >
+            <option value="none">No body</option>
+            <option value="json">JSON fields</option>
+            <option value="text">Text template</option>
+          </select>
+
+          {step.body?.kind === "json" ? (
+            <div className="flex flex-col gap-1.5 pt-1">
+              {step.body.fields.map((entry, index) => (
+                <div key={`bf-${index}`} className="flex items-start gap-1">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <input
+                      aria-label={`Step ${number}, body field ${index + 1} name`}
+                      value={entry.key}
+                      spellCheck={false}
+                      placeholder="Field name"
+                      onChange={(event) =>
+                        onChange({
+                          ...step,
+                          body: {
+                            kind: "json",
+                            fields:
+                              step.body?.kind === "json"
+                                ? step.body.fields.map((row, at) =>
+                                    at === index ? { ...row, key: event.target.value } : row,
+                                  )
+                                : [],
+                          },
+                        })
+                      }
+                      className={inputClass}
+                    />
+                    <SimpleValueRow
+                      label={`Step ${number}, body field ${index + 1} value`}
+                      value={entry.value}
+                      onChange={(value) =>
+                        onChange({
+                          ...step,
+                          body: {
+                            kind: "json",
+                            fields:
+                              step.body?.kind === "json"
+                                ? step.body.fields.map((row, at) =>
+                                    at === index ? { ...row, value } : row,
+                                  )
+                                : [],
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                  <IconButton
+                    aria-label={`Remove body field ${index + 1}`}
+                    title="Remove"
+                    onClick={() =>
+                      onChange({
+                        ...step,
+                        body: {
+                          kind: "json",
+                          fields:
+                            step.body?.kind === "json"
+                              ? step.body.fields.filter((_, at) => at !== index)
+                              : [],
+                        },
+                      })
+                    }
+                  >
+                    <Trash2 size={13} aria-hidden />
+                  </IconButton>
+                </div>
+              ))}
+              <SecondaryButton
+                size="compact"
+                className="flex items-center gap-1 self-start"
+                onClick={() =>
+                  onChange({
+                    ...step,
+                    body: {
+                      kind: "json",
+                      fields:
+                        step.body?.kind === "json"
+                          ? [
+                              ...step.body.fields,
+                              { key: "", value: { kind: "literal", value: "" } },
+                            ]
+                          : [{ key: "", value: { kind: "literal", value: "" } }],
+                    },
+                  })
+                }
+              >
+                <Plus size={12} aria-hidden />
+                Add field
+              </SecondaryButton>
+            </div>
+          ) : step.body?.kind === "text" ? (
+            <textarea
+              aria-label={`Step ${number}, body text`}
+              rows={3}
+              value={step.body.template}
+              placeholder="Record {record.Title} was added."
+              onChange={(event) =>
+                onChange({ ...step, body: { kind: "text", template: event.target.value } })
+              }
+              className={`${inputClass} resize-y`}
+              {...invalid(bodyProblem)}
+            />
+          ) : null}
+          <Problem shown={bodyProblem} />
+        </div>
+      )}
+
+      <label className="flex flex-col gap-1">
+        <span className="text-[12px] font-medium text-muted">Save the answer as</span>
+        <input
+          aria-label={`Step ${number}, save the answer as`}
+          value={step.as ?? ""}
+          spellCheck={false}
+          placeholder="Optional, such as stats"
+          onChange={(event) =>
+            onChange({ ...step, as: event.target.value === "" ? null : event.target.value })
+          }
+          className={`${inputClass} font-mono text-[12px]`}
+          {...invalid(asProblem)}
+        />
+        <Problem shown={asProblem} />
+        {step.as === null ? null : (
+          <span className="text-[12px] text-muted">
+            dohc reads the JSON answer, up to 192 KiB. Later steps use it in formulas, such as{" "}
+            <code className="font-mono">{step.as}.count</code>.
+          </span>
+        )}
+      </label>
 
       <StatusLine tone="muted" icon={Info} label="Confirmation required">
-        POST only. Confirm this step with Allow before it sends. Runs only while this Collection is
-        private.
+        Confirm this step with Allow before it sends. Runs only while this Collection is private.
       </StatusLine>
     </div>
   );

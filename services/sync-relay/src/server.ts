@@ -290,6 +290,7 @@ export interface CreateSyncRelayHandlerOptions {
   outboundWebhookLimiters?: OutboundWebhookLimiters;
   resolveOutboundDestination?: OutboundWebhookExecutionDependencies["resolveDestination"];
   sendOutboundRequest?: OutboundWebhookExecutionDependencies["sendRequest"];
+  readOutboundRequest?: OutboundWebhookExecutionDependencies["readRequest"];
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
@@ -425,6 +426,7 @@ export function createSyncRelayHandler({
   outboundWebhookLimiters = createOutboundWebhookLimiters(),
   resolveOutboundDestination,
   sendOutboundRequest,
+  readOutboundRequest,
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -838,6 +840,7 @@ export function createSyncRelayHandler({
     nowMs,
     ...(resolveOutboundDestination ? { resolveDestination: resolveOutboundDestination } : {}),
     ...(sendOutboundRequest ? { sendRequest: sendOutboundRequest } : {}),
+    ...(readOutboundRequest ? { readRequest: readOutboundRequest } : {}),
   };
   const respondToOutboundWebhooks = createOutboundWebhookRoutes(outboundWebhookDeps);
   const incomingWebhookLimiters = createIncomingWebhookLimiters();

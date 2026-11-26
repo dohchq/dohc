@@ -184,6 +184,7 @@ export const MAX_HTTP_HEADER_VALUE_BYTES = 2_048;
 const MAX_HTTP_SECRET_PREFIX_LENGTH = 64;
 export const MAX_HTTP_TOTAL_HEADER_BYTES = 8_192;
 export const MAX_HTTP_BODY_BYTES = 64 * 1024;
+export const MAX_HTTP_RESPONSE_BYTES = 192 * 1024;
 export const AUTOMATION_HTTP_USER_AGENT = "dohc-automation/1";
 export const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/u;
 export const HTTP_HEADER_VALUE_PATTERN = /^[\x20-\x7e]*$/u;
@@ -383,16 +384,18 @@ type AutomationStep =
    */
   | { kind: "wake-agent"; text: string; person: string }
   /**
-   * A personal step (ADR 0012): sends a status-only POST webhook to an
-   * owner-confirmed static HTTPS destination in a private solo Collection.
+   * A personal step (ADR 0012): sends a request to an owner-confirmed HTTPS
+   * destination in a private solo Collection. Without `as` it reads only the
+   * status. With `as` it reads the JSON response and binds it as a value.
    */
   | {
       kind: "http";
       url: AutomationHttpTarget;
-      method: "POST";
+      method: "POST" | "GET";
       headers: AutomationHttpHeader[];
       secretHeaders: AutomationHttpSecretHeader[];
       body: AutomationHttpBody | null;
+      as: string | null;
     }
   | { kind: "run"; code: string; as: string | null }
   /** `file` is relative to the Collection's folder. */
@@ -490,6 +493,7 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "invalid-operation-name",
   "invalid-http-url",
   "invalid-http-method",
+  "http-get-with-body",
   "invalid-secret-name",
   "invalid-http-header-name",
   "forbidden-http-header",
@@ -586,7 +590,7 @@ const STEP_OPTIONS = {
   post: ["group"],
   "direct-message": ["to"],
   "wake-agent": ["person"],
-  http: ["method", "headers", "secret-headers", "body"],
+  http: ["method", "headers", "secret-headers", "body", "as"],
   run: ["as"],
   "run-file": ["as"],
 } as const satisfies Record<AutomationStep["kind"], readonly string[]>;
@@ -1456,12 +1460,13 @@ function readStep(
         issues.push({ code: "too-many-http-steps", path });
       }
       const url = readHttpTarget(argument, argumentPath, issues);
-      const method = "POST" as const;
-      if (entries.has("method")) {
-        const rawMethod = entries.get("method");
-        if (rawMethod !== "POST") {
-          issues.push({ code: "invalid-http-method", path: option("method") });
-        }
+      const rawMethod = entries.get("method") ?? "POST";
+      const method = rawMethod === "GET" ? "GET" : "POST";
+      if (rawMethod !== "POST" && rawMethod !== "GET") {
+        issues.push({ code: "invalid-http-method", path: option("method") });
+      }
+      if (method === "GET" && entries.has("body")) {
+        issues.push({ code: "http-get-with-body", path: option("body") });
       }
       const seenHeaders = new Set<string>();
       const headers = readHttpHeaders(
@@ -1484,9 +1489,10 @@ function readStep(
         issues.push({ code: "too-many-http-headers", path });
       }
       const body = readHttpBody(entries.get("body"), option("body"), issues);
+      const as = bindName(entries.get("as"), option("as"), "value", scope, context);
       return url === null || headers === null || secretHeaders === null || body === undefined
         ? null
-        : { kind, url, method, headers, secretHeaders, body };
+        : { kind, url, method, headers, secretHeaders, body, as };
     }
     case "run": {
       const code = readText(argument, argumentPath, MAX_INLINE_CODE_LENGTH, issues);
@@ -1835,6 +1841,7 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
         step.kind,
         step.url.kind === "literal" ? step.url.url : new Map([["secret", step.url.secret]]),
         [
+          ["method", step.method === "GET" ? "GET" : null],
           [
             "headers",
             step.headers.length === 0
@@ -1863,6 +1870,7 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
                 ? step.body.template
                 : inputYaml(step.body.fields),
           ],
+          ["as", step.as],
         ],
       );
     case "run":

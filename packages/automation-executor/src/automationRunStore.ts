@@ -352,6 +352,8 @@ export const WriteSchema = z.union([
     target: z.string(),
     status: z.number().int(),
     deliveryId: z.string(),
+    method: z.literal("GET").optional(),
+    fetched: z.literal(true).optional(),
   }),
 ]);
 // Effect application time excludes the progress append. The count is per
@@ -361,6 +363,8 @@ const AppliedSchema = z.object({
   writes: z.array(WriteSchema),
   writeMs: z.number().nonnegative().optional(),
   writeCount: z.number().int().nonnegative().optional(),
+  response: JsonValueSchema.optional(),
+  code: z.array(z.object({ file: z.string(), sha256: z.string() })).optional(),
 });
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.
@@ -1525,7 +1529,11 @@ export function createAutomationRunStore(
     parseRun(await readBounded(join(folder, `${name}${RUN_SUFFIX}`)), name, automationId);
   const runText = (run: StoredRun) => {
     const head = `${JSON.stringify({ ...header(run), kind: "header" })}\n`;
-    const progress = progressText(run);
+    const progress = progressText(
+      run.superseded || run.outcome?.state === "done"
+        ? { ...run, applied: run.applied.map(({ response: _response, ...applied }) => applied) }
+        : run,
+    );
     // Replacing null with any finite JSON timestamp grows by fewer than 32 bytes.
     const headerLimit = MAX_RUN_HEADER_BYTES - (run.finishedAtMs === null ? 32 : 0);
     if (

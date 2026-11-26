@@ -12,6 +12,8 @@ import {
   computeHttpStepApprovalDigest,
   sanitizeHttpFailureReason,
   workspaceSecretApprovalBinding,
+  scrubSecretsFromJson,
+  secretUrlScrubValues,
 } from "./httpStepApprovals";
 
 describe("http automation steps", () => {
@@ -118,7 +120,7 @@ automations:
 `,
       ],
       [
-        "GET method",
+        "DELETE method",
         `version: 1
 automations:
   - id: a
@@ -126,7 +128,7 @@ automations:
     when: record-added
     do:
       - http: https://hooks.example.com/events
-        method: GET
+        method: DELETE
 `,
       ],
       [
@@ -229,6 +231,7 @@ automations:
       headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
       secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
       body: { kind: "text", template: "Added {record.Title}" },
+      as: null,
     };
 
     const base = computeHttpStepApprovalDigest({
@@ -318,6 +321,7 @@ automations:
       headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
       secretHeaders: [],
       body: null,
+      as: null,
     };
     const digest = computeHttpStepApprovalDigest({
       collectionId: "col-obj-1",
@@ -358,6 +362,7 @@ automations:
       headers: [],
       secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
       body: null,
+      as: null,
     };
     const digestWith = (
       urlSecret: Parameters<typeof workspaceSecretApprovalBinding>[0] | null,
@@ -413,5 +418,104 @@ automations:
     expect(scrubbed).not.toContain("SECRET");
     expect(scrubbed).not.toContain("sk_live_123456");
     expect(scrubbed).toContain("[redacted]");
+  });
+
+  it("scrubs secret values anywhere in a fetched JSON response and keeps its keys and other values", () => {
+    expect(
+      scrubSecretsFromJson(
+        {
+          headers: { Authorization: "Bearer sk_live_123456" },
+          echoed: ["sk_live_123456", 3, true, null],
+          empty: null,
+        },
+        ["sk_live_123456"],
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        headers: { Authorization: "Bearer [redacted]" },
+        echoed: ["[redacted]", 3, true, null],
+        empty: null,
+      },
+    });
+    expect(scrubSecretsFromJson(null, ["sk_live_123456"])).toEqual({ ok: true, value: null });
+  });
+
+  it("refuses a fetched answer with a secret in a field name, or one over the size limit as JSON", () => {
+    expect(
+      scrubSecretsFromJson({ list: [{ "Bearer sk_live_123456": 1 }] }, ["sk_live_123456"]),
+    ).toEqual({
+      ok: false,
+      reason: "The answer has a secret in a field name, so dohc did not keep it.",
+    });
+    const grown = scrubSecretsFromJson(
+      Array.from({ length: 50_000 }, () => "sk"),
+      ["sk"],
+    );
+    expect(grown).toEqual({
+      ok: false,
+      reason: "The answer is 635 KiB as JSON, over the 192 KiB limit.",
+    });
+    expect(scrubSecretsFromJson({ "[redacted]": 1 }, ["[redacted]"])).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("redacts every secret span once, merging overlaps, never inside a marker it already wrote", () => {
+    expect(scrubSecretsFromJson({ x: "red tape" }, ["d", "re"])).toEqual({
+      ok: true,
+      value: { x: "[redacted] tape" },
+    });
+    expect(
+      sanitizeHttpFailureReason("got Bearer sk_live_123456789 back", [
+        "sk_live_123456789",
+        "Bearer sk_live_",
+      ]),
+    ).toBe("got [redacted] back");
+    expect(sanitizeHttpFailureReason("a.b and a*b", ["a.b"])).toBe("[redacted] and a*b");
+  });
+
+  it("scrubs a secret echoed trimmed, decoded, or as a number", () => {
+    const secrets = [
+      "tok_123456 ",
+      "84720193",
+      ...secretUrlScrubValues("https://hooks.example.com/services/T01%2FB02xyz?key=sk_live_abcdef"),
+    ];
+    expect(
+      scrubSecretsFromJson(
+        { auth: "Bearer tok_123456", pin: 84720193, path: "/services/T01/B02xyz", count: 3 },
+        secrets,
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        auth: "Bearer [redacted]",
+        pin: "[redacted]",
+        path: "/[redacted]/[redacted]",
+        count: 3,
+      },
+    });
+  });
+
+  it("scrubs every path part of a secret URL but refuses a field name only for a token", () => {
+    const scrubValues = secretUrlScrubValues(
+      "https://api.example.com/v1/customers/qdfrgkmwnpvbzstx?api_key=sk_live_12345678",
+    );
+    expect(
+      scrubSecretsFromJson(
+        { customers: [{ path: "/v1/customers/qdfrgkmwnpvbzstx", key: "sk_live_12345678" }] },
+        scrubValues,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { customers: [{ path: "/v1/[redacted]/[redacted]", key: "[redacted]" }] },
+    });
+    expect(scrubSecretsFromJson({ sk_live_12345678: 1 }, scrubValues)).toMatchObject({ ok: false });
+    expect(
+      scrubSecretsFromJson(
+        { raw: "sk%2Flive%2F12345678", plain: "sk/live/12345678" },
+        secretUrlScrubValues("https://api.example.com/v1?api_key=sk%2Flive%2F12345678"),
+      ),
+    ).toEqual({ ok: true, value: { raw: "[redacted]", plain: "[redacted]" } });
   });
 });
