@@ -1150,6 +1150,25 @@ describe("owner app publication", () => {
       },
     );
 
+    it("warns about a likely secret token before a first approval", async () => {
+      const answers = local();
+      api.publishOwnerApp.mockImplementation(async (request) =>
+        request.action === "prepareLocal"
+          ? {
+              ...prepared,
+              local: true,
+              capabilities: [approvedAccess],
+              likelySecrets: [{ path: "trip/main.tsx", prefix: "sk_live_" }],
+            }
+          : answers(request),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(screen.getByTestId("app-publication-likely-secrets").textContent).toContain(
+        "trip/main.tsx has a Stripe live secret key",
+      );
+    });
     it("marks newly added fields when changed source widens createFields on an existing operation", async () => {
       const restrictedSubmit = {
         ...submitOperation,

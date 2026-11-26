@@ -5,7 +5,7 @@ import { AppAccessSummary } from "./AppPermissionsCard";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
-import { openLocalApp } from "./OwnerAppPublication";
+import { LikelySecretsWarning, openLocalApp } from "./OwnerAppPublication";
 import { CopyButton } from "./ui/CopyButton";
 import {
   EmptyState,
@@ -126,12 +126,17 @@ export function PersonalAppsDialog(props: {
           </IconButton>
         </div>
         {review ? (
-          <AppAccessSummary
-            capabilities={review.capabilities}
-            approved={null}
-            failed={false}
-            onRetry={() => undefined}
-          />
+          <>
+            {review.likelySecrets.length > 0 ? (
+              <LikelySecretsWarning secrets={review.likelySecrets} />
+            ) : null}
+            <AppAccessSummary
+              capabilities={review.capabilities}
+              approved={null}
+              failed={false}
+              onRetry={() => undefined}
+            />
+          </>
         ) : (
           <>
             <div className="flex items-center gap-1 rounded-lg bg-bg py-1 pr-1 pl-3">

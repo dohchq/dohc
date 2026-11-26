@@ -28,7 +28,7 @@ const capability = {
   ],
 };
 
-it("opens the folder, reviews an app's access, approves it, and opens it in the browser", async () => {
+it("opens the folder, reviews an app's access and likely secrets, approves it, and opens it in the browser", async () => {
   let approved = false;
   const requests: OwnerAppPublicationRequest[] = [];
   const publishOwnerApp = vi.fn(async (request: OwnerAppPublicationRequest) => {
@@ -66,7 +66,7 @@ it("opens the folder, reviews an app's access, approves it, and opens it in the 
           versionId: "main",
           sourceRevision: hash("d"),
           sourcePaths: ["trip/main.ts"],
-          likelySecrets: [],
+          likelySecrets: [{ path: "trip/main.ts", prefix: "ghp_" }],
           capabilities: [capability],
           externalNetwork: true,
           local: true,
@@ -99,6 +99,9 @@ it("opens the folder, reviews an app's access, approves it, and opens it in the 
   await user.click(screen.getByRole("button", { name: "Review" }));
   expect(await screen.findByRole("heading", { name: "Approve trip" })).toBeTruthy();
   expect(screen.getByTestId("app-access").textContent).toContain("Trips");
+  expect(screen.getByTestId("app-publication-likely-secrets").textContent).toContain(
+    "trip/main.ts has a GitHub token",
+  );
   await user.click(screen.getByRole("button", { name: "Approve" }));
   await user.click(await screen.findByRole("button", { name: "Open" }));
   await waitFor(() =>

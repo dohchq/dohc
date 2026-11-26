@@ -33,7 +33,7 @@ function harness(
     packageMap: {},
     backend,
   };
-  const sources = new Map([
+  const sources = new Map<string, string | Uint8Array>([
     ["app/app.publish.json", JSON.stringify(declaration)],
     ["app/main.ts", "document.body.textContent = 'Register';"],
     [
@@ -436,6 +436,17 @@ describe("app without app.publish.json", () => {
     const { likelySecrets } = await h.prepare();
     expect(likelySecrets).toEqual([{ path: "app/app.js", prefix: "ghp_" }]);
     expect(JSON.stringify(likelySecrets)).not.toContain(token);
+  });
+
+  it("does not read a binary source file for likely secret tokens", async () => {
+    const h = harness();
+    page(h, {
+      "app/index.html": '<!doctype html><h1>Trip</h1><img src="logo.png">',
+    });
+    h.sources.set("app/logo.png", new TextEncoder().encode(`PNG ghp_${"a".repeat(30)}`));
+    const { likelySecrets } = await h.prepare();
+    expect(h.capturePaths.flat()).toContain("app/logo.png");
+    expect(likelySecrets).toEqual([]);
   });
 
   it("names the missing page before capturing anything", async () => {

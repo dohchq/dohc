@@ -182,7 +182,8 @@ type ControlProps = PublicationProps & {
   testId: string;
 };
 
-function LikelySecretsWarning(props: { secrets: Prepared["likelySecrets"] }) {
+/** Lists app source files that hold a likely secret token. It never blocks the review. */
+export function LikelySecretsWarning(props: { secrets: Prepared["likelySecrets"] }) {
   const count = props.secrets.length;
   return (
     <div
@@ -192,8 +193,8 @@ function LikelySecretsWarning(props: { secrets: Prepared["likelySecrets"] }) {
       <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
       <div className="min-w-0 space-y-1">
         <p className="m-0 text-ink">
-          {count === 1 ? "1 file holds" : `${count} files hold`} a likely secret token. Move each
-          token to a .env file before you publish.
+          {count === 1 ? "1 file holds" : `${count} files hold`} a likely secret token. Remove each
+          token from the app's source.
         </p>
         <ul className="m-0 list-none p-0">
           {props.secrets.map(({ path, prefix }) => (
@@ -1377,6 +1378,9 @@ function PublicationDialog(
                     </p>
                   ) : null,
                 )}
+              {needsCandidate && localCandidate?.likelySecrets.length ? (
+                <LikelySecretsWarning secrets={localCandidate.likelySecrets} />
+              ) : null}
               <AppAccessSummary
                 capabilities={boxCapabilities}
                 approved={changed && approval ? approvedCapabilities(approval) : null}

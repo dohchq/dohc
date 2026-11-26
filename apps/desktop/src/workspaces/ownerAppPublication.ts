@@ -356,8 +356,7 @@ function staticDeclaration(
   };
 }
 
-/** A source file that holds a likely secret token, by path and the token's prefix. */
-export interface AppSourceSecret {
+interface AppSourceSecret {
   path: string;
   prefix: SecretPrefix;
 }
@@ -655,8 +654,12 @@ async function prepareAppSources(
     );
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
+  const textPaths = new Set(
+    metadata.files.filter((file) => file.contentKind === "text").map((file) => file.path),
+  );
   const decoder = new TextDecoder();
   const likelySecrets = selected.files.flatMap((file) => {
+    if (!textPaths.has(file.path)) return [];
     const prefix = likelySecretPrefix(decoder.decode(file.bytes));
     return prefix ? [{ path: file.path, prefix }] : [];
   });

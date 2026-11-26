@@ -9,7 +9,7 @@ export const SECRET_PREFIXES = [
 
 export type SecretPrefix = (typeof SECRET_PREFIXES)[number];
 
-const LIKELY_SECRET = /\b(phx_|sk_live_|ghp_|github_pat_|xoxb-|xoxp-)[A-Za-z0-9_-]{20,}/;
+const LIKELY_SECRET = new RegExp(String.raw`\b(${SECRET_PREFIXES.join("|")})[A-Za-z0-9_-]{20,}`);
 
 /** The prefix of the first likely live secret token in `text`, or null. It never returns the token. */
 export function likelySecretPrefix(text: string): SecretPrefix | null {

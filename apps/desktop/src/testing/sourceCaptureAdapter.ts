@@ -79,7 +79,7 @@ export function sourceCaptureAdapter(
             return {
               path,
               objectId: path,
-              contentKind: "text",
+              contentKind: typeof sources.get(path) === "string" ? "text" : "binary",
               sha256: hash,
               byteLength: bytes.byteLength,
               latestMomentId: "m",
