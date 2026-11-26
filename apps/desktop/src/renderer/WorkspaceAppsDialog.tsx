@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, useState } from "react";
 import { AppWindow, X } from "lucide-react";
 import type {
   MemberAppInspectResult,
-  MemberAppsListResult,
   WorkspaceAppRow,
 } from "@dohc/workspace-contracts/member-apps";
 import { bridge } from "./bridge";
@@ -27,7 +26,6 @@ type Review = { row: WorkspaceAppRow; app: MemberAppInspectResult };
 /** Apps members open in this workspace: official apps first, then apps members shared. */
 export function WorkspaceAppsDialog(props: {
   workspaceId: string;
-  moderates: boolean;
   canCopy: boolean;
   onClose(): void;
   reportError(fallback: string, error: unknown, retry?: () => void): void;
@@ -49,16 +47,14 @@ export function WorkspaceAppsDialog(props: {
     key: JSON.stringify([workspaceId, reload]),
     load: async (signal) => {
       const apps: WorkspaceAppRow[] = [];
-      let first: MemberAppsListResult | null = null;
       let cursor: string | undefined;
       do {
         const page = await api.memberAppsList({ workspaceId, ...(cursor ? { cursor } : {}) });
         signal.throwIfAborted();
-        first ??= page;
         apps.push(...page.apps);
         cursor = page.nextCursor ?? undefined;
       } while (cursor);
-      return { apps, membersCanShare: first.membersCanShare };
+      return apps;
     },
   });
 
@@ -78,8 +74,12 @@ export function WorkspaceAppsDialog(props: {
       setBusy(null);
     }
   };
-  const open = (url: string) => void api.openExternalUrl({ url });
-  const membersCanShare = listed.value?.membersCanShare;
+  const open = (url: string) =>
+    void api
+      .openExternalUrl({ url })
+      .catch((cause: unknown) =>
+        props.reportError("dohc could not open your browser.", cause, () => open(url)),
+      );
 
   return (
     <Overlay
@@ -182,87 +182,61 @@ export function WorkspaceAppsDialog(props: {
           <RetryRow testId="workspace-apps-retry" onRetry={listed.retry} />
         ) : !listed.value ? (
           <SkeletonRows rows={2} label="Loading workspace apps…" />
-        ) : (
-          <>
-            {props.moderates && membersCanShare !== undefined ? (
-              <label className="flex items-center gap-2 text-[13px] text-ink">
-                <input
-                  type="checkbox"
-                  data-testid="workspace-apps-members-can-share"
-                  checked={membersCanShare}
-                  disabled={busy !== null}
-                  onChange={(event) => {
-                    const next = event.target.checked;
-                    void run("sharing", "dohc could not change who can share apps.", async () => {
-                      await api.memberAppSharing({ workspaceId, membersCanShare: next });
-                      setReload((value) => value + 1);
-                    });
-                  }}
-                />
-                Members can share apps
-              </label>
-            ) : null}
-            {listed.value.apps.length ? (
-              <ul className="m-0 flex min-h-0 list-none flex-col overflow-y-auto p-0">
-                {listed.value.apps.map((row) => (
-                  <li
-                    key={row.publicationId}
-                    data-testid="workspace-app-row"
-                    className="flex items-center gap-2 py-1.5"
+        ) : listed.value.length ? (
+          <ul className="m-0 flex min-h-0 list-none flex-col overflow-y-auto p-0">
+            {listed.value.map((row) => (
+              <li
+                key={row.publicationId}
+                data-testid="workspace-app-row"
+                className="flex items-center gap-2 py-1.5"
+              >
+                <AppWindow size={14} aria-hidden className="shrink-0 text-muted" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-[13px] text-ink">{row.name}</span>
+                  <span className="truncate text-[12px] text-muted">
+                    {row.kind === "workspace"
+                      ? "Official app"
+                      : `Shared by ${row.authorName ?? "a member"}`}
+                  </span>
+                </span>
+                {row.consent === "changed" ? <Pill tone="warning">Changed</Pill> : null}
+                {row.canWithdraw ? (
+                  <SecondaryButton
+                    size="compact"
+                    disabled={busy !== null}
+                    onClick={() => setWithdrawing(row)}
                   >
-                    <AppWindow size={14} aria-hidden className="shrink-0 text-muted" />
-                    <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-[13px] text-ink">{row.name}</span>
-                      <span className="truncate text-[12px] text-muted">
-                        {row.kind === "workspace"
-                          ? "Official app"
-                          : `Shared by ${row.authorName ?? "a member"}`}
-                      </span>
-                    </span>
-                    {row.consent === "changed" ? <Pill tone="warning">Changed</Pill> : null}
-                    {row.canWithdraw ? (
-                      <SecondaryButton
-                        size="compact"
-                        disabled={busy !== null}
-                        onClick={() => setWithdrawing(row)}
-                      >
-                        Withdraw
-                      </SecondaryButton>
-                    ) : null}
-                    {row.kind === "member" ? (
-                      <SecondaryButton
-                        size="compact"
-                        disabled={busy !== null}
-                        onClick={() =>
-                          void run(
-                            row.publicationId,
-                            `dohc could not load ${row.name}.`,
-                            async () => {
-                              const app = await api.memberAppInspect({
-                                workspaceId,
-                                publicationId: row.publicationId,
-                              });
-                              setCopyName(`${row.name}-copy`);
-                              setCopied(null);
-                              setReview({ row, app });
-                            },
-                          )
-                        }
-                      >
-                        {busy === row.publicationId ? "Loading…" : "Review"}
-                      </SecondaryButton>
-                    ) : row.url ? (
-                      <PrimaryButton size="compact" onClick={() => open(row.url!)}>
-                        Open in browser
-                      </PrimaryButton>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <EmptyState icon={AppWindow} title="No apps are shared in this workspace yet." />
-            )}
-          </>
+                    Withdraw
+                  </SecondaryButton>
+                ) : null}
+                {row.kind === "member" ? (
+                  <SecondaryButton
+                    size="compact"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      void run(row.publicationId, `dohc could not load ${row.name}.`, async () => {
+                        const app = await api.memberAppInspect({
+                          workspaceId,
+                          publicationId: row.publicationId,
+                        });
+                        setCopyName(`${row.name}-copy`);
+                        setCopied(null);
+                        setReview({ row, app });
+                      })
+                    }
+                  >
+                    {busy === row.publicationId ? "Loading…" : "Review"}
+                  </SecondaryButton>
+                ) : row.url ? (
+                  <PrimaryButton size="compact" onClick={() => open(row.url!)}>
+                    Open in browser
+                  </PrimaryButton>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState icon={AppWindow} title="No apps are shared in this workspace yet." />
         )}
         {withdrawing ? (
           <div

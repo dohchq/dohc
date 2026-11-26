@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import { memberAppSlugOf, memberAppUpload, writeForkedApp } from "./memberAppsActions";
+import {
+  createMemberAppsActions,
+  memberAppSlugOf,
+  memberAppUpload,
+  writeForkedApp,
+} from "./memberAppsActions";
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 const sha256 = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -89,6 +94,20 @@ describe("writeForkedApp", () => {
     expect(await readdir(folder)).toEqual([]);
   });
 
+  it("copies source under a folder name a workspace path can't start with", async () => {
+    const folder = await personalFolder();
+    await writeForkedApp(folder, "copy", [file("trip/shared-with-me/main.ts", "x")]);
+    expect(await readFile(join(folder, "copy", "shared-with-me", "main.ts"), "utf8")).toBe("x");
+  });
+
+  it("refuses a copy name dohc can't build", async () => {
+    const folder = await personalFolder();
+    await expect(writeForkedApp(folder, "my trip", [file("trip/main.ts", "x")])).rejects.toThrow(
+      "lowercase letters",
+    );
+    expect(await readdir(folder)).toEqual([]);
+  });
+
   it("refuses a path that leaves the app's folder", async () => {
     const folder = await personalFolder();
     await expect(writeForkedApp(folder, "copy", [file("trip/../x.ts", "x")])).rejects.toThrow(
@@ -102,8 +121,37 @@ describe("writeForkedApp", () => {
 });
 
 describe("memberAppSlugOf", () => {
-  it("names the app after its folder", () => {
-    expect(memberAppSlugOf("Trip Board")).toBe("trip-board");
-    expect(() => memberAppSlugOf("!!!")).toThrow("lowercase letters");
+  it("names the app after its folder, and never gives two folders one name", () => {
+    expect(memberAppSlugOf("trip-board")).toBe("trip-board");
+    expect(() => memberAppSlugOf("trip_board")).toThrow("Rename the folder trip_board");
+    expect(() => memberAppSlugOf("Trip Board")).toThrow("lowercase letters");
+  });
+});
+
+describe("createMemberAppsActions", () => {
+  it("sends the relay only the sharing switch, whatever else the caller passed", async () => {
+    const sent: unknown[] = [];
+    const actions = createMemberAppsActions({
+      remoteForWorkspace: async () => ({ credentials: "token", credentialGeneration: 1 }),
+      remoteForJoinedWorkspace: async () => ({ credentials: "token", credentialGeneration: 1 }),
+      currentCredentialGeneration: () => 1,
+      relayResponse: async (_credentials, _path, init) => {
+        sent.push(JSON.parse(String(init.body)));
+        return Response.json({ membersCanShare: true });
+      },
+      serverAnswered: () => undefined,
+      personalFolder: () => null,
+      preparePersonalApp: async () => {
+        throw new Error("unused");
+      },
+    });
+    const operation = {
+      workspace: { workspaceId: "ws", rootPath: "/w" },
+      signal: new AbortController().signal,
+      assertCurrent: () => undefined,
+    };
+    const input = { membersCanShare: true, cwd: "/w", actor: "agent" };
+    await expect(actions.sharing(operation, input)).resolves.toEqual({ membersCanShare: true });
+    expect(sent).toEqual([{ membersCanShare: true }]);
   });
 });

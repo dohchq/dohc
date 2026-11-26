@@ -320,11 +320,16 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
         .click();
       return target.getByTestId("workspace-apps");
     };
-    let ownerApps = await openWorkspaceApps(page);
-    const allow = ownerApps.getByTestId("workspace-apps-members-can-share");
-    await expect(allow).not.toBeChecked();
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("general")).click();
+    await page.getByTestId(settingsNavPin("members")).click();
+    const allow = page
+      .getByTestId("settings-members-app-sharing")
+      .getByRole("switch", { name: "Members can share apps" });
+    await expect(allow).toHaveAttribute("aria-checked", "false");
     await allow.click();
-    await expect(allow).toBeChecked();
+    await expect(allow).toHaveAttribute("aria-checked", "true");
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
     await share.click();
     await expect(dialog.getByText("Shared trip-board with the workspace's members.")).toBeVisible({
       timeout: 60_000,
@@ -385,9 +390,7 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     expect(consent.status).toBe(403);
 
     // --- The owner withdraws Ana's app --------------------------------------
-    await page.keyboard.press("Escape");
-    await expect(ownerApps).toHaveCount(0);
-    ownerApps = await openWorkspaceApps(page);
+    const ownerApps = await openWorkspaceApps(page);
     const ownerRow = ownerApps.getByTestId("workspace-app-row").filter({ hasText: "trip-board" });
     await expect(ownerRow).toBeVisible();
     for (const theme of ["Light", "Dark"] as const) {

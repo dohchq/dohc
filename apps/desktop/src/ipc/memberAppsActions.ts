@@ -56,14 +56,16 @@ export async function writeForkedApp(
   appRoot: string,
   files: ReadonlyArray<{ path: string; bytes: Uint8Array; sha256: string }>,
 ): Promise<void> {
-  if (!isShareablePath(appRoot) || appRoot.includes("/"))
-    throw new Error(`${appRoot} is not a folder name you can use.`);
+  if (!MemberAppSlug.safeParse(appRoot).success)
+    throw new Error(
+      `Name the copy with lowercase letters, digits, or hyphens. ${appRoot} is not a folder name you can use.`,
+    );
   const roots = new Set(files.map((file) => file.path.split("/", 1)[0]));
   if (roots.size !== 1)
     throw new Error("This app's source spans more than one folder, so dohc cannot copy it.");
   const placed = files.map((file) => {
     const rest = file.path.slice(file.path.indexOf("/") + 1);
-    if (!file.path.includes("/") || !isShareablePath(rest))
+    if (!file.path.includes("/") || !isShareablePath(`${appRoot}/${rest}`))
       throw new Error(`${file.path} is not a file dohc can copy.`);
     if (sha256(file.bytes) !== file.sha256)
       throw new Error(`${file.path} doesn't match the app the author shared. Try again.`);
@@ -88,15 +90,13 @@ export async function writeForkedApp(
   }
 }
 
-/** The name a Personal app keeps in the workspace when the caller names none. */
+/** The name a Personal app keeps in the workspace when the caller names none: its folder's own name, so two folders never share one. */
 export function memberAppSlugOf(appRoot: string): string {
-  const slug = appRoot
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  const parsed = MemberAppSlug.safeParse(slug);
-  if (!parsed.success) throw new Error("Name this app with lowercase letters, digits, or hyphens.");
+  const parsed = MemberAppSlug.safeParse(appRoot);
+  if (!parsed.success)
+    throw new Error(
+      `Rename the folder ${appRoot} with lowercase letters, digits, or hyphens, or choose a name for the app.`,
+    );
   return parsed.data;
 }
 
@@ -327,7 +327,10 @@ export function createMemberAppsActions<
 
     sharing: (operation: Operation, input: { membersCanShare: boolean }) =>
       run(operation, "change app sharing", async (request) => {
-        const { body } = await request("/member-apps/settings", { method: "POST", body: input });
+        const { body } = await request("/member-apps/settings", {
+          method: "POST",
+          body: { membersCanShare: input.membersCanShare },
+        });
         const membersCanShare = (body as { membersCanShare?: unknown } | null)?.membersCanShare;
         if (typeof membersCanShare !== "boolean") throw unreadable("change app sharing");
         return { membersCanShare };

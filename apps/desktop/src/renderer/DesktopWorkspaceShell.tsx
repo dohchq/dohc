@@ -10468,7 +10468,6 @@ function WorkspaceShell(props: {
                         {workspaceAppsOpen ? (
                           <WorkspaceAppsDialog
                             workspaceId={props.workspace.workspaceId}
-                            moderates={!shareView || membershipRole === "admin"}
                             canCopy={!!shareView?.membership}
                             onClose={() => setWorkspaceAppsOpen(false)}
                             reportError={reportShellError}

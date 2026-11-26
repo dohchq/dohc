@@ -46,6 +46,7 @@ import type { CloudSettings } from "./CloudSyncSettings";
 import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 import { joinedByAnother } from "../../ipc/joinedAccountWords";
 import { FolderAccessSettings } from "./FolderAccessSettings";
+import { MemberAppSharingSetting } from "./MemberAppSharingSetting";
 import { invitationResendWords } from "../sharePerson";
 
 // Resolves with the relay's answer, or null when the change didn't go through.
@@ -448,6 +449,14 @@ export function MembersSettings(props: {
           onOpenSync={props.onOpenSync}
           run={run}
           {...(props.onMessage ? { onMessage: props.onMessage } : {})}
+          appSharing={
+            shownView && shownView.viewer.role !== "member" ? (
+              <MemberAppSharingSetting
+                workspaceId={workspaceId}
+                {...(props.onError ? { onError: props.onError } : {})}
+              />
+            ) : null
+          }
         />
       </MembersGateView>
     </div>
@@ -543,6 +552,7 @@ export function MembersLoadView(props: {
   onOpenSync: () => void;
   run: RunMembers;
   onMessage?: (memberId: string) => void;
+  appSharing?: ReactNode;
 }) {
   return (
     <>
@@ -603,6 +613,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
           run={props.run}
           reload={props.onRetry}
           onMessage={props.onMessage}
+          appSharing={props.appSharing}
         />
       );
   }
@@ -691,6 +702,7 @@ export function MembersPage(props: {
   run: RunMembers;
   reload: () => void;
   onMessage?: (memberId: string) => void;
+  appSharing?: ReactNode;
 }) {
   const { view, running, run, onMessage } = props;
   const role = view.viewer.role;
@@ -902,6 +914,8 @@ export function MembersPage(props: {
           />
         </SettingsSection>
       )}
+
+      {props.appSharing}
 
       {view.folderRules !== null ? (
         <FolderAccessSettings
