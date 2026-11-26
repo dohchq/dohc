@@ -2836,6 +2836,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspaceSecretStorage.deleteWorkspaceSecret(this, workspaceId, ownerUserId, name);
   }
 
+  listWorkspaceSecretSeals() {
+    return workspaceSecretStorage.listWorkspaceSecretSeals(this);
+  }
+
+  replaceWorkspaceSecretSeal(
+    seal: workspaceSecretStorage.WorkspaceSecretSeal,
+    next: { readonly keyId: string; readonly sealedValue: string },
+  ) {
+    return workspaceSecretStorage.replaceWorkspaceSecretSeal(this, seal, next);
+  }
+
   listWorkspaceHttpStepApprovals(workspaceId: string) {
     return outboundWebhookStorage.listWorkspaceHttpStepApprovals(this, workspaceId);
   }

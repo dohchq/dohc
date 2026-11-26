@@ -5,7 +5,7 @@ import {
   initializeAccountDeletion,
   purgeAccountRows,
 } from "./storage/accountDeletion";
-import { unsealWorkspaceSecret } from "./workspaceSecretCrypto";
+import { unsealWorkspaceSecret, workspaceSecretKeyring } from "./workspaceSecretCrypto";
 import {
   closeTestStorages,
   countRows,
@@ -148,7 +148,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-1",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",
@@ -161,7 +161,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-1",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",
@@ -174,7 +174,7 @@ describe("workspace secrets relay routes", () => {
     expect(
       unsealWorkspaceSecret({
         sealed: stored!.sealedValue,
-        linkKey: LINK_KEY,
+        keyring: workspaceSecretKeyring({ linkKey: LINK_KEY })!,
         workspaceId: "ws-other",
         ownerUserId: "owner",
         name: "RESEND_API_KEY",

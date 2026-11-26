@@ -19,8 +19,28 @@ import {
 import { AutomationRunWait } from "./automationRunWait";
 import { createTestScratch, testStoreFolder } from "./testScratch";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const everyDigest = { has: () => true } as unknown as ReadonlySet<string>;
+const HOOK_SECRETS: WorkspaceSecretSummary[] = [
+  {
+    name: "API_TOKEN",
+    usage: "http-header",
+    allowedHosts: ["hooks.slack.com"],
+    generation: 1,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  },
+  {
+    name: "SLACK_HOOK",
+    usage: "http-url",
+    allowedHosts: [],
+    generation: 1,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  },
+];
 
 const HOOK_YAML = `version: 1
 automations:
@@ -126,8 +146,9 @@ describe("automation http steps", () => {
       ["Tasks/helper.js", 'export default () => "v1";'],
     ]);
     const approvedDigests = new Set<string>();
+    let secrets = HOOK_SECRETS;
     const httpApprovals: CollectionHttpApprovalGate = {
-      isApproved: async (digest) => (approvedDigests.has(digest) ? "approved" : "unapproved"),
+      read: async () => ({ approved: approvedDigests, secrets }),
       approve: async (input) => {
         approvedDigests.add(input.approvalDigest);
       },
@@ -233,6 +254,59 @@ describe("automation http steps", () => {
         steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
       });
 
+      const listedReach = async () => {
+        const listed = await afterTamper.automationsIn("Tasks");
+        if (listed.status !== "read" || !listed.automations[0]?.valid)
+          throw Error("expected valid");
+        return listed.automations[0];
+      };
+      const replaceSecret = (name: string, change: Partial<WorkspaceSecretSummary>) => {
+        secrets = secrets.map((secret) =>
+          secret.name === name ? { ...secret, ...change } : secret,
+        );
+      };
+      replaceSecret("API_TOKEN", { generation: 5 });
+      expect((await listedReach()).reach).toEqual({
+        kind: "checked",
+        steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
+      });
+      replaceSecret("SLACK_HOOK", { generation: 2 });
+      const afterNewLink = await listedReach();
+      if (afterNewLink.reach.kind !== "checked") throw Error("expected checked");
+      expect(afterNewLink.reach.steps.find((s) => s.verdict === "held")).toMatchObject({
+        verdict: "held",
+        action: "send-http",
+      });
+      const withLink = secrets;
+      secrets = secrets.filter((secret) => secret.name !== "SLACK_HOOK");
+      const withoutLink = await listedReach();
+      if (withoutLink.reach.kind !== "checked") throw Error("expected checked");
+      const heldForLink = withoutLink.reach.steps.find((s) => s.verdict === "held");
+      await expect(
+        afterTamper.confirmReach({
+          automationId: withoutLink.automationId,
+          definitionHash: withoutLink.definitionHash,
+          step: heldForLink!.step,
+          seq: heldForLink!.seq,
+        }),
+      ).rejects.toThrow("Add the secret SLACK_HOOK in Settings");
+      secrets = withLink;
+      const beforeAllow = await listedReach();
+      if (beforeAllow.reach.kind !== "checked") throw Error("expected checked");
+      const heldAgain = beforeAllow.reach.steps.find((s) => s.verdict === "held");
+      expect(
+        await afterTamper.confirmReach({
+          automationId: beforeAllow.automationId,
+          definitionHash: beforeAllow.definitionHash,
+          step: heldAgain!.step,
+          seq: heldAgain!.seq,
+        }),
+      ).toBe("confirmed");
+      expect((await listedReach()).reach).toEqual({
+        kind: "checked",
+        steps: [{ verdict: "allowed" }, { verdict: "allowed" }],
+      });
+
       files.set("Tasks/helper.js", 'export default () => "v2-tampered";');
       afterTamper.handleWatcherEvents([{ operation: "update", path: "Tasks/helper.js" }]);
       const listed4 = await afterTamper.automationsIn("Tasks");
@@ -316,7 +390,7 @@ automations:
       postNotice: async () => {},
       readMessageBody: async () => null,
       recipientVerdicts: async () => [],
-      isHttpStepApproved: async () => "approved",
+      readHttpApprovals: async () => ({ approved: everyDigest, secrets: HOOK_SECRETS }),
       httpWebhook: { execute: executeMock },
     };
 
@@ -645,7 +719,7 @@ automations:
         ["Tasks/helper.js", "return { output: 'v1' };"],
       ]);
       const executor = makeExecutorFor(dir, files, {
-        isApproved: async (digest) => (approved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved, secrets: HOOK_SECRETS }),
         approve: approveSpy,
       });
       try {
@@ -698,7 +772,7 @@ automations:
       currentCollectionObjectId = "col-obj-v2";
       const replacedDir = await createTestScratch("dohc-http-replaced-col-");
       const replacedExecutor = makeExecutorFor(replacedDir, files, {
-        isApproved: async (digest) => (approved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved, secrets: HOOK_SECRETS }),
         approve: approveSpy,
       });
       try {
@@ -717,7 +791,7 @@ automations:
         serverApproved.add(input.approvalDigest);
       });
       const serverExecutor = makeExecutorFor(serverDir, files, {
-        isApproved: async (digest) => (serverApproved.has(digest) ? "approved" : "unapproved"),
+        read: async () => ({ approved: serverApproved, secrets: HOOK_SECRETS }),
       });
       try {
         await serverExecutor.open();
@@ -845,7 +919,10 @@ automations:
       postNotice: async () => {},
       readMessageBody: async () => null,
       recipientVerdicts: async () => [],
-      isHttpStepApproved: async () => (approved ? "approved" : "unapproved"),
+      readHttpApprovals: async () => ({
+        approved: approved ? everyDigest : new Set<string>(),
+        secrets: HOOK_SECRETS,
+      }),
       httpWebhook: { execute: executeMock },
     };
 
@@ -927,8 +1004,8 @@ automations:
     const approvedDigests = new Set<string>();
     let lookupAvailable = true;
     const httpApprovals: CollectionHttpApprovalGate = {
-      isApproved: async (digest) =>
-        !lookupAvailable ? "unavailable" : approvedDigests.has(digest) ? "approved" : "unapproved",
+      read: async () =>
+        lookupAvailable ? { approved: approvedDigests, secrets: HOOK_SECRETS } : null,
       approve: async (input) => {
         approvedDigests.add(input.approvalDigest);
       },

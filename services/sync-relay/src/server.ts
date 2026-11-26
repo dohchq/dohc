@@ -69,6 +69,7 @@ import {
   createWorkspaceSecretRoutes,
   WORKSPACE_SECRET_MAX_BODY_BYTES,
 } from "./workspaceSecretRoutes";
+import { workspaceSecretKeyring, type WorkspaceSecretKeyring } from "./workspaceSecretCrypto";
 import {
   createOutboundWebhookLimiters,
   createOutboundWebhookRoutes,
@@ -260,6 +261,8 @@ export interface CreateSyncRelayHandlerOptions {
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
+  // The keys that seal workspace secrets; built from linkKey alone when absent.
+  secretKeyring?: WorkspaceSecretKeyring | null;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
   // Ends share-web's phone app sessions for these launch IDs' hashes once the relay has deleted them.
@@ -356,6 +359,7 @@ export function createSyncRelayHandler({
   discussionActivity = new DiscussionActivityHub(),
   replicaWatches = new ReplicaWatches(discussionActivity),
   linkKey,
+  secretKeyring = workspaceSecretKeyring({ linkKey }),
   shareWebOrigin,
   relayExchangeKey,
   endShareWebAppLaunches,
@@ -776,7 +780,7 @@ export function createSyncRelayHandler({
   const respondToKeyEnvelopes = createKeyEnvelopeRoutes(storage, nowMs);
   const respondToWorkspaceSecrets = createWorkspaceSecretRoutes({
     storage,
-    linkKey,
+    keyring: secretKeyring,
     nowMs,
     rateLimiter: workspaceSecretRateLimiter,
   });
@@ -821,7 +825,7 @@ export function createSyncRelayHandler({
   };
   const outboundWebhookDeps: OutboundWebhookExecutionDependencies = {
     storage,
-    linkKey: linkKey ?? null,
+    keyring: secretKeyring,
     readOwnerShares,
     approvalRateLimiter: outboundWebhookLimiters.approval,
     accountRateLimiter: outboundWebhookLimiters.account,

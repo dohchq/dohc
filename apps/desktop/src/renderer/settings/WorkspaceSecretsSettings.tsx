@@ -370,6 +370,7 @@ export function WorkspaceSecretsSettings(props: {
   const [editorMode, setEditorMode] = useState<EditorMode | null>(null);
   const [deletingSecret, setDeletingSecret] = useState<string | null>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const [showSkeleton, setShowSkeleton] = useState(false);
 
   const query = useWorkspaceQuery(session, {
@@ -388,6 +389,7 @@ export function WorkspaceSecretsSettings(props: {
     setEditorMode(null);
     setDeletingSecret(null);
     setDeletingBusy(false);
+    setConfirmingClear(false);
   }, [workspaceId]);
 
   useEffect(
@@ -398,6 +400,7 @@ export function WorkspaceSecretsSettings(props: {
         setEditorMode(null);
         setDeletingSecret(null);
         setDeletingBusy(false);
+        setConfirmingClear(false);
         void retryQuery();
       }),
     [requests, retryQuery],
@@ -443,6 +446,22 @@ export function WorkspaceSecretsSettings(props: {
     },
     [onError, requests, workspaceId],
   );
+
+  const handleClearLocal = useCallback(async () => {
+    const token = requests.next();
+    setDeletingBusy(true);
+    try {
+      const next = await bridge().clearLocalWorkspaceSecrets({ workspaceId });
+      if (!requests.isCurrent(token)) return;
+      setOverrideState(next);
+      setConfirmingClear(false);
+    } catch (error) {
+      if (!requests.isCurrent(token)) return;
+      onError?.(ipcErrorMessage(error, "dohc could not delete the saved secrets."), error);
+    } finally {
+      if (requests.isCurrent(token)) setDeletingBusy(false);
+    }
+  }, [onError, requests, workspaceId]);
 
   if (query.error && !state) {
     return (
@@ -490,8 +509,37 @@ export function WorkspaceSecretsSettings(props: {
             <SecondaryButton disabled={query.pending} onClick={reloadSecrets}>
               Check again
             </SecondaryButton>
+            {state.canDelete ? (
+              <SecondaryButton
+                data-testid="workspace-secrets-clear-local"
+                onClick={() => setConfirmingClear(true)}
+              >
+                Delete saved secrets
+              </SecondaryButton>
+            ) : null}
           </EmptyState>
         </div>
+        {confirmingClear ? (
+          <ConfirmDialog
+            title="Delete this workspace's saved secrets?"
+            icon={Trash2}
+            intent="danger"
+            confirmLabel={deletingBusy ? "Deleting…" : "Delete saved secrets"}
+            confirmDisabled={deletingBusy}
+            testId="workspace-secrets-confirm-clear-local"
+            cancelTestId="workspace-secrets-cancel-clear-local"
+            confirmTestId="workspace-secrets-confirm-clear-local-action"
+            onCancel={() => {
+              if (!deletingBusy) setConfirmingClear(false);
+            }}
+            onConfirm={() => void handleClearLocal()}
+          >
+            <p className="m-0">
+              dohc deletes every secret this workspace saved on this computer. Automations that use
+              them stop until you add them again. This cannot be undone.
+            </p>
+          </ConfirmDialog>
+        ) : null}
       </SettingsSection>
     );
   }

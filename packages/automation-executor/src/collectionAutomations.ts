@@ -14,7 +14,11 @@ import {
   type AutomationScheduleTrigger,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
-import { computeHttpStepApprovalDigest } from "@dohc/workspace-contracts/http-step-approvals";
+import {
+  computeHttpStepApprovalDigest,
+  httpStepSecretProblem,
+  workspaceSecretApprovalBindings,
+} from "@dohc/workspace-contracts/http-step-approvals";
 import {
   COLLECTION_SCHEMA_FILENAME,
   collectionVersionError,
@@ -122,6 +126,7 @@ import {
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
+  type HttpApprovalSnapshot,
   rebaseRun,
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
@@ -437,9 +442,8 @@ export interface ServerDataset {
 }
 
 export interface CollectionHttpApprovalGate {
-  isApproved(digest: string): Promise<"approved" | "unapproved" | "unavailable">;
-  /** Reads the workspace's full approved digest set once per batch check, or null when unavailable. */
-  readApprovedDigests?(): Promise<ReadonlySet<string> | null>;
+  /** Reads the approved digests and the workspace's secrets together, or null when unavailable. */
+  read(): Promise<HttpApprovalSnapshot | null>;
   approve?(input: {
     approvalDigest: string;
     collectionId: string;
@@ -3258,6 +3262,7 @@ export class CollectionAutomations {
     collectionPath: string;
     automationId: string;
     stepOrdinal: number;
+    secretProblem: string | null;
   } | null> {
     const located = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
@@ -3275,20 +3280,26 @@ export class CollectionAutomations {
     if (!stepEntry || stepEntry.step.kind !== "http") return null;
     const codeFileHashes = await this.codeFileHashesFor(located.collectionPath, automation);
     if (codeFileHashes === null) return null;
-    return {
-      approvalDigest: computeHttpStepApprovalDigest({
-        collectionId,
-        collectionPath: located.collectionPath,
-        automationId: automation.id,
-        stepOrdinal: matched.stepOrdinal,
-        step: stepEntry.step,
-        definitionDigest: definitionDigest(automation),
-        codeFileHashes,
-      }),
+    const approvals = this.options.httpApprovals ? await this.options.httpApprovals.read() : null;
+    const secrets = approvals?.secrets ?? null;
+    const approvalDigest = computeHttpStepApprovalDigest({
       collectionId,
       collectionPath: located.collectionPath,
       automationId: automation.id,
       stepOrdinal: matched.stepOrdinal,
+      step: stepEntry.step,
+      definitionDigest: definitionDigest(automation),
+      codeFileHashes,
+      secretBindings: workspaceSecretApprovalBindings(secrets),
+    });
+    if (approvalDigest === null) return null;
+    return {
+      approvalDigest,
+      collectionId,
+      collectionPath: located.collectionPath,
+      automationId: automation.id,
+      stepOrdinal: matched.stepOrdinal,
+      secretProblem: secrets === null ? null : httpStepSecretProblem(stepEntry.step, secrets),
     };
   }
 
@@ -3302,6 +3313,7 @@ export class CollectionAutomations {
     collectionPath: string;
     automationId: string;
     stepOrdinal: number;
+    secretProblem: string | null;
   } | null> {
     await this.ready();
     return this.computeHttpApprovalInput(input);
@@ -3348,7 +3360,14 @@ export class CollectionAutomations {
         }
         const approve = options?.approveHttpStep ?? this.options.httpApprovals?.approve;
         if (!approve) return false;
-        await approve(httpApproval);
+        if (httpApproval.secretProblem !== null) throw new Error(httpApproval.secretProblem);
+        await approve({
+          approvalDigest: httpApproval.approvalDigest,
+          collectionId: httpApproval.collectionId,
+          collectionPath: httpApproval.collectionPath,
+          automationId: httpApproval.automationId,
+          stepOrdinal: httpApproval.stepOrdinal,
+        });
       }
       this.verdicts.set(key, {
         ...stored,
@@ -6847,10 +6866,10 @@ export class CollectionAutomations {
       inventories.get(automationId)?.some((step) => step.kind === "http"),
     );
     if (!hasAnyHttp) return states;
-    let prefetched: ReadonlySet<string> | null | undefined;
-    if (this.options.httpApprovals?.readApprovedDigests) {
-      prefetched = await this.options.httpApprovals.readApprovedDigests();
-    }
+    const approvals: HttpApprovalSnapshot | null = this.options.httpApprovals
+      ? await this.options.httpApprovals.read()
+      : { approved: new Set(), secrets: [] };
+    const secretBindings = workspaceSecretApprovalBindings(approvals?.secrets ?? null);
     for (const { automationId, collectionPath, automation } of owned) {
       const steps = inventories.get(automationId);
       if (!steps || !steps.some((step) => step.kind === "http")) continue;
@@ -6880,18 +6899,16 @@ export class CollectionAutomations {
           step: entry.step,
           definitionDigest: digest,
           codeFileHashes,
+          secretBindings,
         });
-        const state: "approved" | "unapproved" | "unavailable" =
-          prefetched !== undefined
-            ? prefetched === null
-              ? "unavailable"
-              : prefetched.has(approvalDigest)
-                ? "approved"
-                : "unapproved"
-            : this.options.httpApprovals
-              ? await this.options.httpApprovals.isApproved(approvalDigest)
-              : "unapproved";
-        states.set(key, { state, approvalDigest });
+        if (approvals === null || approvalDigest === null) {
+          states.set(key, { state: "unavailable", approvalDigest: null });
+          continue;
+        }
+        states.set(key, {
+          state: approvals.approved.has(approvalDigest) ? "approved" : "unapproved",
+          approvalDigest,
+        });
       }
     }
     return states;
@@ -8030,7 +8047,7 @@ export class CollectionAutomations {
       postNotice: this.options.postNotice,
       ...(this.options.httpWebhook ? { httpWebhook: this.options.httpWebhook } : {}),
       ...(this.options.httpApprovals
-        ? { isHttpStepApproved: (digest: string) => this.options.httpApprovals!.isApproved(digest) }
+        ? { readHttpApprovals: () => this.options.httpApprovals!.read() }
         : {}),
     };
   }

@@ -169,6 +169,7 @@ import {
 } from "./automationReplicaCredential";
 import { serverLogLine } from "./serverLogWords";
 import { createStartTimeline } from "./startTimeline";
+import { resealWorkspaceSecrets, workspaceSecretKeyring } from "./workspaceSecretCrypto";
 
 // Node starting, and every module above loading.
 const startTimeline = createStartTimeline();
@@ -344,6 +345,15 @@ if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
 if (!isDevOrTest && !linkKey) {
   fatal("FATAL: DOHC_RELAY_LINK_KEY must be set outside development/test.");
 }
+
+const secretKeys = process.env.DOHC_RELAY_SECRET_KEYS;
+const secretKeyring = (() => {
+  try {
+    return workspaceSecretKeyring({ linkKey, secretKeys });
+  } catch (error) {
+    return fatal(`FATAL: ${error instanceof Error ? error.message : String(error)}`);
+  }
+})();
 
 if (!isDevOrTest && !relayExchangeKey) {
   fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set outside development/test.");
@@ -588,6 +598,12 @@ const deployment = deploymentConfig
   ? openRelayDeployment(deploymentConfig, storageOptions)
   : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+if (secretKeyring && secretKeys?.trim()) {
+  const counts = resealWorkspaceSecrets(storage, secretKeyring);
+  console.log(
+    `[sync-relay] workspace secrets on key ${secretKeyring.activeId}: ${counts.resealed} resealed, ${counts.current} already current, ${counts.unreadable} unreadable, ${counts.changed} changed while resealing`,
+  );
+}
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
 const datasetDirectory =
   deployment?.datasetDirectory ?? (await mkdtemp(join(tmpdir(), "dohc-relay-datasets-")));
@@ -786,6 +802,7 @@ const relayApplication = createSyncRelayHandler({
   lookupUserDisplayNames: (userIds) => lookupUserDisplayNames(userIds),
   presence,
   linkKey,
+  secretKeyring,
   shareWebOrigin,
   relayExchangeKey,
   // The relay has already ended these launches, so every later call share-web makes for them is refused.

@@ -428,26 +428,49 @@ Storage follows the workspace's sync mode:
 - **Local-only workspaces** seal secrets in the desktop profile's `workspace-secrets/`
   folder (`0700` directory, `0600` file) with Electron `safeStorage`. On Linux, dohc
   checks that `safeStorage.getSelectedStorageBackend()` is neither `basic_text` nor
-  `unknown` and refuses to store secrets when no OS keyring is active. An unreadable or
-  schema-invalid local vault fails closed instead of appearing empty, so existing
-  ciphertext cannot be overwritten. OS keychain storage keeps values out of workspace
-  files and API responses; it does not defend against arbitrary code running as the same
-  OS user. Turning on sync later does not copy local secrets to the server; the owner
-  enters them on the server directly. Pausing sync on a synced workspace keeps its server
-  binding and refuses secret reads or changes until sync resumes instead of switching to
-  local keychain storage.
+  `unknown` and refuses to store secrets when no OS keyring is active. Each vault file
+  seals its whole record (values, usages, allowed hosts, generations, and dates) with
+  AES-256-GCM under a random data key that `safeStorage` wraps, with the workspace ID as
+  additional data. An edited, swapped, or copied vault, or one an older dohc wrote, fails
+  closed instead of appearing empty, so existing ciphertext cannot be overwritten; the
+  owner can delete it in Settings and add the secrets again. The local HTTP step approval
+  file is sealed the same way, and an edited or unreadable one reads as no approvals.
+  `safeStorage` on macOS and Linux encrypts without a MAC, and Windows DPAPI does not stop
+  other code running as the same user, so the GCM seal is what detects edits. OS keychain
+  storage keeps values out of workspace files and API responses; it does not defend
+  against arbitrary code running as the same OS user, and it does not detect a rollback to
+  an older copy of a vault or approval file. Turning on sync later does not copy local
+  secrets to the server; the owner enters them on the server directly. Pausing sync on a
+  synced workspace keeps its server binding and refuses secret reads or changes until sync
+  resumes instead of switching to local keychain storage.
 - **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
-  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 from
-  `DOHC_RELAY_LINK_KEY` with info `dohc-workspace-secret-seal-v1`, recorded `key_id`, and
-  AAD binding workspace, owner, secret name, usage, allowed hosts, generation, and key ID). The relay
+  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 with info
+  `dohc-workspace-secret-seal-v1`, recorded `key_id`, and AAD binding workspace, owner,
+  secret name, usage, allowed hosts, generation, and key ID). The keyring comes from
+  `DOHC_RELAY_SECRET_KEYS` (`id:key,id:key`, each key at least 32 bytes): its first key
+  seals, and every listed key opens. `DOHC_RELAY_LINK_KEY` always opens rows sealed under
+  `relay-link-v1`, and seals only when `DOHC_RELAY_SECRET_KEYS` is unset. At startup with
+  `DOHC_RELAY_SECRET_KEYS` set, the relay reseals every readable row under the active key
+  with a guarded update and logs how many rows it resealed, found current, could not open,
+  or found changed. The relay
   accepts only cookie-less desktop owner Bearer sessions (`resolveAccountSession` with
   `clientKind === "desktop"`), refusing browser sessions (cookie or Bearer), phone
   sessions, personal agents, share links, and non-owners, and rechecks session authority,
   account fencing, and workspace ownership at commit time. Because the server holds the
   sealing key in its environment, the server operator (dohc Drive or a self-hoster) has
-  technical capability to unseal stored secrets at runtime; rotating `DOHC_RELAY_LINK_KEY`
-  invalidates previously sealed secrets until re-entered. Account deletion purges all
-  workspace secret rows automatically.
+  technical capability to unseal stored secrets at runtime. Removing a key from the
+  keyring before its rows are resealed leaves those secrets unreadable until re-entered.
+  Account deletion purges all workspace secret rows automatically.
+
+An owner's approval of an HTTP step binds the step's destination as well as its
+definition. For a step that names secrets, the approval digest includes each named
+secret's usage and creation time, plus its allowed hosts for an `http-header` secret and
+its generation for an `http-url` secret. Replacing a webhook link, deleting and
+recreating a secret, or changing a header secret's allowed hosts holds the step until the
+owner allows it again; rotating a header secret's value with the same hosts keeps the
+approval. Each run reads approvals and secrets together before it sends. Just before
+sending, the relay rereads every secret it loaded and refuses the request if one changed,
+and the desktop executor compares each secret it reads with the one the approval saw.
 
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
 enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),

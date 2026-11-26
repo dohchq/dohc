@@ -4,7 +4,10 @@ import {
   parseAutomationsFile,
   type AutomationHttpStep,
 } from "@dohc/workspace-contracts/automations";
-import { computeHttpStepApprovalDigest } from "@dohc/workspace-contracts/http-step-approvals";
+import {
+  computeHttpStepApprovalDigest,
+  workspaceSecretApprovalBindings,
+} from "@dohc/workspace-contracts/http-step-approvals";
 import { definitionDigest } from "@dohc/automation-executor/automation-plan";
 import type { SafeOutboundDestination, SafeOutboundRequest } from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +31,7 @@ import {
   type HandlerOverrides,
 } from "./testing";
 import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 
 afterEach(async () => {
@@ -141,11 +145,16 @@ automations:
 
 const HELPER_JS = 'export default () => "computed-v1";';
 
+function secretBindingsIn(storage: Pick<SyncRelayStorage, "listWorkspaceSecrets">) {
+  return workspaceSecretApprovalBindings(storage.listWorkspaceSecrets(WORKSPACE));
+}
+
 function approvalFor(
   yamlText: string,
   helperText: string,
   stepOrdinal = 1,
   collectionId = "obj-schema",
+  storage?: Pick<SyncRelayStorage, "listWorkspaceSecrets">,
 ): string {
   const parsed = parseAutomationsFile(yamlText);
   if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") {
@@ -161,7 +170,30 @@ function approvalFor(
     step: httpStep,
     definitionDigest: definitionDigest(automation),
     codeFileHashes: [{ file: "helper.js", sha256: sha256(helperText) }],
-  });
+    secretBindings: storage ? secretBindingsIn(storage) : new Map(),
+  })!;
+}
+
+async function approveStep(
+  handler: SyncRelayHandler,
+  approvalDigest: string,
+  automationId: string,
+  stepOrdinal: number,
+): Promise<void> {
+  const response = await handler(
+    request(
+      OWNER,
+      `/sync/${WORKSPACE}/webhooks/http-approvals`,
+      jsonBody({
+        approvalDigest,
+        collectionId: "obj-schema",
+        collectionPath: COLLECTION,
+        automationId,
+        stepOrdinal,
+      }),
+    ),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
 }
 
 async function setup(overrides: HandlerOverrides = {}) {
@@ -268,6 +300,7 @@ describe("outbound webhook relay routes (Model E1)", () => {
     ).toEqual({
       ok: true,
       approvals: [digest],
+      secrets: [],
     });
 
     // Mismatched approvalDigest (caller evaluated a different revision than committed) must be refused before sending.
@@ -303,6 +336,25 @@ describe("outbound webhook relay routes (Model E1)", () => {
       }),
     );
     expect(wrongHostSecret.status).toBe(200);
+
+    const approvedBeforeSecret = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+        jsonBody({
+          ...dispatchPayload,
+          deliveryId: createHash("sha256").update("delivery-before-secret").digest("hex"),
+        }),
+      ),
+    );
+    expect(approvedBeforeSecret.status).toBe(409);
+    expect(await approvedBeforeSecret.json()).toMatchObject({
+      ok: false,
+      error: "definition_not_synced",
+      reason: expect.stringContaining("A secret this step uses changed"),
+    });
+    dispatchPayload.approvalDigest = approvalFor(SAMPLE_YAML, HELPER_JS, 1, "obj-schema", storage);
+    await approveStep(handler, dispatchPayload.approvalDigest, "notify-hook", 1);
 
     const wrongHostDelivery = createHash("sha256").update("delivery-wrong-host").digest("hex");
     const hostDenied = await handler(
@@ -340,6 +392,8 @@ describe("outbound webhook relay routes (Model E1)", () => {
       }),
     );
     expect(fixedSecret.status).toBe(200);
+    dispatchPayload.approvalDigest = approvalFor(SAMPLE_YAML, HELPER_JS, 1, "obj-schema", storage);
+    await approveStep(handler, dispatchPayload.approvalDigest, "notify-hook", 1);
 
     // Retrying the same wrongHostDelivery ID after fixing the secret now succeeds because the prior failure was beforeSend.
     const retriedDelivery = await handler(
@@ -390,6 +444,32 @@ describe("outbound webhook relay routes (Model E1)", () => {
     expect(await duplicate.json()).toEqual({ ok: true, status: 200, deduplicated: true });
     expect(sent).toHaveLength(1);
 
+    const rotated = await handler(
+      request(OWNER, `/sync/${WORKSPACE}/secrets/RESEND_API_KEY`, {
+        ...jsonBody({
+          mode: "replace",
+          usage: "http-header",
+          value: "re_live_rotated_token",
+          allowedHosts: ["api.resend.com"],
+        }),
+        method: "PUT",
+      }),
+    );
+    expect(rotated.status).toBe(200);
+    const afterRotation = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+        jsonBody({
+          ...dispatchPayload,
+          deliveryId: createHash("sha256").update("delivery-after-rotation").digest("hex"),
+        }),
+      ),
+    );
+    expect(await afterRotation.json()).toEqual({ ok: true, status: 200 });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.headers["Authorization"]).toBe("Bearer re_live_rotated_token");
+
     // A workspace member stops dispatch too, until they are removed.
     const invitedMember = await handler(
       request(
@@ -416,7 +496,7 @@ describe("outbound webhook relay routes (Model E1)", () => {
     );
     expect(afterMember.status).toBe(403);
     expect(await afterMember.json()).toMatchObject({ ok: false, error: "reach_stopped" });
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     expect(
       (await handler(request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/remove`, jsonBody({}))))
         .status,
@@ -440,12 +520,12 @@ describe("outbound webhook relay routes (Model E1)", () => {
     );
     expect(afterShare.status).toBe(403);
     expect(await afterShare.json()).toMatchObject({ ok: false, error: "reach_stopped" });
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
 
     // Account deletion cascade purges approvals and dispatches.
     const dbPath = storagePath(storage);
     expect(countRows(dbPath, "sync_relay_http_approvals")).toBe(1);
-    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(2);
+    expect(countRows(dbPath, "sync_relay_http_dispatches")).toBe(3);
     initializeAccountDeletion(storage, LINK_KEY);
     const fenced = fenceAccount(storage, LINK_KEY, OWNER, "owner@dohc.test");
     expect(fenced.manifest).not.toBeNull();
@@ -488,7 +568,8 @@ automations:
       step: automation.do[0] as AutomationHttpStep,
       definitionDigest: definitionDigest(automation),
       codeFileHashes: [],
-    });
+      secretBindings: null,
+    })!;
     await handler(
       request(
         OWNER,
@@ -578,28 +659,17 @@ automations:
     const parsed = parseAutomationsFile(secretUrlYaml);
     if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("bad");
     const automation = parsed.entries[0].automation;
-    const digest = computeHttpStepApprovalDigest({
-      collectionId: "obj-schema",
-      collectionPath: COLLECTION,
-      automationId: automation.id,
-      stepOrdinal: 0,
-      step: automation.do[0] as AutomationHttpStep,
-      definitionDigest: definitionDigest(automation),
-      codeFileHashes: [],
-    });
-    await handler(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/webhooks/http-approvals`,
-        jsonBody({
-          approvalDigest: digest,
-          collectionId: "obj-schema",
-          collectionPath: COLLECTION,
-          automationId: "secret-hook",
-          stepOrdinal: 0,
-        }),
-      ),
-    );
+    const secretHookDigest = (store: Pick<SyncRelayStorage, "listWorkspaceSecrets">) =>
+      computeHttpStepApprovalDigest({
+        collectionId: "obj-schema",
+        collectionPath: COLLECTION,
+        automationId: automation.id,
+        stepOrdinal: 0,
+        step: automation.do[0] as AutomationHttpStep,
+        definitionDigest: definitionDigest(automation),
+        codeFileHashes: [],
+        secretBindings: secretBindingsIn(store),
+      })!;
     await handler(
       request(OWNER, `/sync/${WORKSPACE}/secrets/PRIVATE_HOOK_URL`, {
         ...jsonBody({
@@ -621,6 +691,8 @@ automations:
         method: "PUT",
       }),
     );
+    let digest = secretHookDigest(storage);
+    await approveStep(handler, digest, "secret-hook", 0);
 
     // Host-pin denial on a secret URL must NOT reveal secret-internal-host.example.com.
     const pinDenied = await handler(
@@ -659,6 +731,8 @@ automations:
         method: "PUT",
       }),
     );
+    digest = secretHookDigest(storage);
+    await approveStep(handler, digest, "secret-hook", 0);
     const expanded64kBody = "a\n".repeat(32 * 1024);
     expect(Buffer.byteLength(expanded64kBody, "utf8")).toBe(64 * 1024);
     const largeRes = await handler(
@@ -682,6 +756,67 @@ automations:
     expect(largeRes.status).toBe(200);
     expect(await largeRes.json()).toEqual({ ok: true, status: 200 });
     expect(sent).toHaveLength(1);
+
+    duringDns = async () => {
+      const replaced = await handler(
+        request(OWNER, `/sync/${WORKSPACE}/secrets/PRIVATE_HOOK_URL`, {
+          ...jsonBody({
+            mode: "replace",
+            usage: "http-url",
+            value: "https://secret-internal-host.example.com/hook/new",
+          }),
+          method: "PUT",
+        }),
+      );
+      expect(replaced.status).toBe(200);
+    };
+    const replacedDuringDns = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+        jsonBody({
+          collectionId: "obj-schema",
+          collectionPath: COLLECTION,
+          automationId: "secret-hook",
+          stepOrdinal: 0,
+          approvalDigest: digest,
+          deliveryId: createHash("sha256").update("replaced-during-dns").digest("hex"),
+          chainDepth: 0,
+          evaluatedSafeHeaders: [],
+          evaluatedBody: "hello",
+          defaultContentType: "text/plain; charset=utf-8",
+        }),
+      ),
+    );
+    expect(replacedDuringDns.status).toBe(409);
+    expect(await replacedDuringDns.json()).toMatchObject({
+      ok: false,
+      error: "secret_changed",
+      beforeSend: true,
+    });
+    expect(sent).toHaveLength(1);
+    const staleLink = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+        jsonBody({
+          collectionId: "obj-schema",
+          collectionPath: COLLECTION,
+          automationId: "secret-hook",
+          stepOrdinal: 0,
+          approvalDigest: digest,
+          deliveryId: createHash("sha256").update("stale-link").digest("hex"),
+          chainDepth: 0,
+          evaluatedSafeHeaders: [],
+          evaluatedBody: "hello",
+          defaultContentType: "text/plain; charset=utf-8",
+        }),
+      ),
+    );
+    expect(staleLink.status).toBe(409);
+    expect(await staleLink.json()).toMatchObject({ error: "definition_not_synced" });
+    digest = secretHookDigest(storage);
+    await approveStep(handler, digest, "secret-hook", 0);
 
     // Disabling the automation while DNS is pending must abort atomically at reservation without sending.
     const disabledYaml = secretUrlYaml.replace(
@@ -773,19 +908,6 @@ automations:
       { objectId: "obj-auto", path: `${COLLECTION}/automations.yaml`, text: secretUrlYaml },
     ]);
     await fenceHandler(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/webhooks/http-approvals`,
-        jsonBody({
-          approvalDigest: digest,
-          collectionId: "obj-schema",
-          collectionPath: COLLECTION,
-          automationId: "secret-hook",
-          stepOrdinal: 0,
-        }),
-      ),
-    );
-    await fenceHandler(
       request(OWNER, `/sync/${WORKSPACE}/secrets/PRIVATE_HOOK_URL`, {
         ...jsonBody({
           mode: "create",
@@ -806,6 +928,8 @@ automations:
         method: "PUT",
       }),
     );
+    digest = secretHookDigest(fenceStorage);
+    await approveStep(fenceHandler, digest, "secret-hook", 0);
     const fencedDuringDns = await fenceHandler(
       request(
         OWNER,
@@ -832,8 +956,6 @@ automations:
   it("preserves UTF-8 BOM in run-file hashes, rejects replacement Collections, and returns structured beforeSend on quota exhaustion", async () => {
     const { storage, handler, sent } = await setup();
     const bomHelper = `\uFEFFexport default () => "bom-v1";`;
-    const bomDigest = approvalFor(SAMPLE_YAML, bomHelper, 1, "obj-schema-bom");
-
     await commitFiles(handler, [
       {
         objectId: "obj-schema-bom",
@@ -843,6 +965,18 @@ automations:
       { objectId: "obj-auto", path: `${COLLECTION}/automations.yaml`, text: SAMPLE_YAML },
       { objectId: "obj-helper", path: `${COLLECTION}/helper.js`, text: bomHelper },
     ]);
+    await handler(
+      request(OWNER, `/sync/${WORKSPACE}/secrets/RESEND_API_KEY`, {
+        ...jsonBody({
+          mode: "create",
+          usage: "http-header",
+          value: "re_bom_secret",
+          allowedHosts: ["api.resend.com"],
+        }),
+        method: "PUT",
+      }),
+    );
+    const bomDigest = approvalFor(SAMPLE_YAML, bomHelper, 1, "obj-schema-bom", storage);
     await handler(
       request(
         OWNER,
@@ -855,17 +989,6 @@ automations:
           stepOrdinal: 1,
         }),
       ),
-    );
-    await handler(
-      request(OWNER, `/sync/${WORKSPACE}/secrets/RESEND_API_KEY`, {
-        ...jsonBody({
-          mode: "create",
-          usage: "http-header",
-          value: "re_bom_secret",
-          allowedHosts: ["api.resend.com"],
-        }),
-        method: "PUT",
-      }),
     );
 
     const bomRes = await handler(
@@ -1123,6 +1246,6 @@ automations:
 
     const listed = await handler(request(OWNER, `/sync/${WORKSPACE}/webhooks/http-approvals`));
     expect(listed.status).toBe(200);
-    expect(await listed.json()).toEqual({ ok: true, approvals: [secondDigest] });
+    expect(await listed.json()).toEqual({ ok: true, secrets: [], approvals: [secondDigest] });
   });
 });

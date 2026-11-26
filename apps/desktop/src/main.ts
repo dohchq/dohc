@@ -475,7 +475,6 @@ import {
 } from "./workspaces/localHttpApprovalStore";
 import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
 import {
-  HttpStepApprovalDigest,
   OutboundWebhookDispatchResponse,
   type HttpStepApprovalWriteInput,
 } from "@dohc/workspace-contracts/http-step-approvals";
@@ -734,7 +733,12 @@ import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notic
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
-import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
+import { z } from "zod";
+import {
+  createCloudCredentialStore,
+  mayUseKeychain,
+  type TokenCipher,
+} from "./workspaces/cloudCredentialStore";
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
@@ -1818,34 +1822,35 @@ let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
 let cachedLocalWorkspaceSecrets: LocalWorkspaceSecretStore | null = null;
 let cachedLocalHttpApprovals: LocalHttpApprovalStore | null = null;
-function localHttpApprovals(): LocalHttpApprovalStore {
-  if (!cachedLocalHttpApprovals) {
-    cachedLocalHttpApprovals = createLocalHttpApprovalStore({ dir: stateDir() });
+function systemKeyCipher(): TokenCipher | undefined {
+  if (
+    !mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env })
+  ) {
+    return undefined;
   }
+  return {
+    isAvailable: () =>
+      safeStorage.isEncryptionAvailable() &&
+      encryptsWithSystemKey(
+        process.platform,
+        process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
+      ),
+    encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+    decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+  };
+}
+function localHttpApprovals(): LocalHttpApprovalStore {
+  cachedLocalHttpApprovals ??= createLocalHttpApprovalStore({
+    dir: stateDir(),
+    cipher: systemKeyCipher(),
+  });
   return cachedLocalHttpApprovals;
 }
 function localWorkspaceSecrets(): LocalWorkspaceSecretStore {
-  if (!cachedLocalWorkspaceSecrets) {
-    cachedLocalWorkspaceSecrets = createLocalWorkspaceSecretStore({
-      dir: stateDir(),
-      cipher: mayUseKeychain({
-        isPackaged: app.isPackaged,
-        platform: process.platform,
-        env: process.env,
-      })
-        ? {
-            isAvailable: () =>
-              safeStorage.isEncryptionAvailable() &&
-              encryptsWithSystemKey(
-                process.platform,
-                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
-              ),
-            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-          }
-        : undefined,
-    });
-  }
+  cachedLocalWorkspaceSecrets ??= createLocalWorkspaceSecretStore({
+    dir: stateDir(),
+    cipher: systemKeyCipher(),
+  });
   return cachedLocalWorkspaceSecrets;
 }
 function t3Code(): T3CodeConnection {
@@ -1856,25 +1861,7 @@ function t3Code(): T3CodeConnection {
     home,
     // T3 Code's own program, which makes dohc's sign-in code after the person says yes in dohc.
     codes: createT3CodeCodeMaker({ home }),
-    store: createT3CodeSignInStore({
-      dir: stateDir(),
-      cipher: mayUseKeychain({
-        isPackaged: app.isPackaged,
-        platform: process.platform,
-        env: process.env,
-      })
-        ? {
-            isAvailable: () =>
-              safeStorage.isEncryptionAvailable() &&
-              encryptsWithSystemKey(
-                process.platform,
-                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
-              ),
-            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-          }
-        : undefined,
-    }),
+    store: createT3CodeSignInStore({ dir: stateDir(), cipher: systemKeyCipher() }),
   });
   return cachedT3Code;
 }
@@ -6169,12 +6156,33 @@ const serverRuns = createServerRuns(async (workspaceId, request) => {
   };
 });
 
+type WorkspaceSecretsMutation =
+  | { kind: "set"; secret: WorkspaceSecretWriteInput }
+  | { kind: "delete"; name: string }
+  | { kind: "clear-local" };
+
+async function changeWorkspaceSecrets(
+  workspaceId: string,
+  mutation: WorkspaceSecretsMutation,
+): Promise<WorkspaceSecretsState> {
+  const state = await workspaceSecretsState(workspaceId, mutation);
+  collectionAutomationsOf(workspaceId)?.rosterChanged();
+  return state;
+}
+
 async function workspaceSecretsState(
   workspaceId: string,
-  mutation?: { kind: "set"; secret: WorkspaceSecretWriteInput } | { kind: "delete"; name: string },
+  mutation?: WorkspaceSecretsMutation,
 ): Promise<WorkspaceSecretsState> {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return { kind: "none" };
+  if (mutation?.kind === "clear-local") {
+    if (entry.remote !== undefined || entry.pausedRemote !== undefined) {
+      throw new Error("This workspace keeps its secrets on your server, not on this computer.");
+    }
+    await localWorkspaceSecrets().clearWorkspace(workspaceId);
+    return workspaceSecretsState(workspaceId);
+  }
   if (entry.remote === undefined && entry.pausedRemote !== undefined) {
     const message =
       "Sync is paused for this workspace. Resume sync to view or change its server secrets.";
@@ -6202,7 +6210,7 @@ async function workspaceSecretsState(
       return { kind: "ready", storage: "local", secrets, limit: MAX_WORKSPACE_SECRETS };
     } catch (error) {
       if (!mutation && error instanceof WorkspaceSecretVaultCorruptError) {
-        return { kind: "unavailable", storage: "local", message: error.message };
+        return { kind: "unavailable", storage: "local", message: error.message, canDelete: true };
       }
       throw error;
     }
@@ -6588,13 +6596,26 @@ async function incomingWebhookShareStops(
     }));
 }
 
+const RelayHttpApprovals = z.object({
+  approvals: z.array(z.string()),
+  secrets: z.array(WorkspaceSecretSummary),
+});
+
 function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalGate {
-  const readApprovedDigests = async (): Promise<ReadonlySet<string> | null> => {
+  const read: CollectionHttpApprovalGate["read"] = async () => {
     const entry = findWorkspace(workspaceId);
-    if (entry === null || entry.shareView !== undefined) return new Set();
+    if (entry === null || entry.shareView !== undefined) {
+      return { approved: new Set(), secrets: [] };
+    }
     if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
     if (entry.remote === undefined) {
-      return null;
+      const [approved, secrets] = await Promise.all([
+        localHttpApprovals().approved(workspaceId),
+        localWorkspaceSecrets()
+          .list(workspaceId)
+          .catch(() => null),
+      ]);
+      return { approved, secrets };
     }
     let credentials: CloudSessionCredentials;
     let credentialGeneration: number;
@@ -6619,38 +6640,12 @@ function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalG
     ) {
       return null;
     }
-    const body = (await response.json().catch(() => undefined)) as
-      | { approvals?: unknown }
-      | undefined;
-    if (!body || !Array.isArray(body.approvals)) return null;
-    return new Set(body.approvals.filter((item): item is string => typeof item === "string"));
+    const body = RelayHttpApprovals.safeParse(await response.json().catch(() => undefined));
+    if (!body.success) return null;
+    return { approved: new Set(body.data.approvals), secrets: body.data.secrets };
   };
   return {
-    isApproved: async (digest) => {
-      const parsedDigest = HttpStepApprovalDigest.safeParse(digest);
-      if (!parsedDigest.success) return "unapproved";
-      const entry = findWorkspace(workspaceId);
-      if (entry === null || entry.shareView !== undefined) return "unapproved";
-      if (entry.remote === undefined && entry.pausedRemote !== undefined) return "unavailable";
-      if (entry.remote === undefined) {
-        return localHttpApprovals().isApproved(workspaceId, parsedDigest.data);
-      }
-      const digests = await readApprovedDigests();
-      if (digests === null) return "unavailable";
-      return digests.has(parsedDigest.data) ? "approved" : "unapproved";
-    },
-    readApprovedDigests: async () => {
-      const entry = findWorkspace(workspaceId);
-      if (entry === null || entry.shareView !== undefined) return new Set();
-      if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
-      if (entry.remote === undefined) {
-        return localHttpApprovals()
-          .list(workspaceId)
-          .then((listed) => new Set(listed))
-          .catch(() => null);
-      }
-      return readApprovedDigests();
-    },
+    read,
     approve: async (input) => {
       await approveWorkspaceHttpStep(workspaceId, input);
     },
@@ -12875,9 +12870,11 @@ function registerIpcHandlers(): void {
       currentRendererSession: (sender) => rendererWorkspaceSessions.current(sender),
       listWorkspaceSecrets: (workspaceId) => workspaceSecretsState(workspaceId),
       setWorkspaceSecret: (workspaceId, secret) =>
-        workspaceSecretsState(workspaceId, { kind: "set", secret }),
+        changeWorkspaceSecrets(workspaceId, { kind: "set", secret }),
       deleteWorkspaceSecret: (workspaceId, name) =>
-        workspaceSecretsState(workspaceId, { kind: "delete", name }),
+        changeWorkspaceSecrets(workspaceId, { kind: "delete", name }),
+      clearLocalWorkspaceSecrets: (workspaceId) =>
+        changeWorkspaceSecrets(workspaceId, { kind: "clear-local" }),
     }),
   );
 

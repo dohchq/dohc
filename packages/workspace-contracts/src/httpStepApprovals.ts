@@ -10,6 +10,7 @@ import {
   isForbiddenHttpHeader,
   type AutomationHttpStep,
 } from "./automations";
+import type { WorkspaceSecretSummary } from "./workspaceSecrets";
 
 export const AUTOMATION_CHAIN_DEPTH_CAP = 4;
 export const MAX_WORKSPACE_HTTP_APPROVALS = 500;
@@ -96,10 +97,64 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export function httpStepSecretNames(
+  step: Pick<AutomationHttpStep, "url" | "secretHeaders">,
+): string[] {
+  const names = new Set(step.secretHeaders.map((header) => header.secret));
+  if (step.url.kind === "secret") names.add(step.url.secret);
+  return [...names].sort(compareCodeUnits);
+}
+
+/**
+ * What an approval remembers about a secret: a header secret's websites and
+ * when it was first added, so rotating its value keeps the approval; a link
+ * secret's exact version, so any new link needs a new approval.
+ */
+export function workspaceSecretApprovalBinding(secret: {
+  readonly usage: "http-header" | "http-url";
+  readonly allowedHosts: readonly string[];
+  readonly createdAtMs: number;
+  readonly generation: number;
+}): string {
+  return JSON.stringify(
+    secret.usage === "http-header"
+      ? [secret.usage, [...secret.allowedHosts].sort(compareCodeUnits), secret.createdAtMs]
+      : [secret.usage, secret.createdAtMs, secret.generation],
+  );
+}
+
+export function httpStepSecretProblem(
+  step: Pick<AutomationHttpStep, "url" | "secretHeaders">,
+  secrets: readonly WorkspaceSecretSummary[],
+): string | null {
+  const uses = [
+    ...(step.url.kind === "secret" ? [{ name: step.url.secret, usage: "http-url" as const }] : []),
+    ...step.secretHeaders.map((header) => ({ name: header.secret, usage: "http-header" as const })),
+  ];
+  for (const use of uses) {
+    const secret = secrets.find((candidate) => candidate.name === use.name);
+    if (!secret) return `Add the secret ${use.name} in Settings, then allow this step.`;
+    if (secret.usage !== use.usage) {
+      return `${use.name} is saved as ${secret.usage === "http-url" ? "a webhook link" : "an API key"}, but this step uses it as ${use.usage === "http-url" ? "a webhook link" : "an API key"}. Fix it in Settings, then allow this step.`;
+    }
+  }
+  return null;
+}
+
+export function workspaceSecretApprovalBindings(
+  secrets: readonly WorkspaceSecretSummary[] | null,
+): Map<string, string> | null {
+  return secrets === null
+    ? null
+    : new Map(secrets.map((secret) => [secret.name, workspaceSecretApprovalBinding(secret)]));
+}
+
 /**
  * Deterministic SHA-256 digest binding an owner's Desktop UI approval of one
  * outbound HTTP step to its Collection id and path, automation definition, step
- * ordinal, destination, header declarations, and every referenced code file.
+ * ordinal, destination, header declarations, every referenced code file, and
+ * each named secret's approval binding. Null when the step names a secret and
+ * the secret bindings could not be read.
  */
 export function computeHttpStepApprovalDigest(input: {
   readonly collectionId: string;
@@ -109,7 +164,8 @@ export function computeHttpStepApprovalDigest(input: {
   readonly step: Pick<AutomationHttpStep, "url" | "method" | "headers" | "secretHeaders">;
   readonly definitionDigest: string;
   readonly codeFileHashes: ReadonlyArray<{ readonly file: string; readonly sha256: string }>;
-}): string {
+  readonly secretBindings: ReadonlyMap<string, string> | null;
+}): string | null {
   const urlBinding =
     input.step.url.kind === "literal"
       ? ["literal", input.step.url.url]
@@ -123,20 +179,32 @@ export function computeHttpStepApprovalDigest(input: {
   const codeFiles = [...input.codeFileHashes]
     .map((entry) => [entry.file, entry.sha256] as const)
     .sort((left, right) => compareCodeUnits(left[0], right[0]));
+  const fields = [
+    input.collectionId,
+    input.collectionPath,
+    input.automationId,
+    input.stepOrdinal,
+    urlBinding,
+    input.step.method,
+    headerNames,
+    secretHeaderRefs,
+    input.definitionDigest,
+    codeFiles,
+  ];
+  const secretNames = httpStepSecretNames(input.step);
+  if (secretNames.length === 0) {
+    return createHash("sha256")
+      .update(JSON.stringify(["dohc-http-step-approval-v1", ...fields]))
+      .digest("hex");
+  }
+  const bindings = input.secretBindings;
+  if (bindings === null) return null;
   return createHash("sha256")
     .update(
       JSON.stringify([
-        "dohc-http-step-approval-v1",
-        input.collectionId,
-        input.collectionPath,
-        input.automationId,
-        input.stepOrdinal,
-        urlBinding,
-        input.step.method,
-        headerNames,
-        secretHeaderRefs,
-        input.definitionDigest,
-        codeFiles,
+        "dohc-http-step-approval-v2",
+        ...fields,
+        secretNames.map((name) => [name, bindings.get(name) ?? null]),
       ]),
     )
     .digest("hex");

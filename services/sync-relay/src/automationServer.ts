@@ -1215,10 +1215,10 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         );
       },
       httpApprovals: {
-        isApproved: async (digest) =>
-          storage.hasWorkspaceHttpStepApproval(workspaceId, digest) ? "approved" : "unapproved",
-        readApprovedDigests: async () =>
-          new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+        read: async () => ({
+          approved: new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+          secrets: storage.listWorkspaceSecrets(workspaceId),
+        }),
       },
       httpWebhook: {
         execute: async ({

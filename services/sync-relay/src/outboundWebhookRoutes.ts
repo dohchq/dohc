@@ -27,7 +27,9 @@ import {
   HttpStepApprovalWriteInput,
   OutboundWebhookDispatchRequest,
   computeHttpStepApprovalDigest,
+  httpStepSecretNames,
   sanitizeHttpFailureReason,
+  workspaceSecretApprovalBinding,
   type OutboundWebhookDispatchResponse,
 } from "@dohc/workspace-contracts/http-step-approvals";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
@@ -50,7 +52,7 @@ import {
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { SyncRelayQuotaExceededError } from "./storage/errors";
 import type { SyncRelayStorage } from "./storage";
-import { unsealWorkspaceSecret } from "./workspaceSecretCrypto";
+import { unsealWorkspaceSecret, type WorkspaceSecretKeyring } from "./workspaceSecretCrypto";
 
 export const MAX_HTTP_APPROVAL_BODY_BYTES = 8 * 1024;
 export const MAX_OUTBOUND_DISPATCH_BODY_BYTES = 448 * 1024;
@@ -162,7 +164,7 @@ export type OutboundWebhookRoute =
 
 export interface OutboundWebhookExecutionDependencies {
   readonly storage: SyncRelayStorage;
-  readonly linkKey: string | Uint8Array | null;
+  readonly keyring: WorkspaceSecretKeyring | null;
   readonly readOwnerShares: (
     ownerUserId: string,
     path: string,
@@ -390,6 +392,12 @@ export async function executeRelayOutboundWebhook(
       });
     }
 
+    const secretNames = httpStepSecretNames(httpStep);
+    const secretBindings = new Map<string, string>();
+    for (const name of secretNames) {
+      const stored = storage.readWorkspaceSecretForExecution(workspaceId, name);
+      if (stored) secretBindings.set(name, workspaceSecretApprovalBinding(stored.summary));
+    }
     const approvalDigest = computeHttpStepApprovalDigest({
       collectionId: committedCollectionId,
       collectionPath: request.collectionPath,
@@ -398,14 +406,17 @@ export async function executeRelayOutboundWebhook(
       step: httpStep,
       definitionDigest: definitionDigest(automation),
       codeFileHashes,
+      secretBindings,
     });
-    if (approvalDigest !== request.approvalDigest) {
+    if (approvalDigest === null || approvalDigest !== request.approvalDigest) {
       return {
         ok: false as const,
         failure: beforeSendFailure(
           409,
           "definition_not_synced",
-          "Sync this workspace first so your server has the current automation definition and scripts.",
+          secretNames.length > 0
+            ? "A secret this step uses changed, or your server doesn't have the current automation yet. Sync this workspace, then allow the step again if dohc asks."
+            : "Sync this workspace first so your server has the current automation definition and scripts.",
           secrets,
         ),
       };
@@ -562,6 +573,7 @@ export async function executeRelayOutboundWebhook(
 
   deps.accountInFlight.set(ownerUserId, currentInFlight + 1);
   const secretsToScrub: string[] = [];
+  const loadedSecrets: Array<{ name: string; generation: number; createdAtMs: number }> = [];
   const finalizeFailure = (errorCode: string, reason: string, httpStatus?: number) => {
     const safeReason = sanitizeHttpFailureReason(reason, secretsToScrub);
     storage.finalizeWorkspaceHttpDispatch({
@@ -588,7 +600,7 @@ export async function executeRelayOutboundWebhook(
     if (httpStep.url.kind === "literal") {
       rawUrl = httpStep.url.url;
     } else {
-      if (!deps.linkKey) {
+      if (!deps.keyring) {
         return beforeSendFailure(
           200,
           "secrets_unavailable",
@@ -616,8 +628,9 @@ export async function executeRelayOutboundWebhook(
           secretsToScrub,
         );
       }
+      loadedSecrets.push(storedUrlSecret.summary);
       const unsealedUrl = unsealWorkspaceSecret({
-        linkKey: deps.linkKey,
+        keyring: deps.keyring,
         workspaceId,
         ownerUserId,
         name: storedUrlSecret.summary.name,
@@ -674,7 +687,7 @@ export async function executeRelayOutboundWebhook(
     }
 
     for (const secretHeader of httpStep.secretHeaders) {
-      if (!deps.linkKey) {
+      if (!deps.keyring) {
         return beforeSendFailure(
           200,
           "secrets_unavailable",
@@ -712,8 +725,9 @@ export async function executeRelayOutboundWebhook(
           secretsToScrub,
         );
       }
+      loadedSecrets.push(storedSecret.summary);
       const unsealed = unsealWorkspaceSecret({
-        linkKey: deps.linkKey,
+        keyring: deps.keyring,
         workspaceId,
         ownerUserId,
         name: storedSecret.summary.name,
@@ -791,6 +805,21 @@ export async function executeRelayOutboundWebhook(
         deliveryId: request.deliveryId,
         nowMs: nowMs(),
         beforeReserve: () => {
+          for (const loaded of loadedSecrets) {
+            const current = storage.readWorkspaceSecretForExecution(workspaceId, loaded.name);
+            if (
+              current === null ||
+              current.summary.generation !== loaded.generation ||
+              current.summary.createdAtMs !== loaded.createdAtMs
+            ) {
+              return beforeSendFailure(
+                409,
+                "secret_changed",
+                `Secret "${loaded.name}" changed while dohc was sending. Try again.`,
+                secretsToScrub,
+              );
+            }
+          }
           const verified = verifyCommittedStep(secretsToScrub);
           if (!verified.ok) return verified.failure;
           if (!storage.hasWorkspaceHttpStepApproval(workspaceId, verified.approvalDigest)) {
@@ -941,6 +970,7 @@ export function createOutboundWebhookRoutes(deps: OutboundWebhookExecutionDepend
           {
             ok: true,
             approvals: deps.storage.listWorkspaceHttpStepApprovals(route.workspaceId),
+            secrets: deps.storage.listWorkspaceSecrets(route.workspaceId),
           },
           200,
         );

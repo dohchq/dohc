@@ -18,8 +18,10 @@ import {
 import {
   AUTOMATION_CHAIN_DEPTH_CAP,
   sanitizeHttpFailureReason,
+  workspaceSecretApprovalBinding,
 } from "@dohc/workspace-contracts/http-step-approvals";
 import type { AutomationHttpWebhookExecutor } from "@dohc/automation-executor/collection-automation-run";
+import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
 import type { LocalWorkspaceSecretStore } from "./localWorkspaceSecretStore";
 
 const OUTBOUND_TIMEOUT_MS = 10_000;
@@ -58,7 +60,12 @@ export function createLocalOutboundWebhookExecutor(options: {
   let inFlight = 0;
 
   return {
-    async execute({ effect, depth, signal }) {
+    async execute({ effect, depth, signal, secrets }) {
+      const approvedBindings = new Map(
+        secrets.map((secret) => [secret.name, workspaceSecretApprovalBinding(secret)]),
+      );
+      const changedSince = (summary: WorkspaceSecretSummary) =>
+        approvedBindings.get(summary.name) !== workspaceSecretApprovalBinding(summary);
       if (depth >= AUTOMATION_CHAIN_DEPTH_CAP) {
         return {
           ok: false,
@@ -118,6 +125,13 @@ export function createLocalOutboundWebhookExecutor(options: {
             return {
               ok: false,
               reason: `Secret "${effect.url.secret}" is not configured as a webhook URL secret.`,
+              beforeSend: true,
+            };
+          }
+          if (changedSince(secret.summary)) {
+            return {
+              ok: false,
+              reason: `Secret "${effect.url.secret}" changed while dohc was sending. Try again.`,
               beforeSend: true,
             };
           }
@@ -210,6 +224,13 @@ export function createLocalOutboundWebhookExecutor(options: {
             return {
               ok: false,
               reason: `Secret "${secretHeader.secret}" is not configured as a header secret.`,
+              beforeSend: true,
+            };
+          }
+          if (changedSince(secret.summary)) {
+            return {
+              ok: false,
+              reason: `Secret "${secretHeader.secret}" changed while dohc was sending. Try again.`,
               beforeSend: true,
             };
           }

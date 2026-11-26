@@ -11,6 +11,7 @@ import {
 import {
   AUTOMATION_CHAIN_DEPTH_CAP,
   computeHttpStepApprovalDigest,
+  workspaceSecretApprovalBindings,
 } from "@dohc/workspace-contracts/http-step-approvals";
 import { changedSincePressed } from "./automationButtons";
 import type { StoredRun } from "./automationRunStore";
@@ -122,7 +123,7 @@ export type RecordRunDependencies = Pick<
       | "authorizeDataset"
       | "isButtonField"
       | "httpWebhook"
-      | "isHttpStepApproved"
+      | "readHttpApprovals"
     >
   > &
   Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
@@ -1622,19 +1623,21 @@ export async function prepareRecordBackend(
           codeFileHashes.push({ file, sha256: currentHash });
         }
         const digest = definitionDigest(automation);
-        const approvalDigest = computeHttpStepApprovalDigest({
-          collectionId,
-          collectionPath: collection.path,
-          automationId: automation.id,
-          stepOrdinal: place.ordinal,
-          step: declaredStep,
-          definitionDigest: digest,
-          codeFileHashes,
-        });
-        const approvalState = deps.isHttpStepApproved
-          ? await deps.isHttpStepApproved(approvalDigest)
-          : "unapproved";
-        if (approvalState === "unavailable") {
+        const approvals = deps.readHttpApprovals ? await deps.readHttpApprovals() : null;
+        const approvalDigest =
+          approvals === null
+            ? null
+            : computeHttpStepApprovalDigest({
+                collectionId,
+                collectionPath: collection.path,
+                automationId: automation.id,
+                stepOrdinal: place.ordinal,
+                step: declaredStep,
+                definitionDigest: digest,
+                codeFileHashes,
+                secretBindings: workspaceSecretApprovalBindings(approvals.secrets),
+              });
+        if (approvals === null || approvalDigest === null) {
           return {
             outcome: failed(
               `dohc could not verify owner confirmation for the webhook in step ${place.ordinal + 1}. Check Settings or sync status and try again.`,
@@ -1642,7 +1645,7 @@ export async function prepareRecordBackend(
             httpRefusedBeforeSend: true,
           };
         }
-        if (approvalState !== "approved") {
+        if (!approvals.approved.has(approvalDigest)) {
           return { outcome: { kind: "wait", reason: "held" }, httpRefusedBeforeSend: true };
         }
         if (!deps.httpWebhook) {
@@ -1671,6 +1674,7 @@ export async function prepareRecordBackend(
           definitionDigest: digest,
           approvalDigest,
           codeFileHashes,
+          secrets: approvals.secrets ?? [],
           effect: boundEffect,
           depth: claim.depth,
           signal,
