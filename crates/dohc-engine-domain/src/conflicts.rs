@@ -5,7 +5,7 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
+    VersionedTextStore, delete_text_in_tx, get_version, hash_author_fields, hash_fields,
     hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
     require_unarchived_version, validate_delete_input, validate_identifier, validate_moment_id,
     validate_moment_metadata, validate_path, validate_write_input, version_is_active,
@@ -818,7 +818,13 @@ impl VersionedTextStore<'_> {
                 });
             }
             require_unarchived_version(tx, &input.workspace_id, &conflict.target_version_id)?;
-            require_unarchived_version(tx, &input.workspace_id, &conflict.source_version_id)?;
+            if get_version(tx, &input.workspace_id, &conflict.source_version_id)?
+                .is_some_and(|version| version.archived_at_ms.is_some())
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "version-archived",
+                });
+            }
             // Before any write. The caller's answer carries this conflict, one
             // control frame has to hold that answer, and withholding removes
             // only bodies — so a conflict whose remaining strings cannot fit

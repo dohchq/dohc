@@ -1482,7 +1482,7 @@ where
                 reason: "path does not match the protected history moment",
             });
         }
-        require_writable_version(tx, workspace_id, &before.version_id, metadata_origin)?;
+        require_unarchived_version(tx, workspace_id, &before.version_id)?;
         // The state to go back to is the tip that change replaced, so skip a
         // synced change that lost and never became the tip.
         let previous = tx

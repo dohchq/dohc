@@ -2080,7 +2080,7 @@ fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
     }
 }
 
-fn get_version(
+pub(crate) fn get_version(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,

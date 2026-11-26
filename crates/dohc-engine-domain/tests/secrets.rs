@@ -1486,28 +1486,30 @@ fn secret_apply_refuses_archived_versions_in_both_directions() {
         ));
     }
 
-    let restore_err =
-        dohc_engine_domain::secrets::restore_secret_file_verbatim_with_metadata_and_after(
-            &mut store,
-            WS,
-            ".env",
-            "sm-feat",
-            "sm-restore",
-            "restore",
-            None,
-            None,
-            601,
-            &|_, _, _, _| Ok(Preimage::Absent),
-            &NO_FAULTS,
-            |_, _| Ok(()),
-        )
-        .expect_err("restoring protected history in an archived version must fail");
-    assert!(matches!(
-        restore_err,
-        dohc_engine_domain::DomainError::InvalidInput {
-            reason: "version-archived"
-        }
-    ));
+    for origin in ["restore", "sync"] {
+        let restore_err =
+            dohc_engine_domain::secrets::restore_secret_file_verbatim_with_metadata_and_after(
+                &mut store,
+                WS,
+                ".env",
+                "sm-feat",
+                &format!("sm-restore-{origin}"),
+                origin,
+                None,
+                None,
+                601,
+                &|_, _, _, _| Ok(Preimage::Absent),
+                &NO_FAULTS,
+                |_, _| Ok(()),
+            )
+            .expect_err("restoring protected history in an archived version must fail");
+        assert!(matches!(
+            restore_err,
+            dohc_engine_domain::DomainError::InvalidInput {
+                reason: "version-archived"
+            }
+        ));
+    }
 }
 
 #[test]
