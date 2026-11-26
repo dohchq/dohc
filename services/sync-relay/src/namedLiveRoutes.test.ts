@@ -23,7 +23,7 @@ import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createLiveRooms, type LiveRooms } from "./liveRoom.js";
+import { createLiveRooms, NoteFormatOff, type LiveRooms } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import {
   createLiveFrameSession,
@@ -2816,6 +2816,34 @@ it("closes an idle invited desktop socket on the next pong when its grant is rev
   ).toBe(true);
   await desktop.closed;
   expect(desktop.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
+it("closes a room's socket as one to try later when the note's format is switched off", async () => {
+  const f = await fixture(
+    limits,
+    false,
+    undefined,
+    false,
+    true,
+    undefined,
+    0,
+    0,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    {
+      join: (captured: NamedFrameRoomHost) => ({
+        ...captured,
+        openSync: () => Promise.reject(new NoteFormatOff()),
+      }),
+    } as unknown as LiveRooms,
+    true,
+  );
+  const socket = f.connect((await f.mint()).token);
+  expect(await socket.status).toBe(101);
+  await Promise.race([startProvider(socket), socket.closed]);
+  expect(await socket.closed).toEqual([1013, "note_format_off"]);
 });
 
 it("keeps delivering live room edits after quiet idle cycles and keeps editing after Can edit -> Can view -> Can edit", async () => {

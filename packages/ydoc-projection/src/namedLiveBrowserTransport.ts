@@ -38,6 +38,7 @@ export const NAMED_LIVE_NO_AUTOMATIC_RETRY: readonly string[] = [
   "paused",
   "live-stopped",
   "document-gone",
+  "note-format-off",
 ];
 /** How often a page whose note is off checks, while it is visible, whether its owner started it again. */
 export const NAMED_LIVE_OFF_CHECK_MS = 30_000;
@@ -362,14 +363,17 @@ export function createNamedLiveBrowserTransport<
           held.controller.signal.removeEventListener("abort", abort);
         };
         const onClose = (event: CloseEvent) => {
-          if (
+          const reason =
             event.code === LIVE_CONNECTION_LIMIT_CLOSE_CODE &&
             liveConnectionLimitMessage(event.reason)
-          ) {
-            fail(held, "disconnected", event.reason);
-            finish();
-            reject(new Error(event.reason));
-          } else disconnected();
+              ? event.reason
+              : event.code === 1013 && event.reason === "note_format_off"
+                ? "note-format-off"
+                : null;
+          if (reason === null) return disconnected();
+          fail(held, "disconnected", reason);
+          finish();
+          reject(new Error(reason));
         };
         const disconnected = () => {
           fail(held, "disconnected", "transport-closed");

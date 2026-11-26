@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { BLOCK_ELEMENT, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 type DeleteSet = ReturnType<typeof Y.decodeUpdate>["ds"];
 
@@ -74,8 +75,10 @@ function findRemovedText(
   keep: (item: Y.Item) => boolean,
 ): RemovedText | null {
   const deleted: Y.Item[] = [];
+  const sequence = sequenceOf(transaction.doc);
   Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
-    if (struct instanceof Y.Item && holdsText(struct) && keep(struct)) deleted.push(struct);
+    if (struct instanceof Y.Item && holdsText(struct, sequence) && keep(struct))
+      deleted.push(struct);
   });
   if (deleted.length === 0) return null;
   const listed = named();
@@ -108,8 +111,9 @@ export class DeletedText {
 
   /** Call from `afterTransaction`, while the deleted content is still there. */
   note(transaction: Y.Transaction): void {
+    const sequence = sequenceOf(transaction.doc);
     Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
-      if (!(struct instanceof Y.Item) || !holdsText(struct)) return;
+      if (!(struct instanceof Y.Item) || !holdsText(struct, sequence)) return;
       const list = this.ranges.get(struct.id.client) ?? [];
       list.push({ clock: struct.id.clock, end: struct.id.clock + struct.length });
       this.ranges.set(struct.id.client, list);
@@ -147,6 +151,7 @@ export function findUnsentText(doc: Y.Doc, unsent: Uint8Array, deleted: DeletedT
       deletes = true;
   });
   const pieces: { piece: Piece; shown: string }[] = [];
+  const sequence = sequenceOf(doc);
   to.forEach((end, client) => {
     const start = from.get(client)!;
     const structs = doc.store.clients.get(client) ?? [];
@@ -154,7 +159,7 @@ export function findUnsentText(doc: Y.Doc, unsent: Uint8Array, deleted: DeletedT
     for (let at = Y.findIndexSS(structs, start); at < structs.length; at++) {
       const item = structs[at]!;
       if (item.id.clock >= end) break;
-      if (!(item instanceof Y.Item) || item.deleted || !holdsText(item)) continue;
+      if (!(item instanceof Y.Item) || item.deleted || !holdsText(item, sequence)) continue;
       const piece = {
         item,
         start: Math.max(start - item.id.clock, 0),
@@ -174,7 +179,7 @@ function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
     .sort((left, right) => compare(left.at, right.at));
   let text = "";
-  let line: Y.AbstractType<unknown> | null = null;
+  let line: unknown = null;
   for (const entry of sorted) {
     if (line !== null && entry.line !== line) text += "\n";
     line = entry.line;
@@ -183,12 +188,15 @@ function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string
   return text;
 }
 
+const sequenceOf = (doc: Y.Doc) => doc.share.get(BODY_SEQUENCE_FIELD);
+
 /** Characters, and inline items such as an image, a link or a line break. */
-function holdsText(item: Y.Item): boolean {
+function holdsText(item: Y.Item, sequence: unknown): boolean {
   if (item.parentSub !== null) return false;
   const content = item.content;
-  if (content instanceof Y.ContentString || content instanceof Y.ContentEmbed)
-    return item.parent instanceof Y.XmlText;
+  if (content instanceof Y.ContentString)
+    return item.parent instanceof Y.XmlText || item.parent === sequence;
+  if (content instanceof Y.ContentEmbed) return item.parent instanceof Y.XmlText;
   return (
     content instanceof Y.ContentType &&
     content.type instanceof Y.XmlElement &&
@@ -221,9 +229,20 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
   return ranges;
 }
 
-function lineOf(item: Y.Item): Y.AbstractType<unknown> {
+/** A note's line: a paragraph's element, or in a format-2 note the boundary before the item. */
+function lineOf(item: Y.Item): unknown {
   const parent = item.parent as Y.AbstractType<unknown>;
-  return parent instanceof Y.XmlText ? (parent._item!.parent as Y.AbstractType<unknown>) : parent;
+  if (parent instanceof Y.XmlText) return parent._item!.parent;
+  if (!(parent instanceof Y.Text)) return parent;
+  for (let left = item.left; left; left = left.left)
+    if (
+      !left.deleted &&
+      left.content instanceof Y.ContentType &&
+      left.content.type instanceof Y.XmlElement &&
+      left.content.type.nodeName === BLOCK_ELEMENT
+    )
+      return left;
+  return parent;
 }
 
 /** Note positions, counting deleted items, so removed text sorts the way it stood. */

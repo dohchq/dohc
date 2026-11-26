@@ -16,6 +16,13 @@ import {
   type NamedLiveProviderLimits,
 } from "@dohc/ydoc-projection/named-live-provider";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { bodySequenceReading } from "@dohc/ydoc-projection/body-sequence-yjs";
+import {
+  admitBodySequenceNotes,
+  liveEditRefusal,
+} from "@dohc/ydoc-projection/live-journal-validation";
+import { replaceLiveText } from "../../src/liveTextEdit";
 
 const limits = (): NamedLiveProviderLimits => ({
   frames: {
@@ -1426,4 +1433,140 @@ it("bounds pending application resubmissions and retains the draft at the attemp
   await vi.advanceTimersByTimeAsync(20_000);
   expect(host.submissions()).toHaveLength(2);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+describe("a format-2 note in the browser provider", () => {
+  const note = (markdown: string) => {
+    const doc = markdownToYDoc(markdown, { bodySequence: true });
+    cleanup.push(() => doc.destroy());
+    return doc;
+  };
+  const sequenceOf = (doc: Y.Doc) => doc.getText("sequence");
+  /** The sequence index just after the first time `word` stands in the note. */
+  function after(doc: Y.Doc, word: string) {
+    let index = 0;
+    for (const part of sequenceOf(doc).toDelta() as { insert: unknown }[]) {
+      if (typeof part.insert === "string") {
+        const at = part.insert.indexOf(word);
+        if (at >= 0) return index + at + word.length;
+        index += part.insert.length;
+      } else index += 1;
+    }
+    throw new Error(`No ${word} in the note.`);
+  }
+  const replace = (value: Provider, find: string, replacement: string) =>
+    replaceLiveText(value.doc, find, replacement);
+
+  it("declares the note's sequence and containers as it starts", () => {
+    const value = provider();
+    expect(value.doc.share.get("sequence")).toBeInstanceOf(Y.Text);
+    expect(value.doc.share.get("containers")).toBeInstanceOf(Y.Map);
+  });
+
+  it("sends nothing of its own when someone deletes a letter between formatting", async () => {
+    const doc = note("**a**b");
+    const { value, host } = await live(provider(), doc);
+    const before = Y.encodeStateVector(doc);
+    const sequence = sequenceOf(doc);
+    doc.transact((transaction) => {
+      for (let item = sequence._start; item; item = item.right)
+        if (!item.deleted && item.content instanceof Y.ContentString && item.content.str === "a")
+          item.delete(transaction);
+    });
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 2);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
+    expect(host.submissions()).toHaveLength(0);
+    expect(bodySequenceReading(value.doc)).toBe(bodySequenceReading(doc));
+  });
+
+  it("a declared sequence with no guard would send formatting deletes of its own", () => {
+    const doc = note("**a**b");
+    const page = new Y.Doc();
+    cleanup.push(() => page.destroy());
+    page.getText("sequence");
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(doc));
+    const before = Y.encodeStateVector(doc);
+    const sequence = sequenceOf(doc);
+    doc.transact((transaction) => {
+      for (let item = sequence._start; item; item = item.right)
+        if (!item.deleted && item.content instanceof Y.ContentString && item.content.str === "a")
+          item.delete(transaction);
+    });
+    const own: unknown[] = [];
+    page.on("update", (_: Uint8Array, origin: unknown) => {
+      if (origin !== "elsewhere") own.push(origin);
+    });
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(doc, before), "elsewhere");
+    expect(own.length).toBeGreaterThan(0);
+  });
+
+  it("reads unsent letters typed in two lines as two lines", async () => {
+    const { value } = await live(provider(), note("one\n\ntwo"));
+    value.doc.transact(() => sequenceOf(value.doc).insert(after(value.doc, "one"), "1"));
+    value.doc.transact(() => sequenceOf(value.doc).insert(after(value.doc, "two"), "2"));
+    expect(value.unsentText()).toEqual({ text: "1\n2", deletes: false });
+  });
+
+  it("reads unsent letters before the first boundary as a line of their own", async () => {
+    const { value } = await live(provider(), note("one"));
+    value.doc.transact(() => sequenceOf(value.doc).insert(0, "pre"));
+    value.doc.transact(() => sequenceOf(value.doc).insert(after(value.doc, "one"), "1"));
+    expect(value.unsentText()).toEqual({ text: "pre\n1", deletes: false });
+  });
+
+  it("reads an unsent image as its Markdown, without an attribute taken off it", async () => {
+    const { value } = await live(provider(), note("one"));
+    const image = new Y.XmlElement("image");
+    value.doc.transact(() => {
+      image.setAttribute("src", "a.png");
+      image.setAttribute("alt", "old");
+      sequenceOf(value.doc).insertEmbed(after(value.doc, "one"), image);
+    });
+    value.doc.transact(() => image.removeAttribute("alt"));
+    expect(value.unsentText()).toEqual({ text: "![](a.png)", deletes: false });
+  });
+
+  it("says unsent changes delete letters that were there", async () => {
+    const { value } = await live(provider(), note("one"));
+    value.doc.transact(() => sequenceOf(value.doc).delete(after(value.doc, "one") - 1, 1));
+    expect(value.unsentText()).toEqual({ text: "", deletes: true });
+  });
+
+  it("says nothing when someone deletes the boundary of a line the page typed in", async () => {
+    const doc = note("one\n\ntwo");
+    const { value, host } = await live(provider(), doc);
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    value.doc.transact(() => sequenceOf(value.doc).insert(after(value.doc, "two"), "2"));
+    await host.ack(await host.submitted(), 1, 2);
+    const before = Y.encodeStateVector(doc);
+    doc.transact(() => sequenceOf(doc).delete(after(doc, "two") - 4, 1));
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 3);
+    expect(removed).toEqual([]);
+  });
+
+  it("sends a replacement as one change the relay takes, never a delete on its own", async () => {
+    admitBodySequenceNotes(true);
+    cleanup.push(() => admitBodySequenceNotes(false));
+    const doc = note("Hello world.");
+    const { value, host } = await live(provider(), doc);
+    const copy = new Y.Doc({ gc: false });
+    cleanup.push(() => copy.destroy());
+    Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+    replace(value, "world", "friend");
+    const sent = await host.submitted();
+    if (sent.begin.purpose !== "submit-update") throw new Error("Expected a submit.");
+    await host.send({
+      kind: "result",
+      result: "refused",
+      deliveryId: sent.begin.deliveryId,
+      updateDigest: sent.begin.digest,
+      reason: "invalid-update",
+    });
+    expect(host.submissions()).toHaveLength(1);
+    expect(Y.decodeUpdate(sent.bytes).ds.clients.size).toBeGreaterThan(0);
+    expect(liveEditRefusal(copy, sent.bytes)).toBeUndefined();
+    expect(sequenceOf(copy).toString()).toContain("Hello friend.");
+    expect(sequenceOf(doc).toString()).toContain("Hello world.");
+  });
 });

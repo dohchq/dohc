@@ -264,7 +264,7 @@ export async function remoteLiveDocument(
     host.socket.resume();
     await waitFor(current, (state) => state.status === "live", signal);
     if (edit) {
-      replaceLiveText(current.body, edit.find, edit.replacement);
+      replaceLiveText(current.doc, edit.find, edit.replacement);
       if (current.state().pendingUpdates === 0 && current.state().status !== "live")
         throw new Error(
           current.state().reason ?? "The provider refused the edit before sending it.",

@@ -28,6 +28,8 @@ import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import { seededNote } from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport";
+import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
 import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, currentAccountFeedCursor } from "./accountFeed";
 import { ACCOUNT_READ_DEADLINE_MS } from "./accountOperations";
@@ -1092,8 +1094,9 @@ describe("pages the relay hosts live", () => {
         text: "Hello\n",
         objectId: "object",
       }),
+    baselineBytes?: Uint8Array,
   ) {
-    const f = registered({ deployment: true });
+    const f = registered({ deployment: true, ...(baselineBytes ? { baselineBytes } : {}) });
     cleanup.push(async () => f.close());
     f.storage.claimWorkspaceIdentity({
       workspaceId: "workspace",
@@ -1130,6 +1133,14 @@ describe("pages the relay hosts live", () => {
     expect(await answer(await read())).toEqual(edited);
     expect(f.journalRows().journal).toHaveLength(journal);
     expect(new Set(engine.methods())).toEqual(new Set(["versions.active", "versionedText.read"]));
+  });
+
+  it("reads a format-2 note the relay hosts as its text", async () => {
+    admitBodySequenceNotes(true);
+    cleanup.push(async () => admitBodySequenceNotes(false));
+    const { read } = await livePage(undefined, seededNote());
+    const { markdown } = (await answer(await read())) as { markdown: string };
+    expect(markdown).toMatch(/^---\nstatus: draft\n---\n\n# Trip plan\n/);
   });
 });
 

@@ -16,7 +16,7 @@ import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { createLiveRooms } from "./liveRoom.js";
+import { createLiveRooms, NoteFormatOff } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type { NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
@@ -261,6 +261,23 @@ it("with the setting turned off, a room refuses each change to a format-2 note a
   await room.close();
   expect(paused(f)).toBe(false);
   expect(f.journalRows().journal).toHaveLength(1);
+});
+
+it("with the setting turned off, a room opens no one into a format-2 note and leaves it", async () => {
+  const { f, room } = noteInARoom();
+  const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
+  admitBodySequenceNotes(false);
+  try {
+    await expect(session.openSync(Y.encodeStateVector(new Y.Doc()), signal)).rejects.toThrow(
+      NoteFormatOff,
+    );
+  } finally {
+    admitBodySequenceNotes(true);
+  }
+  session.close();
+  await room.close();
+  expect(paused(f)).toBe(false);
+  expect(f.journalRows().journal).toHaveLength(0);
 });
 
 it("after the setting goes off, a room cannot save the changes it had taken to a format-2 note, and pauses the note with them in its copy", async () => {

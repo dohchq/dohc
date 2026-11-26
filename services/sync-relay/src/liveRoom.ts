@@ -11,7 +11,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
-import { liveEditRefusal } from "@dohc/ydoc-projection/live-journal-validation";
+import {
+  admitsBodySequenceNotes,
+  liveEditRefusal,
+} from "@dohc/ydoc-projection/live-journal-validation";
+import { holdsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import {
@@ -313,6 +317,13 @@ export function nextSave(
       if (id.clock < (leftOut.get(id.client) ?? Infinity)) leftOut.set(id.client, id.clock);
   }
   return taken;
+}
+
+/** The relay has notes in this note's format switched off, so no one opens it live. */
+export class NoteFormatOff extends Error {
+  constructor() {
+    super("Notes in this format are switched off on this relay.");
+  }
 }
 
 export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
@@ -924,6 +935,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           });
           held.lifetime.signal.throwIfAborted();
           host.assertCurrent();
+          if (!admitsBodySequenceNotes() && holdsBodySequence(held.doc)) throw new NoteFormatOff();
           if (owner) {
             const feed = new AbortController();
             const sync = await host.openSync(clientVector, signal);
