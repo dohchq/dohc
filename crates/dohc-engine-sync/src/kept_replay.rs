@@ -224,11 +224,16 @@ fn finish_note(
     let (workspace, version, object): (String, String, String) =
         serde_json::from_str(&claims[0].0).map_err(SyncError::corrupt)?;
     let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
-    let drained = crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
-    let refused = format!(
-        "UPDATE replication_refused_ydoc_blobs AS k SET reason=?4, replayed=0 \
-         WHERE k.replayed=1 AND {AT}"
-    );
+    crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
+    let refused = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
+         replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
+         AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
+         AND r.origin_seq=k.origin_seq AND k.rowid IN (SELECT value FROM json_each(?1))";
+    let note = claims
+        .iter()
+        .flat_map(|(_, _, kept)| kept.iter().map(|(rowid, _)| rowid))
+        .collect::<Vec<_>>();
+    let note = serde_json::to_string(&note).map_err(SyncError::corrupt)?;
     let forget = format!(
         "DELETE FROM replication_refused_ydoc_blobs WHERE replayed=1 \
            AND rowid IN (SELECT value FROM json_each(?1)) \
@@ -236,15 +241,7 @@ fn finish_note(
            WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
     match store.write_with(faults, |tx| -> Result<(), SyncError> {
-        for r in &drained.refusals {
-            let row = (
-                &r.workspace_id,
-                &r.origin_id,
-                r.origin_seq,
-                r.reason.message(),
-            );
-            tx.execute(&refused, row).map_err(SyncError::persist)?;
-        }
+        tx.execute(refused, [&note]).map_err(SyncError::persist)?;
         for kept in finished {
             let rowids = kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>();
             let rowids = serde_json::to_string(&rowids).map_err(SyncError::corrupt)?;
