@@ -415,7 +415,7 @@ This check uses the form that the desktop creates for a Collection.
 4. **Operator:** Open the app's review and choose **Publish on a link**, then **Share app folder**.
    Under **Anyone with the link**, choose **View**, then **Create link**. Copy the link, and close sharing.
 5. **Operator:** Open the app's review again and choose **Publish on a link**. Select the new link and choose **Prepare app**.
-   In **Review app publication**, check that the link's actions are only the form's create action, and that the owner and helper actions are None.
+   In **Review app publication**, check that the table lists only the form's Adds records action, with a check under Link, Helpers, and You.
    Then choose **Publish this revision**.
 6. **Operator:** Open the link in a private browser window that is not signed in to Drive, and choose **Open app**.
    Enter `drive-entry-check-<UTC time>` as the Name, and choose **Submit**.

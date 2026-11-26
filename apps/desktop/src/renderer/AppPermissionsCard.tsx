@@ -1,13 +1,17 @@
 import { useEffect, useId, useRef } from "react";
 import {
+  Check,
   Eye,
   Globe,
   Info,
   Link as LinkIcon,
   Lock,
   Pencil,
+  Play,
+  Plus,
   ShieldCheck,
   Table2,
+  Trash2,
   TriangleAlert,
   Users,
 } from "lucide-react";
@@ -16,7 +20,7 @@ import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-o
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { collectionsRefusalError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
-import { Pill, RetryRow } from "./ui/controls";
+import { Pill, RetryRow, SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "./workspace/workspaceSession";
@@ -28,34 +32,38 @@ export type ReportPermissionError = (
   retry: (() => void) | null,
 ) => void;
 
-type Reach = { text: string; added: boolean };
-type Line = { key: string; prefix?: string; items: Reach[] };
+type Operation = AppDatasetCapability["operations"][number];
+type Kind = NonNullable<Operation["display"]>["kind"];
+type Mark = { text: string; added: boolean };
+type Row = {
+  key: string;
+  kind: Kind | null;
+  label: string;
+  fields: Mark[];
+  added: boolean;
+  name?: string;
+};
 type Access = {
   key: string;
   name: string;
   alias?: string;
   path?: string;
-  reads: Line[];
-  changes: Line[];
+  reads: Row[];
+  changes: Row[];
 };
 
-const addsRecords = "Adds records with ";
+const kindIcons = { read: Eye, create: Plus, edit: Pencil, delete: Trash2, action: Play } as const;
 
-function tablePrefix(display: AppDatasetCapability["operations"][number]["display"]): string {
-  return display?.table ? `${display.table}: ` : "";
-}
-
-function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
+function labelOf({ display }: Operation): string {
   if (!display) return "Records";
-  const prefix = tablePrefix(display);
-  const fields = display.fields.join(", ");
+  const prefix = display.table ? `${display.table}: ` : "";
   switch (display.kind) {
     case "read":
-      return `${prefix}${fields || "Records"}`;
+      return `${prefix}Reads records`;
     case "create":
-      return `${prefix}${fields ? `${addsRecords}${fields}` : "Adds records"}`;
+      return `${prefix}Adds records`;
     case "edit":
-      return `${prefix}${fields ? `Edits ${fields}` : "Edits records"}`;
+      return `${prefix}Edits records`;
     case "delete":
       return `${prefix}Deletes records`;
     case "action":
@@ -63,14 +71,8 @@ function operationWords({ display }: AppDatasetCapability["operations"][number])
   }
 }
 
-function actionSummary(operation: AppDatasetCapability["operations"][number]): string {
-  if (!operation.display) return "";
-  if (operation.display.kind === "read") {
-    const fields = operation.display.fields.join(", ");
-    return `${tablePrefix(operation.display)}${fields ? `Reads ${fields}` : "Reads records"}`;
-  }
-  return operationWords(operation);
-}
+const unmarked = (fields: readonly string[]): Mark[] =>
+  fields.map((text) => ({ text, added: false }));
 
 function createFieldsWidened(
   capability: AppDatasetCapability,
@@ -84,69 +86,88 @@ function createFieldsWidened(
   return next.fieldIds.some((fieldId) => !prior.fieldIds.includes(fieldId));
 }
 
-function prefixForFieldKind(kind: "read" | "create" | "edit"): string | undefined {
-  if (kind === "create") return addsRecords;
-  if (kind === "edit") return "Edits ";
-  return undefined;
-}
-
-function operationLine(
-  operation: AppDatasetCapability["operations"][number],
+function operationRow(
+  operation: Operation,
   capability: AppDatasetCapability,
   same: AppDatasetCapability | undefined,
-  comparing: boolean,
-): { group: string; line: Line } {
-  const text = operationWords(operation);
+): Row {
+  const display = operation.display;
+  const fields = display?.fields ?? [];
+  const base = {
+    key: operation.operationId,
+    kind: display?.kind ?? null,
+    label: labelOf(operation),
+  };
   const prior = same?.operations.find((entry) => entry.operationId === operation.operationId);
-  if (comparing && same && prior) {
-    const widened = createFieldsWidened(capability, same, operation.operationId);
-    const nextDisplay = operation.display;
-    const priorDisplay = prior.display;
-    if (
-      nextDisplay &&
-      priorDisplay &&
-      nextDisplay.kind === priorDisplay.kind &&
-      (nextDisplay.kind === "read" ||
-        nextDisplay.kind === "create" ||
-        nextDisplay.kind === "edit") &&
-      nextDisplay.fields.length > 0 &&
-      priorDisplay.fields.length > 0
-    ) {
-      const hasAddedField = nextDisplay.fields.some(
-        (field) => !priorDisplay.fields.includes(field),
-      );
-      if (hasAddedField) {
-        const prefix = `${tablePrefix(nextDisplay)}${prefixForFieldKind(nextDisplay.kind) ?? ""}`;
-        return {
-          group: `fields ${operation.operationId}`,
-          line: {
-            key: operation.operationId,
-            ...(prefix ? { prefix } : {}),
-            items: nextDisplay.fields.map((field) => ({
-              text: field,
-              added: !priorDisplay.fields.includes(field),
-            })),
-          },
-        };
-      }
-    }
-    const expanded =
-      widened ||
-      (nextDisplay !== undefined &&
-        priorDisplay !== undefined &&
-        (nextDisplay.kind !== priorDisplay.kind ||
-          nextDisplay.label !== priorDisplay.label ||
-          nextDisplay.fields.some((field) => !priorDisplay.fields.includes(field))));
+  if (!same || !prior) {
     return {
-      group: nextDisplay?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
-      line: { key: operation.operationId, items: [{ text, added: expanded }] },
+      ...base,
+      fields: unmarked(fields),
+      added: !!same && !same.operationIds.includes(operation.operationId),
     };
   }
-  const added = comparing && !same?.operationIds.includes(operation.operationId);
+  const priorDisplay = prior.display;
+  const isNew = (field: string) => !!priorDisplay && !priorDisplay.fields.includes(field);
+  if (
+    display &&
+    priorDisplay &&
+    display.kind === priorDisplay.kind &&
+    (display.kind === "read" || display.kind === "create" || display.kind === "edit") &&
+    fields.length > 0 &&
+    priorDisplay.fields.length > 0 &&
+    fields.some(isNew)
+  ) {
+    return { ...base, fields: fields.map((text) => ({ text, added: isNew(text) })), added: false };
+  }
+  const expanded =
+    createFieldsWidened(capability, same, operation.operationId) ||
+    (display !== undefined &&
+      priorDisplay !== undefined &&
+      (display.kind !== priorDisplay.kind ||
+        display.label !== priorDisplay.label ||
+        fields.some(isNew)));
+  return { ...base, fields: unmarked(fields), added: expanded };
+}
+
+function mergedRows(rows: Row[]): Row[] {
+  const byGroup = new Map<string, Row>();
+  for (const row of rows) {
+    const group =
+      row.kind === "action"
+        ? `action ${row.key}`
+        : JSON.stringify([row.label, row.fields.map((field) => field.text)]);
+    const seen = byGroup.get(group);
+    if (!seen) {
+      byGroup.set(group, { ...row, fields: row.fields.map((field) => ({ ...field })) });
+      continue;
+    }
+    seen.added ||= row.added;
+    row.fields.forEach((field, index) => {
+      seen.fields[index]!.added ||= field.added;
+    });
+  }
+  return [...byGroup.values()];
+}
+
+function collectionRows(
+  capability: AppCollectionCapability,
+  marks: (fields: readonly string[], kind: "read" | "create") => Mark[],
+): Pick<Access, "reads" | "changes"> {
+  const row = (kind: "read" | "create", fields: readonly string[]): Row[] =>
+    fields.length
+      ? [
+          {
+            key: kind,
+            kind,
+            label: kind === "read" ? "Reads records" : "Adds records",
+            fields: marks(fields, kind),
+            added: false,
+          },
+        ]
+      : [];
   return {
-    group:
-      operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
-    line: { key: operation.operationId, items: [{ text, added }] },
+    reads: row("read", capability.readFields),
+    changes: row("create", capability.allowedFields),
   };
 }
 
@@ -156,49 +177,37 @@ function accessOf(capability: AppCapability, approved: readonly AppCapability[] 
       (value): value is AppDatasetCapability =>
         value.kind === "dataset" && value.datasetId === capability.datasetId,
     );
-    const lines = (operations: AppDatasetCapability["operations"]) => {
-      const byGroup = new Map<string, Line>();
-      for (const operation of operations) {
-        const { group, line } = operationLine(operation, capability, same, approved !== null);
-        const seen = byGroup.get(group);
-        if (seen && seen.items.length === 1 && line.items.length === 1) {
-          seen.items[0]!.added ||= line.items[0]!.added;
-        } else {
-          byGroup.set(seen ? `${group}:${operation.operationId}` : group, line);
-        }
-      }
-      return [...byGroup.values()];
-    };
+    const rows = (operations: Operation[]) =>
+      mergedRows(
+        operations.map((operation) => {
+          const row = operationRow(operation, capability, same);
+          return approved !== null && !same ? { ...row, added: true } : row;
+        }),
+      );
     return {
       key: capability.datasetId,
       name: capability.name,
       ...(capability.alias ? { alias: capability.alias } : {}),
-      reads: lines(capability.operations.filter((operation) => operation.readOnly)),
-      changes: lines(capability.operations.filter((operation) => !operation.readOnly)),
+      reads: rows(capability.operations.filter((operation) => operation.readOnly)),
+      changes: rows(capability.operations.filter((operation) => !operation.readOnly)),
     };
   }
   const same = approved?.find(
     (value): value is AppCollectionCapability =>
       value.kind !== "dataset" && value.collectionPath === capability.collectionPath,
   );
-  const items = (fields: readonly string[], allowed: readonly string[] | undefined) =>
-    fields.map((field) => ({ text: field, added: approved !== null && !allowed?.includes(field) }));
   return {
     key: capability.collectionPath,
     name: capability.collectionPath.split("/").pop() || capability.collectionPath,
     path: capability.collectionPath,
-    reads: capability.readFields.length
-      ? [{ key: "fields", items: items(capability.readFields, same?.readFields) }]
-      : [],
-    changes: capability.allowedFields.length
-      ? [
-          {
-            key: "fields",
-            prefix: addsRecords,
-            items: items(capability.allowedFields, same?.allowedFields),
-          },
-        ]
-      : [],
+    ...collectionRows(capability, (fields, kind) =>
+      fields.map((text) => ({
+        text,
+        added:
+          approved !== null &&
+          !(kind === "read" ? same?.readFields : same?.allowedFields)?.includes(text),
+      })),
+    ),
   };
 }
 
@@ -215,26 +224,70 @@ function boundaryLineFor(capabilities: readonly AppCapability[]): string {
   return "Cannot change or delete existing records, or read other workspace files.";
 }
 
-function Reaches({ lines }: { lines: Line[] }) {
+function NewMark() {
   return (
-    <dd className="m-0 min-w-0 break-words text-ink">
-      {lines.map((line) => (
-        <div key={line.key}>
-          {line.prefix}
-          {line.items.map((item, index) => (
-            <span key={`${index}:${item.text}`}>
-              {index ? ", " : ""}
-              {item.text}
-              {item.added ? (
-                <span className="ml-1 inline-block">
-                  <Pill tone="warning">New</Pill>
-                </span>
-              ) : null}
-            </span>
+    <span className="ml-1 inline-block">
+      <Pill tone="warning">New</Pill>
+    </span>
+  );
+}
+
+function ActionCell({ row, changes }: { row: Row; changes: boolean }) {
+  const Icon = row.kind ? kindIcons[row.kind] : Table2;
+  return (
+    <div className="flex min-w-0 items-start gap-2 text-[13px]">
+      <span
+        title={changes ? "Changes data" : "Reads only"}
+        className={`grid size-5 shrink-0 place-items-center rounded ${changes ? "bg-selected text-ink" : "border border-line text-muted"}`}
+      >
+        <Icon size={12} aria-hidden />
+      </span>
+      <div className="min-w-0 wrap-anywhere">
+        <span className="text-ink">{row.label}</span>
+        {row.added ? <NewMark /> : null}
+        {row.fields.length || row.name ? (
+          <p className="m-0 text-[12px] text-muted">
+            {row.fields.map((field, index) => (
+              <span key={`${index}:${field.text}`}>
+                {index ? ", " : ""}
+                {field.text}
+                {field.added ? <NewMark /> : null}
+              </span>
+            ))}
+            {row.name ? (
+              <>
+                {row.fields.length ? " · " : ""}
+                <span className="font-mono text-[11px]">{row.name}</span>
+              </>
+            ) : null}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function groupsOf<T>(changes: T[], reads: T[]) {
+  return [
+    { label: "Changes data", items: changes, changes: true },
+    { label: "Reads only", items: reads, changes: false },
+  ].filter((group) => group.items.length);
+}
+
+function RowGroups({ changes, reads }: { changes: Row[]; reads: Row[] }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {groupsOf(changes, reads).map((group) => (
+        <div key={group.label} className="flex flex-col gap-2">
+          <SectionLabel as="p" className="m-0">
+            {group.label}
+          </SectionLabel>
+          {group.items.map((row) => (
+            <ActionCell key={row.key} row={row} changes={group.changes} />
           ))}
         </div>
       ))}
-    </dd>
+    </div>
   );
 }
 
@@ -250,26 +303,9 @@ function AccessRows({ access }: { access: Access }) {
           </span>
         ) : null}
       </span>
-      <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-        {access.reads.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Eye size={12} aria-hidden />
-              Reads
-            </dt>
-            <Reaches lines={access.reads} />
-          </>
-        ) : null}
-        {access.changes.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Pencil size={12} aria-hidden />
-              Changes
-            </dt>
-            <Reaches lines={access.changes} />
-          </>
-        ) : null}
-      </dl>
+      <div className="col-start-2 mt-2">
+        <RowGroups changes={access.changes} reads={access.reads} />
+      </div>
     </div>
   );
 }
@@ -294,7 +330,7 @@ export function AppAccessSummary({
       <div data-testid="app-access" className="rounded-lg border border-line bg-bg">
         {capabilities ? (
           <>
-            <div className="flex flex-col gap-3 py-3">
+            <div className="flex flex-col gap-4 py-3">
               {capabilities.length ? (
                 capabilities.map((capability) => {
                   const access = accessOf(capability, approved);
@@ -326,37 +362,6 @@ export function AppAccessSummary({
         )}
       </div>
     </section>
-  );
-}
-
-function OperationNames({ operations }: { operations: AppDatasetCapability["operations"] }) {
-  if (operations.length === 0) return <span className="text-muted">None</span>;
-  return (
-    <>
-      {operations.map((operation, index) => {
-        const needsMutability = !operation.display || operation.display.kind === "action";
-        return (
-          <span key={operation.operationId}>
-            {index ? ", " : ""}
-            {operation.display ? (
-              <>
-                <span className="text-ink">{actionSummary(operation)}</span>
-                {" · "}
-              </>
-            ) : null}
-            <span className="font-mono text-ink">{operation.name}</span>
-            {needsMutability ? (
-              <>
-                {" "}
-                <span className="text-muted">
-                  ({operation.readOnly ? "reads only" : "changes data"})
-                </span>
-              </>
-            ) : null}
-          </span>
-        );
-      })}
-    </>
   );
 }
 
@@ -421,17 +426,168 @@ function deriveOperationDisplays(
   return operations;
 }
 
+export type LinkReadChoice = {
+  selected: ReadonlySet<string>;
+  shared: ReadonlySet<string>;
+  disabled: boolean;
+  onChange(operation: Operation, checked: boolean): void;
+};
+
+const audiences = [
+  { label: "Link", title: "Anyone with the link", Icon: LinkIcon },
+  { label: "Helpers", title: "People you gave access to this Collection", Icon: Users },
+  { label: "You", title: "Only you", Icon: Lock },
+] as const;
+
+function Allowed({ yes }: { yes: boolean }) {
+  return yes ? (
+    <>
+      <Check size={14} aria-hidden className="inline-block text-ink" />
+      <span className="sr-only">Yes</span>
+    </>
+  ) : (
+    <>
+      <span aria-hidden className="inline-block size-1 rounded-full bg-subtle align-middle" />
+      <span className="sr-only">No</span>
+    </>
+  );
+}
+
+function AudienceTable({
+  operations,
+  approvedReads,
+  choice,
+  narrow,
+}: {
+  operations: Operation[];
+  approvedReads: ReadonlySet<string>;
+  choice: LinkReadChoice | undefined;
+  narrow: boolean;
+}) {
+  const items = operations.map((operation) => {
+    const id = operation.operationId;
+    const choosable = !!choice && operation.access === "helper" && operation.fields !== undefined;
+    const exactFields =
+      (choosable || approvedReads.has(id)) && operation.fields
+        ? operation.fields.map((field) => field.name)
+        : (operation.display?.fields ?? []);
+    const row: Row = {
+      key: id,
+      kind: operation.display?.kind ?? null,
+      label: operation.display ? labelOf(operation) : operation.name,
+      fields: unmarked(exactFields),
+      added: false,
+      ...(operation.display ? { name: operation.name } : {}),
+    };
+    return {
+      operation,
+      row,
+      choosable,
+      onLink: operation.access === "link" || approvedReads.has(id),
+    };
+  });
+  const reasonId = useId();
+  const choosable = items.filter((item) => item.choosable);
+  const blocked = choosable.filter((item) => choice!.shared.has(item.operation.operationId));
+  const cell = `${narrow ? "w-8" : "w-14"} py-2 text-center align-top`;
+  return (
+    <>
+      <table className="w-full border-collapse">
+        <thead>
+          <tr className="border-b border-line">
+            <th scope="col" className="p-0">
+              <span className="sr-only">Action</span>
+            </th>
+            {audiences.map(({ label, title, Icon }) => (
+              <th
+                key={label}
+                scope="col"
+                title={title}
+                className={`${narrow ? "w-8" : "w-14"} py-2 align-bottom text-[12px] font-normal text-muted`}
+              >
+                <span className="flex flex-col items-center gap-1">
+                  <Icon size={14} aria-hidden />
+                  <span className={narrow ? "sr-only" : undefined}>{label}</span>
+                </span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        {groupsOf(
+          items.filter((item) => !item.operation.readOnly),
+          items.filter((item) => item.operation.readOnly),
+        ).map((group) => (
+          <tbody key={group.label}>
+            <tr>
+              <th scope="rowgroup" colSpan={4} className="px-3 pb-1 pt-3 text-left font-normal">
+                <SectionLabel>{group.label}</SectionLabel>
+              </th>
+            </tr>
+            {group.items.map(({ operation, row, choosable: canChoose, onLink }) => (
+              <tr key={row.key}>
+                <th scope="row" className="py-2 pl-3 pr-2 text-left align-top font-normal">
+                  <ActionCell row={row} changes={group.changes} />
+                </th>
+                <td className={cell}>
+                  {canChoose ? (
+                    <input
+                      type="checkbox"
+                      aria-label={`Let anyone with the link use ${operation.name}`}
+                      checked={choice!.selected.has(operation.operationId)}
+                      disabled={choice!.disabled || choice!.shared.has(operation.operationId)}
+                      {...(choice!.shared.has(operation.operationId)
+                        ? { "aria-describedby": `${reasonId}-${operation.operationId}` }
+                        : {})}
+                      onChange={(event) => choice!.onChange(operation, event.target.checked)}
+                    />
+                  ) : (
+                    <Allowed yes={onLink} />
+                  )}
+                </td>
+                <td className={cell}>
+                  <Allowed yes={operation.access !== "owner"} />
+                </td>
+                <td className={cell}>
+                  <Allowed yes />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        ))}
+      </table>
+      {choosable.length > blocked.length ? (
+        <p className="m-0 px-3 py-2 text-[12px] text-muted">
+          Ticked reads show anyone with the link current records and later changes. Unpublish to
+          withdraw access.
+        </p>
+      ) : null}
+      {blocked.map(({ operation }) => (
+        <p
+          key={operation.operationId}
+          id={`${reasonId}-${operation.operationId}`}
+          className="m-0 px-3 py-2 text-[12px] text-muted"
+        >
+          dohc can't open {operation.name} to the link, because another of this app's Collections
+          has an action with the same ID.
+        </p>
+      ))}
+    </>
+  );
+}
+
 export function DatasetPermissionCard({
   capability,
   workspaceId,
   reportError,
-  draftLinkReads = false,
+  linkReadChoice,
+  narrow = false,
   loadDisplay = false,
 }: {
   capability: AppDatasetCapability;
   workspaceId: string;
   reportError: ReportPermissionError;
-  draftLinkReads?: boolean;
+  linkReadChoice?: LinkReadChoice;
+  narrow?: boolean;
   loadDisplay?: boolean;
 }) {
   const { datasetId } = capability;
@@ -519,14 +675,6 @@ export function DatasetPermissionCard({
     found.path === null &&
     (found.status === "ambiguous" || found.status === "unreadable" || found.status === "missing");
 
-  const linkOps = operations.filter(
-    (operation) =>
-      operation.access === "link" ||
-      capability.linkReads?.some((read) => read.operationId === operation.operationId),
-  );
-  const helperOps = operations.filter((operation) => operation.access === "helper");
-  const ownerOps = operations.filter((operation) => operation.access === "owner");
-
   return (
     <div
       data-testid="app-publication-capability"
@@ -557,57 +705,13 @@ export function DatasetPermissionCard({
           </p>
         </div>
       </div>
-      <div className="space-y-2.5 p-3 text-[12px]">
-        <dl className="m-0 space-y-1.5">
-          <div>
-            <dt className="inline-flex items-center gap-1.5 font-medium text-ink">
-              <LinkIcon size={12} aria-hidden className="shrink-0 text-subtle" />
-              Link actions:
-            </dt>{" "}
-            <dd className="m-0 inline">
-              <OperationNames operations={linkOps} />
-            </dd>
-          </div>
-          <div>
-            <dt className="inline-flex items-center gap-1.5 font-medium text-ink">
-              <Users size={12} aria-hidden className="shrink-0 text-subtle" />
-              Helper actions:
-            </dt>{" "}
-            <dd className="m-0 inline">
-              <OperationNames operations={helperOps} />
-            </dd>
-          </div>
-          <div>
-            <dt className="inline-flex items-center gap-1.5 font-medium text-ink">
-              <Lock size={12} aria-hidden className="shrink-0 text-subtle" />
-              Owner actions:
-            </dt>{" "}
-            <dd className="m-0 inline">
-              <OperationNames operations={ownerOps} />
-            </dd>
-          </div>
-        </dl>
-        {capability.linkReads?.length ? (
-          <p className="m-0 rounded-md bg-panel-2 px-2.5 py-1.5 text-[12px] text-muted">
-            {draftLinkReads ? "Selected link reads: " : "Approved link reads: "}
-            {operations
-              .filter((operation) =>
-                capability.linkReads!.some((read) => read.operationId === operation.operationId),
-              )
-              .map((operation) => {
-                const fieldNames =
-                  operation.fields?.map((field) => field.name) ?? operation.display?.fields;
-                return fieldNames?.length
-                  ? `${operation.name} (${fieldNames.join(", ")})`
-                  : operation.name;
-              })
-              .join("; ")}
-            .{" "}
-            {draftLinkReads
-              ? "People with the link can use these once published."
-              : "Unpublish to withdraw access."}
-          </p>
-        ) : null}
+      <div className="pb-1">
+        <AudienceTable
+          operations={operations}
+          approvedReads={new Set(capability.linkReads?.map((read) => read.operationId))}
+          choice={linkReadChoice}
+          narrow={narrow}
+        />
       </div>
       <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
         <ShieldCheck size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
@@ -632,6 +736,14 @@ export function CollectionPermissionCard({
   capability: AppCollectionCapability;
   compact?: boolean;
 }) {
+  const required = new Set(capability.requiredFields);
+  const rows = collectionRows(capability, (fields, kind) =>
+    unmarked(
+      kind === "create"
+        ? fields.map((field) => (required.has(field) ? `${field} (required)` : field))
+        : fields,
+    ),
+  );
   return (
     <div
       data-testid="app-publication-capability"
@@ -643,38 +755,9 @@ export function CollectionPermissionCard({
           Creates records only in <span className="break-all">{capability.collectionPath}</span>.
         </p>
       </div>
-      {compact ? (
-        <div className="space-y-1 p-3 text-[12px] text-ink">
-          <p className="m-0 break-words">Create: {capability.allowedFields.join(", ")}</p>
-          <p className="m-0 break-words">
-            Required: {capability.requiredFields.join(", ") || "None"}
-          </p>
-          <p className="m-0 break-words">
-            Shown in the app: {capability.readFields.join(", ") || "None"}
-          </p>
-        </div>
-      ) : (
-        <dl className="m-0 space-y-1.5 p-3 text-[12px]">
-          <div>
-            <dt className="inline font-medium text-ink">Fields it can create: </dt>
-            <dd className="m-0 inline break-words text-ink">
-              {capability.allowedFields.join(", ")}
-            </dd>
-          </div>
-          <div>
-            <dt className="inline font-medium text-ink">Required fields: </dt>
-            <dd className="m-0 inline break-words text-ink">
-              {capability.requiredFields.join(", ") || "None"}
-            </dd>
-          </div>
-          <div>
-            <dt className="inline font-medium text-ink">Fields shown in the app: </dt>
-            <dd className="m-0 inline break-words text-ink">
-              {capability.readFields.join(", ") || "None"}
-            </dd>
-          </div>
-        </dl>
-      )}
+      <div className="p-3">
+        <RowGroups {...rows} />
+      </div>
       <div className="space-y-1.5 border-t border-line px-3 py-2 text-[12px] text-muted">
         <p className="m-0 flex items-start gap-2">
           <Info size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />

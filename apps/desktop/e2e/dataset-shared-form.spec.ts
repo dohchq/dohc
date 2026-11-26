@@ -179,10 +179,10 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
       "registrations-form/frontend.js",
     );
     const approval = publication.getByTestId("app-publication-capability");
-    await expect(approval).toContainText("Link actions:");
-    await expect(approval).toContainText("Adds records with Name");
-    await expect(approval).toContainText("Helper actions: None");
-    await expect(approval).toContainText("Owner actions: None");
+    const actionRows = approval.locator("tbody tr").filter({ has: page.locator("th[scope=row]") });
+    await expect(actionRows).toHaveCount(1);
+    await expect(actionRows.locator("td")).toHaveText(["Yes", "Yes", "Yes"]);
+    await expect(actionRows.locator("th")).toContainText("Adds recordsName");
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
     // The publication list reloads behind the notice, so its loading status can show beside it.
