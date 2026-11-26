@@ -295,7 +295,7 @@ async function harness(
             duplicateFile: async () => {
               throw new Error("unexpected Duplicate");
             },
-            removeKeptProtectedFiles: async () => [],
+            keepsProtectedBytes: async () => false,
             recordDisk: async (_path, files) => [...files],
             moveFile: async () => false,
             rename: async () => undefined,

@@ -817,7 +817,7 @@ describe("agent move and delete admission", () => {
       duplicateFile: async () => {
         throw new Error("unexpected Duplicate");
       },
-      removeKeptProtectedFiles: async () => [],
+      keepsProtectedBytes: async () => false,
       recordDisk: vi.fn(async () => []),
       moveFile: vi.fn(async () => false),
       rename: vi.fn(async () => {
@@ -1034,6 +1034,47 @@ describe("a person's delete of a protected file", () => {
       expect(existsSync(join(f.rootPath, ".env"))).toBe(false);
       expect(await f.workspaceTrash()).toEqual([]);
       expect(f.markDeleted).toHaveBeenCalledWith(".env");
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("comes back from History with the bytes it had", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      await f.removeByHand(".env");
+      await f.settle();
+      const removed = (await f.rows()).find(
+        (row) => row.path === ".env" && row.operation === "delete",
+      );
+      expect(removed).toBeDefined();
+      await f.engine().restoreFileToBeforeMoment(removed!.id, person);
+      expect(await readFile(join(f.rootPath, ".env"), "utf8")).toBe("TOKEN=held\n");
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("keeps it in place when the delete is not admitted", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      await expect(
+        deleteWorkspacePathByHand(f.operation, ".env", person, {
+          capture: f.engine(),
+          requestId: "request",
+          trashItem: f.trashItem,
+          markDeleted: f.markDeleted,
+          admit: async () => {
+            throw new Error("Not admitted");
+          },
+        }),
+      ).rejects.toThrow("Not admitted");
+      expect(await readFile(join(f.rootPath, ".env"), "utf8")).toBe("TOKEN=held\n");
+      expect(await f.workspaceTrash()).toEqual([]);
     } finally {
       await f.engine().stop();
     }

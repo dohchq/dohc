@@ -47,7 +47,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
     changePathsAs: async (_paths, _authored, work) =>
       work({
         policy: await readWorkspaceEnginePolicy(rootPath),
-        removeKeptProtectedFiles: async () => [],
+        keepsProtectedBytes: async () => false,
         recordDisk: async () => trackedPaths,
         delete: vi.fn(async () => "delete-moment"),
       } as never),

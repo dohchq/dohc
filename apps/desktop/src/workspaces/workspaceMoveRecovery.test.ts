@@ -93,7 +93,7 @@ async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewri
         duplicateFile: async () => {
           throw new Error("unexpected Duplicate");
         },
-        removeKeptProtectedFiles: async () => [],
+        keepsProtectedBytes: async () => false,
         recordDisk: async (_base, files) => files.filter((path) => !path.endsWith("oversized.bin")),
         rename: async (from, to) => {
           objects.set(to, objects.get(from) ?? `object:${from}`);

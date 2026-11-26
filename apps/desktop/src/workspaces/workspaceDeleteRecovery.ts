@@ -386,15 +386,17 @@ export async function finishDeleteRecovery(
     if (!record) throw new Error("Recovery collection failed");
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
     const notes: string[] = [];
-    if (trashed && record.paths.length) {
-      const where = `in the ${systemTrash}`;
+    if (!plan.noUndo && (trashed || removed.length) && record.paths.length) {
+      const where = trashed
+        ? `in the ${systemTrash}`
+        : `in the workspace trash, ${WORKSPACE_TRASH}`;
       notes.push(
         `${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`,
       );
     }
     if (removed.length) notes.push(protectedRemovedNote(removed));
-    if (!plan.noUndo && notes.length) {
-      plan.noUndo = `Cannot undo the delete. ${notes.join(" ")}`;
+    if (notes.length) {
+      plan.noUndo = [plan.noUndo ?? "Cannot undo the delete.", ...notes].join(" ");
       record.noUndo = plan.noUndo;
       await saveRecoveryRecord(workspace, record).catch(() => undefined);
       scheduleRecoveryPrune(workspace);

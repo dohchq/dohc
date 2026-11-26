@@ -116,7 +116,7 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     changePathsAs: async (_paths, _author, work) =>
       work({
         policy: await readWorkspaceEnginePolicy(root),
-        removeKeptProtectedFiles: async () => [],
+        keepsProtectedBytes: async () => false,
         recordDisk: async () => tracked,
         delete: recordDelete,
       } as never),

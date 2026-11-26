@@ -8,8 +8,10 @@ import {
   mkdir,
   readdir,
   open,
+  readFile,
   realpath,
   rename,
+  rm,
   rmdir,
   stat,
   unlink,
@@ -18,6 +20,7 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import {
   workspaceDestinationError,
@@ -1524,6 +1527,49 @@ async function restoreUnrecorded(
   return kept;
 }
 
+type ProtectedFileKeeper = Pick<AuthoredPathChanges, "policy" | "keepsProtectedBytes">;
+
+// Moves each protected file at or under `endpoint` into the workspace trash
+// and answers those whose staged bytes History holds; the rest go back. Never
+// follows a link or enters a folder History excludes. Never throws.
+async function stageKeptProtectedFiles(
+  workspace: PathChangeWorkspace,
+  endpoint: string,
+  keeper: ProtectedFileKeeper,
+): Promise<{ path: string; staged: string }[]> {
+  const rootPath = workspace.rootPath;
+  const kept: { path: string; staged: string }[] = [];
+  const walk = async (path: string): Promise<void> => {
+    const absolute = join(rootPath, path);
+    const info = await lstat(absolute);
+    if (info.isDirectory()) {
+      if (
+        classifyEngineFilePath(path).kind === "ignored" ||
+        historyExcludesSubtree(keeper.policy, path)
+      )
+        return;
+      for (const name of (await readdir(absolute)).sort()) await walk(`${path}/${name}`);
+      return;
+    }
+    const checked = validateUserMaterializePath(path, { platform: process.platform });
+    if (
+      !info.isFile() ||
+      classifyEngineFilePath(path).kind !== "secret" ||
+      !checked.ok ||
+      checked.normalized !== path
+    )
+      return;
+    const staged = await moveIntoWorkspaceTrash(workspace, absolute);
+    const held = await readFile(staged)
+      .then(async (bytes) => await keeper.keepsProtectedBytes(path, bytes))
+      .catch(() => false);
+    if (held) kept.push({ path, staged });
+    else await placeBack(rootPath, staged, absolute);
+  };
+  await walk(endpoint).catch(() => undefined);
+  return kept;
+}
+
 /**
  * A person's delete. An open document settles first, then the entry goes
  * from its own place to the system trash, whose Restore puts it back there;
@@ -1563,10 +1609,17 @@ export async function deleteWorkspacePathByHand(
       return { trashed: false, refused: undefined };
     }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
-    const trash = async (recorded: readonly string[], removed: readonly string[] = []) => {
+    const trash = async (recorded: readonly string[], keeper?: ProtectedFileKeeper) => {
       assertWritable(operation);
       await options.admit?.();
+      const kept = keeper ? await stageKeptProtectedFiles(workspace, endpoint, keeper) : [];
+      const removed = kept.map((file) => file.path);
+      const discard = async () =>
+        await Promise.all(kept.map(async ({ staged }) => await rm(staged, { force: true }))).catch(
+          () => undefined,
+        );
       if (removed.includes(endpoint)) {
+        await discard();
         markChanged();
         options.markDeleted(endpoint);
         return {
@@ -1590,7 +1643,11 @@ export async function deleteWorkspacePathByHand(
       let staged: string | undefined;
       const trashed = await deletePath(workspace, endpoint, options.trashItem, (path) => {
         staged = path;
+      }).catch(async (error: unknown) => {
+        for (const file of kept) await placeBack(rootPath, file.staged, join(rootPath, file.path));
+        throw error;
       });
+      await discard();
       markChanged();
       options.markDeleted(endpoint);
       const collected =
@@ -1640,7 +1697,7 @@ export async function deleteWorkspacePathByHand(
         );
         // Edits capture has not seen yet land as their own rows first.
         const recorded = await engine.recordDisk(endpoint, files);
-        const trashed = await trash(recorded, await engine.removeKeptProtectedFiles(endpoint));
+        const trashed = await trash(recorded, engine);
         gone = [endpoint];
         for (const file of (await engine.orderFilePaths?.(recorded, true)) ?? recorded) {
           try {
