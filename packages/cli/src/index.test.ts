@@ -641,7 +641,6 @@ describe("executeCli", () => {
           id: "collection:Tasks",
           kind: "document-collection",
           path: "Tasks",
-          objectId: "t",
           title: "Tasks",
           recordCount: 0,
         },

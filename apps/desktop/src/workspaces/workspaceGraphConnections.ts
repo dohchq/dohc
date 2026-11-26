@@ -144,10 +144,7 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       });
       return file && "text" in file && typeof file.text === "string" ? file.text : null;
     };
-    const owners = new Map<
-      string,
-      { id: string; engineId: string | null; kind: "document" | "dataset" }
-    >();
+    const owners = new Map<string, { id: string; engineId: string | null }>();
 
     const collections = capped(
       (await adapter.listCollections()).collections
@@ -173,11 +170,10 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         id,
         kind: "document-collection",
         path: summary.path,
-        objectId: summary.objectId,
         title: collection?.schema.name || posix.basename(summary.path),
         recordCount: collection?.recordCount ?? 0,
       });
-      owners.set(summary.path, { id, engineId: summary.objectId, kind: "document" });
+      owners.set(summary.path, { id, engineId: summary.objectId });
       if (query?.nextCursor) complete = false;
       const paths = (query?.records ?? []).map((record) => record.path).sort(byText);
       if (paths.length) records.push({ collection: id, paths });
@@ -202,21 +198,15 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         .sort(byText),
       CONNECTION_LIMITS.datasets,
     );
-    const definitions = await eachLimited(descriptors, async (path) => {
-      try {
-        const text = await readText(path);
-        return {
-          path,
-          definition:
-            text === null
-              ? null
-              : parseDatasetDefinition(JSON.parse(text), { descriptorPath: path }),
-        };
-      } catch {
-        return { path, definition: null };
-      }
-    });
-    for (const { path, definition } of definitions) {
+    const definitions = await eachLimited(descriptors, (path) =>
+      readText(path)
+        .then((text) =>
+          text === null ? null : parseDatasetDefinition(JSON.parse(text), { descriptorPath: path }),
+        )
+        .catch(() => null),
+    );
+    descriptors.forEach((path, index) => {
+      const definition = definitions[index];
       const folder = posix.dirname(path);
       const id = `dataset:${path}`;
       nodes.set(id, {
@@ -226,12 +216,10 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         datasetId: definition?.datasetId ?? null,
         title: definition?.name ?? (folder === "." ? "dataset.json" : posix.basename(folder)),
         firstTableId: definition?.tables[0]?.tableId ?? null,
-        tableCount: definition?.tables.length ?? 0,
       });
       if (definition) datasetIds.set(definition.datasetId, id);
-      if (!owners.has(folder))
-        owners.set(folder, { id, engineId: definition?.datasetId ?? null, kind: "dataset" });
-    }
+      if (!owners.has(folder)) owners.set(folder, { id, engineId: definition?.datasetId ?? null });
+    });
 
     const groupNode = (name: string) => {
       const channels = groups.filter((group) => group.kind === "channel");
@@ -265,7 +253,6 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
           automationId: engineId,
           title: automation.name,
           enabled: automation.enabled,
-          ownerKind: owner.kind,
         });
         edge({ source: owner.id, target: id, kind: "automation-trigger" });
         if (automation.when.kind === "group-message") {
@@ -293,18 +280,17 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         .sort((a, b) => byText(a.root, b.root)),
       CONNECTION_LIMITS.apps,
     );
-    const manifests = await eachLimited(apps, async (app) => {
-      try {
-        const text = await readText(join(app.root, "app.publish.json"));
-        return text === null
-          ? null
-          : parseAppPublicationDeclaration(new TextEncoder().encode(text), app.root, {
-              folder: app.sourceFiles,
-            });
-      } catch {
-        return null;
-      }
-    });
+    const manifests = await eachLimited(apps, (app) =>
+      readText(join(app.root, "app.publish.json"))
+        .then((text) =>
+          text === null
+            ? null
+            : parseAppPublicationDeclaration(new TextEncoder().encode(text), app.root, {
+                folder: app.sourceFiles,
+              }),
+        )
+        .catch(() => null),
+    );
     apps.forEach((app, index) => {
       const id = `app:${app.root}`;
       nodes.set(id, {

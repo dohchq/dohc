@@ -394,11 +394,11 @@ Returns `{ kind, reference, link }`.
 
 Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share returns scope share-omitted with nothing listed.
 
-Changes the workspace, so a shared view does not offer it.
+Connections are kept only in the original workspace. Shared profiles do not offer this read.
 
 No arguments.
 
-Returns `{ scope, nodes: ({ kind: "document-collection", id, path, objectId, title, recordCount } | { kind: "dataset", id, path, datasetId, title, firstTableId, tableCount } | { kind: "app", id, path, title, entryPath } | { kind: "automation", id, path, automationId, title, enabled, ownerKind } | { kind: "group", id, channelId, title })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
+Returns `{ scope, nodes: ({ kind: "document-collection", id, title, path, recordCount } | { kind: "dataset", id, title, path, datasetId, firstTableId } | { kind: "app", id, title, path, entryPath } | { kind: "automation", id, title, path, automationId, enabled } | { kind: "group", id, title, channelId })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
 
 ### `dohc_links_edges`
 
@@ -1135,7 +1135,7 @@ dohc links connections [options]
 
 Read how Collections, apps, and automations connect.
 
-With `--json`, prints `{ schemaVersion, scope, nodes: ({ kind: "document-collection", id, path, objectId, title, recordCount } | { kind: "dataset", id, path, datasetId, title, firstTableId, tableCount } | { kind: "app", id, path, title, entryPath } | { kind: "automation", id, path, automationId, title, enabled, ownerKind } | { kind: "group", id, channelId, title })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
+With `--json`, prints `{ schemaVersion, scope, nodes: ({ kind: "document-collection", id, title, path, recordCount } | { kind: "dataset", id, title, path, datasetId, firstTableId } | { kind: "app", id, title, path, entryPath } | { kind: "automation", id, title, path, automationId, enabled } | { kind: "group", id, title, channelId })[], edges: { kind, source, target, approval? }[], records: { collection, paths }[], complete, mountsCovered }`.
 
 #### `dohc links in`
 

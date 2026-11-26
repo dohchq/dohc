@@ -104,42 +104,18 @@ export type LinksEdgesResult = z.infer<typeof LinksEdgesResult>;
 
 export const LINKS_CONNECTIONS_MAX_BYTES = 64 * 1024;
 const id = z.string().min(1).max(4200);
-const title = z.string().max(640);
+const node = <Kind extends string, Shape extends z.ZodRawShape>(kind: Kind, shape: Shape) =>
+  z.object({ id, kind: z.literal(kind), title: z.string().max(640), ...shape }).strict();
 const ConnectionNode = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id,
-      kind: z.literal("document-collection"),
-      path,
-      objectId: z.string().min(1).max(500),
-      title,
-      recordCount: z.number().int().nonnegative(),
-    })
-    .strict(),
-  z
-    .object({
-      id,
-      kind: z.literal("dataset"),
-      path,
-      datasetId: z.string().max(64).nullable(),
-      title,
-      firstTableId: z.string().max(64).nullable(),
-      tableCount: z.number().int().nonnegative(),
-    })
-    .strict(),
-  z.object({ id, kind: z.literal("app"), path, title, entryPath: path.nullable() }).strict(),
-  z
-    .object({
-      id,
-      kind: z.literal("automation"),
-      path,
-      automationId: z.string().min(1).max(4200),
-      title,
-      enabled: z.boolean(),
-      ownerKind: z.enum(["document", "dataset"]),
-    })
-    .strict(),
-  z.object({ id, kind: z.literal("group"), channelId: z.string().min(1).max(500), title }).strict(),
+  node("document-collection", { path, recordCount: z.number().int().nonnegative() }),
+  node("dataset", {
+    path,
+    datasetId: z.string().max(64).nullable(),
+    firstTableId: z.string().max(64).nullable(),
+  }),
+  node("app", { path, entryPath: path.nullable() }),
+  node("automation", { path, automationId: id, enabled: z.boolean() }),
+  node("group", { channelId: z.string().min(1).max(500) }),
 ]);
 const ConnectionEdge = z
   .object({

@@ -149,7 +149,6 @@ it("connects Collections, Datasets, apps, automations, and Groups from workspace
   expect(result.nodes.find((node) => node.id === "dataset:Ledger/dataset.json")).toMatchObject({
     datasetId: uuid(10),
     firstTableId: uuid(11),
-    tableCount: 1,
     title: "Ledger",
   });
   expect(result.edges).toEqual([

@@ -21,7 +21,11 @@ import {
   type Envelope,
   type LocalCollectionEngine,
 } from "./localCollectionApps";
-import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
+import {
+  createLocalDatasetHost,
+  readLocalAppApprovals,
+  type LocalDatasetHost,
+} from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { unguardedCollections } from "../testing/collectionsHolder";
 
@@ -661,6 +665,17 @@ body`,
     });
     const reopened = await f.open();
     expect(reopened.apps.list("trip", "main")[0]).toMatchObject({ active: true });
+  });
+
+  it("lists each app root's active approval read-only, following a move between kinds", async () => {
+    const f = await fixture();
+    expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
+      { appRoot: "trip", kind: "collection", resourceId: "trip/responses" },
+    ]);
+    await f.host.apps.activate(await f.datasetApp(f.host), signal());
+    expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
+      { appRoot: "trip", kind: "dataset", resourceId: definition.datasetId },
+    ]);
   });
 
   it("moves a root between kinds only by explicit replacement, refusing each earlier session", async () => {
