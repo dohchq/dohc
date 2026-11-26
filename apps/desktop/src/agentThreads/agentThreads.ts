@@ -61,7 +61,7 @@ function served(
   return {
     id: agent.id,
     threadId: agent.thread.id,
-    whileBusy: agent.whileBusy ?? "line",
+    whileBusy: agent.whileBusy ?? "own-chat",
     note: agent.note ?? null,
     reader: {
       kind: "connected",

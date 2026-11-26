@@ -233,6 +233,29 @@ describe("forwarding", () => {
     expect(sent.map((message) => message.how)).toEqual(["steer", "steer"]);
   });
 
+  it("steers only in the agent's own chat when the agent is set to", async () => {
+    const { forwarding, sent } = setup(
+      [
+        request("m1", 10),
+        request("m2", 20, {
+          threadId: "thread-group",
+          channel: { id: "c", kind: "channel", name: "launch", slug: "launch", purpose: "" },
+        }),
+        request("m3", 30, { threadId: "thread-file", channel: null }),
+      ],
+      {
+        workspace: async () => ({
+          name: "Launch",
+          agents: [{ ...agent, whileBusy: "own-chat" }],
+        }),
+      },
+    );
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(sent.map((message) => message.how)).toEqual(["steer", "line", "line"]);
+  });
+
   it("forwards every page of a long backlog", async () => {
     const backlog = Array.from({ length: 120 }, (_, index) => request(`m${index}`, index));
     const { forwarding, sent } = setup(backlog);

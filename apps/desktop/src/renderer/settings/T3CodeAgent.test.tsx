@@ -510,9 +510,14 @@ it("saves the forwarding switch, what a message does while the thread works, and
   await userEvent.click(page.getByRole("switch", { name: "Forward messages to Chief of Staff" }));
   expect(saved().enabled).toBe(false);
 
-  expect(page.getByRole("radio", { name: "Wait in line" }).getAttribute("aria-checked")).toBe(
-    "true",
-  );
+  expect(
+    page.getByRole("radio", { name: "Right away in its own chat" }).getAttribute("aria-checked"),
+  ).toBe("true");
+  expect(
+    page.getByText("Your messages in its own chat go right away. Messages elsewhere wait in line."),
+  ).toBeTruthy();
+  await userEvent.click(page.getByRole("radio", { name: "Wait in line" }));
+  expect(saved().whileBusy).toBe("line");
   await userEvent.click(page.getByRole("radio", { name: "Go right away" }));
   expect(saved().whileBusy).toBe("steer");
   rerender({ ...WITH_CHIEF, agents: { ...SETTINGS.agents, "t3-code": saved() } });

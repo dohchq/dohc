@@ -167,7 +167,8 @@ describe("agent threads", () => {
     agentThreads.watch(WORKSPACE);
 
     await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
+    // With no busy choice in Settings, a message in the agent's own chat goes right away.
+    expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "steer" });
     expect(sent[0]!.message).toContain("--workspace ws-1 --agent-id chief");
     expect(readers[0]).toEqual({
       kind: "connected",
