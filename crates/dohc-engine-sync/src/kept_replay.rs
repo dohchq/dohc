@@ -210,13 +210,25 @@ fn finish_note(
     claims: &[KeptClaim],
 ) -> Result<usize, SyncError> {
     let mut replayed = 0;
-    for (_, _, kept) in claims {
-        replayed += replay_claim(store, cache, faults, kept)?;
+    let mut finished = Vec::new();
+    for (_, claim, kept) in claims {
+        match replay_claim(store, cache, faults, kept) {
+            Ok(count) => {
+                replayed += count;
+                finished.push(kept);
+            }
+            Err(SyncError::FaultCrash) => return Err(SyncError::FaultCrash),
+            Err(error) => eprintln!("engine: kept format-2 claim {claim} stays kept: {error}"),
+        }
     }
     let (workspace, version, object): (String, String, String) =
         serde_json::from_str(&claims[0].0).map_err(SyncError::corrupt)?;
     let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
-    crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
+    let drained = crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
+    let refused = format!(
+        "UPDATE replication_refused_ydoc_blobs AS k SET reason=?4, replayed=0 \
+         WHERE k.replayed=1 AND {AT}"
+    );
     let forget = format!(
         "DELETE FROM replication_refused_ydoc_blobs WHERE replayed=1 \
            AND rowid IN (SELECT value FROM json_each(?1)) \
@@ -224,7 +236,16 @@ fn finish_note(
            WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
     match store.write_with(faults, |tx| -> Result<(), SyncError> {
-        for (_, _, kept) in claims {
+        for r in &drained.refusals {
+            let row = (
+                &r.workspace_id,
+                &r.origin_id,
+                r.origin_seq,
+                r.reason.message(),
+            );
+            tx.execute(&refused, row).map_err(SyncError::persist)?;
+        }
+        for kept in finished {
             let rowids = kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>();
             let rowids = serde_json::to_string(&rowids).map_err(SyncError::corrupt)?;
             tx.execute(&forget, [rowids]).map_err(SyncError::persist)?;

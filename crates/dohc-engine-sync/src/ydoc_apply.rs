@@ -8520,6 +8520,10 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         lineage_replacement: None,
                         record_facts: Vec::new(),
                     }))
+                } else if crate::kept_replay::replaying_now() {
+                    Err(SyncError::InvalidInput {
+                        reason: LIVE_UNADMITTED_UPDATE,
+                    })
                 } else {
                     Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
                         reason: LIVE_UNADMITTED_UPDATE.into(),
@@ -9864,6 +9868,11 @@ fn refuse_ydoc_with_reason(
     faults: &dyn FaultInjector,
     reason: String,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    if crate::kept_replay::replaying_now() {
+        return crate::apply_envelope_with(store, envelope, faults, move |_tx, _op| {
+            Err(SyncError::BaseRefused { reason })
+        });
+    }
     crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, move |_tx, _op| {
         Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason })
     })
