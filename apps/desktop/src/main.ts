@@ -362,6 +362,8 @@ import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
 import { sharedViewHistory } from "./workspaces/sharedViewHistory";
 import { memberOperations } from "./ipc/memberOperations";
+import { createMemberAppsActions } from "./ipc/memberAppsActions";
+import { memberAppsReadOperations, memberAppsWriteOperations } from "./ipc/memberAppsOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -8122,6 +8124,18 @@ const chatWrites = createChatWrites({
   },
 });
 
+let personalMemberApps:
+  | {
+      folder(workspace: RegistryEntry): string | null;
+      prepare(
+        operation: { workspace: RegistryEntry; signal: AbortSignal; assertCurrent(): void },
+        appRoot: string,
+      ): Promise<{
+        candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate;
+        files: Array<{ sha256: string; bytes: Uint8Array }>;
+      }>;
+    }
+  | undefined;
 let ownerAppPublicationForCli:
   | ((
       input: OwnerAppPublicationRequest,
@@ -8177,6 +8191,30 @@ const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessi
     shareRosters.sharesChanged(workspaceId);
   },
   serverAnswered: () => activity.retryFailingCloudSyncs(),
+});
+// Workspace apps and Member apps, for the window and for agents through the CLI and MCP.
+const memberApps = createMemberAppsActions<
+  RegistryEntry,
+  { workspace: RegistryEntry; signal: AbortSignal; assertCurrent(): void },
+  CloudSessionCredentials
+>({
+  remoteForWorkspace,
+  remoteForJoinedWorkspace: async (workspace) => {
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    if (!joinedByAccount(workspace.shareView, credentials))
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
+    return { credentials, credentialGeneration: credentialCacheGeneration };
+  },
+  currentCredentialGeneration: () => credentialCacheGeneration,
+  relayResponse: (credentials, path, init) =>
+    relayShareResponseWithCredentials(credentials, path, init),
+  serverAnswered: () => activity.retryFailingCloudSyncs(),
+  personalFolder: (workspace) => personalMemberApps?.folder(workspace) ?? null,
+  preparePersonalApp: (operation, appRoot) => {
+    if (!personalMemberApps) throw new Error("Personal apps are not ready. Try again.");
+    return personalMemberApps.prepare(operation, appRoot);
+  },
 });
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even
@@ -8278,6 +8316,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
   workspaceMembers,
+  memberApps,
   beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
     keptEdits: (workspaceId) => desktopEngine.ownerLiveQuarantines(workspaceId),
@@ -8437,6 +8476,14 @@ const { startDesktopCliServer } = createDesktopCliServer({
         withAdapter: (work) => withEngineAdapter(workspace, work),
       }),
     workspaceSearch: (workspace, input) => workspaceRetrieval.search(workspace, input),
+    memberAppsList: (workspace, input) =>
+      workspaceAuthorities.withOperation(workspace.workspaceId, (operation) =>
+        memberApps.list(operation, input),
+      ),
+    memberAppInspect: (workspace, input) =>
+      workspaceAuthorities.withOperation(workspace.workspaceId, (operation) =>
+        memberApps.inspect(operation, input),
+      ),
   },
   hasOpenWorkspaceWindow: (workspaceId) => hasAnyWorkspaceWindowFor(workspaceId),
   inboxHostFor: (operation) => inboxHostForOperation(operation),
@@ -10458,6 +10505,22 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, memberOperations, {
     workspaceMembers: ({ request }, { operation }) => workspaceMembers(operation, request),
   });
+  registerOperations(operationBoundary, memberAppsReadOperations, {
+    memberAppsList: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.list(operation, input),
+    memberAppInspect: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.inspect(operation, input),
+  });
+  registerOperations(operationBoundary, memberAppsWriteOperations, {
+    memberAppShare: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.share(operation, input),
+    memberAppFork: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.fork(operation, input),
+    memberAppWithdraw: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.withdraw(operation, input),
+    memberAppSharing: ({ workspaceId: _, ...input }, { operation }) =>
+      memberApps.sharing(operation, input),
+  });
   directMessages.listen();
   // A member list names people by its workspace's member ids. The relay checks
   // both accounts are in that workspace; here main only checks the window's
@@ -11812,6 +11875,7 @@ function registerIpcHandlers(): void {
       if (failure) throw new Error(`dohc could not open your Personal app folder: ${failure}`);
     },
   });
+  personalMemberApps = personalPublication;
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
     activePublication: async (operation, appRoot, versionId) => {
       const listed = await localPublication(

@@ -77,6 +77,7 @@ import {
   inboxWriteOperations,
 } from "./inboxOperations";
 import { explorerMenuOperations } from "./explorerMenuOperations";
+import { memberAppsReadOperations, memberAppsWriteOperations } from "./memberAppsOperations";
 
 export const OPERATION_TABLES = [
   workspaceFileOperations,
@@ -144,6 +145,8 @@ export const OPERATION_TABLES = [
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,
   appViewOperations,
+  memberAppsReadOperations,
+  memberAppsWriteOperations,
 ] as const satisfies readonly OperationTable[];
 
 // Each channel names one row or one CHANNELS entry. A repeat fails when this module loads.

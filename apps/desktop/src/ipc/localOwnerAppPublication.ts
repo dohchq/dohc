@@ -125,7 +125,7 @@ export function createLocalOwnerAppPublicationHandler<
     }
   >();
   const preparing = new Set<string>();
-  return async (
+  const handle = async (
     input: OwnerAppPublicationRequest,
     callerKey: string,
     operation: Operation,
@@ -551,6 +551,7 @@ export function createLocalOwnerAppPublicationHandler<
         versionId: candidate.versionId,
         sourceRevision: candidate.sourceRevision,
         sourcePaths: candidate.inputs.map((file) => file.path),
+        likelySecrets: prepared.likelySecrets,
         capabilities: shown,
         ...(candidate.external ? { external: candidate.external } : {}),
         externalNetwork: true,
@@ -560,4 +561,14 @@ export function createLocalOwnerAppPublicationHandler<
       preparing.delete(callerKey);
     }
   };
+  return Object.assign(handle, {
+    /** Hands a preparation to its own caller once, for an upload in place of a local approval. */
+    take(approvalId: string, callerKey: string, signal: AbortSignal): Prepared {
+      const entry = pending.get(approvalId);
+      if (!entry || entry.callerKey !== callerKey || entry.signal !== signal)
+        throw new Error("This app preparation expired. Try again.");
+      entry.clear();
+      return entry.prepared;
+    },
+  });
 }

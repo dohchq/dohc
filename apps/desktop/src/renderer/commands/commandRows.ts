@@ -26,6 +26,8 @@ export const COMMAND_AVAILABILITY = {
   activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,
   joinedWorkspace: (context: CommandContext) => context.shareView?.membership === true,
+  membersWorkspace: (context: CommandContext) =>
+    context.shareView === null || context.shareView.membership === true,
   updateAvailable: (context: CommandContext) => context.updateStatus === "available",
   updateReady: (context: CommandContext) => context.updateStatus === "ready",
   pinnedApp: (context: CommandContext, id: PinnedAppCommandId) =>
@@ -248,6 +250,14 @@ export const COMMAND_ROWS = {
     group: "Views",
     icon: "app-window",
     keywords: ["apps", "build", "private", "folder"],
+  },
+  "workspace-apps": {
+    label: "Workspace apps…",
+    availability: "membersWorkspace",
+    capabilityId: "app.member.list",
+    group: "Views",
+    icon: "app-window",
+    keywords: ["apps", "members", "shared", "review"],
   },
   "open-versions": {
     label: "Show all versions",

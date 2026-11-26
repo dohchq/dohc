@@ -33,7 +33,7 @@ function harness(
     packageMap: {},
     backend,
   };
-  const sources = new Map([
+  const sources = new Map<string, string | Uint8Array>([
     ["app/app.publish.json", JSON.stringify(declaration)],
     ["app/main.ts", "document.body.textContent = 'Register';"],
     [
@@ -427,6 +427,32 @@ describe("app without app.publish.json", () => {
     expect(candidate.capabilities).toEqual([]);
     expect(candidate.dependencies).toEqual(["app/App.JS", "app/index.html", "app/style.css"]);
     expect(files.map((file) => file.path)).toEqual(["bundle.js", "page.json"]);
+  });
+
+  it("lists each source file that holds a likely secret token by path and prefix, never the token", async () => {
+    const h = harness();
+    const token = `ghp_${"a".repeat(30)}`;
+    page(h, {
+      "app/index.html": '<!doctype html><h1>Trip</h1><script src="app.js"></script>',
+      "app/app.js": `fetch("https://api.github.com", { headers: { authorization: "${token}" } });`,
+    });
+    const { likelySecrets } = await h.prepare();
+    expect(likelySecrets).toEqual([{ path: "app/app.js", prefix: "ghp_" }]);
+    expect(JSON.stringify(likelySecrets)).not.toContain(token);
+  });
+
+  it("does not read a binary source file for likely secret tokens", async () => {
+    const h = harness();
+    page(h, {
+      "app/index.html": '<!doctype html><h1>Trip</h1><img src="logo.png">',
+    });
+    h.sources.set(
+      "app/logo.png",
+      Uint8Array.from([0x89, ...new TextEncoder().encode(`PNG ghp_${"a".repeat(30)}`)]),
+    );
+    const { likelySecrets } = await h.prepare();
+    expect(h.capturePaths.flat()).toContain("app/logo.png");
+    expect(likelySecrets).toEqual([]);
   });
 
   it("names the missing page before capturing anything", async () => {

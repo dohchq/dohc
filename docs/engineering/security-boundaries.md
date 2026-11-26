@@ -264,6 +264,13 @@ relay refuses a share whose source sits outside the app's folder. It doesn't
 apply folder rules to that folder's name, because a Personal app's folder is
 not a workspace folder.
 
+The desktop checks every file's digest twice: before it uploads a share, and
+before it writes a copy into the person's Personal apps. A copy never replaces
+a folder that already exists. Members share apps only while the Owner or an
+Admin turns on "Members can share apps", which is off by default. Turning it off
+pauses the apps members already shared. The Owner and
+Admins can withdraw any Member app, and the author can withdraw their own.
+
 ## A phone runs an app in a locked web view
 
 The phone posts a one-use handoff to the app's bootstrap on a random host under
@@ -413,6 +420,14 @@ project can share its settings without values. The Rust floor
 shared fixtures test. Older builds kept templates as protected files. An engine migration
 deletes those encrypted rows once and leaves the file on disk and its ordinary history
 alone. Sync still skips template operations that older peers send.
+
+The protected copies dohc keeps in `.dohc/local` are plain text, because the key sits
+beside them. On Windows that folder and every staged file are private to the user
+(`crates/dohc-windows-files/src/private_dir.rs`,
+`crates/dohc-engine-files/src/materialize/staged_dacl.rs`). Deleting a protected file in
+the Explorer removes it outright when History holds its exact bytes, so it never reaches
+the system trash in plain text; restore it from History. A file History can't hold, or
+one dohc can't move aside first, goes to the trash as before.
 
 ## Workspace secrets and outbound HTTPS
 

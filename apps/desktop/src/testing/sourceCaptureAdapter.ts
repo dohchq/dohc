@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
@@ -80,7 +81,7 @@ export function sourceCaptureAdapter(
             return {
               path,
               objectId: path,
-              contentKind: "text",
+              contentKind: isUtf8(bytes) ? "text" : "binary",
               sha256: hash,
               byteLength: bytes.byteLength,
               latestMomentId: "m",

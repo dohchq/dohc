@@ -239,6 +239,7 @@ import { preloadRowView, preloadViewForPath, scheduleIdleViewPreloads } from "./
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { PersonalAppsDialog } from "./PersonalAppsDialog";
+import { WorkspaceAppsDialog } from "./WorkspaceAppsDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
@@ -864,6 +865,7 @@ function WorkspaceShell(props: {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [personalAppsOpen, setPersonalAppsOpen] = useState(false);
+  const [workspaceAppsOpen, setWorkspaceAppsOpen] = useState(false);
   // The New collection dialog: null = closed, otherwise the folder to
   // create inside ("" = workspace root).
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(null);
@@ -6864,6 +6866,7 @@ function WorkspaceShell(props: {
       "new-file": () => openNewPage(""),
       "new-file-at-path": () => setNewFileOpen(true),
       "personal-apps": () => setPersonalAppsOpen(true),
+      "workspace-apps": () => setWorkspaceAppsOpen(true),
       "new-drawing": () => void createUntitledDrawing(),
       "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
@@ -10473,6 +10476,14 @@ function WorkspaceShell(props: {
                           <PersonalAppsDialog
                             workspaceId={props.workspace.workspaceId}
                             onClose={() => setPersonalAppsOpen(false)}
+                            reportError={reportShellError}
+                          />
+                        ) : null}
+                        {workspaceAppsOpen ? (
+                          <WorkspaceAppsDialog
+                            workspaceId={props.workspace.workspaceId}
+                            canCopy={!!shareView?.membership}
+                            onClose={() => setWorkspaceAppsOpen(false)}
                             reportError={reportShellError}
                           />
                         ) : null}

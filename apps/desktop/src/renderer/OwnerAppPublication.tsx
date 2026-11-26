@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
+import { secretPrefixLabel } from "@dohc/security-contract/secret-prefix";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
 import {
   OwnerAppPublicationResult,
@@ -182,6 +183,32 @@ type ControlProps = PublicationProps & {
   testId: string;
   disabled?: boolean;
 };
+
+/** Lists app source files that hold a likely secret token. It never blocks the review. */
+export function LikelySecretsWarning(props: { secrets: Prepared["likelySecrets"] }) {
+  const count = props.secrets.length;
+  return (
+    <div
+      data-testid="app-publication-likely-secrets"
+      className="mt-2 flex items-start gap-2 rounded-lg border border-line bg-panel-2 px-3 py-2.5 text-[12px] text-muted"
+    >
+      <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+      <div className="min-w-0 space-y-1">
+        <p className="m-0 text-ink">
+          {count === 1 ? "1 file holds" : `${count} files hold`} a likely secret token. Remove each
+          token from the app's source.
+        </p>
+        <ul className="m-0 list-none p-0">
+          {props.secrets.map(({ path, prefix }) => (
+            <li key={path} className="break-all">
+              {path} has {secretPrefixLabel(prefix)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 /** Review app: the person's one way to see what the app can reach, and to approve or publish it. */
 export function OwnerAppPublication(props: ControlProps) {
@@ -1284,6 +1311,9 @@ function PublicationDialog(
                 <More>Approving applies these Collection rules and approves this app.</More>
               </StateLine>
               <StagedCollectionsBox collections={staged.collections} />
+              {staged.likelySecrets.length > 0 ? (
+                <LikelySecretsWarning secrets={staged.likelySecrets} />
+              ) : null}
               <AppAccessSummary
                 capabilities={staged.capabilities}
                 approved={approval ? approvedCapabilities(approval) : null}
@@ -1382,6 +1412,9 @@ function PublicationDialog(
                     </p>
                   ) : null,
                 )}
+              {needsCandidate && localCandidate?.likelySecrets.length ? (
+                <LikelySecretsWarning secrets={localCandidate.likelySecrets} />
+              ) : null}
               <AppAccessSummary
                 capabilities={boxCapabilities}
                 approved={changed && approval ? approvedCapabilities(approval) : null}
@@ -1622,6 +1655,9 @@ function PublicationDialog(
               </div>
               <div>
                 <h3 className="m-0 text-[13px] font-medium text-ink">Files included</h3>
+                {prepared.likelySecrets.length > 0 ? (
+                  <LikelySecretsWarning secrets={prepared.likelySecrets} />
+                ) : null}
                 <ul
                   data-testid="app-publication-source-paths"
                   className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 text-[12px] text-muted"

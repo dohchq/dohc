@@ -5,7 +5,7 @@ import { AppAccessSummary } from "./AppPermissionsCard";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
-import { openLocalApp } from "./OwnerAppPublication";
+import { LikelySecretsWarning, openLocalApp } from "./OwnerAppPublication";
 import { CopyButton } from "./ui/CopyButton";
 import {
   EmptyState,
@@ -37,6 +37,7 @@ export function PersonalAppsDialog(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [review, setReview] = useState<Prepared | null>(null);
+  const [shared, setShared] = useState<string | null>(null);
   const reviewing = useRef<Prepared | null>(null);
   const alive = useRef(true);
   const titleId = useId(),
@@ -86,6 +87,7 @@ export function PersonalAppsDialog(props: {
   const run = async (key: string, fallback: string, work: () => Promise<unknown>) => {
     setBusy(key);
     setError(null);
+    setShared(null);
     try {
       await work();
     } catch (cause) {
@@ -126,12 +128,17 @@ export function PersonalAppsDialog(props: {
           </IconButton>
         </div>
         {review ? (
-          <AppAccessSummary
-            capabilities={review.capabilities}
-            approved={null}
-            failed={false}
-            onRetry={() => undefined}
-          />
+          <>
+            {review.likelySecrets.length > 0 ? (
+              <LikelySecretsWarning secrets={review.likelySecrets} />
+            ) : null}
+            <AppAccessSummary
+              capabilities={review.capabilities}
+              approved={null}
+              failed={false}
+              onRetry={() => undefined}
+            />
+          </>
         ) : (
           <>
             <div className="flex items-center gap-1 rounded-lg bg-bg py-1 pr-1 pl-3">
@@ -168,6 +175,25 @@ export function PersonalAppsDialog(props: {
                     <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
                       {row.appRoot}
                     </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(
+                          `share:${row.appRoot}`,
+                          `dohc could not share ${row.appRoot}.`,
+                          async () => {
+                            const result = await api.memberAppShare({
+                              workspaceId,
+                              personalApp: row.appRoot,
+                            });
+                            if (alive.current) setShared(result.slug);
+                          },
+                        )
+                      }
+                    >
+                      {busy === `share:${row.appRoot}` ? "Sharing…" : "Share"}
+                    </SecondaryButton>
                     {row.approved ? (
                       <>
                         <SecondaryButton
@@ -241,6 +267,11 @@ export function PersonalAppsDialog(props: {
             )}
           </>
         )}
+        {shared ? (
+          <p role="status" className="m-0 text-[13px] text-success">
+            Shared {shared} with the workspace's members. They allow it in their browser.
+          </p>
+        ) : null}
         {error ? <FieldError id={errorId}>{error}</FieldError> : null}
         {review ? (
           <div className="flex justify-end gap-2">

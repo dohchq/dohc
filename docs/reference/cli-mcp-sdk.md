@@ -37,7 +37,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
-| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access) |
+| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access), [`dohc_list_member_apps`](#dohc_list_member_apps), [`dohc_inspect_member_app`](#dohc_inspect_member_app), [`dohc_share_member_app`](#dohc_share_member_app), [`dohc_fork_member_app`](#dohc_fork_member_app), [`dohc_withdraw_member_app`](#dohc_withdraw_member_app), [`dohc_set_member_app_sharing`](#dohc_set_member_app_sharing) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
 ---
@@ -771,7 +771,7 @@ Returns `{ agentRunId, agentName, planToken, truncated, scannedChanges, restorab
 
 ---
 
-**Sharing and connected agents.** Inspect owned share codes, manage agents connected through a share link, and manage the workspace's members.
+**Sharing and connected agents.** Inspect owned share codes, manage agents connected through a share link, manage the workspace's members, and share and review Member apps.
 
 ### `dohc_read_share_copy`
 
@@ -825,6 +825,56 @@ Available only in a shared workspace with view or comment or edit access.
 - `request`: `{ workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "permissions", after?: string, limit?: integer } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setGrant", grantId: string, grant: { revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setDefaults", defaults: { view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "removeGrant", principalKey: string }`. Required.
 
 Returns what that verb returns, listed under [`dohc dataset`](#dohc-dataset). The relay accepts it from an Admin alone.
+
+### `dohc_list_member_apps`
+
+List the apps you can open in this workspace: official apps its owner published (kind workspace), then apps members shared (kind member). Continue with nextCursor until it is null; a page can be empty and still have a next page. url opens the app in a browser. consent says whether the person you work for allowed a Member app: none, current, or changed (allowed an earlier version). Only that person can allow a Member app, in their browser. membersCanShare, on the first page, says whether members may share apps.
+
+- `cursor`: `string`
+
+Returns `{ apps: { kind, publicationId, name, authorName, createdAtMs, reachable, consent, canWithdraw, url }[], nextCursor, membersCanShare? }`.
+
+### `dohc_inspect_member_app`
+
+Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.
+
+- `publicationId`: `string`. Required.
+
+Returns `{ name, authorName, consent, collections: { name, access, operations }[], source: { path, sha256, byteLength }[] }`.
+
+### `dohc_share_member_app`
+
+Share a Personal app (a folder in the Personal app folder) with the members of a workspace you joined, or update the one you shared under the same slug. Members review and allow it in their browser before it runs. It can do only what both its author and each viewer can do.
+
+- `personalApp`: `string`. Required.
+- `slug`: `string`
+
+Returns `{ ok: true, publicationId, slug } | { ok: false, reason }`.
+
+### `dohc_fork_member_app`
+
+Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.
+
+- `publicationId`: `string`. Required.
+- `personalApp`: `string`. Required.
+
+Returns `{ ok: true, personalApp } | { ok: false, reason }`.
+
+### `dohc_withdraw_member_app`
+
+Stop sharing a Member app. Authors withdraw their own; the workspace owner and admins can withdraw any member's app. Members can no longer open it. The author can share it again. Ask the person you work for before you withdraw someone else's app.
+
+- `publicationId`: `string`. Required.
+
+Returns `{ ok: true, publicationId } | { ok: false, reason }`.
+
+### `dohc_set_member_app_sharing`
+
+Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Off pauses the apps members shared until it is on again; apps admins shared keep working. Ask the person you work for first.
+
+- `membersCanShare`: `boolean`. Required.
+
+Returns `{ ok: true, membersCanShare } | { ok: false, reason }`.
 
 ---
 
@@ -1142,6 +1192,82 @@ List items waiting in the workspace Inbox.
 - `--limit <<n>>`: Show at most this many items (default 50, max 100).
 
 With `--json`, prints `{ schemaVersion, exists, items: { kind, id, path, title, status, source, received, url?, attachment?, filedTo? }[], hasMore }`.
+
+### `dohc member-apps`
+
+List the apps you can open in this workspace, review Member apps, and share or copy your Personal apps.
+
+Members allow a Member app in their browser. Agents can list, review, share, and copy apps, but never allow one.
+
+#### `dohc member-apps share`
+
+```sh
+dohc member-apps share <app-folder> [options]
+```
+
+Share a Personal app with the workspace's members, or update it.
+
+Sharing again under the same name updates the app. Members allow it again.
+
+- `--slug <<name>>`: Name the app keeps in the workspace (default: the folder name).
+
+With `--json`, prints `{ schemaVersion, ok: true, publicationId, slug }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc member-apps fork`
+
+```sh
+dohc member-apps fork <app-id> <new-folder> [options]
+```
+
+Copy a Member app's source into a new Personal app folder.
+
+With `--json`, prints `{ schemaVersion, ok: true, personalApp }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc member-apps withdraw`
+
+```sh
+dohc member-apps withdraw <app-id> [options]
+```
+
+Stop sharing a Member app with the workspace.
+
+Authors withdraw their own apps. The owner and admins can withdraw any. Sharing it again brings it back.
+
+With `--json`, prints `{ schemaVersion, ok: true, publicationId }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc member-apps sharing`
+
+```sh
+dohc member-apps sharing <on|off> [options]
+```
+
+Turn members' app sharing on or off.
+
+Only the owner and admins can change it. Off pauses the apps members shared until it is on again. Apps admins shared keep working.
+
+With `--json`, prints `{ schemaVersion, ok: true, membersCanShare }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc member-apps list`
+
+```sh
+dohc member-apps list [options]
+```
+
+List the workspace's official apps, then the apps members shared.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, apps: { kind, publicationId, name, authorName, createdAtMs, reachable, consent, canWithdraw, url }[], nextCursor, membersCanShare? }`.
+
+#### `dohc member-apps inspect`
+
+```sh
+dohc member-apps inspect <app-id> [options]
+```
+
+Show a Member app's author, Collection access, and source files.
+
+With `--json`, prints `{ schemaVersion, name, authorName, consent, collections: { name, access, operations }[], source: { path, sha256, byteLength }[] }`.
 
 ### `dohc sync`
 
@@ -2490,7 +2616,7 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `appRoot`: `string`. Required.
 - `versionId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app stage`
 
@@ -2503,7 +2629,7 @@ Reads app.publish.json and each bound Collection without writing workspace files
 - `migrations`: `{ [key: string]: string }`
 - `agentLabel`: `string`
 
-Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true } }`.
+Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets, collections, capabilities, externalNetwork: true } }`.
 
 #### `dohc app listStaged`
 
@@ -2514,7 +2640,7 @@ Pass optional appRoot to filter to one app folder.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`
 
-Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true }[] }`.
+Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, likelySecrets, collections, capabilities, externalNetwork: true }[] }`.
 
 #### `dohc app approveStaged`
 
@@ -2575,7 +2701,7 @@ Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `c
 - `shareId`: `string`
 - `grantId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
@@ -2635,7 +2761,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, external?, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, likelySecrets: { path, prefix }[], capabilities, external?, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

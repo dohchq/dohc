@@ -409,6 +409,7 @@ export function createOwnerAppPublicationHandler<
           versionId: candidate.versionId,
           sourceRevision: candidate.sourceRevision,
           sourcePaths: candidate.inputs.map((file) => file.path),
+          likelySecrets: prepared.likelySecrets,
           capabilities,
           externalNetwork: true,
           ...(audience === "workspace"
@@ -486,7 +487,12 @@ export function createOwnerAppPublicationHandler<
         });
         if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
         if (workspace)
-          return await remember({ candidate, files: [] }, selection, reactivation, "workspace");
+          return await remember(
+            { candidate, files: [], likelySecrets: [] },
+            selection,
+            reactivation,
+            "workspace",
+          );
         const grant = await currentGrant(selection.shareId!, selection.grantId!);
         if (
           grant.generation !== row.owner.generation ||
@@ -494,7 +500,7 @@ export function createOwnerAppPublicationHandler<
         )
           throw new Error("The app link changed. Prepare the app again.");
         return await remember(
-          { candidate, files: [], generation: row.owner.generation! },
+          { candidate, files: [], likelySecrets: [], generation: row.owner.generation! },
           selection,
           reactivation,
           { access: grant.access as "view" | "comment" | "edit", selector: grant.selector },

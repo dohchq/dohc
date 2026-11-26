@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -454,17 +454,36 @@ export function createPersonalAppPublication<
     launchLocalDataset: async (workspace, publicationId, signal) =>
       (await deps.hostFor(workspace, signal)).launcher.launch(publicationId, signal),
   });
-  return async (
+  const member = (workspace: Workspace) =>
+    recordedShareSelector(
+      (workspace.shareView as { grantedSelector?: unknown } | null)?.grantedSelector,
+    )?.wholeWorkspace === true;
+  const publication = async (
     input: OwnerAppPublicationRequest,
     callerKey: string,
     operation: Operation,
     agent: ApprovalAgent | null,
   ) => {
-    const shareView = operation.workspace.shareView as { grantedSelector?: unknown } | null;
-    if (recordedShareSelector(shareView?.grantedSelector)?.wholeWorkspace !== true) return null;
+    if (!member(operation.workspace)) return null;
     if (input.action !== "personalFolder") return handler(input, callerKey, operation, agent);
     const folder = await openPersonalAppFolder(folderOf(operation.workspace));
     if (input.open) await deps.openFolder(folder.path);
     return folder;
   };
+  return Object.assign(publication, {
+    /** The member's Personal app folder for this workspace, or null outside a joined workspace. */
+    folder: (workspace: Workspace) => (member(workspace) ? folderOf(workspace) : null),
+    /** Captures a Personal app as Review captures it, for sharing with members instead of approving it here. */
+    async prepare(operation: Operation, appRoot: string) {
+      const callerKey = `member-app-share:${randomUUID()}`;
+      const result = await publication(
+        { action: "prepareLocal", workspaceId: operation.workspace.workspaceId, appRoot },
+        callerKey,
+        operation,
+        null,
+      );
+      if (result?.kind !== "prepared") throw new Error("dohc could not capture this app.");
+      return handler.take(result.approvalId, callerKey, operation.signal);
+    },
+  });
 }

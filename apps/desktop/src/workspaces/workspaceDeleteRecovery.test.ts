@@ -76,6 +76,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
         policy: await readWorkspaceEnginePolicy(root),
         recordDisk,
         delete: vi.fn(async () => "moment"),
+        keepsProtectedBytes: async () => true,
       } as never);
       afterCommit?.(authored.operationId);
       return result;
@@ -221,6 +222,28 @@ describe("delete recovery", () => {
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     },
   );
+  it("keeps History readable when a held .env leaves with an invalid path", async () => {
+    const f = await fixture();
+    await f.write("folder/.dohc", "untracked");
+    await f.write("folder/.env", "TOKEN=held");
+    const result = await f.remove(true);
+    expect(result).toMatchObject({
+      undo: {
+        available: false,
+        reason:
+          "Cannot undo the delete. Invalid recovery path: folder/.dohc. Restore it from the trash. folder/.env skipped the trash because it holds secrets. Restore it in History, which keeps an encrypted copy.",
+      },
+    });
+    expect(await readDeleteRecovery(f.root, result.operationId!)).toBeUndefined();
+    expect(
+      await readWorkspaceHistoryOperation(
+        f.operation,
+        { operationId: result.operationId! },
+        f.history,
+        { agent: true },
+      ),
+    ).toMatchObject({ ok: true });
+  });
 
   it.each(["read", "undo"] as const)(
     "an agent delete saves recovery before %s queued at History commit",

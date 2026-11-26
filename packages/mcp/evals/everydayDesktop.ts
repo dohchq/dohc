@@ -2111,6 +2111,7 @@ export async function createEverydayDesktop(
           sourceRevision,
           ...(audience ? { audience } : {}),
           sourcePaths: manifest.inputs,
+          likelySecrets: [],
           capabilities,
           externalNetwork: true as const,
           ...(isLocal ? { local: true as const } : {}),

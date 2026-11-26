@@ -40,6 +40,7 @@ const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   versionId: "main",
   sourceRevision: "b".repeat(64),
   sourcePaths: ["trip/main.tsx", "trip/style.css"],
+  likelySecrets: [],
   capabilities: [],
   externalNetwork: true,
 };
@@ -231,6 +232,28 @@ describe("owner app publication", () => {
       approvalId: prepared.approvalId,
       candidateDigest: prepared.candidateDigest,
     });
+  });
+
+  it("warns about each file that holds a likely secret token, and still publishes", async () => {
+    api.publishOwnerApp.mockImplementation(async (request) =>
+      request.action === "prepare"
+        ? { ...prepared, likelySecrets: [{ path: "trip/main.tsx", prefix: "ghp_" }] }
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    const warning = screen.getByTestId("app-publication-likely-secrets");
+    expect(warning.textContent).toContain("1 file holds a likely secret token");
+    expect(warning.textContent).toContain("trip/main.tsx has a GitHub token");
+    expect(warning.textContent).not.toContain("trip/style.css");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    await screen.findByText("App published on the selected link.");
+  });
+
+  it("shows no secret warning when no file holds a likely secret token", async () => {
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    expect(screen.queryByTestId("app-publication-likely-secrets")).toBeNull();
   });
 
   it("publishes for workspace members without a link or link reads", async () => {
@@ -1129,6 +1152,25 @@ describe("owner app publication", () => {
       },
     );
 
+    it("warns about a likely secret token before a first approval", async () => {
+      const answers = local();
+      api.publishOwnerApp.mockImplementation(async (request) =>
+        request.action === "prepareLocal"
+          ? {
+              ...prepared,
+              local: true,
+              capabilities: [approvedAccess],
+              likelySecrets: [{ path: "trip/main.tsx", prefix: "sk_live_" }],
+            }
+          : answers(request),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(screen.getByTestId("app-publication-likely-secrets").textContent).toContain(
+        "trip/main.tsx has a Stripe live secret key",
+      );
+    });
     it("marks newly added fields when changed source widens createFields on an existing operation", async () => {
       const restrictedSubmit = {
         ...submitOperation,
@@ -1826,6 +1868,7 @@ it("renders a single plain-English staged review card for new/updated Collection
                 createdAtMs: 1_790_000_000_000,
                 sourceRevision: prepared.sourceRevision,
                 sourcePaths: ["control-tower/index.tsx"],
+                likelySecrets: [{ path: "control-tower/index.tsx", prefix: "xoxb-" }],
                 collections: [
                   {
                     alias: "expenses",
@@ -1904,6 +1947,9 @@ it("renders a single plain-English staged review card for new/updated Collection
     expect(card.textContent).toContain("Date, Merchant, Amount");
     expect(card.textContent).toContain("Workouts");
     expect(card.textContent).toContain("Changes the code for the actions");
+    expect(within(card).getByTestId("app-publication-likely-secrets").textContent).toContain(
+      "control-tower/index.tsx",
+    );
 
     await user.click(screen.getByTestId("staged-app-approve"));
     await waitFor(() =>
@@ -2090,6 +2136,7 @@ describe("appLinkUrl and Copy app link", () => {
               createdAtMs: 1_790_000_000_000,
               sourceRevision: prepared.sourceRevision,
               sourcePaths: ["trip/index.html"],
+              likelySecrets: [],
               collections: [],
               capabilities: [],
               externalNetwork: true,

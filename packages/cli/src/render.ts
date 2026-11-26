@@ -890,6 +890,47 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       }
       return lines.join("\n");
     }
+    case "memberAppsList": {
+      const list = result as CliResultByVerb["memberAppsList"];
+      const lines = list.apps.map((app) =>
+        [
+          app.publicationId,
+          lineSafe(app.name),
+          app.kind === "workspace" ? "official" : `by ${lineSafe(app.authorName ?? "a member")}`,
+          ...(app.consent === "none" ? ["not allowed yet"] : []),
+          ...(app.consent === "changed" ? ["changed since you allowed it"] : []),
+          ...(app.url ? [app.url] : []),
+        ].join(" · "),
+      );
+      if (list.membersCanShare !== undefined)
+        lines.push(`Members can share apps: ${list.membersCanShare ? "on" : "off"}`);
+      if (list.nextCursor) lines.push(`More apps: --cursor ${list.nextCursor}`);
+      return lines.join("\n") || "No apps in this workspace.";
+    }
+    case "memberAppInspect": {
+      const app = result as CliResultByVerb["memberAppInspect"];
+      return [
+        `${lineSafe(app.name)} by ${lineSafe(app.authorName ?? "a member")}`,
+        ...app.collections.flatMap((collection) => [
+          `${lineSafe(collection.name)} (${collection.access})`,
+          ...collection.operations.map(
+            (operation) =>
+              `  ${lineSafe(operation.name)}${operation.readOnly ? "" : " · changes data"}`,
+          ),
+        ]),
+        ...app.source.map((file) => `${lineSafe(file.path)} · ${file.byteLength} bytes`),
+      ].join("\n");
+    }
+    case "memberAppShare": {
+      const shared = result as Extract<CliResultByVerb["memberAppShare"], { ok: true }>;
+      return `Shared ${shared.slug} with the workspace's members · ${shared.publicationId}`;
+    }
+    case "memberAppFork":
+      return `Copied into ${lineSafe((result as Extract<CliResultByVerb["memberAppFork"], { ok: true }>).personalApp)} in your Personal app folder`;
+    case "memberAppWithdraw":
+      return `Withdrew ${(result as Extract<CliResultByVerb["memberAppWithdraw"], { ok: true }>).publicationId}`;
+    case "memberAppSharing":
+      return `Members can share apps: ${(result as Extract<CliResultByVerb["memberAppSharing"], { ok: true }>).membersCanShare ? "on" : "off"}`;
     default:
       return JSON.stringify(result, null, 2);
   }

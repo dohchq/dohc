@@ -111,7 +111,11 @@ function harness(active: string | null = null) {
     withAdapter: async (_workspace, work) => work(versionAdapter(active)),
     compile: vi.fn(),
   });
-  vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
+  vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+    candidate,
+    files: [],
+    likelySecrets: [],
+  });
   const prepare = async () => {
     const result = await handler(
       { action: "prepareLocal", workspaceId: "w", appRoot: "app" },
@@ -197,7 +201,11 @@ describe("local app publication review", () => {
       h.operation,
       agent,
     );
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, agent);
+    expect(h.activate).toHaveBeenCalledWith(
+      { candidate, files: [], likelySecrets: [] },
+      h.controller.signal,
+      agent,
+    );
   });
   it("captures before approval and activates the captured bundle without remote credentials", async () => {
     const h = harness();
@@ -216,7 +224,11 @@ describe("local app publication review", () => {
         h.operation,
       ),
     ).toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, null);
+    expect(h.activate).toHaveBeenCalledWith(
+      { candidate, files: [], likelySecrets: [] },
+      h.controller.signal,
+      null,
+    );
     expect(
       await h.handler(
         {
@@ -256,7 +268,11 @@ describe("local app publication review", () => {
   it("prepares and approves an app that reaches no workspace data, with no capabilities", async () => {
     const h = harness(),
       unconnected = { ...candidate, capabilities: [] };
-    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: unconnected, files: [] });
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+      candidate: unconnected,
+      files: [],
+      likelySecrets: [],
+    });
     const review = await h.prepare();
     expect(review).toMatchObject({
       kind: "prepared",
@@ -286,7 +302,7 @@ describe("local app publication review", () => {
       ),
     ).toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
     expect(h.activate).toHaveBeenCalledWith(
-      { candidate: unconnected, files: [] },
+      { candidate: unconnected, files: [], likelySecrets: [] },
       h.controller.signal,
       null,
     );
@@ -301,7 +317,11 @@ describe("local app publication review", () => {
         },
       }),
       calling = { ...candidate, capabilities: [], external: [usage!] };
-    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: calling, files: [] });
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+      candidate: calling,
+      files: [],
+      likelySecrets: [],
+    });
     await expect(h.prepare()).resolves.toMatchObject({ external: [usage] });
     await expect(
       h.handler(
@@ -428,6 +448,7 @@ describe("local app publication review", () => {
     vi.mocked(prepareLocalAppPublication).mockResolvedValue({
       candidate: { ...candidate, capabilities: [collection] },
       files: [],
+      likelySecrets: [],
     });
     const review = await h.prepare();
     expect(review).toMatchObject({ local: true, capabilities: [collection] });
@@ -442,7 +463,7 @@ describe("local app publication review", () => {
       h.operation,
     );
     expect(h.activate).toHaveBeenCalledWith(
-      { candidate: { ...candidate, capabilities: [collection] }, files: [] },
+      { candidate: { ...candidate, capabilities: [collection] }, files: [], likelySecrets: [] },
       h.controller.signal,
       null,
     );

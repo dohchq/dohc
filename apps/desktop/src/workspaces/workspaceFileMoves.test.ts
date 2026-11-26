@@ -990,12 +990,18 @@ describe("a person's delete", () => {
     );
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks")).toMatchObject({ trashed: true });
+      expect(await f.removeByHand("tasks")).toMatchObject({
+        trashed: true,
+        undo: {
+          available: false,
+          reason: expect.stringContaining(
+            "tasks/.env skipped the trash because it holds secrets. Restore it in History",
+          ),
+        },
+      });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks")]]);
       expect(await readFile(join(f.systemTrash, "tasks", "build", "out.js"), "utf8")).toBe("built");
-      expect(await readFile(join(f.systemTrash, "tasks", ".env"), "utf8")).toBe(
-        "SECRET=kept private",
-      );
+      expect(existsSync(join(f.systemTrash, "tasks", ".env"))).toBe(false);
       expect((await lstat(join(f.systemTrash, "tasks", "link"))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
       expect(existsSync(join(f.rootPath, "tasks"))).toBe(false);
@@ -1004,6 +1010,149 @@ describe("a person's delete", () => {
       ]);
     } finally {
       delete faults.readdir;
+      await f.engine().stop();
+    }
+  });
+});
+
+describe("a person's delete of a protected file", () => {
+  it("removes it without a trash when History holds its text", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      expect(await f.removeByHand(".env")).toMatchObject({
+        trashed: false,
+        undo: {
+          available: false,
+          reason:
+            "Cannot undo the delete. .env skipped the trash because it holds secrets. Restore it in History, which keeps an encrypted copy.",
+        },
+      });
+      expect(f.trashItem).not.toHaveBeenCalled();
+      expect(existsSync(join(f.rootPath, ".env"))).toBe(false);
+      expect(await f.workspaceTrash()).toEqual([]);
+      expect(f.markDeleted).toHaveBeenCalledWith(".env");
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("comes back from History with the bytes it had", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      await f.removeByHand(".env");
+      await f.settle();
+      const removed = (await f.rows()).find(
+        (row) => row.path === ".env" && row.operation === "delete",
+      );
+      expect(removed).toBeDefined();
+      await f.engine().restoreFileToBeforeMoment(removed!.id, person);
+      expect(await readFile(join(f.rootPath, ".env"), "utf8")).toBe("TOKEN=held\n");
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("keeps it in place when the delete is not admitted", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      await expect(
+        deleteWorkspacePathByHand(f.operation, ".env", person, {
+          capture: f.engine(),
+          requestId: "request",
+          trashItem: f.trashItem,
+          markDeleted: f.markDeleted,
+          admit: async () => {
+            throw new Error("Not admitted");
+          },
+        }),
+      ).rejects.toThrow("Not admitted");
+      expect(await readFile(join(f.rootPath, ".env"), "utf8")).toBe("TOKEN=held\n");
+      expect(await f.workspaceTrash()).toEqual([]);
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("keeps every held one in a folder out of the trash, past excluded and unreadable folders", async () => {
+    const f = await fixture({
+      beforeRequest: (request) => {
+        if (request.method === "capture.hold")
+          faults.readdir = (path) => path.endsWith(`${sep}build`);
+      },
+    });
+    await write(
+      f.rootPath,
+      ".dohc/files.toml",
+      '[[rule]]\npath = "tasks/build/**"\ntracked = false\n\n[[rule]]\npath = "tasks/out/**"\ntracked = false\n',
+    );
+    await write(f.rootPath, "tasks/build/x.js", "built");
+    await write(f.rootPath, "tasks/out/.env", "SECRET=out\n");
+    await write(f.rootPath, "tasks/z/.env", "SECRET=z\n");
+    await write(f.rootPath, "tasks/z/note.md", "# Note\n");
+    await f.start();
+    try {
+      expect(await f.removeByHand("tasks")).toMatchObject({
+        trashed: true,
+        undo: {
+          reason: expect.stringContaining(
+            "tasks/out/.env, tasks/z/.env skipped the trash because they hold secrets.",
+          ),
+        },
+      });
+      expect(await readFile(join(f.systemTrash, "tasks", "build", "x.js"), "utf8")).toBe("built");
+      expect(existsSync(join(f.systemTrash, "tasks", "out", ".env"))).toBe(false);
+      expect(existsSync(join(f.systemTrash, "tasks", "z", ".env"))).toBe(false);
+      expect(await f.workspaceTrash()).toEqual([]);
+    } finally {
+      delete faults.readdir;
+      await f.engine().stop();
+    }
+  });
+
+  it("trashes it when History cannot hold its bytes", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", Uint8Array.from([0x54, 0x3d, 0xff, 0x0a]));
+    await f.start();
+    try {
+      expect(await f.removeByHand(".env")).toMatchObject({ trashed: true });
+      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, ".env")]]);
+      expect(await readFile(join(f.systemTrash, ".env"))).toEqual(
+        Buffer.from([0x54, 0x3d, 0xff, 0x0a]),
+      );
+    } finally {
+      await f.engine().stop();
+    }
+  });
+  it("stops a folder delete and names where it is when a new file takes its place", async () => {
+    const f = await fixture();
+    const unheld = Uint8Array.from([0x54, 0x3d, 0xff, 0x0a]);
+    await write(f.rootPath, "tasks/.env", unheld);
+    await write(f.rootPath, "tasks/note.md", "# Note\n");
+    await f.start();
+    const original = join(f.rootPath, "tasks", ".env");
+    faults.link = async (_from, to) => {
+      if (to === original) await writeFile(original, "NEW=1\n");
+    };
+    try {
+      await expect(f.removeByHand("tasks")).rejects.toThrow(
+        /tasks\/\.env is in the workspace trash as \.dohc\/local\/trash\/[^ ]+, because a new file appeared at its place\. Nothing was deleted\./,
+      );
+      expect(f.trashItem).not.toHaveBeenCalled();
+      expect(await readFile(original, "utf8")).toBe("NEW=1\n");
+      expect(await readFile(join(f.rootPath, "tasks", "note.md"), "utf8")).toBe("# Note\n");
+      const trash = await f.workspaceTrash();
+      expect(trash).toHaveLength(1);
+      expect(await readFile(join(f.rootPath, ".dohc/local/trash", trash[0]!))).toEqual(
+        Buffer.from(unheld),
+      );
+    } finally {
+      delete faults.link;
       await f.engine().stop();
     }
   });

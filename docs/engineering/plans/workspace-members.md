@@ -112,6 +112,10 @@ A person's agent acts with at most that person's access. Its reach can cover wor
 
 The dohc CLI and MCP do what the Members page does, in a workspace the person owns or joined. They act with the person's own account, and the relay decides each action by role: a member's agent lists names and roles; an admin's agent also invites and removes members and changes access rules; only the owner's tools change roles or end membership.
 
+## Apps
+
+Official apps, Personal apps, and Member apps follow [ADR 0018](../adr/0018-member-apps-cap-every-viewer-to-both-reaches.md), [ADR 0019](../adr/0019-member-app-source-stays-off-the-synced-tree.md), and [ADR 0020](../adr/0020-collection-workspace-defaults-live-on-the-server.md). Members open them from Workspace apps in the command palette, and the CLI and MCP list, inspect, share, copy, and withdraw them with `dohc member-apps`.
+
 ## Not in this version
 
 - Custom roles, a Moderator role, a Guest role, and named sets of people.

@@ -121,9 +121,10 @@ const blocks = top.slice(prefix.length, top.length - suffix.length).split(/(?=^ 
 const blockOf = Object.fromEntries(
   Object.keys(CLI_COMMANDS).map((group, index) => [group, blocks[index]]),
 );
-const commands = cli.help.top.commands.map((command) =>
-  groups.includes(command.group) ? { ...command, block: blockOf[command.group]! } : command,
-);
+const commands = cli.help.top.commands.map((command) => ({
+  ...command,
+  block: blockOf[command.group]!,
+}));
 const help: Record<string, unknown> = { ...cli.help, top: { prefix, commands, suffix } };
 for (const group of groups) help[group] = renderCliHelp({ help: [group] });
 for (const command of [...operations.map(({ cli }) => cli.command), ...writeCommands])
