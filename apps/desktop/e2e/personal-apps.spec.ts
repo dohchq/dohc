@@ -344,7 +344,7 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     await row.getByRole("button", { name: "Review" }).click();
     await expect(apps.getByRole("heading", { name: "Review trip-board" })).toBeVisible();
     await expect(apps).toContainText("Trips");
-    await expect(apps.getByTestId("workspace-app-source")).toContainText("trip-board/main.ts");
+    await expect(apps.getByTestId("workspace-app-source")).toContainText("main.ts");
     for (const theme of ["Light", "Dark"] as const) {
       await mine.evaluate(
         (value) => document.documentElement.setAttribute("data-theme", value),
@@ -416,6 +416,8 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     expect(await sourceText.textContent()).toBe(appSource(read.name));
     await expect(ownerApps.getByLabel("Workspace folder")).toHaveValue("apps/trip-board");
     await themed("owner-review", ownerApps);
+    await ownerApps.getByLabel("Workspace folder").scrollIntoViewIfNeeded();
+    await themed("owner-promote", ownerApps);
     await ownerApps.getByRole("button", { name: "Promote app" }).click();
     await expect(ownerApps).toHaveCount(0, { timeout: 60_000 });
     expect(await readFile(join(ownerTemp.rootPath, "apps", "trip-board", "main.ts"), "utf8")).toBe(
@@ -435,6 +437,7 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     await expect(
       ownerApps.getByRole("region", { name: "Official apps" }).getByText("trip-board"),
     ).toBeVisible({ timeout: 60_000 });
+    await themed("owner-apps-promoted", ownerApps);
     await memberRow.getByRole("button", { name: "Withdraw" }).click();
     const withdrawal = page.getByTestId("workspace-app-withdraw-confirm");
     await themed("owner-withdraw", withdrawal);

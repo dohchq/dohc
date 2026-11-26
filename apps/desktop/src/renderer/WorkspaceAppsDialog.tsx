@@ -449,6 +449,9 @@ function SourceBrowser(props: {
   files: MemberAppInspectResult["source"];
 }) {
   const [selected, setSelected] = useState(props.files[0]?.path ?? null);
+  const top = props.files[0]?.path.split("/")[0];
+  const shared =
+    top && props.files.every((file) => file.path.startsWith(`${top}/`)) ? top.length + 1 : 0;
   return (
     <section className="flex flex-col gap-1.5">
       <SectionLabel as="h3" className="m-0">
@@ -469,7 +472,7 @@ function SourceBrowser(props: {
                 className={`dohc-focus-row flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left font-mono text-[12px] ${file.path === selected ? "bg-selected text-ink" : "text-muted hover:bg-panel-2 hover:text-ink"}`}
               >
                 <FileCode size={12} aria-hidden className="shrink-0" />
-                <PathLine path={file.path} className="min-w-0 flex-1" />
+                <PathLine path={file.path.slice(shared)} className="min-w-0 flex-1" />
               </button>
             </li>
           ))}
