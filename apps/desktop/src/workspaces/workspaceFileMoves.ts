@@ -1559,7 +1559,10 @@ async function stageKeptProtectedFiles(
     const staged = await moveIntoWorkspaceTrash(workspace, absolute).catch(() => null);
     if (staged === null) return;
     const held = await lstat(staged)
-      .then(async (copy) => small(copy.size) && (await keeps(path, await readFile(staged))))
+      .then(
+        async (copy) =>
+          copy.isFile() && small(copy.size) && (await keeps(path, await readFile(staged))),
+      )
       .catch(() => false);
     if (held) kept.push({ path, staged });
     else await placeBack(rootPath, staged, absolute);
