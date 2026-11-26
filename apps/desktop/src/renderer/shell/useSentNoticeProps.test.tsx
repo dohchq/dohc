@@ -600,8 +600,8 @@ describe("opening a sent notice", () => {
 
   it("dismisses on every computer through the list", async () => {
     const { result, sentNotices } = setup([notice()], [workspace("notes")]);
-    await act(async () => result.current.onDismissSentNotice(notice()));
-    expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "account", noticeId: "n1" });
+    await act(async () => result.current.onDismissSentNotices([notice()]));
+    expect(sentNotices.dismiss).toHaveBeenCalledWith([{ store: "account", noticeId: "n1" }]);
   });
 });
 
@@ -1423,7 +1423,7 @@ describe("an agent run's notice while its chat is on screen", () => {
     const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
     expect(result.current.sentNoticeToast).toBeNull();
     await waitFor(() =>
-      expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "local", noticeId: "n1" }),
+      expect(sentNotices.dismiss).toHaveBeenCalledWith([{ store: "local", noticeId: "n1" }]),
     );
     expect(sentNotices.hideToast).toHaveBeenCalledOnce();
     expect(sentNotices.read).not.toHaveBeenCalled();

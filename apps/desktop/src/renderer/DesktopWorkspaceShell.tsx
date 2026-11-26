@@ -8577,7 +8577,7 @@ function WorkspaceShell(props: {
       );
       if (refusal) {
         const askedFor = workspaceId;
-        void props.sentNotices!.dismiss(refusal).catch((error) => {
+        void props.sentNotices!.dismiss([refusal]).catch((error) => {
           if (workspaceIdRef.current === askedFor)
             reportShellError("dohc could not dismiss this Notice.", error);
         });

@@ -325,7 +325,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.sentNoticesAccount !== undefined
         ? { sentNoticesAccount: props.sentNoticesAccount }
         : {})}
-      {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
+      {...(props.onDismissSentNotices ? { onDismissSentNotices: props.onDismissSentNotices } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
       {...(props.onReadSentNotice ? { onReadSentNotice: props.onReadSentNotice } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
@@ -467,6 +467,50 @@ describe("notice center", () => {
 
     view.rerender(noticeElement({ keptTyping: [], onDismissKeptTyping }));
     expect(screen.queryByTestId("notice-kept-typing")).toBeNull();
+  });
+
+  it("clears every row with its own × after one confirm, and keeps what cannot be dismissed", async () => {
+    const user = userEvent.setup();
+    const error = (id: string, noDismiss: boolean): WorkspaceErrorNotice => ({
+      id,
+      tone: "warning",
+      title: `Failure ${id}`,
+      message: "",
+      atMs: 0,
+      canRetry: false,
+      seen: true,
+      noDismiss,
+    });
+    const onDismissWorkspaceError = vi.fn();
+    const onDismissSentNotices = vi.fn();
+    const onDismissKeptTyping = vi.fn(async () => undefined);
+    renderNotices({
+      workspaceErrors: [error("gone", false), error("stays", true)],
+      onDismissWorkspaceError,
+      sentNotices: [sentRow("a"), sentRow("wake", { kind: "automation-wake" })],
+      onDismissSentNotices,
+      keptTyping: [
+        { workspaceId: "left", recordId: "a".repeat(64), path: "plan.md", text: "typed" },
+      ],
+      onDismissKeptTyping,
+    });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+
+    // The first press only asks, and Escape backs out with Notices still open.
+    await user.click(screen.getByTestId("notice-center-clear-all"));
+    expect(screen.getByTestId("notice-center-clear-confirm").textContent).toBe("Clear 2 Notices");
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-clear-cancel"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("notice-center-clear-confirm")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-clear-all"));
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+
+    await user.click(screen.getByTestId("notice-center-clear-all"));
+    await user.click(screen.getByTestId("notice-center-clear-confirm"));
+    expect(onDismissWorkspaceError).toHaveBeenCalledExactlyOnceWith("gone");
+    expect(onDismissSentNotices).toHaveBeenCalledExactlyOnceWith([sentRow("a").notice]);
+    expect(onDismissKeptTyping).not.toHaveBeenCalled();
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
   });
 
   it("keeps a dismissal across a rename and announces a refusal after a new save", async () => {
@@ -990,7 +1034,7 @@ describe("notices sent to you", () => {
       renderNotices({
         sentNotices: [sentRow("a")],
         onOpenSentNotice,
-        onDismissSentNotice: vi.fn(),
+        onDismissSentNotices: vi.fn(),
       });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
@@ -1043,7 +1087,7 @@ describe("notices sent to you", () => {
 
   it("moves between rows with the arrows, opens with Enter, dismisses with Delete, and closes with Escape", async () => {
     const onOpenSentNotice = vi.fn(async () => null);
-    const onDismissSentNotice = vi.fn();
+    const onDismissSentNotices = vi.fn();
     const onOpenHistory = vi.fn();
     const onOpenTarget = vi.fn(async () => null);
     renderNotices({
@@ -1052,7 +1096,7 @@ describe("notices sent to you", () => {
       onOpenTarget,
       sentNotices: [sentRow("a"), sentRow("b")],
       onOpenSentNotice,
-      onDismissSentNotice,
+      onDismissSentNotices,
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
@@ -1067,7 +1111,7 @@ describe("notices sent to you", () => {
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
 
     await userEvent.keyboard("{Delete}");
-    expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
+    expect(onDismissSentNotices).toHaveBeenCalledWith([sentRow("a").notice]);
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
 
     await userEvent.keyboard("{Enter}");

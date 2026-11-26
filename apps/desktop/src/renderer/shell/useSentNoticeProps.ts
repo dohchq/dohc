@@ -240,7 +240,7 @@ export function useSentNoticeProps(input: {
     // A dismiss or read that fails leaves the row in Notices, unread, which
     // is harmless.
     const ref = sentNoticeRef(seenRun.notice);
-    (seenRun.replied ? dismissNotice(ref) : readNotices([ref])).catch(() => undefined);
+    (seenRun.replied ? dismissNotice([ref]) : readNotices([ref])).catch(() => undefined);
   }, [dismissNotice, hideToast, readNotices, seenRun]);
   // A "Shared … with you" row is about its share. While this workspace holds
   // that share, as its own view or in shared-with-me, the person has opened
@@ -563,12 +563,15 @@ export function useSentNoticeProps(input: {
     [reportShellError, retryAutomationNotice, workspace, workspaceId],
   );
 
-  const onDismissSentNotice = useCallback(
-    (notice: NoticeRow) => {
-      if (!sentNotices) return;
+  const onDismissSentNotices = useCallback(
+    (notices: readonly NoticeRow[]) => {
+      if (!sentNotices || notices.length === 0) return;
+      const refs = notices.map(sentNoticeRef);
+      const message =
+        refs.length === 1 ? "dohc could not dismiss this Notice." : "dohc could not clear Notices.";
       const attempt = () => {
-        sentNotices.dismiss(sentNoticeRef(notice)).catch((error: unknown) => {
-          reportShellError("dohc could not dismiss this Notice.", error, attempt);
+        sentNotices.dismiss(refs).catch((error: unknown) => {
+          reportShellError(message, error, attempt);
         });
       };
       attempt();
@@ -590,7 +593,7 @@ export function useSentNoticeProps(input: {
     sentNoticeToast: toast,
     onHideSentNoticeToast: sentNotices?.hideToast,
     onOpenSentNotice,
-    onDismissSentNotice,
+    onDismissSentNotices,
     onReadSentNotice,
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
