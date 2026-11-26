@@ -399,11 +399,11 @@ pub fn opening_comment_quote(body: &str) -> Option<(String, &str)> {
     let mut chars = raw.chars().peekable();
     let mut in_ws = false;
     while let Some(mut ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(&escaped) = chars.peek().filter(|next| next.is_ascii_punctuation()) {
-                chars.next();
-                ch = escaped;
-            }
+        if ch == '\\'
+            && let Some(&escaped) = chars.peek().filter(|next| next.is_ascii_punctuation())
+        {
+            chars.next();
+            ch = escaped;
         }
         if ch.is_whitespace() {
             in_ws = true;
