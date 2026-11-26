@@ -1565,10 +1565,18 @@ async function stageKeptProtectedFiles(
       )
       .catch(() => false);
     if (held) kept.push({ path, staged });
-    else await placeBack(rootPath, staged, absolute);
+    else if ((await placeBack(rootPath, staged, absolute)).length) stranded.push({ path, staged });
   };
+  const stranded: { path: string; staged: string }[] = [];
   await walk(endpoint);
-  return kept;
+  if (!stranded.length) return kept;
+  for (const file of kept)
+    if ((await placeBack(rootPath, file.staged, join(rootPath, file.path))).length)
+      stranded.push(file);
+  const where = stranded
+    .map(({ path, staged }) => `${path} is in the workspace trash as ${workspaceTrashPath(staged)}`)
+    .join(", ");
+  throw new Error(`${where}, because a new file appeared at its place. Nothing was deleted.`);
 }
 
 /**

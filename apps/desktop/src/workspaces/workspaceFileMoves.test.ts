@@ -1129,6 +1129,33 @@ describe("a person's delete of a protected file", () => {
       await f.engine().stop();
     }
   });
+  it("stops a folder delete and names where it is when a new file takes its place", async () => {
+    const f = await fixture();
+    const unheld = Uint8Array.from([0x54, 0x3d, 0xff, 0x0a]);
+    await write(f.rootPath, "tasks/.env", unheld);
+    await write(f.rootPath, "tasks/note.md", "# Note\n");
+    await f.start();
+    const original = join(f.rootPath, "tasks", ".env");
+    faults.link = async (_from, to) => {
+      if (to === original) await writeFile(original, "NEW=1\n");
+    };
+    try {
+      await expect(f.removeByHand("tasks")).rejects.toThrow(
+        /tasks\/\.env is in the workspace trash as \.dohc\/local\/trash\/[^ ]+, because a new file appeared at its place\. Nothing was deleted\./,
+      );
+      expect(f.trashItem).not.toHaveBeenCalled();
+      expect(await readFile(original, "utf8")).toBe("NEW=1\n");
+      expect(await readFile(join(f.rootPath, "tasks", "note.md"), "utf8")).toBe("# Note\n");
+      const trash = await f.workspaceTrash();
+      expect(trash).toHaveLength(1);
+      expect(await readFile(join(f.rootPath, ".dohc/local/trash", trash[0]!))).toEqual(
+        Buffer.from(unheld),
+      );
+    } finally {
+      delete faults.link;
+      await f.engine().stop();
+    }
+  });
 });
 
 // The workspace trash is in `.dohc/local`, which only the engine's open
