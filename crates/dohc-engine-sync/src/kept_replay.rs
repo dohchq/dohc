@@ -144,6 +144,7 @@ pub(crate) fn refuse_claim_in_tx(
 }
 
 type KeptClaim = (String, String, Vec<(i64, Option<String>)>);
+type KeptRow = (String, String, i64, Option<String>);
 
 fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
     let sql = format!(
@@ -156,15 +157,13 @@ fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
            k.relay_seq, k.origin_id, k.origin_seq"
     );
     let rows = store
-        .read_with(
-            |conn| -> rusqlite::Result<Vec<(String, String, i64, Option<String>)>> {
-                conn.prepare(&sql)?
-                    .query_map([], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                    })?
-                    .collect()
-            },
-        )
+        .read_with(|conn| -> rusqlite::Result<Vec<KeptRow>> {
+            conn.prepare(&sql)?
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect()
+        })
         .map_err(SyncError::corrupt)?;
     let mut claims: Vec<KeptClaim> = Vec::new();
     for (key, claim, rowid, envelope) in rows {
