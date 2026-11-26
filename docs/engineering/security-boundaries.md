@@ -237,6 +237,33 @@ environment. [App compiler containment](app-compiler.md) states what each
 platform bounds. Arbitrary build scripts need a separate, credential-free sandbox before
 they can run.
 
+## A person allows a Member app in their browser or on their phone
+
+A Member app runs within both its author's and its viewer's reach
+([ADR 0018](adr/0018-member-apps-cap-every-viewer-to-both-reaches.md)). Before
+it runs for anyone but its author, that person allows the operations it uses.
+The relay records that choice only from a browser sign-in that came through the
+viewer, with the viewer's origin and exchange key, or from the person's paired
+phone. The relay looks up the session's kind itself, so a request can't claim to
+be a person.
+
+The desktop's sign-in serves the person and their local agents alike, and the
+relay can't tell them apart. So the desktop, the CLI and MCP never allow a
+Member app. The desktop sends the person to the review page in their browser.
+The `agent` label on a share records provenance and grants nothing.
+
+This stops an agent that holds only the desktop's sign-in. It doesn't stop
+software that drives the person's signed-in browser or reads its cookies.
+
+The author's reach already bounds their own app, so it opens for them without
+review, even when their agent shared it.
+
+A Member app's source comes with its upload and never from the synced tree
+([ADR 0019](adr/0019-member-app-source-stays-off-the-synced-tree.md)). The
+relay refuses a share whose source sits outside the app's folder. It doesn't
+apply folder rules to that folder's name, because a Personal app's folder is
+not a workspace folder.
+
 ## A phone runs an app in a locked web view
 
 The phone posts a one-use handoff to the app's bootstrap on a random host under

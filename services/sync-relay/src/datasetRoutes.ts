@@ -1136,8 +1136,7 @@ export function createDatasetAppRoutes(
         }
         if (route.action === "consent") {
           if (!published.member || auth.kind !== "named") throw notFound();
-          if (raw && typeof raw === "object" && Object.hasOwn(raw, "agent"))
-            throw new MemberAppRefusal("agent");
+          if (!auth.person) throw new MemberAppRefusal("browser");
           const body = record(raw, ["scopeDigest"]);
           if (typeof body.scopeDigest !== "string" || !/^[0-9a-f]{64}$/.test(body.scopeDigest))
             throw badRequest("Invalid Member app review.");

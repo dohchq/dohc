@@ -7,6 +7,11 @@ export type AppBackendAuth =
       grantId?: string;
       /** The owner's agent making this change, as the owner's computer reports it. Provenance only. */
       agent?: { depth: number; agentId?: string };
+      /**
+       * Set only by the relay, for a browser sign-in that came through the viewer. Agents reach the relay through the
+       * desktop's sign-in, so only this lane can allow a Member app.
+       */
+      person?: true;
       /** A phone launch's binding, which the owner's authority checks at admission, before each commit, and inside it. */
       launch?: PhoneAppLaunchGuard;
     };
