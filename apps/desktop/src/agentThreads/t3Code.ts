@@ -700,6 +700,31 @@ export async function listT3CodeThreads(
   };
 }
 
+const Launched = z.object({ threadId: z.string() });
+
+/**
+ * Starts an idle thread in a project, for an agent the person is adding.
+ * With a mode, the thread runs with it, so dohc's sign-in can message it.
+ * `requestId` names this start, so asking again after a lost answer starts
+ * no second thread.
+ */
+export async function startT3CodeThread(
+  session: T3CodeSession,
+  input: { projectId: string; title: string; mode: T3CodeAccess | null; requestId: string },
+): Promise<{ id: string }> {
+  const launched = shaped(
+    Launched,
+    await session.call("t3_thread_launch", {
+      projectId: input.projectId,
+      title: input.title,
+      generateTitle: false,
+      ...(input.mode === null ? {} : { runtimeMode: input.mode }),
+      clientRequestId: input.requestId,
+    }),
+  );
+  return { id: launched.threadId };
+}
+
 const Sent = z.object({ runId: z.string().nullable().optional() });
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ExternalLink, LoaderCircle, Search } from "lucide-react";
+import { ExternalLink, LoaderCircle, Plus, Search } from "lucide-react";
 import type {
   T3CodeAccess as T3CodeMode,
   T3CodeConnectionState,
@@ -570,6 +570,8 @@ function ThreadPage(props: {
   first: boolean;
   last: boolean;
   picked: string | null;
+  // The first row holds the tab stop while nothing is picked.
+  holdsTabStop: boolean;
   onPick: (thread: T3CodeThreadChoice) => void;
   onMore: (cursor: number) => void;
 }) {
@@ -618,7 +620,7 @@ function ThreadPage(props: {
             aria-checked={checked}
             data-testid="t3-code-thread"
             data-thread-id={thread.id}
-            tabIndex={checked || (props.picked === null && props.first && index === 0) ? 0 : -1}
+            tabIndex={checked || (props.holdsTabStop && index === 0) ? 0 : -1}
             onClick={() => props.onPick({ id: thread.id, title: thread.title })}
             className={`${THREAD_ROW} ${
               checked
@@ -657,14 +659,26 @@ function ThreadPage(props: {
 }
 
 /**
+ * A thread to start in the chosen project, offered above its threads. The
+ * thread takes `title` when it starts.
+ */
+export type T3CodeNewThread = {
+  title: string;
+  picked: boolean;
+  onPick: (projectId: string) => void;
+};
+
+/**
  * A T3 Code thread, chosen from one project's threads. A person can have
  * thousands, so the list holds a page at a time and the field finds threads
  * by title. Changing the project or the search clears the choice, so the
- * chosen thread is always one the list shows.
+ * chosen thread is always one the list shows. With `newThread`, the first row
+ * starts a thread in the project instead.
  */
 export function T3CodeThreadPicker(props: {
   picked: string | null;
   onPick: (thread: T3CodeThreadChoice | null) => void;
+  newThread?: T3CodeNewThread;
   // Shown under the list, such as when Add was pressed with no thread chosen.
   error: string | null;
   searchId: string;
@@ -804,6 +818,30 @@ export function T3CodeThreadPicker(props: {
           onKeyDown={onKeyDown}
           className="flex max-h-44 flex-col overflow-y-auto rounded-lg border border-line bg-bg p-1"
         >
+          {props.newThread ? (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={props.newThread.picked}
+              data-testid="t3-code-new-thread"
+              tabIndex={props.newThread.picked || props.picked === null ? 0 : -1}
+              onClick={() => props.newThread?.onPick(projectId)}
+              className={`${THREAD_ROW} ${
+                props.newThread.picked
+                  ? "bg-selected font-medium text-ink"
+                  : "text-muted hover:bg-hover hover:text-ink"
+              }`}
+            >
+              <Plus size={14} aria-hidden className="shrink-0" />
+              <span className="shrink-0">New thread</span>
+              <span
+                className="min-w-0 flex-1 truncate text-right text-[12px] font-normal text-subtle"
+                title={props.newThread.title}
+              >
+                {props.newThread.title}
+              </span>
+            </button>
+          ) : null}
           {pages.map((cursor, index) => (
             <ThreadPage
               key={`${listKey}:${cursor}`}
@@ -813,6 +851,8 @@ export function T3CodeThreadPicker(props: {
               first={index === 0}
               last={index === pages.length - 1}
               picked={props.picked}
+              // A New thread row takes the tab stop before any thread.
+              holdsTabStop={index === 0 && props.picked === null && !props.newThread}
               onPick={onPick}
               onMore={(next) => setMore({ list: listKey, cursors: [...cursors, next] })}
             />
@@ -832,6 +872,7 @@ export function T3CodeThreadPicker(props: {
 export function T3CodeChoice(props: {
   picked: string | null;
   onPick: (thread: T3CodeThreadChoice | null) => void;
+  newThread?: T3CodeNewThread;
   error: string | null;
   searchId: string;
   onReady: (ready: boolean) => void;
@@ -870,6 +911,7 @@ export function T3CodeChoice(props: {
       <T3CodeThreadPicker
         picked={props.picked}
         onPick={props.onPick}
+        newThread={props.newThread}
         error={props.error}
         searchId={props.searchId}
       />

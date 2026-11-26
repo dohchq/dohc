@@ -990,19 +990,34 @@ export function AgentList(props: {
   // An agent with a thread serves the workspace it was connected in.
   const add = async (fields: NewAgent) => {
     const id = idFor(fields.launch !== undefined, fields.idBase);
+    // The agent is saved for every workspace; its check belongs to this one.
+    const token = requests.current();
+    setAddError(null);
+    setAdding(true);
+    let thread = fields.thread;
+    if (fields.startThread) {
+      try {
+        const { threadId } = await bridge().startT3CodeThread({
+          ...fields.startThread,
+          title: fields.name,
+        });
+        thread = { tool: "t3-code", id: threadId };
+      } catch (cause) {
+        setAdding(false);
+        if (requests.isCurrent(token))
+          setAddError(ipcErrorMessage(cause, "dohc could not start a thread in T3 Code."));
+        return;
+      }
+    }
     const agent: AgentSettings = {
       ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue),
       name: fields.name,
       hue: fields.hue,
       enabled: fields.enabled,
       ...(fields.launch ? { launch: fields.launch } : {}),
-      ...(fields.thread ? { thread: fields.thread, workspaces: [workspaceId] } : {}),
+      ...(thread ? { thread, workspaces: [workspaceId] } : {}),
     };
-    // The agent is saved for every workspace; its check belongs to this one.
-    const token = requests.current();
-    setAddError(null);
-    setAdding(true);
-    if (fields.thread) {
+    if (thread) {
       // The thread gets dohc's introduction first. When T3 Code refuses it,
       // nothing is saved for a thread dohc cannot message.
       try {
@@ -1010,7 +1025,7 @@ export function AgentList(props: {
           workspaceId,
           agentId: id,
           name: fields.name,
-          threadId: fields.thread.id,
+          threadId: thread.id,
         });
       } catch (cause) {
         setAdding(false);

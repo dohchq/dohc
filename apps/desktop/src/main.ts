@@ -12994,6 +12994,7 @@ function registerIpcHandlers(): void {
         nextCursor: page.nextCursor,
       };
     },
+    startT3CodeThread: async (input) => ({ threadId: (await t3Code().startThread(input)).id }),
     readAgentThread: async ({ workspaceId, agentId }) => {
       const agent = await agentWithThreadFor(workspaceId, agentId);
       const threadId = agent.thread.id;

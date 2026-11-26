@@ -339,8 +339,10 @@ it("names a new agent, picks its color, and keeps a typed name when the choice c
   expect(name.value).toBe("Agent");
   await userEvent.clear(name);
   expect(sheet().queryByRole("alert")).toBeNull();
-  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  // Another agent goes on to its MCP config only with a name it can have.
+  await userEvent.click(sheet().getByRole("button", { name: "Next" }));
   expect(sheet().getByRole("alert").textContent).toBe("Enter an agent name.");
+  expect(screen.getByTestId("agent-add-sheet").dataset.page).toBe("choose");
   await userEvent.type(name, "codex");
   expect(sheet().getByRole("alert").textContent).toBe("Another agent has this name.");
   await userEvent.clear(name);
@@ -774,6 +776,7 @@ it("gives an agent link on Add agent and Sign in again in a joined workspace, na
 
   await openAdd();
   await userEvent.click(runsWith("link"));
+  await userEvent.click(sheet().getByRole("button", { name: "Next" }));
   expect(screen.getByTestId("agent-add-link").textContent).toContain("relay.test");
   expect(screen.getByTestId("agent-add-link-note").textContent).not.toContain(
     "Sync this workspace",

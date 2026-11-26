@@ -188,6 +188,7 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     const sheet = page.getByTestId("agent-add-sheet");
     await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
     await sheet.getByTestId("agent-runs-with-t3-code").click();
+    await sheet.getByTestId("agent-add-next").click();
     await expect(sheet.getByTestId("t3-code-allow")).toBeVisible();
     await expect(sheet.getByTestId("agent-add-confirm")).toHaveCount(0);
     // The person picks the mode. dohc picks none for them.
@@ -225,9 +226,17 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await expect(sheet.getByTestId("t3-code-thread")).toHaveCount(4);
 
     await sheet.locator('[data-testid="t3-code-thread"][data-thread-id="t-chief"]').click();
+    await expect(sheet.getByTestId("agent-add-summary-name")).toHaveText("Chief of Staff: dohc");
+    // Back to the name keeps the thread picked.
+    await sheet.getByTestId("agent-add-back").click();
     const name = sheet.getByRole("textbox", { name: "Name" });
     await expect(name).toHaveValue("Chief of Staff: dohc");
     await name.fill("Chief");
+    await sheet.getByTestId("agent-add-next").click();
+    await expect(
+      sheet.locator('[data-testid="t3-code-thread"][data-thread-id="t-chief"]'),
+    ).toHaveAttribute("aria-checked", "true");
+    await expect(sheet.getByTestId("agent-add-summary-name")).toHaveText("Chief");
     await shoot(page, page, "t3-code-c-picked");
 
     await sheet.getByTestId("agent-add-confirm").click();
@@ -453,6 +462,42 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     expect(
       sends().some((call) => String(call.args.message).includes("Written while it was off.")),
     ).toBe(false);
+
+    // The person adds another agent on a thread dohc starts in T3 Code. It
+    // starts idle under the agent's name. dohc did not learn the mode the
+    // person allowed on T3 Code's page, so T3 Code picks it.
+    const launches = () => t3.calls.filter((call) => call.tool === "t3_thread_launch");
+    t3.tools.t3_thread_launch = (args) => ({
+      threadId: "mcp:t-planner",
+      projectId: args.projectId,
+      runId: null,
+      status: null,
+    });
+    await openAgentPage();
+    await agentPage.getByTestId("agent-back").click();
+    await section.getByTestId("agent-add").click();
+    await sheet.getByTestId("agent-add-name").fill("Planner");
+    await sheet.getByTestId("agent-runs-with-t3-code").click();
+    await sheet.getByTestId("agent-add-next").click();
+    const fresh = sheet.getByTestId("t3-code-new-thread");
+    await expect(fresh).toContainText("Planner");
+    await fresh.click();
+    await expect(fresh).toHaveAttribute("aria-checked", "true");
+    await shoot(page, page, "t3-code-n-new-thread");
+    await sheet.getByTestId("agent-add-confirm").click();
+    await expect(sheet).toHaveCount(0);
+    await expect(section.locator('[data-testid="agent-row"][aria-label="Planner"]')).toHaveCount(1);
+    expect(launches().map((call) => call.args)).toEqual([
+      {
+        projectId: "p-dohc",
+        title: "Planner",
+        generateTitle: false,
+        clientRequestId: expect.any(String),
+      },
+    ]);
+    // The new thread got dohc's introduction, as a thread the person picked does.
+    expect(sends().at(-1)!.args.threadId).toBe("mcp:t-planner");
+    expect(String(sends().at(-1)!.args.message)).toContain('as their agent "Planner"');
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
     await t3.close();

@@ -15,6 +15,7 @@
     "desktop:list-not-versioned-files",
     "desktop:list-t3-code-projects",
     "desktop:list-t3-code-threads",
+    "desktop:start-t3-code-thread",
     "desktop:open-agent-thread",
     "desktop:personal-agents",
     "desktop:app-view",

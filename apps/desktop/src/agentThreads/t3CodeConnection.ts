@@ -11,6 +11,7 @@ import {
   readT3CodeThread,
   sendToT3CodeThread,
   signInToT3Code,
+  startT3CodeThread,
   t3CodeThreadLink,
   type T3CodeAnswers,
   type T3CodeAccess,
@@ -55,6 +56,10 @@ export interface T3CodeConnection extends AgentThreadTool {
     titleContains?: string;
     cursor?: number;
   }): Promise<{ threads: T3CodeThread[]; nextCursor: number | null }>;
+  /** Starts an idle thread in a project, with the mode the person allowed dohc. */
+  startThread(input: { projectId: string; title: string; requestId: string }): Promise<{
+    id: string;
+  }>;
   thread(threadId: string): Promise<T3CodeThreadState>;
   /** Where one run of a thread stands, asked by its id. */
   run(threadId: string, runId: string): Promise<T3CodeRun["state"]>;
@@ -179,6 +184,10 @@ export function createT3CodeConnection(dependencies: {
     },
     projects: () => use(listT3CodeProjects),
     threads: (input) => use((session) => listT3CodeThreads(session, input)),
+    startThread: async (input) => {
+      const mode = (await store.load())?.access ?? null;
+      return use((session) => startT3CodeThread(session, { ...input, mode }));
+    },
     thread: (threadId) => use((session) => readT3CodeThread(session, threadId)),
     run: (threadId, runId) => use((session) => readT3CodeRun(session, { threadId, runId })),
     question: (threadId, requestId) =>

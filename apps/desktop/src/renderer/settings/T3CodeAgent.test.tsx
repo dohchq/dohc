@@ -80,6 +80,13 @@ const bridgeMock = {
   listT3CodeThreads: vi.fn(async (_payload: ThreadsPayload): Promise<T3CodeThreadPage> =>
     onePage(thread("t-chief", "Chief of Staff: dohc", "Working"), thread("t-issue", "Issue owner")),
   ),
+  startT3CodeThread: vi.fn(
+    async (_payload: {
+      projectId: string;
+      title: string;
+      requestId: string;
+    }): Promise<{ threadId: string }> => ({ threadId: "t-new" }),
+  ),
   readyAgentThread: vi.fn(
     async (_payload: {
       workspaceId: string;
@@ -136,6 +143,8 @@ beforeEach(() => {
   bridgeMock.allowDohcInT3Code.mockReset();
   bridgeMock.changeAgentThread.mockReset();
   bridgeMock.setAgentThreadWorkspace.mockReset();
+  bridgeMock.startT3CodeThread.mockReset();
+  bridgeMock.startT3CodeThread.mockResolvedValue({ threadId: "t-new" });
 });
 afterEach(cleanup);
 
@@ -177,10 +186,17 @@ function renderList(settings: DesktopUserSettings = SETTINGS) {
 
 const sheet = () => within(screen.getByTestId("agent-add-sheet"));
 const nameField = () => sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" });
+// The name the second page says the agent is added under.
+const addedName = () => sheet().getByTestId("agent-add-summary-name").textContent;
 const threadRow = (title: string) => sheet().getByRole("radio", { name: new RegExp(`^${title}`) });
-async function chooseT3Code() {
+async function chooseT3Code(name?: string) {
   await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
+  if (name !== undefined) {
+    await userEvent.clear(nameField());
+    await userEvent.type(nameField(), name);
+  }
   await userEvent.click(screen.getByTestId("agent-runs-with-t3-code"));
+  await userEvent.click(sheet().getByRole("button", { name: "Next" }));
 }
 const searchFor = (text: string) =>
   userEvent.type(sheet().getByRole("searchbox", { name: "Find a thread by title" }), text);
@@ -251,7 +267,7 @@ it("connects the picked thread, named after it unless the person typed a name", 
   const chief = await sheet().findByRole("radio", { name: /^Chief of Staff: dohc/ });
   expect(within(chief).getByText("Working")).toBeTruthy();
   expect(bridgeMock.listT3CodeThreads).toHaveBeenCalledWith({ projectId: "p-dohc" });
-  expect(nameField().value).toBe("Agent");
+  expect(addedName()).toBe("Agent");
 
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
   expect(sheet().getByRole("alert").textContent).toBe("Choose a thread.");
@@ -259,13 +275,18 @@ it("connects the picked thread, named after it unless the person typed a name", 
 
   await userEvent.click(chief);
   expect(sheet().queryByRole("alert")).toBeNull();
-  expect(nameField().value).toBe("Chief of Staff: dohc");
+  expect(addedName()).toBe("Chief of Staff: dohc");
   await userEvent.click(threadRow("Issue owner"));
+  expect(addedName()).toBe("Issue owner");
+  // Back to the name keeps the thread picked.
+  await userEvent.click(sheet().getByRole("button", { name: "Back" }));
   expect(nameField().value).toBe("Issue owner");
   await userEvent.clear(nameField());
   await userEvent.type(nameField(), "Chief");
+  await userEvent.click(sheet().getByRole("button", { name: "Next" }));
+  expect(threadRow("Issue owner").getAttribute("aria-checked")).toBe("true");
   await userEvent.click(chief);
-  expect(nameField().value).toBe("Chief");
+  expect(addedName()).toBe("Chief");
 
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
   await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
@@ -291,14 +312,16 @@ it("forgets the picked thread when the person leaves T3 Code and comes back", as
   renderList();
   await chooseT3Code();
   await userEvent.click(await sheet().findByRole("radio", { name: /^Issue owner/ }));
-  expect(nameField().value).toBe("Issue owner");
+  expect(addedName()).toBe("Issue owner");
 
   // The list is gone, so no thread it showed can still be the choice.
+  await userEvent.click(sheet().getByRole("button", { name: "Back" }));
   await userEvent.click(screen.getByTestId("agent-runs-with-mcp"));
   await userEvent.click(screen.getByTestId("agent-runs-with-t3-code"));
+  await userEvent.click(sheet().getByRole("button", { name: "Next" }));
   const row = await sheet().findByRole("radio", { name: /^Issue owner/ });
   expect(row.getAttribute("aria-checked")).toBe("false");
-  expect(nameField().value).toBe("Agent");
+  expect(addedName()).toBe("Agent");
 
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
   expect(sheet().getByRole("alert").textContent).toBe("Choose a thread.");
@@ -322,6 +345,48 @@ it("saves nothing when the thread can't be readied, and says why in the sheet", 
   expect(onSave).not.toHaveBeenCalled();
   expect(confirm.textContent).toBe("Add agent");
   expect(confirm.disabled).toBe(false);
+});
+
+it("starts a new thread named after the agent, once however often Add is pressed, and connects it", async () => {
+  const starting = deferred<{ threadId: string }>();
+  bridgeMock.startT3CodeThread
+    .mockRejectedValueOnce(new Error("T3 Code is not running on this computer."))
+    .mockReturnValueOnce(starting.promise);
+  const { onSave } = renderList();
+  await chooseT3Code("Planner");
+  const fresh = await sheet().findByRole("radio", { name: /^New thread/ });
+  // The new thread takes the agent's name.
+  expect(within(fresh).getByText("Planner")).toBeTruthy();
+  await sheet().findByRole("radio", { name: /^Issue owner/ });
+  await userEvent.click(fresh);
+  expect(fresh.getAttribute("aria-checked")).toBe("true");
+  expect(addedName()).toBe("Planner");
+
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect((await sheet().findByRole("alert")).textContent).toBe(
+    "T3 Code is not running on this computer.",
+  );
+  expect(bridgeMock.readyAgentThread).not.toHaveBeenCalled();
+  expect(onSave).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect(screen.getByTestId("agent-add-confirm").textContent).toBe("Adding…");
+  await act(async () => starting.resolve({ threadId: "t-new" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+  // Both tries name one start, so T3 Code starts one thread for them.
+  const [first, second] = bridgeMock.startT3CodeThread.mock.calls.map(([payload]) => payload);
+  expect(first).toEqual({ projectId: "p-dohc", title: "Planner", requestId: second!.requestId });
+  expect(bridgeMock.readyAgentThread).toHaveBeenCalledExactlyOnceWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+    name: "Planner",
+    threadId: "t-new",
+  });
+  expect(onSave.mock.calls[0]![0].agents["t3-code"]).toMatchObject({
+    name: "Planner",
+    thread: { tool: "t3-code", id: "t-new" },
+    workspaces: ["ws-1"],
+  });
 });
 
 it("keeps an older search's late answer out of the list", async () => {
@@ -903,8 +968,9 @@ it("keeps the pick when dohc could not sign itself in, and offers T3 Code's page
   await userEvent.click(allow.getByRole("button", { name: "Allow with Auto" }));
   // Chromium takes focus from a button that turns disabled. jsdom leaves it
   // there, and only a field that can take focus can give it up.
-  nameField().focus();
-  nameField().blur();
+  const hiddenName = screen.getByTestId<HTMLInputElement>("agent-add-name");
+  hiddenName.focus();
+  hiddenName.blur();
   expect(document.activeElement).toBe(document.body);
   await act(async () => asking.reject(cannotAllowHere()));
 
