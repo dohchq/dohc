@@ -5604,7 +5604,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_ydoc_row_records_why_where_and_whether_it_replayed() {
+    fn a_kept_ydoc_row_records_why_where_whether_it_replayed_and_whether_it_counted() {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         run_migrations(
@@ -5636,6 +5636,7 @@ mod tests {
                 open("replication_epoch"),
                 open("stream_identity"),
                 ("replayed".to_owned(), true, Some("0".to_owned())),
+                ("counted".to_owned(), true, Some("0".to_owned())),
             ]
         );
     }
@@ -6100,7 +6101,7 @@ mod tests {
             ),
             (
                 "v2-kept-format-two-replay",
-                "5295c22c23a75e6b746d091503e8f268b067794ea8cab93a5dd17385b8ea50cd",
+                "68d67c24f40109fafd44d0a8f3f9277689fdc3f14c79013e9971b1c70bbbe587",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

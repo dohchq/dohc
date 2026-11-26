@@ -2,7 +2,6 @@ use super::*;
 use dohc_engine_collab::ydoc::reading_body_sequence_here;
 use dohc_engine_collab::{DocKey, WriterDocCache};
 
-const BASE_WAS_REFUSED: &str = "ydoc-update-base-was-refused";
 const CANNOT_SETTLE: &str = "ydoc-kept-base-cannot-settle";
 const STRAY_ROOTS: &str = "ydoc-update-outside-format-two-roots";
 const KEPT: &str = "SELECT COUNT(*) FROM replication_refused_ydoc_blobs";
@@ -239,26 +238,56 @@ fn a_kept_base_and_its_edits_replay_at_open_and_clear_their_notices() {
     assert_eq!(replay(&mut engine), 0);
 }
 
+fn applied_edits(engine: &EngineStore, key: &DocKey, note: &Note) -> Vec<String> {
+    engine
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT update_blob_sha256 FROM ydoc_updates WHERE workspace_id=?1 \
+                 AND version_id=?2 AND object_id=?3 AND update_blob_sha256<>?4 ORDER BY seq",
+            )?
+            .query_map(
+                (
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &note.claim,
+                ),
+                |row| row.get(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("applied edits")
+}
+
+fn edits_in_order(note: &Note) -> Vec<String> {
+    note.edits
+        .iter()
+        .map(|edit| dohc_engine_storage::hex_sha256(edit))
+        .collect()
+}
+
 #[test]
-fn an_edit_parked_before_its_base_replays_after_it_and_counts_its_replay() {
+fn edits_parked_before_their_base_replay_after_it_in_relay_order_and_count_once() {
     let (_scratch, _path, mut engine) = open_store();
     let note = note();
     let key = seed_object(&mut engine, "object-two");
-    let edit = op(
-        &mut engine,
-        "object-two",
-        ("editor", 0, 1),
-        &note.edits[0],
-        &note.claim,
-    );
-    assert!(matches!(
-        arrive(&mut engine, &edit),
-        ApplyDisposition::Applied(result) if result.deferred
-    ));
+    for (origin, relay, bytes) in [("peer-z", 1, &note.edits[0]), ("peer-a", 2, &note.edits[1])] {
+        let edit = op(
+            &mut engine,
+            "object-two",
+            (origin, 0, relay),
+            bytes,
+            &note.claim,
+        );
+        assert!(matches!(
+            arrive(&mut engine, &edit),
+            ApplyDisposition::Applied(result) if result.deferred
+        ));
+    }
     let base = op(
         &mut engine,
         "object-two",
-        ("peer-a", 0, 2),
+        ("peer-b", 0, 3),
         &note.base,
         &note.claim,
     );
@@ -272,15 +301,16 @@ fn an_edit_parked_before_its_base_replays_after_it_and_counts_its_replay() {
             count(&engine, NOTICES),
             count(&engine, QUEUED)
         ),
-        (2, 2, 0)
+        (3, 3, 0)
     );
     let changes = count(&engine, CHANGES);
-    assert_eq!(replay(&mut engine), 2);
+    assert_eq!(replay(&mut engine), 3);
+    assert_eq!(applied_edits(&engine, &key, &note), edits_in_order(&note));
     assert_eq!((count(&engine, KEPT), count(&engine, NOTICES)), (0, 0));
-    assert_eq!(count(&engine, CHANGES), changes + 2);
+    assert_eq!(count(&engine, CHANGES), changes + 1);
     let (claim, text) = note_text(&engine, &key);
     assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
-    assert!(text.contains('y'), "{text}");
+    assert!(text.contains('y') && text.contains('z'), "{text}");
 }
 
 fn format_one_base() -> (Vec<u8>, String, Vec<u8>) {
@@ -494,49 +524,84 @@ fn a_stray_roots_base_refuses_its_whole_claim_in_one_step_and_the_next_note_repl
     }
 }
 
+fn kept_with_a_queued_edit(note: &Note) -> (ScratchDir, std::path::PathBuf, EngineStore, DocKey) {
+    let (scratch, path, mut engine) = open_store();
+    let key = seed_object(&mut engine, "object-two");
+    for (seq, bytes) in [(0, &note.base), (1, &note.edits[0])] {
+        let op = op(
+            &mut engine,
+            "object-two",
+            ("peer-a", seq, seq + 1),
+            bytes,
+            &note.claim,
+        );
+        assert_eq!(
+            refused_as(&arrive(&mut engine, &op)),
+            Some(NEWER_BODY_FORMAT)
+        );
+    }
+    let queued = op(
+        &mut engine,
+        "object-two",
+        ("peer-a", 2, 3),
+        &note.edits[1],
+        &note.claim,
+    );
+    assert!(matches!(
+        reading_body_sequence_here(|| arrive(&mut engine, &queued)),
+        ApplyDisposition::Applied(result) if result.deferred
+    ));
+    (scratch, path, engine, key)
+}
+
+fn crash_at(
+    point: dohc_engine_storage::FaultPoint,
+    nth: usize,
+) -> super::super::ordinary_pull_progress::CrashAt {
+    super::super::ordinary_pull_progress::CrashAt {
+        point,
+        nth,
+        seen: std::sync::atomic::AtomicUsize::new(0),
+    }
+}
+
 #[test]
-fn a_crash_at_each_replay_commit_converges_without_doubling() {
+fn a_crash_at_each_replay_commit_converges_in_order_without_doubling() {
+    use std::sync::atomic::Ordering;
     let note = note();
     for point in [
         dohc_engine_storage::FaultPoint::StorageBeforePersist,
         dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck,
     ] {
-        for nth in 0..4 {
-            let (_scratch, _path, mut engine) = open_store();
-            let key = seed_object(&mut engine, "object-two");
-            for (seq, bytes) in [(0, &note.base), (1, &note.edits[0])] {
-                let op = op(
-                    &mut engine,
-                    "object-two",
-                    ("peer-a", seq, seq + 1),
-                    bytes,
-                    &note.claim,
-                );
-                assert_eq!(
-                    refused_as(&arrive(&mut engine, &op)),
-                    Some(NEWER_BODY_FORMAT)
-                );
-            }
-            let queued = op(
-                &mut engine,
-                "object-two",
-                ("peer-a", 2, 3),
-                &note.edits[1],
-                &note.claim,
-            );
-            assert!(matches!(
-                reading_body_sequence_here(|| arrive(&mut engine, &queued)),
-                ApplyDisposition::Applied(result) if result.deferred
-            ));
+        let (_scratch, _path, mut engine, _key) = kept_with_a_queued_edit(&note);
+        let commits = crash_at(point, usize::MAX);
+        replay_with(&mut engine, &commits).expect("the replay goes on");
+        let commits = commits.seen.load(Ordering::SeqCst);
+        assert!(commits >= 4, "{point:?}: {commits} commits");
+        let mut left = Vec::new();
+        for nth in 0..commits {
+            let (_scratch, path, mut engine, key) = kept_with_a_queued_edit(&note);
             let changes = count(&engine, CHANGES);
-            let crash = super::super::ordinary_pull_progress::CrashAt {
-                point,
-                nth,
-                seen: std::sync::atomic::AtomicUsize::new(0),
-            };
+            let crash = crash_at(point, nth);
             let _ = replay_with(&mut engine, &crash);
+            assert!(crash.seen.load(Ordering::SeqCst) > nth, "{point:?} #{nth}");
+            left.push((
+                count(
+                    &engine,
+                    "SELECT COALESCE(SUM(replayed), 0) FROM replication_refused_ydoc_blobs",
+                ),
+                count(&engine, KEPT),
+                count(&engine, QUEUED),
+            ));
+            drop(engine);
+            let mut engine = EngineStore::open(&path, 1_000).expect("reopen");
             replay_with(&mut engine, &NoFaults)
                 .unwrap_or_else(|error| panic!("{point:?} #{nth}: {error:?}"));
+            assert_eq!(
+                applied_edits(&engine, &key, &note),
+                edits_in_order(&note),
+                "{point:?} #{nth}"
+            );
             assert_eq!(
                 (
                     count(&engine, KEPT),
@@ -559,6 +624,14 @@ fn a_crash_at_each_replay_commit_converges_without_doubling() {
                 "{point:?} #{nth}: {text}"
             );
         }
+        let (at_the_kept_edit, at_the_final_delete) =
+            if point == dohc_engine_storage::FaultPoint::StorageBeforePersist {
+                ((1, 2, 1), (2, 2, 0))
+            } else {
+                ((2, 2, 1), (0, 0, 0))
+            };
+        assert!(left.contains(&at_the_kept_edit), "{point:?}: {left:?}");
+        assert_eq!(left.last(), Some(&at_the_final_delete), "{point:?}");
     }
 }
 
@@ -713,7 +786,7 @@ fn rows_kept_before_this_build_from_another_epoch_or_for_a_live_session_never_re
 }
 
 #[test]
-fn a_later_edit_for_a_claim_refused_on_replay_is_refused_and_not_parked() {
+fn a_later_edit_for_a_claim_refused_on_replay_is_refused_for_the_same_reason_and_not_parked() {
     let (_scratch, _path, mut engine) = open_store();
     let stray = stray_note();
     keep(&mut engine, "object-two", "peer-a", 1, &stray);
@@ -729,7 +802,7 @@ fn a_later_edit_for_a_claim_refused_on_replay_is_refused_and_not_parked() {
         );
         arrive(&mut engine, &later)
     });
-    assert_eq!(refused_as(&later), Some(BASE_WAS_REFUSED));
+    assert_eq!(refused_as(&later), Some(STRAY_ROOTS));
     assert_eq!(count(&engine, QUEUED), 0);
 }
 
@@ -776,31 +849,21 @@ fn a_kept_coordinate_replays_only_with_its_own_payload() {
     ));
 }
 
-fn keep_a_thousand(engine: &mut EngineStore) {
+#[test]
+fn a_thousand_kept_format_two_ops_replay_in_one_open() {
+    let (_scratch, _path, mut engine) = open_store();
     for i in 0..250 {
         let mut note = note_saying(&format!("Note {i}.\n"));
         note.edits.push(note.later.clone());
         keep(
-            engine,
+            &mut engine,
             &format!("bulk-{i}"),
             &format!("peer-{i}"),
             1 + 4 * i,
             &note,
         );
     }
-    assert_eq!(count(engine, KEPT), 1_000);
-}
-
-#[test]
-fn a_thousand_format_two_ops_are_kept() {
-    let (_scratch, _path, mut engine) = open_store();
-    keep_a_thousand(&mut engine);
-}
-
-#[test]
-fn a_thousand_kept_format_two_ops_replay_in_one_open() {
-    let (_scratch, _path, mut engine) = open_store();
-    keep_a_thousand(&mut engine);
+    assert_eq!(count(&engine, KEPT), 1_000);
     assert_eq!(replay(&mut engine), 1_000);
     assert_eq!((count(&engine, KEPT), count(&engine, NOTICES)), (0, 0));
 }
