@@ -1,11 +1,21 @@
 import * as Y from "yjs";
 import type { JSONContent } from "@tiptap/core";
 import {
+  getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   getDohcYDocFrontmatter,
+  placedBoundaries,
   serializeRichdocBody,
+  startingRecords,
   yDocToMarkdown,
 } from "@dohc/ydoc-projection";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  readsBodySequence,
+  storedValue,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 import { frontmatterValueFlowYaml } from "@dohc/ydoc-projection/frontmatter";
 
 /** A recovery copy: the note as the updates rebuild it, and how many kept edits it lists at the end because the note has no place for them. */
@@ -22,7 +32,19 @@ type NotInNote =
       name: string;
       value: unknown;
       now: unknown;
+      /** Set for an item inside a line, such as a formula, whose `block` is the line's text. */
+      inline?: boolean;
+      /** The type the note reads the container as, when that type has no such setting. */
+      shownAs?: string;
     }
+  | {
+      kind: "kind";
+      /** The text of the lines in the container, or null when none is left. */
+      block: string | null;
+      value: unknown;
+      now: unknown;
+    }
+  | { kind: "move"; block: string | null; nodeName: string }
   | { kind: "other" };
 
 /** Offsets within one item, from inclusive, to exclusive. */
@@ -103,43 +125,11 @@ const same = (left: unknown, right: unknown) => equal(left ?? null, right ?? nul
  * deleted it. Formatting a kept edit added is not listed.
  */
 function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
-  const decoded = kept.map((update) => Y.decodeUpdate(update));
-  const keptDeletes = Y.mergeDeleteSets(decoded.map(({ ds }) => ds));
-  const body = getDohcYDocBodyFragment(doc);
+  const dropped = droppedEdits(doc, kept);
   const frontmatter = doc.getMap("frontmatter");
-  // Each item holding dropped kept content, with the offsets dropped. Yjs does
-  // not split an item that was already deleted when a later kept update
-  // deletes part of it, and an item can hold accepted content beside kept.
-  const lost = new Map<Y.Item, Span[]>();
-  const found: NotInNote[] = [];
-  // Kept updates can repeat each other's content, so each clock is read once.
-  const keptClocks = new Map<number, Span[]>();
-  for (const { structs } of decoded)
-    for (const struct of structs)
-      if (struct instanceof Y.Item) {
-        const spans = keptClocks.get(struct.id.client) ?? [];
-        spans.push([struct.id.clock, struct.id.clock + struct.length]);
-        keptClocks.set(struct.id.client, spans);
-      }
-  for (const [client, spans] of keptClocks) {
-    spans.sort(([left], [right]) => left - right);
-    let clock = 0;
-    for (const [from, end] of spans) {
-      for (clock = Math.max(clock, from); clock < end;) {
-        const part = Y.getItem(doc.store, Y.createID(client, clock));
-        const partEnd = Math.min(end, part.id.clock + part.length);
-        // Collected with a block it was made in: its content is not in the document to show.
-        if (!(part instanceof Y.Item)) found.push({ kind: "other" });
-        else if (part.deleted) {
-          const dropped = notDeleted(keptDeletes, client, clock, partEnd).map(
-            ([start, stop]): Span => [start - part.id.clock, stop - part.id.clock],
-          );
-          if (dropped.length > 0) lost.set(part, [...(lost.get(part) ?? []), ...dropped]);
-        }
-        clock = partEnd;
-      }
-    }
-  }
+  if (readsBodySequence(doc)) return sequenceEditsNotInNote(doc, frontmatter, dropped);
+  const { lost, found } = dropped;
+  const body = getDohcYDocBodyFragment(doc);
 
   const parentsWithText = new Set<Y.AbstractType<unknown>>();
   const elementsWithText = new Set<Y.Item>();
@@ -147,12 +137,8 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
     const parent = item.parent as Y.AbstractType<unknown>;
     if (item.parentSub !== null) {
       const value = contentValue(item);
-      if (parent === frontmatter) {
-        // A value set at the same moment was kept instead.
-        const fields = getDohcYDocFrontmatter(doc);
-        const now = Object.hasOwn(fields, item.parentSub) ? fields[item.parentSub] : undefined;
-        if (!same(value, now)) found.push({ kind: "field", field: item.parentSub, value, now });
-      } else if (
+      if (parent === frontmatter) found.push(...fieldNotInNote(doc, item.parentSub, value));
+      else if (
         parent instanceof Y.XmlElement &&
         rootOf(parent as Y.AbstractType<unknown>) === body &&
         // A setting of a block the kept edits added goes with that block.
@@ -181,27 +167,14 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
   }
   // Text in each block, in document order, one quote per unbroken run.
   for (const parent of parentsWithText) {
-    let run = "";
-    const flush = () => {
-      if (run.trim() !== "") found.push({ kind: "text", text: run.trim() });
-      run = "";
-    };
+    const quotes = new Quotes(found);
     for (let item = parent._start; item; item = item.right) {
       if (item.content instanceof Y.ContentFormat) continue;
       const spans = item.content instanceof Y.ContentString ? lost.get(item) : undefined;
-      if (spans === undefined || !(item.content instanceof Y.ContentString)) {
-        flush();
-        continue;
-      }
-      let at = 0;
-      for (const [from, to] of spans) {
-        if (from > at) flush();
-        run += item.content.str.slice(from, to);
-        at = to;
-      }
-      if (at < item.length) flush();
+      if (spans === undefined || !(item.content instanceof Y.ContentString)) quotes.flush();
+      else quotes.add(item.content.str, spans);
     }
-    flush();
+    quotes.flush();
   }
   // Something added with settings but no text, such as an image, a formula or
   // an embed. Its settings were deleted with it, so they are read from the
@@ -224,6 +197,242 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
       continue;
     found.push({ kind: "other" });
   }
+  return found;
+}
+
+type Dropped = {
+  /** Each item holding dropped kept content, with the offsets dropped. */
+  lost: Map<Y.Item, Span[]>;
+  /** The kept items still in the document. */
+  live: Y.Item[];
+  keptDeletes: ReturnType<typeof Y.mergeDeleteSets>;
+  /** Whether an item is from a kept update. */
+  isKept: (id: Y.ID) => boolean;
+  found: NotInNote[];
+};
+
+function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
+  const decoded = kept.map((update) => Y.decodeUpdate(update));
+  const keptDeletes = Y.mergeDeleteSets(decoded.map(({ ds }) => ds));
+  // Yjs does not split an item that was already deleted when a later kept
+  // update deletes part of it, and an item can hold accepted content beside kept.
+  const lost = new Map<Y.Item, Span[]>();
+  const live: Y.Item[] = [];
+  const found: NotInNote[] = [];
+  // Kept updates can repeat each other's content, so each clock is read once.
+  const keptClocks = new Map<number, Span[]>();
+  for (const { structs } of decoded)
+    for (const struct of structs)
+      if (struct instanceof Y.Item) {
+        const spans = keptClocks.get(struct.id.client) ?? [];
+        spans.push([struct.id.clock, struct.id.clock + struct.length]);
+        keptClocks.set(struct.id.client, spans);
+      }
+  for (const [client, spans] of keptClocks) {
+    spans.sort(([left], [right]) => left - right);
+    let clock = 0;
+    for (const [from, end] of spans) {
+      for (clock = Math.max(clock, from); clock < end;) {
+        const part = Y.getItem(doc.store, Y.createID(client, clock));
+        const partEnd = Math.min(end, part.id.clock + part.length);
+        // Collected with a block it was made in: its content is not in the document to show.
+        if (!(part instanceof Y.Item)) found.push({ kind: "other" });
+        else if (part.deleted) {
+          const dropped = notDeleted(keptDeletes, client, clock, partEnd).map(
+            ([start, stop]): Span => [start - part.id.clock, stop - part.id.clock],
+          );
+          if (dropped.length > 0) lost.set(part, [...(lost.get(part) ?? []), ...dropped]);
+        } else live.push(part);
+        clock = partEnd;
+      }
+    }
+  }
+  const isKept = (id: Y.ID) =>
+    (keptClocks.get(id.client) ?? []).some(([from, end]) => id.clock >= from && id.clock < end);
+  return { lost, live, keptDeletes, isKept, found };
+}
+
+/** A value set at the same moment was kept instead. */
+function fieldNotInNote(doc: Y.Doc, field: string, value: unknown): NotInNote[] {
+  const fields = getDohcYDocFrontmatter(doc);
+  const now = Object.hasOwn(fields, field) ? fields[field] : undefined;
+  return same(value, now) ? [] : [{ kind: "field", field, value, now }];
+}
+
+/** Dropped text in document order, one quote per unbroken run. */
+class Quotes {
+  private run = "";
+
+  constructor(private readonly found: NotInNote[]) {}
+
+  add(text: string, spans: readonly Span[]): void {
+    let at = 0;
+    for (const [from, to] of spans) {
+      if (from > at) this.flush();
+      this.run += text.slice(from, to);
+      at = to;
+    }
+    if (at < text.length) this.flush();
+  }
+
+  breakLine(): void {
+    if (this.run !== "") this.run += "\n";
+  }
+
+  flush(): void {
+    if (this.run.trim() !== "") this.found.push({ kind: "text", text: this.run.trim() });
+    this.run = "";
+  }
+}
+
+type Stored = { readonly _map: Map<string, Y.Item> };
+
+/** The value last set under a key, whether or not it was deleted since. */
+function setLast(holder: Stored | undefined, key: string): unknown {
+  const item = holder?._map.get(key);
+  return item ? contentValue(item) : undefined;
+}
+
+/**
+ * The kept edits a rebuilt format-2 note dropped, or that it holds where nothing shows them: a
+ * setting of a container no line is in any more, or one the type the note reads it as has no use
+ * for. A record the kept edits gave a container they made, with its starting value, is not listed.
+ * Dropped text is quoted line by line. An item inside a line, or a block with no text such as a
+ * rule, is counted, and an empty line is not.
+ */
+function sequenceEditsNotInNote(
+  doc: Y.Doc,
+  frontmatter: Y.Map<unknown>,
+  { lost, live, keptDeletes, isKept, found }: Dropped,
+): NotInNote[] {
+  const schema = getDohcProseMirrorSchema();
+  const sequence = doc.share.get(BODY_SEQUENCE_FIELD);
+  const records = doc.share.get(BODY_CONTAINERS_FIELD);
+  const textOf = new Map<Y.Item, string>();
+  const lineOf = new Map<Y.Item, Y.Item>();
+  const emptied = new Set<unknown>();
+  let line: Y.Item | null = null;
+  for (let item = sequence?._start ?? null; item; item = item.right) {
+    const { content } = item;
+    if (content instanceof Y.ContentString) {
+      if (line && !item.deleted) textOf.set(line, textOf.get(line)! + content.str);
+    } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      if (content.type.nodeName !== BLOCK_ELEMENT) {
+        if (line) lineOf.set(item, line);
+        continue;
+      }
+      for (let path = content.type._map.get("path") ?? null; path; path = path.left)
+        if (path.deleted && !Y.isDeleted(keptDeletes, path.id))
+          for (const id of [contentValue(path)].flat()) emptied.add(id);
+      if (!item.deleted) textOf.set((line = item), "");
+    }
+  }
+  const typeOf = new Map<string, string>();
+  const linesOf = new Map<string, Y.Item[]>();
+  for (const { item, path } of placedBoundaries(schema, doc))
+    for (const { id, type } of path) {
+      typeOf.set(id, type);
+      const lines = linesOf.get(id);
+      if (lines) lines.push(item);
+      else linesOf.set(id, [item]);
+    }
+  const textIn = (id: string) =>
+    (linesOf.get(id) ?? [])
+      .map((item) => textOf.get(item) ?? "")
+      .filter((text) => text !== "")
+      .join(" ");
+  const keptMade = (key: string) => {
+    let first = records?._map.get(key) ?? null;
+    while (first?.left) first = first.left;
+    return first !== null && isKept(first.id);
+  };
+
+  const record = (key: string, value: unknown, dropped: boolean): NotInNote[] => {
+    const dot = key.indexOf(".");
+    const id = dot < 0 ? key : key.slice(0, dot);
+    const type = typeOf.get(id);
+    if (type === undefined && !dropped && !emptied.has(id)) return [];
+    const block = type === undefined ? null : textIn(id);
+    if (dot < 0)
+      return (
+        dropped ? type !== undefined && same(value, type) : type !== undefined || keptMade(key)
+      )
+        ? []
+        : [{ kind: "kind", block, value, now: type }];
+    const name = key.slice(dot + 1);
+    const recorded = setLast(records, id);
+    const kind = typeof recorded === "string" ? recorded : "block";
+    if (keptMade(key) && same(value, startingRecords(schema, kind).get(name))) return [];
+    if (type === undefined)
+      return [{ kind: "attribute", block, nodeName: kind, name, value, now: undefined }];
+    if (!Object.hasOwn(schema.nodes[type]?.spec.attrs ?? {}, name))
+      return [
+        { kind: "attribute", block, nodeName: type, name, value, now: undefined, shownAs: type },
+      ];
+    const now = storedValue(records, key);
+    return dropped && !same(value, now)
+      ? [{ kind: "attribute", block, nodeName: type, name, value, now }]
+      : [];
+  };
+
+  const setting = (element: Y.XmlElement, name: string, value: unknown): NotInNote[] => {
+    const at = element._item!;
+    if (lost.has(at)) return [];
+    const boundary = element.nodeName === BLOCK_ELEMENT;
+    const type = boundary ? setLast(element, "type") : element.nodeName;
+    const nodeName = typeof type === "string" ? type : "paragraph";
+    if (at.deleted)
+      return [
+        boundary && name === "path"
+          ? { kind: "move", block: null, nodeName }
+          : boundary && name === "type"
+            ? { kind: "kind", block: null, value, now: undefined }
+            : { kind: "attribute", block: null, nodeName, name, value, now: undefined },
+      ];
+    const now = storedValue(element, name);
+    if (same(value, now)) return [];
+    const home = boundary ? at : lineOf.get(at);
+    const block = home ? (textOf.get(home) ?? "") : "";
+    if (!boundary) return [{ kind: "attribute", block, nodeName, name, value, now, inline: true }];
+    if (name === "type") return [{ kind: "kind", block, value, now }];
+    if (name === "path") return [{ kind: "move", block, nodeName }];
+    return [{ kind: "attribute", block, nodeName, name, value, now }];
+  };
+
+  for (const item of lost.keys()) {
+    const { parent, parentSub } = item;
+    if (parentSub === null) continue;
+    const value = contentValue(item);
+    if (parent === frontmatter) found.push(...fieldNotInNote(doc, parentSub, value));
+    else if (parent === records) found.push(...record(parentSub, value, true));
+    else if (parent instanceof Y.XmlElement && parent._item?.parent === sequence)
+      found.push(...setting(parent, parentSub, value));
+  }
+  for (const item of live)
+    if (item.parent === records && item.parentSub !== null)
+      found.push(...record(item.parentSub, contentValue(item), false));
+
+  const quotes = new Quotes(found);
+  for (let item = sequence?._start ?? null; item; item = item.right) {
+    const { content } = item;
+    const spans = lost.get(item);
+    if (content instanceof Y.ContentFormat) continue;
+    if (spans === undefined) quotes.flush();
+    else if (content instanceof Y.ContentString) quotes.add(content.str, spans);
+    else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const element = content.type;
+      const boundary = element.nodeName === BLOCK_ELEMENT;
+      const type = boundary ? setLast(element, "type") : undefined;
+      if (
+        boundary
+          ? schema.nodes[String(type)]?.isTextblock !== false
+          : element.nodeName === "hardBreak"
+      )
+        quotes.breakLine();
+      else found.push({ kind: "other" });
+    }
+  }
+  quotes.flush();
   return found;
 }
 
@@ -282,22 +491,42 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
               : `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on a ${edit.nodeName} that was deleted.`,
           ),
         ];
-      const block = edit.block === "" ? `a ${edit.nodeName}` : `"${quoteOf(edit.block)}"`;
+      const quoted = edit.block === "" ? null : `"${quoteOf(edit.block)}"`;
+      const block = edit.inline
+        ? `a ${edit.nodeName}${quoted === null ? "" : ` in ${quoted}`}`
+        : (quoted ?? `a ${edit.nodeName}`);
+      const done = task
+        ? `${edit.value === true ? "Ticked" : "Unticked"} ${block}.`
+        : `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on ${block}.`;
+      if (edit.shownAs !== undefined)
+        return [paragraph(`${done} The note has it as ${article(edit.shownAs)}.`)];
       if (task)
-        return [
-          paragraph(
-            `${edit.value === true ? "Ticked" : "Unticked"} ${block}. The note has it ${edit.now === true ? "ticked" : "unticked"}.`,
-          ),
-        ];
-      const now = shown(edit.now);
+        return [paragraph(`${done} The note has it ${edit.now === true ? "ticked" : "unticked"}.`)];
+      return [paragraph(`${done} The note has ${shown(edit.now) ?? "no value"}.`)];
+    }
+    case "kind":
       return [
         paragraph(
-          `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on ${block}. The note has ${now ?? "no value"}.`,
+          edit.block === null
+            ? `Changed a part that was deleted to ${article(edit.value)}.`
+            : `Changed ${edit.block === "" ? article(edit.now) : `"${quoteOf(edit.block)}"`} to ${article(edit.value)}. The note has it as ${article(edit.now)}.`,
         ),
       ];
-    }
+    case "move":
+      return [
+        paragraph(
+          edit.block === null
+            ? `Moved ${article(edit.nodeName)} that was deleted.`
+            : `Moved ${edit.block === "" ? article(edit.nodeName) : `"${quoteOf(edit.block)}"`}. The note has it in another place.`,
+        ),
+      ];
   }
 }
+
+const article = (type: unknown) => {
+  const name = typeof type === "string" ? type : "block";
+  return `${/^[aeiou]/iu.test(name) ? "an" : "a"} ${name}`;
+};
 
 /** The closing section of a recovery copy that lists kept edits the note above it has no place for. */
 function notInNoteSection(edits: readonly NotInNote[]): string {

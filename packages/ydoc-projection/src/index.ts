@@ -21,6 +21,8 @@ export {
   yDocToMarkdown,
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
+export { placedBoundaries } from "./bodySequenceYjs.js";
+export { startingRecords } from "./bodySequenceGrammar.js";
 export { yDocToArtifactMarkdown, createArtifactMarkdownProjector } from "./artifact-markdown.js";
 export {
   documentCreateUpdate,
