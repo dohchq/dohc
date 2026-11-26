@@ -2677,3 +2677,5 @@ fn a_parked_duplicate_of_a_format_two_edit_is_refused_and_kept_when_drained() {
         .unwrap();
     assert_eq!((kept, queued), (Some(typed), 0));
 }
+
+mod kept_format_two;

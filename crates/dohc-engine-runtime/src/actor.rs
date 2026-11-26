@@ -466,29 +466,38 @@ impl WorkspaceActor {
         let worker_markdown_recovery = markdown_recovery.clone();
         let wake = tx.downgrade();
         let worker_identity = identity.clone();
+        #[cfg(test)]
+        let reading = dohc_engine_collab::ydoc::reads_body_sequence();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
-                worker_main(
-                    StorePaths {
-                        named: named_path,
-                        open: db_path,
-                        identity: worker_identity,
-                    },
-                    now_ms,
-                    mode,
-                    root_token,
-                    rx,
-                    wake,
-                    worker_state,
-                    worker_metrics,
-                    worker_link_drain_holds,
-                    startup_tx,
-                    writer_lock,
-                    work,
-                    worker_tails,
-                    worker_markdown_recovery,
-                )
+                let serve = move || {
+                    worker_main(
+                        StorePaths {
+                            named: named_path,
+                            open: db_path,
+                            identity: worker_identity,
+                        },
+                        now_ms,
+                        mode,
+                        root_token,
+                        rx,
+                        wake,
+                        worker_state,
+                        worker_metrics,
+                        worker_link_drain_holds,
+                        startup_tx,
+                        writer_lock,
+                        work,
+                        worker_tails,
+                        worker_markdown_recovery,
+                    )
+                };
+                #[cfg(test)]
+                if reading {
+                    return dohc_engine_collab::ydoc::reading_body_sequence_here(serve);
+                }
+                serve()
             })
             .map_err(RuntimeError::ThreadSpawn)?;
 
@@ -1703,6 +1712,10 @@ mod reader_tests;
 #[cfg(test)]
 #[path = "actor/page_check_tests.rs"]
 mod page_check_tests;
+
+#[cfg(test)]
+#[path = "actor/kept_format_two_tests.rs"]
+mod kept_format_two_tests;
 
 #[cfg(test)]
 #[path = "actor/owner_retirement_tests.rs"]

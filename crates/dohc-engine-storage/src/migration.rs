@@ -5597,6 +5597,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_kept_ydoc_row_records_why_where_and_whether_it_replayed() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(
+            &mut conn,
+            BASELINE_MIGRATIONS,
+            &MigrationContext::current(1000),
+            &NoFaults,
+        )
+        .unwrap();
+        let columns = conn
+            .prepare("SELECT name, \"notnull\", dflt_value FROM pragma_table_info('replication_refused_ydoc_blobs') WHERE cid >= 4")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let open = |name: &str| (name.to_owned(), false, None);
+        assert_eq!(
+            columns,
+            [
+                open("reason"),
+                open("relay_seq"),
+                open("replication_epoch"),
+                open("stream_identity"),
+                ("replayed".to_owned(), true, Some("0".to_owned())),
+            ]
+        );
+    }
+
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
