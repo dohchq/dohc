@@ -4,7 +4,9 @@ import { SafeOutboundError, type SafeOutboundRequest } from "./safeOutboundHttps
 
 const SECRET = "phx_live/secret+key";
 
-function transport(answer: { status?: number; contentType?: string; body: string } | Error) {
+function transport(
+  answer: { status?: number; contentType?: string; contentEncoding?: string; body: string } | Error,
+) {
   const sent: SafeOutboundRequest[] = [];
   const allowed: string[][] = [];
   const value: DeclaredHttpsTransport = {
@@ -18,6 +20,7 @@ function transport(answer: { status?: number; contentType?: string; body: string
       return {
         status: answer.status ?? 200,
         contentType: answer.contentType ?? "application/json; charset=utf-8",
+        contentEncoding: answer.contentEncoding ?? null,
         body: Buffer.from(answer.body),
       };
     }),
@@ -94,7 +97,9 @@ describe("sendDeclaredHttps", () => {
   it.each([
     [{ contentType: "text/html", body: "<html>" }, "unexpected_content_type"],
     [{ contentType: `text/${SECRET}`, body: "<html>" }, "unexpected_content_type"],
+    [{ contentEncoding: `gzip-${SECRET}`, body: "{}" }, "unexpected_content_type"],
     [{ contentType: "application/problem+json", body: "{" }, "invalid_json"],
+    [{ body: "[".repeat(65) + "]".repeat(65) }, "invalid_json"],
   ])("refuses an answer that isn't JSON: %j", async (answer, code) => {
     await expect(send(transport(answer).value)).rejects.toMatchObject({
       code,

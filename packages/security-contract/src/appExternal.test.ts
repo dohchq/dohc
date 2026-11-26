@@ -41,7 +41,7 @@ describe("declared external operations", () => {
       host: "us.posthog.com",
       path: "/api/projects/{{project}}/query/",
       access: "owner",
-      response: { maxBytes: 256 * 1024 },
+      response: { maxBytes: 192 * 1024 },
       secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
     });
     expect(parseAppExternalOperation(op)).toEqual(op);

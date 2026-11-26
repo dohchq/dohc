@@ -55,7 +55,12 @@ function transport(gate?: Promise<void>) {
     read: async (request) => {
       sent.push(request);
       await gate;
-      return { status: 200, contentType: "application/json", body: Buffer.from('{"results":[1]}') };
+      return {
+        status: 200,
+        contentType: "application/json",
+        contentEncoding: null,
+        body: Buffer.from('{"results":[1]}'),
+      };
     },
   };
   return { value, sent };

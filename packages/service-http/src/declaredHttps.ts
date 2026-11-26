@@ -1,4 +1,5 @@
 import {
+  parseSafeOutboundJson,
   readSafeOutboundHttps,
   resolveSafeOutboundDestination,
   SafeOutboundError,
@@ -8,6 +9,7 @@ import {
 } from "./safeOutboundHttps";
 
 export const DECLARED_HTTPS_USER_AGENT = "dohc-app/1";
+const MAX_JSON_DEPTH = 64;
 
 export interface DeclaredHttpsRequest {
   readonly method: "GET" | "POST";
@@ -123,21 +125,19 @@ export async function sendDeclaredHttps(options: {
   } catch (error) {
     throw transportError(error, options.maxResponseBytes);
   }
-  const text = response.body.toString("utf8");
-  const type = response.contentType.split(";")[0]!.trim().toLowerCase();
-  if (type !== "application/json" && !/^application\/[a-z0-9.+-]+\+json$/u.test(type))
-    throw new DeclaredHttpsError(
-      "unexpected_content_type",
-      `The service answered HTTP ${response.status} without JSON.`,
-    );
   let data: unknown;
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    throw new DeclaredHttpsError(
-      "invalid_json",
-      `The service answered HTTP ${response.status} with broken JSON.`,
-    );
+    data = parseSafeOutboundJson(response, MAX_JSON_DEPTH);
+  } catch (error) {
+    throw error instanceof SafeOutboundError && error.code === "invalid_json"
+      ? new DeclaredHttpsError(
+          "invalid_json",
+          `The service answered HTTP ${response.status} with JSON that is broken or nested over ${MAX_JSON_DEPTH} levels deep.`,
+        )
+      : new DeclaredHttpsError(
+          "unexpected_content_type",
+          `The service answered HTTP ${response.status} without uncompressed JSON in UTF-8.`,
+        );
   }
   if (secret.trim() && echoes(JSON.stringify(data), secret.trim()))
     throw new DeclaredHttpsError(

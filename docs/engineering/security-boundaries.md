@@ -552,7 +552,7 @@ renderer. The host reads the secret right before it sends, after the address pas
 outbound HTTPS checks above. The secret must be an `http-header` secret whose allowed
 hosts include the operation's host. The host refuses an answer that repeats the secret
 in raw, JSON-escaped, URL-encoded, or decoded form. It also refuses an answer that is not
-JSON or is over the operation's limit (at most 512 KiB). Each call has a 10-second
+uncompressed UTF-8 JSON or is over the operation's limit (at most 192 KiB). Each call has a 10-second
 timeout. The app gets `{ status, data }` and can send that data elsewhere. Approval says
 so.
 

@@ -190,7 +190,7 @@ describe("AppAccessSummary outside calls", () => {
     expect(post!.textContent).toContain("us.posthog.com");
     expect(post!.textContent).toContain("POST /api/projects/{project}/query/");
     expect(post!.textContent).toContain("POSTHOG_KEY");
-    expect(post!.textContent).toContain("up to 256 KB");
+    expect(post!.textContent).toContain("up to 192 KB");
     expect(post!.textContent).toContain("Only you");
     expect(post!.textContent).toContain("This computer");
     expect(post!.textContent).toContain("It can change your data on us.posthog.com.");

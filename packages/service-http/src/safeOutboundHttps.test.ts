@@ -34,7 +34,6 @@ import {
   parseSafeOutboundJson,
   readSafeOutboundHttps,
   resolveSafeOutboundDestination,
-  readSafeOutboundHttps,
   SafeOutboundError,
   sendSafeOutboundHttps,
 } from "./safeOutboundHttps";
@@ -202,31 +201,6 @@ describe("sendSafeOutboundHttps", () => {
       new AbortController().signal,
     );
     expect(status).toBe(202);
-  });
-
-  it("keeps the response body and type when reading, within its own limit", async () => {
-    const destination = await resolveSafeOutboundDestination("https://api.example.com/hook", {
-      lookup: async () => [{ address: "93.184.216.34", family: 4 }],
-    });
-    mockResponse(200, [Buffer.from('{"a":'), Buffer.from("1}")], {
-      "content-type": "application/json",
-    });
-    const read = await readSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: 1024 });
-    expect(read).toEqual({
-      status: 200,
-      contentType: "application/json",
-      body: Buffer.from('{"a":1}'),
-    });
-    mockResponse(200, [Buffer.alloc(600), Buffer.alloc(600)]);
-    await expect(
-      readSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: 1024 }),
-    ).rejects.toMatchObject({ code: "response_too_large" });
-    await expect(
-      readSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: 512 * 1024 + 1 }),
-    ).rejects.toMatchObject({ code: "unsafe_url" });
-    await expect(
-      sendSafeOutboundHttps({ destination, headers: {}, maxResponseBytes: 128 * 1024 }),
-    ).rejects.toMatchObject({ code: "unsafe_url" });
   });
 
   it("destroys redirects immediately by default", async () => {

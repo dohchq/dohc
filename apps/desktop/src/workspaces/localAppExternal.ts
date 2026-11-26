@@ -131,7 +131,8 @@ export function loopbackAppExternalTransport(origin: string): DeclaredHttpsTrans
         throw new SafeOutboundError("response_too_large", "too large");
       return {
         status: response.status,
-        contentType: response.headers.get("content-type") ?? "",
+        contentType: response.headers.get("content-type"),
+        contentEncoding: response.headers.get("content-encoding"),
         body,
       };
     },

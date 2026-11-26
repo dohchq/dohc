@@ -279,7 +279,7 @@ const { status, data } = await useApp().external<{ results: unknown[] }>("recent
 - `url` is `https://host/path`. Put query fields in `query`, not in the URL.
 - `{{name}}` fills a whole path segment, query value, or body value with a declared input. Inputs are `integer` (`min`, `max`), `enum` (`values`), `boolean`, or `string` (`maxLength`). Every input is required.
 - `headers` are fixed text. `secret.header` names the header that carries the secret, after an optional `prefix`. The secret must be a header secret whose allowed websites include the URL's host.
-- `maxResponseBytes` defaults to 256 KiB and can be at most 512 KiB. The answer must be JSON. Each call times out after 10 seconds.
+- `maxResponseBytes` defaults to 192 KiB, which is also the most it can be. The answer must be uncompressed JSON in UTF-8, nested at most 64 levels deep. Each call times out after 10 seconds.
 - `access` is `"owner"`, the default. For now, only the owner's own app can make the call.
 - `status` is the service's HTTP status, so check it. A refused call throws an `AppBackendError` whose `refusal.code` is one such as `external_input`, `external_secret`, or `secret_echoed`.
 
