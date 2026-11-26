@@ -5,3 +5,5 @@ ALTER TABLE replication_refused_ydoc_blobs ADD COLUMN replication_epoch TEXT;
 ALTER TABLE replication_refused_ydoc_blobs ADD COLUMN stream_identity TEXT;
 ALTER TABLE replication_refused_ydoc_blobs ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0
     CHECK (replayed IN (0, 1));
+ALTER TABLE replication_refused_ydoc_blobs ADD COLUMN counted INTEGER NOT NULL DEFAULT 0
+    CHECK (counted IN (0, 1));

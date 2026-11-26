@@ -753,10 +753,11 @@ pub(crate) fn retain_refused_ydoc_blob(
 ) -> Result<(), SyncError> {
     let changed = tx.execute(
         "INSERT OR IGNORE INTO replication_refused_ydoc_blobs
-           (workspace_id,origin_id,origin_seq,update_sha256,reason,relay_seq,replication_epoch,stream_identity)
+           (workspace_id,origin_id,origin_seq,update_sha256,reason,relay_seq,replication_epoch,stream_identity,counted)
          SELECT l.workspace_id,l.origin_id,l.origin_seq,COALESCE(json_extract(l.payload_json,'$.updateBlobSha256'),
            json_extract(l.payload_json,'$.lineageTransition.successor.updateBlobSha256')),?4,COALESCE(?5,q.relay_seq),
-           COALESCE(q.replication_epoch,s.replication_epoch),COALESCE(q.stream_identity,s.stream_identity)
+           COALESCE(q.replication_epoch,s.replication_epoch),COALESCE(q.stream_identity,s.stream_identity),
+           q.lineage_claim_id IS NOT NULL
          FROM replication_log l LEFT JOIN ydoc_deferred_updates q USING (workspace_id,origin_id,origin_seq)
            LEFT JOIN sync_identity s ON s.workspace_id=l.workspace_id
          WHERE l.workspace_id=?1 AND l.origin_id=?2 AND l.origin_seq=?3
@@ -2596,7 +2597,7 @@ fn drain_deferred_ydoc(
                 store.read_with(|conn| kept_base_refusal(conn, key, &lineage_claim_id))?
         {
             let rows = lineage_coordinates(take_claim_rows(row, &mut queue));
-            refusals.extend(refuse_deferred_ydoc(store, key, &rows, reason, faults)?);
+            refusals.extend(refuse_deferred_ydoc(store, key, &rows, &reason, faults)?);
             continue;
         }
         let marker = marker.ok_or(SyncError::RetryableState {
@@ -3306,7 +3307,8 @@ pub(crate) fn refuse_rows_of_a_kept_base_in_tx(
     let rows = tx
         .prepare(
             "SELECT origin_id,origin_seq FROM ydoc_deferred_updates \
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 \
+             ORDER BY relay_seq,origin_id,origin_seq",
         )
         .and_then(|mut statement| {
             statement
@@ -3330,14 +3332,11 @@ fn lineage_coordinates(rows: Vec<DeferredRow>) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// Why a delta of `claim` is refused because its base was kept: the base
-/// is in a format this engine can't read, or was refused again for another
-/// reason when it replayed.
 fn kept_base_refusal(
     conn: &rusqlite::Connection,
     key: &DocKey,
     claim: &str,
-) -> Result<Option<&'static str>, SyncError> {
+) -> Result<Option<String>, SyncError> {
     let kept: Option<(String, Option<String>)> = conn
         .query_row(
             "SELECT k.update_sha256, k.reason FROM replication_refused_ydoc_blobs k \
@@ -3362,7 +3361,7 @@ fn kept_base_refusal(
         Some((_, Some(reason)))
             if ![NEWER_BODY_FORMAT, LIVE_UNADMITTED_UPDATE].contains(&reason.as_str()) =>
         {
-            return Ok(Some(BASE_WAS_REFUSED));
+            return Ok(Some(reason));
         }
         Some((sha, _)) => sha,
     };
@@ -3372,7 +3371,7 @@ fn kept_base_refusal(
     let doc = dohc_engine_collab::Ydoc::wire();
     Ok(
         (doc.apply(&bytes).is_ok() && doc.refuse_a_newer_format().is_err())
-            .then_some(NEWER_BODY_FORMAT),
+            .then(|| NEWER_BODY_FORMAT.to_owned()),
     )
 }
 
@@ -9100,9 +9099,10 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         if matches!(
             outcome.primary,
             ApplyDisposition::Applied(_) | ApplyDisposition::Skipped
-        ) && dohc_engine_collab::read_marker(store, &key)
-            .map_err(map_collab_hard_error)?
-            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+        ) && !crate::kept_replay::replaying_now()
+            && dohc_engine_collab::read_marker(store, &key)
+                .map_err(map_collab_hard_error)?
+                .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
             let drain = drain_deferred_ydoc_in_batch(store, cache, &key, faults, batch_inactive)?;
             let mut outcome = merge_drained(
@@ -9123,9 +9123,10 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     // phase drain first, so the projection below reconstructs the complete
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
-    let drain = if dohc_engine_collab::read_marker(store, &key)
-        .map_err(map_collab_hard_error)?
-        .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+    let drain = if !crate::kept_replay::replaying_now()
+        && dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
         drain_deferred_ydoc_in_batch(store, cache, &key, faults, batch_inactive)?
     } else {
@@ -9187,7 +9188,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     if let Some(reason) =
                         kept_base_refusal(tx, &deferred_key, &payload.lineage_claim_id)?
                     {
-                        return Err(SyncError::InvalidInput { reason });
+                        return Err(SyncError::BaseRefused { reason });
                     }
                     if inactive_lineage_exists(tx, &deferred_key, &payload.lineage_claim_id)? {
                         hold_archived_lineage(
@@ -9283,7 +9284,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 faults,
                 |tx, op| {
                     if let Some(reason) = kept_base_refusal(tx, &key, &payload.lineage_claim_id)? {
-                        return Err(SyncError::InvalidInput { reason });
+                        return Err(SyncError::BaseRefused { reason });
                     }
                     if let Some(lineage) = marker.lineage_claim_id.as_deref() {
                         hold_released_lineage(
@@ -9922,7 +9923,6 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
 const BASE_FAILS_REPLAY_CHECK: &str = "ydoc.update base fails the replay check";
 
 pub(crate) const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
-pub(crate) const BASE_WAS_REFUSED: &str = "ydoc-update-base-was-refused";
 
 const OUTSIDE_FORMAT_TWO_ROOTS: &str = "ydoc-update-outside-format-two-roots";
 

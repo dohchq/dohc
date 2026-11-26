@@ -836,6 +836,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         | SyncError::MarkdownReaderCapacity
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::BaseRefused { .. }
         | SyncError::MarkdownWriteHeld { .. }
         | SyncError::LiveDocumentBindingActive
         | SyncError::SyncedDeletionRevivalRefused

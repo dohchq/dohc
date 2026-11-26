@@ -292,6 +292,7 @@ const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("replication_refused_ydoc_blobs", "replication_epoch"),
     ("replication_refused_ydoc_blobs", "stream_identity"),
     ("replication_refused_ydoc_blobs", "replayed"),
+    ("replication_refused_ydoc_blobs", "counted"),
 ];
 
 /// How an existing file was classified by the fingerprint fence.

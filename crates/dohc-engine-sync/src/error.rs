@@ -48,6 +48,8 @@ pub enum SyncError {
     Storage(#[from] StorageError),
     #[error("invalid replication input: {reason}")]
     InvalidInput { reason: &'static str },
+    #[error("invalid replication input: {reason}")]
+    BaseRefused { reason: String },
     #[error(
         "replication input exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
     )]
@@ -192,6 +194,7 @@ impl SyncError {
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
+            | SyncError::BaseRefused { .. }
             | SyncError::MarkdownWriteHeld { .. }
             | SyncError::LiveDocumentBindingActive
             | SyncError::InputTooLarge { .. }
@@ -233,7 +236,7 @@ impl SyncError {
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::SyncedDeletionRevivalRefused => "synced-deletion-revival-refused",
             SyncError::Storage(err) => err.code(),
-            SyncError::InvalidInput { .. } => "invalid-input",
+            SyncError::InvalidInput { .. } | SyncError::BaseRefused { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
             SyncError::RetryableState { .. }

@@ -471,7 +471,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not
         // when a later drain applies it.
-        if mutation_committed {
+        if mutation_committed && !(kept && crate::kept_replay::counted_when_parked(tx, envelope)?) {
             dohc_engine_storage::count_remote_change_in_tx(tx, &envelope.workspace_id)?;
         }
         if let Admission::Refused(refusal) = &admission
@@ -547,6 +547,9 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         }),
         SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
             reason: (*reason).to_owned(),
+        }),
+        SyncError::BaseRefused { reason } => Some(RefusalReason::InvalidInput {
+            reason: reason.clone(),
         }),
         SyncError::InputTooLarge {
             constraint,

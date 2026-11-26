@@ -38,6 +38,10 @@ pub(crate) fn replaying<R>(run: impl FnOnce() -> R) -> R {
     ran
 }
 
+pub(crate) fn replaying_now() -> bool {
+    REPLAYING.get()
+}
+
 fn at(envelope: &ReplicationEnvelope) -> (&str, &str, i64) {
     (
         envelope.workspace_id.as_str(),
@@ -58,7 +62,6 @@ fn kept_row<T: rusqlite::types::FromSql>(
         .map_err(SyncError::corrupt)
 }
 
-/// Whether this apply is the open's replay of `envelope`'s kept format-2 row.
 pub(crate) fn kept_candidate(
     conn: &Connection,
     envelope: &ReplicationEnvelope,
@@ -66,7 +69,13 @@ pub(crate) fn kept_candidate(
     Ok(REPLAYING.get() && kept_row::<i64>(conn, "1", CANDIDATE, envelope)?.is_some())
 }
 
-/// Whether a kept delta's claim still waits on its own kept base.
+pub(crate) fn counted_when_parked(
+    conn: &Connection,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    Ok(kept_row::<i64>(conn, "1", "k.counted=1", envelope)?.is_some())
+}
+
 pub(crate) fn held_behind_its_base(
     conn: &Connection,
     envelope: &ReplicationEnvelope,
@@ -96,8 +105,6 @@ pub(crate) fn mark_replayed_in_tx(
     Ok(())
 }
 
-/// Settle a kept row refused again for another reason. A base refuses its
-/// whole claim with it, and no row it decides replays again.
 pub(crate) fn refuse_claim_in_tx(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -138,7 +145,8 @@ fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
            k.workspace_id,'originId',k.origin_id,'originSeq',k.origin_seq,'relaySeq',k.relay_seq, \
            'opKind',l.op_kind,'payload',json(l.payload_json),'recordedAtMs',l.recorded_at_ms) END \
          {KEPT_ROWS} WHERE k.replayed=1 OR ({CANDIDATE}) \
-         ORDER BY MIN(k.rowid) OVER (PARTITION BY {CLAIM_OF}), NOT {BASE}, k.rowid"
+         ORDER BY MIN(k.rowid) OVER (PARTITION BY {CLAIM_OF}), NOT {BASE}, \
+           k.relay_seq, k.origin_id, k.origin_seq"
     );
     let rows = store
         .read_with(
@@ -159,8 +167,6 @@ fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
     Ok(claims)
 }
 
-/// Replay a claim's kept rows, base first, then drain its parked edits, and
-/// forget its rows once none is left to replay.
 fn finish_claim(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
