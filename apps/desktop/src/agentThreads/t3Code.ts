@@ -704,13 +704,13 @@ const Launched = z.object({ threadId: z.string() });
 
 /**
  * Starts an idle thread in a project, for an agent the person is adding.
- * With a mode, the thread runs with it, so dohc's sign-in can message it.
- * `requestId` names this start, so asking again after a lost answer starts
+ * T3 Code picks its mode: the project's default, never above dohc's sign-in,
+ * and one the project's provider offers. `requestId` names this start, so asking again after a lost answer starts
  * no second thread.
  */
 export async function startT3CodeThread(
   session: T3CodeSession,
-  input: { projectId: string; title: string; mode: T3CodeAccess | null; requestId: string },
+  input: { projectId: string; title: string; requestId: string },
 ): Promise<{ id: string }> {
   const launched = shaped(
     Launched,
@@ -718,7 +718,6 @@ export async function startT3CodeThread(
       projectId: input.projectId,
       title: input.title,
       generateTitle: false,
-      ...(input.mode === null ? {} : { runtimeMode: input.mode }),
       clientRequestId: input.requestId,
     }),
   );

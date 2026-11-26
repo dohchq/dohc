@@ -104,7 +104,7 @@ describe("dohc's connection to T3 Code", () => {
     expect(await connection.access()).toBeNull();
   });
 
-  it("starts an idle thread with the mode the person allowed, and leaves the mode to T3 Code when it chose it", async () => {
+  it("starts an idle thread and leaves its mode to T3 Code", async () => {
     const { t3, connection } = await setup({ program: true });
     t3.tools.t3_thread_launch = () => ({ threadId: "mcp:t-new", runId: null, status: null });
     const start = () =>
@@ -116,18 +116,14 @@ describe("dohc's connection to T3 Code", () => {
 
     await connection.signIn({ open: browser, access: "auto" });
     await expect(start()).resolves.toEqual({ id: "mcp:t-new" });
-    // No message, so the thread waits for dohc's first one.
+    // No message, so the thread waits for dohc's first one. No mode, so T3 Code
+    // picks one the project's provider offers, within the sign-in.
     expect(launched().at(-1)?.args).toEqual({
       projectId: "p1",
       title: "Planner",
       generateTitle: false,
-      runtimeMode: "auto",
       clientRequestId: "r1",
     });
-
-    await connection.signIn({ open: browser });
-    await start();
-    expect(launched().at(-1)?.args).not.toHaveProperty("runtimeMode");
   });
 
   it("says it cannot allow dohc here, and keeps what it has, when its own code cannot be made", async () => {

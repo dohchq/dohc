@@ -184,10 +184,7 @@ export function createT3CodeConnection(dependencies: {
     },
     projects: () => use(listT3CodeProjects),
     threads: (input) => use((session) => listT3CodeThreads(session, input)),
-    startThread: async (input) => {
-      const mode = (await store.load())?.access ?? null;
-      return use((session) => startT3CodeThread(session, { ...input, mode }));
-    },
+    startThread: (input) => use((session) => startT3CodeThread(session, input)),
     thread: (threadId) => use((session) => readT3CodeThread(session, threadId)),
     run: (threadId, runId) => use((session) => readT3CodeRun(session, { threadId, runId })),
     question: (threadId, requestId) =>

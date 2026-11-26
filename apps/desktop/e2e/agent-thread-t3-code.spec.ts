@@ -478,6 +478,7 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await section.getByTestId("agent-add").click();
     await sheet.getByTestId("agent-add-name").fill("Planner");
     await sheet.getByTestId("agent-runs-with-t3-code").click();
+    await shoot(page, page, "t3-code-n-choose");
     await sheet.getByTestId("agent-add-next").click();
     const fresh = sheet.getByTestId("t3-code-new-thread");
     await expect(fresh).toContainText("Planner");
