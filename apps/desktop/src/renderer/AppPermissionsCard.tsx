@@ -344,14 +344,16 @@ function ExternalRows({
           param.type === "integer"
             ? `whole number ${param.min}–${param.max}`
             : param.type === "enum"
-              ? `one of ${param.values.join(", ")}`
+              ? `one of ${param.values.map((value) => JSON.stringify(value)).join(", ")}`
               : param.type === "boolean"
                 ? "true or false"
                 : `text up to ${param.maxLength} characters`
         }`,
     ),
-    ...Object.entries(operation.headers).map(([key, value]) => `${key}: ${value}`),
-    ...(operation.body === null ? [] : [JSON.stringify(operation.body, null, 2)]),
+    ...[
+      ...Object.entries(operation.headers).map(([key, value]) => `${key}: ${value}`),
+      ...(operation.body === null ? [] : [JSON.stringify(operation.body, null, 2)]),
+    ].map(slots),
   ];
   return (
     <div
@@ -381,7 +383,7 @@ function ExternalRows({
           {query ? `?${slots(query)}` : ""}
           {details.length ? (
             <pre className="m-0 mt-1 whitespace-pre-wrap text-[11px] text-muted">
-              {slots(details.join("\n"))}
+              {details.join("\n")}
             </pre>
           ) : null}
         </dd>

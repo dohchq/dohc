@@ -169,7 +169,8 @@ describe("AppAccessSummary outside calls", () => {
     usage: {
       method: "GET",
       url: "https://api.example.com/usage",
-      query: { period: "month" },
+      query: { period: "{{period}}" },
+      params: { period: { type: "enum", values: ["month, week", "day"] } },
       headers: { "X-Version": "2" },
       secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
     },
@@ -195,7 +196,8 @@ describe("AppAccessSummary outside calls", () => {
     expect(post!.textContent).toContain("It can change your data on us.posthog.com.");
     expect(post!.textContent).toContain('"kind": "EventsQuery"');
     expect(post!.textContent).toContain("{project}: whole number 1–999");
-    expect(get!.textContent).toContain("GET /usage?period=month");
+    expect(get!.textContent).toContain("GET /usage?period={period}");
+    expect(get!.textContent).toContain('{period}: one of "month, week", "day"');
     expect(get!.textContent).toContain("X-Version: 2");
     expect(get!.textContent).not.toContain("change your data");
     expect(screen.getByText(/including what these services return/)).toBeTruthy();
