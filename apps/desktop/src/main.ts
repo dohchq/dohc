@@ -12575,19 +12575,14 @@ function registerIpcHandlers(): void {
                 return workReferenceView(reference, resolution);
               // A data Collection opens at its dataset.json. One this
               // workspace can't place shows, but opens nothing. A failed
-              // lookup reads as unavailable, which the chip asks again.
+              // lookup fails the read, so a click reports it.
               const datasetPath = await datasetPathOf(
                 adapter,
                 workspaceId,
                 resolution.target.datasetId,
                 operation.signal,
-              ).then(
-                (path) => ({ path }),
-                () => null,
               );
-              return datasetPath === null
-                ? workReferenceView(reference, null)
-                : workReferenceView(reference, resolution, datasetPath.path);
+              return workReferenceView(reference, resolution, datasetPath);
             }),
           ),
       );
