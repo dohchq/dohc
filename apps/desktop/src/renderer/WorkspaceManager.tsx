@@ -242,12 +242,10 @@ export function WorkspaceManager(props: {
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
-  // A dohc://connect link's server, until this manager shows it.
   connectServerUrl?: string | null;
   onConnectServerShown?: () => void;
 }) {
   const [joining, setJoining] = useState(false);
-  // The connection dialog a dohc://connect link opened, with its address.
   const [connectingTo, setConnectingTo] = useState<string | null>(null);
   const [openingShare, setOpeningShare] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
@@ -264,13 +262,6 @@ export function WorkspaceManager(props: {
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
-  const { connectServerUrl, onConnectServerShown } = props;
-  useEffect(() => {
-    if (!connectServerUrl) return;
-    onConnectServerShown?.();
-    // A dialog already open may be waiting on a code: leave its sign-in alone.
-    setConnectingTo((open) => open ?? connectServerUrl);
-  }, [connectServerUrl, onConnectServerShown]);
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
   const committedSettingsRef = useRef(props.userSettings ?? null);
@@ -444,6 +435,16 @@ export function WorkspaceManager(props: {
     setJoining(false);
     setOpeningShare(false);
   }, [handoffStatus.status]);
+
+  // A route that connects holds the link until it closes. A dialog already
+  // open may be waiting on a code, so it keeps its address.
+  const { connectServerUrl, onConnectServerShown } = props;
+  const routeConnects = joining || openingShare || handoffStatus.status !== "idle";
+  useEffect(() => {
+    if (!connectServerUrl || routeConnects) return;
+    onConnectServerShown?.();
+    setConnectingTo((open) => open ?? connectServerUrl);
+  }, [connectServerUrl, onConnectServerShown, routeConnects]);
 
   const currentWorkspace = props.current;
   const openCurrentRef = useRef<() => void>(() => undefined);

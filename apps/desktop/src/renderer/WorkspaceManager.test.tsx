@@ -485,6 +485,37 @@ describe("workspace manager", () => {
     expect(shown).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD-EFGH");
   });
+
+  it("holds a connect link while Join a synced workspace is open, then fills it in", async () => {
+    const user = userEvent.setup();
+    const shown = vi.fn();
+    const view = (connectServerUrl: string | null) => (
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+        connectServerUrl={connectServerUrl}
+        onConnectServerShown={shown}
+      />
+    );
+    const { rerender } = render(view(null));
+    await locationReads("/home/sam/dohc/Personal");
+    await user.click(screen.getByTestId("first-run-join-synced"));
+    expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
+
+    rerender(view("https://drive.example"));
+    expect(shown).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("cloud-server-url")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).value).toBe(
+        "https://drive.example",
+      ),
+    );
+    expect(shown).toHaveBeenCalledOnce();
+  });
 });
 
 describe("workspace manager with registered workspaces", () => {

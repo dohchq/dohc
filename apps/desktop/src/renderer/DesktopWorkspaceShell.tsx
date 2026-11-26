@@ -802,7 +802,6 @@ function WorkspaceShell(props: {
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
-  // A dohc://connect link's server, until this shell shows it.
   connectServerUrl?: string | null;
   onConnectServerShown?: () => void;
   // Notices sent to this person, owned above the shell.
@@ -1751,16 +1750,18 @@ function WorkspaceShell(props: {
   );
   // A dohc://connect link fills in the dialog's address. The person still
   // chooses Connect server. An open dialog may be waiting on a code, and a
-  // deletion review holds the account, so neither is interrupted.
+  // deletion review holds the account, so neither is interrupted. Opening a
+  // share covers the dialog, so the link waits for it to close.
   const { connectServerUrl, onConnectServerShown } = props;
+  const openingShare = openShare !== null || handoffStatus.status !== "idle";
   useEffect(() => {
-    if (!connectServerUrl) return;
+    if (!connectServerUrl || openingShare) return;
     onConnectServerShown?.();
     if (cloudOpen || reviewingAccountDeletion()) return;
     setCloudRenew(false);
     setCloudRetryServerUrl(connectServerUrl);
     setCloudOpen(true);
-  }, [connectServerUrl, onConnectServerShown, cloudOpen, reviewingAccountDeletion]);
+  }, [connectServerUrl, onConnectServerShown, cloudOpen, reviewingAccountDeletion, openingShare]);
   // After useShellError's, so this shell attaches with its notices started:
   // an answer to a delete sent from the previous workspace's shell reports here.
   useEffect(
