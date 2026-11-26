@@ -51,7 +51,7 @@ import {
   pauseLiveRoom,
   type LiveRoomPauseCause,
 } from "./storage/liveRoomPauses.js";
-import { documentParams, liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
+import { documentParams, liveJournalSeedClientIds } from "./storage/liveUpdateJournal.js";
 
 const EMPTY_VECTOR = Y.encodeStateVector(new Y.Doc());
 const FEED = Symbol("live-room-feed");
@@ -1023,8 +1023,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           }
           const plan = roomAdmissible(held.doc, taken);
           if (!plan) return refused("invalid-update");
-          const seed = liveJournalSeedClientId(storage, held.document);
-          if (plan.clients.some((clientId) => clientId === seed))
+          const seeds = liveJournalSeedClientIds(storage, held.document);
+          if (plan.clients.some((clientId) => seeds.includes(clientId)))
             return refused("provenance-refused");
           const refusal = refusalOf(held, taken);
           if (refusal) return refused(refusal);

@@ -822,6 +822,7 @@ pub(crate) fn append_and_index_update(
     CollabError,
 > {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+    projection.check_format_two_roots()?;
     let (seq, record_facts) = append_validated_and_index_update(
         conn,
         key,
@@ -983,6 +984,7 @@ fn append_local_update(
         Some(elsewhere) => {
             let (projection, deletions) =
                 crate::replay_parity::validate_replay_parity_seeing_deletions(&base, update)?;
+            projection.check_format_two_roots()?;
             let appended = append_validated_and_index_update(
                 conn,
                 key,
@@ -1062,6 +1064,9 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
+            if let Some(after) = validation.rebuilt_scratch.as_ref().or(scratch) {
+                after.check_format_two_roots()?;
+            }
             let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
@@ -1094,6 +1099,9 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
+            if let Some(after) = &validation.rebuilt_scratch {
+                after.check_format_two_roots()?;
+            }
             let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
@@ -4265,6 +4273,95 @@ mod append_compaction_query_tests {
             (marker.head_update_seq, marker.head_snapshot_seq),
             (i64::from(DEFAULT_COMPACTION_THRESHOLD), 0)
         );
+    }
+
+    #[test]
+    fn a_local_append_under_body_in_a_format_two_note_is_refused_with_nothing_stored() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Map, ReadTxn, Transact, XmlFragment};
+
+        crate::ydoc::reading_body_sequence_here(|| {
+            let scratch = ScratchDir::new_named("format-two-append-under-body").expect("scratch");
+            let mut store = EngineStore::open(&scratch.join("engine.db"), 1).expect("open store");
+            let key = DocKey::new("ws", "main", "object").expect("key");
+            store
+                .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+                    tx.execute_batch(
+                        "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                         VALUES ('ws', 'main'); \
+                         INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                         VALUES ('ws', 'object', 1);",
+                    )
+                    .map_err(map_sql)
+                })
+                .expect("seed parents");
+            ensure_marker(
+                &mut store,
+                &key,
+                ContentKind::Richdoc,
+                Regime::LocalOnly,
+                &NoFaults,
+                2,
+            )
+            .expect("ensure marker");
+            let marked = yrs::Doc::new();
+            let meta = marked.get_or_insert_map(crate::ROOT_META);
+            meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+            let note = Ydoc::wire();
+            note.apply(
+                &marked
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default()),
+            )
+            .expect("format 2");
+            note.rewrite_content_to_markdown(ContentKind::Richdoc, "Text\n")
+                .expect("format-2 note");
+            assert_eq!(note.note_schema_version(), 2);
+            let mut warm = WriterDocCache::new();
+            let append = |store: &mut EngineStore, cache: &mut WriterDocCache, update: &[u8]| {
+                record_local_update(
+                    store,
+                    cache,
+                    &key,
+                    update,
+                    LocalAppend::default(),
+                    &NoFaults,
+                    3,
+                    |_tx, _outcome, _update_sha| Ok(()),
+                )
+            };
+            let seeded = append(&mut store, &mut warm, &note.encode_full_state()).expect("seed");
+            assert!(matches!(seeded, TxnOutcome::Committed(_)));
+            let typed = yrs::Doc::with_client_id(7);
+            let body = typed.get_or_insert_xml_fragment(crate::ROOT_BODY);
+            typed
+                .transact_mut()
+                .apply_update(yrs::Update::decode_v1(&note.encode_full_state()).expect("decode"))
+                .expect("load note");
+            let before = typed.transact().state_vector();
+            body.insert(
+                &mut typed.transact_mut(),
+                0,
+                yrs::XmlTextPrelim::new("Typed"),
+            );
+            let under_body = typed.transact().encode_state_as_update_v1(&before);
+            let stored = |store: &EngineStore| {
+                let marker = read_marker(store, &key)
+                    .expect("marker")
+                    .expect("marker row");
+                let note = load_persisted(store, &key).expect("load").expect("note");
+                (marker.head_update_seq, note.doc.encode_full_state())
+            };
+            let kept = stored(&store);
+            for mut cache in [warm, WriterDocCache::new()] {
+                let refused = append(&mut store, &mut cache, &under_body);
+                assert!(
+                    matches!(refused, Err(CollabError::MalformedUpdate { .. })),
+                    "{refused:?}"
+                );
+                assert_eq!(stored(&store), kept);
+            }
+        });
     }
 }
 

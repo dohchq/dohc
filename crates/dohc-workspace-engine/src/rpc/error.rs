@@ -727,7 +727,8 @@ fn map_domain(error: &DomainError) -> WireError {
                 | "held-change-undo-stale"
                 | "held-change-shared-owner"
                 | "restore-path-collision"
-                | "restore-head-changed"),
+                | "restore-head-changed"
+                | "ydoc-note-uses-a-newer-body-format"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
@@ -900,6 +901,15 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_note_in_a_newer_body_format_keeps_its_reason() {
+        let wire = super::map_domain(&DomainError::InvalidInput {
+            reason: "ydoc-note-uses-a-newer-body-format",
+        });
+        assert!(matches!(wire.code, ErrorCode::InvalidParams));
+        assert_eq!(wire.message, "ydoc-note-uses-a-newer-body-format");
+    }
 
     #[test]
     fn internal_refusal_logs_only_its_code_words() {
