@@ -326,6 +326,14 @@ export function purgeAccountRows(
     }
     if (
       storage.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_approvers'")
+        .get()
+    )
+      storage.db
+        .prepare("UPDATE dohc_dataset_approvers SET user_id=NULL WHERE user_id=?")
+        .run(userId);
+    if (
+      storage.db
         .prepare(
           "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_automation_claims'",
         )

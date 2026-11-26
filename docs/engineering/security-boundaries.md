@@ -340,6 +340,21 @@ bounds sustained and completed allocations without replacing host memory limits.
 Snapshot evaluations (`child.ts`) on standalone Node with `DEFAULT_MEMSTATUS=0` rely
 on `deadlineMs` and `PRAGMA max_page_count`.
 
+## Admins approve Collection rules as themselves
+
+On a relay-hosted Collection, the Owner or an active Admin can create it and
+approve its rules and migrations. The dataset host checks a governance authority
+for these actions, separate from the data authority operations run under. An
+Admin's names their member entry, member grant, and grant generation, never an
+Owner impersonation. A request marked as an agent's or a phone launch's is refused. The host rechecks it inside
+the commit's transaction, so a demoted Admin's approval fails at commit. Approving
+rules trusts the Admin with the Collection's data, since a migration's SQL and
+preview reach every row. Deletion, raw SQL, recovery, bulk changes, archive, and secret or outside-call approvals stay
+Owner-only. Each approved revision records its approver's user id and role, kept
+through recovery and kept without the id when the account is deleted. A former
+Admin's approval keeps running until the Owner confirms it, which records the
+Owner without migrating. See [ADR 0021](adr/0021-admin-collection-approvals-and-demotion-policy.md).
+
 ## Automation edits do not widen access
 
 An automation can reach only what all its Collection's editors can reach.

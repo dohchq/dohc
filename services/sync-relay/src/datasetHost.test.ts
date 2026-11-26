@@ -1,4 +1,4 @@
-import { createDatasetAppRoutes } from "./datasetRoutes";
+import { createDatasetAppRoutes, createDatasetRoutes } from "./datasetRoutes";
 import { createMemberAppRoutes, parseMemberAppUpload } from "./memberAppRoutes";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -24,7 +24,11 @@ import {
   writeMemberApp,
 } from "./storage/memberApps";
 import { disableAppPublication } from "./storage/publications";
-import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import {
+  fenceAccount,
+  initializeAccountDeletion,
+  purgeAccountRows,
+} from "./storage/accountDeletion";
 import type { AccountSession, AccountSessions } from "@dohc/workspace-auth/session";
 import { createPhoneApps } from "./phoneApps";
 import type { PublicEditRelease } from "@dohc/security-contract";
@@ -1447,7 +1451,7 @@ it("refuses a member's running write through a workspace app when a default or f
   expect(lower).toBeNull();
 });
 
-it("lets an admin set Collection defaults and grant a member existing actions, but never approve rules or grant owner-only actions", async () => {
+it("lets an admin set Collection defaults and grant a member existing actions, but never grant owner-only actions", async () => {
   const f = await memberFixture(false);
   expect(
     f.storage.inviteWorkspaceMember({
@@ -1504,16 +1508,169 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
   expect(
     f.host.permissions(ana, { workspaceId: "w", datasetId: id(21) }).rules.actions,
   ).not.toContainEqual(expect.objectContaining({ operationId: id(6) }));
-  await expect(
-    (async () =>
-      f.host.activate(ana, {
+});
+
+async function adminRulesFixture() {
+  const f = await memberFixture();
+  const renamed = (n: number) => {
+    const next = structuredClone(definition);
+    next.tables[0]!.fields[1]!.name = `Name ${n}`;
+    next.schemaPath = `registrations/revision-${n}/schema.sql`;
+    next.operationsPath = `registrations/revision-${n}/operations.js`;
+    return describeDatasetRevision({
+      definition: next,
+      revision: n,
+      schemaSql,
+      operationSource: memberSource,
+    });
+  };
+  const prepare = (auth: AppBackendAuth, n: number) =>
+    f.host.prepareMigration(auth, {
+      workspaceId: "w",
+      revision: renamed(n),
+      schemaSql,
+      operationSource: memberSource,
+      expected: f.host.approvedArtifacts(owner, scope).cursor,
+      migrationSql: "SELECT 1;",
+    });
+  const approve = (
+    auth: AppBackendAuth,
+    preview: { candidateId: string; checkpointSha256: string },
+  ) =>
+    f.host.approveMigration(auth, {
+      ...scope,
+      candidateId: preview.candidateId,
+      checkpointSha256: preview.checkpointSha256,
+    });
+  const demote = () =>
+    expect(
+      f.storage.setWorkspaceMemberRole({
         workspaceId: "w",
-        revision: memberRevision,
-        schemaSql,
-        operationSource: memberSource,
-        capacityBytes: 1024 * 1024,
-      }))(),
-  ).rejects.toMatchObject(refused);
+        actorUserId: "owner",
+        memberId: "ana-entry",
+        role: "member",
+      }),
+    ).toEqual({ ok: true });
+  return { ...f, renamed, prepare, approve, demote };
+}
+
+it("lets an Admin create a Collection and approve its rules as themselves, never a Member", async () => {
+  const f = await adminRulesFixture();
+  await expect(f.prepare(ana, 2)).rejects.toMatchObject(refused);
+  expect(() => f.host.approvedArtifacts(ana, scope)).toThrow(expect.objectContaining(refused));
+  f.admin();
+  await f.approve(ana, await f.prepare(ana, 2));
+  expect(f.host.approvedArtifacts(owner, scope).revision.revisionSha256).toBe(
+    f.renamed(2).revisionSha256,
+  );
+  expect(f.host.approval(owner, scope)).toEqual({
+    revisionSha256: f.renamed(2).revisionSha256,
+    approvedBy: { role: "admin", name: null, former: false, approvedAtMs: expect.any(Number) },
+    needsOwnerConfirmation: false,
+  });
+  const created = describeDatasetRevision({
+    definition: {
+      ...definition,
+      datasetId: id(31),
+      schemaPath: "crm/schema.sql",
+      operationsPath: "crm/operations.js",
+    },
+    revision: 1,
+    schemaSql,
+    operationSource: memberSource,
+  });
+  await f.host.activate(ana, {
+    workspaceId: "w",
+    revision: created,
+    schemaSql,
+    operationSource: memberSource,
+    capacityBytes: 1024 * 1024,
+  });
+  expect(f.host.approval(ana, { workspaceId: "w", datasetId: id(31) }).approvedBy).toMatchObject({
+    role: "admin",
+  });
+  expect(() => f.host.archiveDataset(ana, scope)).toThrow(expect.objectContaining(refused));
+  const agent: AppBackendAuth = { ...ana, agent: { depth: 1, agentId: "agent" } };
+  expect(() => f.host.approvedArtifacts(agent, scope)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
+});
+
+it("refuses an Admin's approval at its commit when they lose the role after it starts", async () => {
+  const f = await adminRulesFixture();
+  f.admin();
+  const preview = await f.prepare(ana, 2);
+  const checks = vi.spyOn(f.storage, "getShareGrant");
+  const pending = f.approve(ana, preview);
+  expect(checks).toHaveBeenCalled();
+  f.demote();
+  await expect(pending).rejects.toMatchObject(refused);
+  expect(f.host.approvedArtifacts(owner, scope).revision.revisionSha256).toBe(
+    memberRevision.revisionSha256,
+  );
+});
+
+it("keeps a former Admin's approved rules running until the Owner confirms them, without migrating again", async () => {
+  const f = await adminRulesFixture();
+  f.admin();
+  await f.approve(ana, await f.prepare(ana, 2));
+  f.demote();
+  expect(f.host.approval(owner, scope)).toMatchObject({
+    approvedBy: { role: "admin", former: true },
+    needsOwnerConfirmation: true,
+  });
+  expect(() => f.host.approval(ana, scope)).toThrow(expect.objectContaining(refused));
+  f.admin();
+  expect(() =>
+    f.host.confirmApproval(ana, { ...scope, revisionSha256: f.renamed(2).revisionSha256 }),
+  ).toThrow(expect.objectContaining(refused));
+  f.demote();
+  expect(() =>
+    f.host.confirmApproval(owner, { ...scope, revisionSha256: memberRevision.revisionSha256 }),
+  ).toThrow(expect.objectContaining({ code: "conflict" }));
+  const history = f.host.history(owner, scope);
+  const route = createDatasetRoutes(f.host, f.storage, { nowMs: () => 10 });
+  const call = async (action: "approval" | "confirm-approval", init?: RequestInit) =>
+    (
+      await route(
+        new Request(`https://relay.test/${action}`, init),
+        { route: "dataset", ...scope, action },
+        { kind: "named", workspaceId: "w", userId: "owner" },
+      )
+    ).json();
+  expect(
+    await call("confirm-approval", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revisionSha256: f.renamed(2).revisionSha256 }),
+    }),
+  ).toMatchObject({ needsOwnerConfirmation: false });
+  expect(await call("approval")).toEqual({
+    revisionSha256: f.renamed(2).revisionSha256,
+    approvedBy: { role: "owner", name: null, former: false, approvedAtMs: expect.any(Number) },
+    needsOwnerConfirmation: false,
+  });
+  expect(f.host.history(owner, scope)).toEqual(history);
+  expect(f.host.approvedArtifacts(owner, scope).revision.revision).toBe(2);
+});
+
+it("keeps an approval's role when its Admin's account is deleted, so the Owner still confirms it", async () => {
+  const f = await adminRulesFixture();
+  f.admin();
+  await f.approve(ana, await f.prepare(ana, 2));
+  const key = "admin-approval-deletion-key-at-least-32-bytes";
+  initializeAccountDeletion(f.storage, key);
+  const fenced = fenceAccount(f.storage, key, "ana", "ana@dohc.test");
+  purgeAccountRows(f.storage, "ana", "ana@dohc.test", fenced.manifest!);
+  expect(
+    f.storage.db
+      .prepare("SELECT user_id,role FROM dohc_dataset_approvers WHERE approved_revision_hash=?")
+      .get(f.renamed(2).revisionSha256),
+  ).toEqual({ user_id: null, role: "admin" });
+  expect(f.host.approval(owner, scope)).toMatchObject({
+    approvedBy: { role: "admin", name: null, former: true },
+    needsOwnerConfirmation: true,
+  });
 });
 
 it("lists a Collection a member reaches only by its defaults, and changes their offline copy's access when the defaults change or the Collection is archived", async () => {

@@ -16,6 +16,7 @@ import {
   type DatasetAccess,
   type DatasetHostOptions,
   type DatasetDataGrant,
+  type DatasetGovernor,
 } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { PublicEditRelease } from "@dohc/security-contract";
@@ -81,6 +82,7 @@ import {
 } from "./storage/memberApps";
 import { deletePhoneAppLaunches } from "./storage/phoneApps";
 import { createDatasetFiles } from "./storage/datasetFiles";
+import { accountName } from "./storage/accountNames";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePaths, collectionFilePresent } from "./storage/collectionFilePresence";
 import type { MemberReach } from "./storage/memberReach";
@@ -367,6 +369,68 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     }
     owner(auth, workspaceId);
     return auth;
+  }
+  function governor(
+    auth: AppBackendAuth,
+    key: { workspaceId: string; datasetId: string },
+  ): DatasetGovernor {
+    current();
+    if (
+      auth.kind === "named" &&
+      auth.workspaceId === key.workspaceId &&
+      !auth.agent &&
+      !auth.launch &&
+      !storage.workspaceIsOwnedBy(key.workspaceId, auth.userId)
+    ) {
+      const role = workspaceRoleOf(storage, key.workspaceId, auth.userId),
+        grantId = workspaceMemberGrantId(storage, key.workspaceId, auth.userId);
+      if (
+        role?.role !== "admin" ||
+        !grantId ||
+        (auth.grantId !== undefined && auth.grantId !== grantId)
+      )
+        throw new DatasetHostError(
+          "not_authorized",
+          "Only the Owner or an Admin can change this Collection's rules.",
+        );
+      const generation = storage.getShareGrant(grantId)?.generation ?? null;
+      return {
+        role: "admin",
+        userId: auth.userId,
+        token: JSON.stringify(["admin", role.memberId, grantId, generation]),
+      };
+    }
+    const authority = resolveAuthority(auth, { ...key, access: { kind: "data" } });
+    if (authority.caller.kind !== "owner" || authority.agent)
+      throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
+    return { role: "owner", userId: authority.caller.userId, token: JSON.stringify(authority) };
+  }
+  function approval(
+    workspaceId: string,
+    result: {
+      revisionSha256: string;
+      approvedBy: { userId: string | null; role: "owner" | "admin"; approvedAtMs: number } | null;
+    },
+  ) {
+    const by = result.approvedBy;
+    if (!by)
+      return {
+        revisionSha256: result.revisionSha256,
+        approvedBy: null,
+        needsOwnerConfirmation: false,
+      };
+    const role = by.userId === null ? null : workspaceRoleOf(storage, workspaceId, by.userId)?.role;
+    const former = by.role === "admin" && role !== "admin" && role !== "owner";
+    return {
+      revisionSha256: result.revisionSha256,
+      approvedBy: {
+        role: by.role,
+        name: by.userId === null ? null : accountName(storage, by.userId),
+        former,
+        approvedAtMs: by.approvedAtMs,
+      },
+      needsOwnerConfirmation: former,
+    };
   }
   function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
     if (authority.caller.kind !== "link") return;
@@ -1171,6 +1235,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       journal,
       supervisor,
       resolveAuthority,
+      resolveGovernor: governor,
       compileOperations: options.compileOperations,
       persistentRuntime: options.runtime,
       recovery: {
@@ -1328,6 +1393,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_automation_claims WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_revisions WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_revision_actors WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_approvers WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_presses WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_automation_failure_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_workspace_defaults WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
@@ -1722,6 +1788,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       describe: host.describe,
       list: host.list,
       approvedArtifacts: host.approvedArtifacts,
+      approval: (auth: AppBackendAuth, scope: { workspaceId: string; datasetId: string }) =>
+        approval(scope.workspaceId, host.approval(auth, scope)),
+      confirmApproval: (
+        auth: AppBackendAuth,
+        input: { workspaceId: string; datasetId: string; revisionSha256: string },
+      ) => approval(input.workspaceId, host.confirmApproval(auth, input)),
       history: host.history,
       historyRevision: host.historyRevision,
       publication,
