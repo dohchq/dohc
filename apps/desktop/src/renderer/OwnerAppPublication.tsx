@@ -26,6 +26,7 @@ import {
   DatasetPermissionCard,
   ExternalNetworkCard,
   type AppCapability,
+  type LinkReadChoice,
   type ReportPermissionError,
 } from "./AppPermissionsCard";
 import { bridge } from "./bridge";
@@ -222,6 +223,7 @@ function PublishedDatasetDetails({
             reportError={reportError}
             workspaceId={workspaceId}
             capability={capability}
+            narrow
             loadDisplay
           />
           <p className="m-0">Open the Collection to view and manage its records.</p>
@@ -1058,6 +1060,29 @@ function PublicationDialog(
     heading.current?.focus();
   };
 
+  const preparedOperationIds = (prepared?.capabilities ?? []).flatMap((capability) =>
+    capability.kind === "dataset" ? capability.operationIds : [],
+  );
+  const linkReadChoice: LinkReadChoice = {
+    selected: new Set(linkReads.map((read) => read.operationId)),
+    shared: new Set(
+      preparedOperationIds.filter((id, index) => preparedOperationIds.indexOf(id) !== index),
+    ),
+    disabled: !!busy,
+    onChange: (operation, checked) =>
+      setLinkReads((previous) =>
+        checked
+          ? [
+              ...previous,
+              {
+                operationId: operation.operationId,
+                fieldIds: operation.fields!.map((field) => field.fieldId),
+              },
+            ]
+          : previous.filter((read) => read.operationId !== operation.operationId),
+      ),
+  };
+
   const localView = view === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView
@@ -1542,13 +1567,9 @@ function PublicationDialog(
                       <DatasetPermissionCard
                         reportError={reportError}
                         workspaceId={props.workspaceId}
-                        draftLinkReads={!reactivating}
                         key={collectionKey(prepared.approvalId, capability.datasetId)}
-                        capability={
-                          !reactivating
-                            ? { ...capability, ...(linkReads.length ? { linkReads } : {}) }
-                            : capability
-                        }
+                        capability={capability}
+                        {...(reactivating ? {} : { linkReadChoice })}
                       />
                     ) : (
                       <CollectionPermissionCard
@@ -1558,75 +1579,6 @@ function PublicationDialog(
                     ),
                   )
                 )}
-                {!reactivating
-                  ? prepared.capabilities
-                      .filter(
-                        (capability) =>
-                          capability.kind === "dataset" &&
-                          capability.operations.some(
-                            (operation) =>
-                              operation.access === "helper" && operation.fields !== undefined,
-                          ),
-                      )
-                      .map((capability) =>
-                        capability.kind === "dataset" ? (
-                          <fieldset
-                            key={capability.datasetId}
-                            disabled={!!busy}
-                            className="space-y-2 rounded-lg border border-line bg-bg p-3"
-                          >
-                            <legend className="px-1 text-[13px] font-medium text-ink">
-                              Allow people with the link to read
-                            </legend>
-                            {capability.operations
-                              .filter(
-                                (operation) =>
-                                  operation.access === "helper" && operation.fields !== undefined,
-                              )
-                              .map((operation) => (
-                                <label
-                                  key={operation.operationId}
-                                  className="block text-[13px] text-ink"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={linkReads.some(
-                                      (read) => read.operationId === operation.operationId,
-                                    )}
-                                    onChange={(event) =>
-                                      setLinkReads((previous) =>
-                                        event.target.checked
-                                          ? [
-                                              ...previous,
-                                              {
-                                                operationId: operation.operationId,
-                                                fieldIds: operation.fields!.map(
-                                                  (field) => field.fieldId,
-                                                ),
-                                              },
-                                            ]
-                                          : previous.filter(
-                                              (read) => read.operationId !== operation.operationId,
-                                            ),
-                                      )
-                                    }
-                                  />{" "}
-                                  {operation.name}
-                                  <span className="block text-[12px] text-muted">
-                                    Fields:{" "}
-                                    {operation.fields!.map((field) => field.name).join(", ") ||
-                                      "None"}
-                                  </span>
-                                </label>
-                              ))}
-                            <p className="m-0 text-[12px] text-muted">
-                              Selected reads are added to this app's link access and show current
-                              records and later changes. Unpublish to withdraw access.
-                            </p>
-                          </fieldset>
-                        ) : null,
-                      )
-                  : null}
                 <ExternalNetworkCard
                   sharedCollectionFiles={prepared.capabilities.some(
                     (capability) => capability.kind === "collection-create",

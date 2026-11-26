@@ -66,9 +66,9 @@ describe("AppAccessSummary multi-table wording", () => {
     );
 
     const text = screen.getByTestId("app-access").textContent ?? "";
-    expect(text).toContain("Members: Adds records with Name");
+    expect(text).toContain("Members: Adds recordsName");
     expect(text).toContain("Members: Deletes records");
-    expect(text).toContain("Expenses: Adds records with Title, Amount");
+    expect(text).toContain("Expenses: Adds recordsTitle, Amount");
     expect(text).toContain("Expenses: Deletes records");
   });
 
@@ -117,6 +117,6 @@ describe("AppAccessSummary multi-table wording", () => {
     );
 
     const text = screen.getByTestId("app-access").textContent ?? "";
-    expect(text).toContain("Expenses: Adds records with Title, CurrencyNew");
+    expect(text).toContain("Expenses: Adds recordsTitle, CurrencyNew");
   });
 });
