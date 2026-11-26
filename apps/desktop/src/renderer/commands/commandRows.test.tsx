@@ -205,7 +205,10 @@ describe("command inventory", () => {
       paletteCommandRows(mainContext)
         .filter((row) => row.capabilityId)
         .map(({ id, capabilityId }) => ({ id, capabilityId })),
-    ).toEqual([{ id: "new-folder", capabilityId: "folder.create" }]);
+    ).toEqual([
+      { id: "new-folder", capabilityId: "folder.create" },
+      { id: "workspace-apps", capabilityId: "app.member.list" },
+    ]);
   });
 
   it("offers Update dohc while an update waits, and Restart to update once it is downloaded", () => {

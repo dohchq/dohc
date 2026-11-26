@@ -264,6 +264,13 @@ relay refuses a share whose source sits outside the app's folder. It doesn't
 apply folder rules to that folder's name, because a Personal app's folder is
 not a workspace folder.
 
+The desktop checks every file's digest twice: before it uploads a share, and
+before it writes a copy into the person's Personal apps. A copy never replaces
+a folder that already exists. Members share apps only while the Owner or an
+Admin turns on "Members can share apps", which is off by default. Turning it off
+pauses the apps members already shared. The Owner and
+Admins can withdraw any Member app, and the author can withdraw their own.
+
 ## A phone runs an app in a locked web view
 
 The phone posts a one-use handoff to the app's bootstrap on a random host under

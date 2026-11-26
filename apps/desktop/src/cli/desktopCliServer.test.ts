@@ -298,6 +298,14 @@ function fixture(
         truncated: false,
       })),
       chatLinks: vi.fn(async () => null),
+      memberAppsList: vi.fn(async () => ({ apps: [], nextCursor: null })),
+      memberAppInspect: vi.fn(async () => ({
+        name: "app",
+        authorName: null,
+        consent: "none" as const,
+        collections: [],
+        source: [],
+      })),
       linksEdges: vi.fn(async () => ({
         versionId: "main",
         files: [],

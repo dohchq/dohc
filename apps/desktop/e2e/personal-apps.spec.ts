@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
@@ -18,7 +18,9 @@ import {
 
 // A member of a joined workspace builds a Personal app on this computer
 // against a Collection the owner granted them, approves it, and opens it in
-// the browser. The app runs the granted action as the member.
+// the browser. The app runs the granted action as the member. Once the owner
+// lets members share apps, the member shares it with the workspace, reviews
+// and copies it, and the owner withdraws it.
 
 const OWNER = {
   token: "test:e2e-personal-owner",
@@ -45,7 +47,7 @@ window.addEventListener("message", (event) => {
 });
 `;
 
-test("@two-client a member builds, approves, and opens a Personal app on a Collection they can read", async ({
+test("@two-client a member builds, approves, opens, and shares a Personal app on a Collection they can read", async ({
   browser,
 }) => {
   test.setTimeout(420_000);
@@ -61,6 +63,7 @@ test("@two-client a member builds, approves, and opens a Personal app on a Colle
   try {
     relay = await spawnSyncRelay({
       dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      appPublications: true,
       linkBoundary: {
         linkKey: randomBytes(32).toString("base64url"),
         relayExchangeKey: randomBytes(32).toString("base64url"),
@@ -302,6 +305,104 @@ test("@two-client a member builds, approves, and opens a Personal app on a Colle
       timeout: 60_000,
     });
     await browserPage.screenshot({ path: shot("app-in-browser") });
+
+    // --- Ana can share it only once the owner lets members share apps -------
+    const share = dialog.getByRole("button", { name: "Share", exact: true });
+    await share.click();
+    await expect(dialog.getByRole("alert")).toContainText(
+      "Members can't share apps in this workspace",
+    );
+    const openWorkspaceApps = async (target: typeof page) => {
+      await target.keyboard.press("ControlOrMeta+k");
+      await target
+        .getByTestId("command-palette")
+        .getByRole("option", { name: "Workspace apps…", exact: true })
+        .click();
+      return target.getByTestId("workspace-apps");
+    };
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("general")).click();
+    await page.getByTestId(settingsNavPin("members")).click();
+    const allow = page
+      .getByTestId("settings-members-app-sharing")
+      .getByRole("switch", { name: "Members can share apps" });
+    await expect(allow).toHaveAttribute("aria-checked", "false");
+    await allow.click();
+    await expect(allow).toHaveAttribute("aria-checked", "true");
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    await share.click();
+    await expect(dialog.getByText("Shared trip-board with the workspace's members.")).toBeVisible({
+      timeout: 60_000,
+    });
+
+    // --- Ana reviews the shared app and copies its source -------------------
+    await mine.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    const apps = await openWorkspaceApps(mine);
+    const row = apps.getByTestId("workspace-app-row").filter({ hasText: "trip-board" });
+    await expect(row).toContainText("Shared by", { timeout: 60_000 });
+    await row.getByRole("button", { name: "Review" }).click();
+    await expect(apps.getByRole("heading", { name: "Review trip-board" })).toBeVisible();
+    await expect(apps).toContainText("Trips");
+    await expect(apps.getByTestId("workspace-app-source")).toContainText("trip-board/main.ts");
+    for (const theme of ["Light", "Dark"] as const) {
+      await mine.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme.toLowerCase(),
+      );
+      await apps.screenshot({ path: shot(`member-review-${theme.toLowerCase()}`) });
+    }
+    await apps.getByTestId("workspace-app-copy-name").fill("trip-copy");
+    await apps.getByRole("button", { name: "Copy", exact: true }).click();
+    await expect(apps.getByText("Copied to trip-copy in your Personal apps.")).toBeVisible();
+    expect(await readFile(join(folder, "trip-copy", "main.ts"), "utf8")).toBe(appSource(read.name));
+    await apps.getByRole("button", { name: "Continue in browser" }).click();
+    await expect
+      .poll(async () =>
+        (await readOpened()).some((entry) => entry.includes(`/s/apps/${workspaceId}/`)),
+      )
+      .toBe(true);
+
+    // --- Only a person allows a Member app: the desktop's sign-in is refused --
+    const listed = await mine.evaluate(async (id) => {
+      const apps = [];
+      let cursor: string | null = null;
+      do {
+        const page = await window.dohcDesktop!.memberAppsList({
+          workspaceId: id,
+          ...(cursor ? { cursor } : {}),
+        });
+        apps.push(...page.apps);
+        cursor = page.nextCursor;
+      } while (cursor);
+      return apps;
+    }, joined);
+    const shared = listed.find((app) => app.kind === "member")!;
+    expect(shared.name).toBe("trip-board");
+    const consent = await fetch(
+      `${relay.baseUrl}/sync/${workspaceId}/app-publications/${shared.publicationId}/backend/consent`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${MEMBER.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ scopeDigest: "0".repeat(64) }),
+      },
+    );
+    expect(consent.status).toBe(403);
+
+    // --- The owner withdraws Ana's app --------------------------------------
+    const ownerApps = await openWorkspaceApps(page);
+    const ownerRow = ownerApps.getByTestId("workspace-app-row").filter({ hasText: "trip-board" });
+    await expect(ownerRow).toBeVisible();
+    for (const theme of ["Light", "Dark"] as const) {
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme.toLowerCase(),
+      );
+      await ownerApps.screenshot({ path: shot(`owner-apps-${theme.toLowerCase()}`) });
+    }
+    await ownerRow.getByRole("button", { name: "Withdraw" }).click();
+    await ownerApps.getByRole("alertdialog").getByRole("button", { name: "Withdraw" }).click();
+    await expect(ownerRow).toHaveCount(0);
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(

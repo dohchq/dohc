@@ -105,6 +105,10 @@
       "label": "View: History"
     },
     {
+      "id": "workspace-apps",
+      "label": "Workspace apps…"
+    },
+    {
       "id": "open-versions",
       "label": "Show all versions"
     },

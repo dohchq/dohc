@@ -3,6 +3,7 @@ import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentio
 import type { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
+import type { memberAppsReadOperations, memberAppsWriteOperations } from "./memberAppsOperations";
 import type { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import type { workspaceSecretsOperations } from "./workspaceSecretsOperations";
@@ -9522,6 +9523,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof liveNoteOperations>,
+    OperationBridge<typeof memberAppsReadOperations>,
+    OperationBridge<typeof memberAppsWriteOperations>,
     OperationBridge<typeof inboxReadOperations>,
     OperationBridge<typeof inboxWriteOperations>,
     OperationBridge<typeof inboxDesktopOperations>,
