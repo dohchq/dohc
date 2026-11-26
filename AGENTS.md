@@ -1,6 +1,6 @@
 # dohc
 
-dohc is a local-first desktop app. People and their agents use it to build, share, and run small apps next to their files, documents, data, and chat. dohc handles sync, sharing, permissions, and history. People own their work and choose their own tools and agents.
+dohc is a local-first workspace and runtime for personal apps. In the desktop app, people and their agents build, run, share, and manage small apps next to their files, documents, data, and chat. The workspace is the primary object. dohc handles sync, sharing, permissions, isolation, and history. People own their work and choose their own tools and agents.
 
 dohc is an early alpha, released as nightly builds. There are no users outside the team yet.
 
@@ -15,7 +15,7 @@ Treat this file as good defaults. The person you work with can override any of i
 5. **Agent agnostic.** dohc doesn't provide or supervise agents. A control does the action it names. It never opens an agent prompt.
 6. **Chat is part of the workspace.** Chat links to files, data, and apps, and what it produces can become real work.
 7. **Apps are real web apps.** Their source lives in the workspace. They see only what their owner exposes. Anyone can open a shared app by its URL.
-8. **Strict foundation, free workflow.** Capability-secure microservices, disguised as Folders, Collections, and Apps. Ownership, sign-in, permissions, sync, history, and isolation are strict. Everything else is the user's choice. App source and Collection automations are files any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows or built-in business apps.
+8. **Strict foundation, free workflow.** Capability-secure microservices, disguised as Folders, Collections, and Apps. The runtime enforces ownership, sign-in, permissions, sync, history, and isolation. Everything else is the user's choice. App source and Collection automations are files any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows or built-in business apps.
 9. **Serious engine, small audience.** "Small" means personal or small-group apps. Build a runtime engineers choose for real work. Keep the runtime and app tools fast and inspectable. Raise or remove accidental limits that block demanding apps. If an app needs new access, add a scoped capability its owner approves.
 
 ### Jobs to test ideas against
