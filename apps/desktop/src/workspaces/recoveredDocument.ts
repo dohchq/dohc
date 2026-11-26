@@ -222,13 +222,21 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
       }
   for (const [client, spans] of keptClocks) {
     spans.sort(([left], [right]) => left - right);
-    let clock = 0;
+    const joined: Span[] = [];
     for (const [from, end] of spans) {
-      for (clock = Math.max(clock, from); clock < end;) {
+      const last = joined.at(-1);
+      if (last && from <= last[1]) joined[joined.length - 1] = [last[0], Math.max(last[1], end)];
+      else joined.push([from, end]);
+    }
+    keptClocks.set(client, joined);
+    for (const [from, end] of joined) {
+      for (let clock = from; clock < end;) {
         const part = Y.getItem(doc.store, Y.createID(client, clock));
         const partEnd = Math.min(end, part.id.clock + part.length);
-        if (!(part instanceof Y.Item)) found.push({ kind: "other" });
-        else if (part.deleted) {
+        if (!(part instanceof Y.Item)) {
+          if (notDeleted(keptDeletes, client, clock, partEnd).length > 0)
+            found.push({ kind: "other" });
+        } else if (part.deleted) {
           const dropped = notDeleted(keptDeletes, client, clock, partEnd).map(
             ([start, stop]): Span => [start - part.id.clock, stop - part.id.clock],
           );
@@ -238,8 +246,17 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
       }
     }
   }
-  const isKept = (id: Y.ID) =>
-    (keptClocks.get(id.client) ?? []).some(([from, end]) => id.clock >= from && id.clock < end);
+  const isKept = ({ client, clock }: Y.ID) => {
+    const spans = keptClocks.get(client) ?? [];
+    let low = 0;
+    let high = spans.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (spans[middle]![1] <= clock) low = middle + 1;
+      else high = middle;
+    }
+    return low < spans.length && spans[low]![0] <= clock;
+  };
   return { lost, live, keptDeletes, isKept, found };
 }
 
@@ -300,6 +317,10 @@ function sequenceEditsNotInNote(
   const lineOf = new Map<Y.Item, Y.Item>();
   const linesOf = new Map<unknown, Y.Item[]>();
   const emptied = new Set<unknown>();
+  const keptLast = (item: Y.Item | undefined) =>
+    item !== undefined &&
+    !item.deleted &&
+    isKept(Y.createID(item.id.client, item.id.clock + item.length - 1));
   let line: Y.Item | null = null;
   for (let item = sequence?._start ?? null; item; item = item.right) {
     const { content } = item;
@@ -311,7 +332,8 @@ function sequenceEditsNotInNote(
         if (line) lineOf.set(item, line);
         continue;
       }
-      for (let path = element._map.get("path") ?? null; path; path = path.left)
+      const own = keptLast(element._map.get("path"));
+      for (let path = own ? null : (element._map.get("path") ?? null); path; path = path.left)
         for (let at = 0; path.deleted && at < path.length; at += 1) {
           const id = Y.createID(path.id.client, path.id.clock + at);
           if (!Y.isDeleted(keptDeletes, id) && !Y.isDeleted(baseDeletes, id))
@@ -319,8 +341,11 @@ function sequenceEditsNotInNote(
         }
       if (item.deleted) continue;
       textOf.set((line = item), "");
-      for (const id of [storedValue(element, "path")].flat())
-        linesOf.set(id, [...(linesOf.get(id) ?? []), item]);
+      for (const id of [storedValue(element, "path")].flat()) {
+        const lines = linesOf.get(id);
+        if (lines) lines.push(item);
+        else linesOf.set(id, [item]);
+      }
     }
   }
   const typeOf = new Map<string, string>();
@@ -362,9 +387,19 @@ function sequenceEditsNotInNote(
     if (type === undefined)
       return [{ kind: "attribute", block, nodeName: kind, name, value, now: undefined }];
     if (!shows(type, name))
-      return [
-        { kind: "attribute", block, nodeName: type, name, value, now: undefined, shownAs: type },
-      ];
+      return keptLast(records?._map.get(id))
+        ? []
+        : [
+            {
+              kind: "attribute",
+              block,
+              nodeName: type,
+              name,
+              value,
+              now: undefined,
+              shownAs: type,
+            },
+          ];
     const now = storedValue(records, key);
     return dropped && !same(value, now)
       ? [{ kind: "attribute", block, nodeName: type, name, value, now }]
@@ -378,10 +413,21 @@ function sequenceEditsNotInNote(
     return false;
   };
 
+  const unshown = (element: Y.XmlElement, name: string, value: unknown) => {
+    const leaf = leafOf.get(element._item!);
+    if (leaf === undefined || shows(leaf, name)) return undefined;
+    if (keptLast(element._map.get("type"))) return [];
+    const block = textOf.get(element._item!) ?? "";
+    return [
+      { kind: "attribute", block, nodeName: leaf, name, value, now: undefined, shownAs: leaf },
+    ] satisfies NotInNote[];
+  };
+
   const setting = (element: Y.XmlElement, name: string, value: unknown): NotInNote[] => {
     const at = element._item!;
     const boundary = element.nodeName === BLOCK_ELEMENT;
-    if (lost.has(at) || (boundary && name !== "type" && retyped(element))) return [];
+    const attribute = boundary && !["type", "path"].includes(name);
+    if (lost.has(at) || (attribute && retyped(element))) return [];
     const type = boundary ? setLast(element, "type") : element.nodeName;
     const nodeName = typeof type === "string" ? type : "paragraph";
     if (at.deleted)
@@ -392,6 +438,8 @@ function sequenceEditsNotInNote(
             ? { kind: "kind", block: null, value, now: undefined }
             : { kind: "attribute", block: null, nodeName, name, value, now: undefined },
       ];
+    const hidden = attribute ? unshown(element, name, value) : undefined;
+    if (hidden) return hidden;
     const now = storedValue(element, name);
     if (same(value, now)) return [];
     const home = boundary ? at : lineOf.get(at);
@@ -418,21 +466,11 @@ function sequenceEditsNotInNote(
     if (parent === records) found.push(...record(parentSub, value, false));
     else if (
       parent instanceof Y.XmlElement &&
+      parent._item?.parent === sequence &&
       !["type", "path"].includes(parentSub) &&
       !retyped(parent)
-    ) {
-      const leaf = leafOf.get(parent._item!);
-      if (leaf !== undefined && !shows(leaf, parentSub))
-        found.push({
-          kind: "attribute",
-          block: textOf.get(parent._item!) ?? "",
-          nodeName: leaf,
-          name: parentSub,
-          value,
-          now: undefined,
-          shownAs: leaf,
-        });
-    }
+    )
+      found.push(...(unshown(parent, parentSub, value) ?? []));
   }
 
   const quotes = new Quotes(found);
@@ -526,6 +564,8 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
         : `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on ${block}.`;
       if (edit.shownAs !== undefined)
         return [paragraph(`${done} The note has it as ${article(edit.shownAs)}.`)];
+      if (task && edit.now === undefined)
+        return [paragraph(`${done} The note doesn't show it as a to-do.`)];
       if (task)
         return [paragraph(`${done} The note has it ${edit.now === true ? "ticked" : "unticked"}.`)];
       return [paragraph(`${done} The note has ${shown(edit.now) ?? "no value"}.`)];
@@ -535,7 +575,7 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
         paragraph(
           edit.block === null
             ? `Changed a part that was deleted to ${article(edit.value)}.`
-            : `Changed ${edit.block === "" ? article(edit.now) : `"${quoteOf(edit.block)}"`} to ${article(edit.value)}. The note has it as ${article(edit.now)}.`,
+            : `Changed ${edit.block === "" ? article(edit.now) : `"${quoteOf(edit.block)}"`} to ${article(edit.value)}. ${edit.now === undefined ? `The note doesn't show it as ${article(edit.value)}` : `The note has it as ${article(edit.now)}`}.`,
         ),
       ];
     case "move":
@@ -583,8 +623,7 @@ function notInNoteSection(edits: readonly NotInNote[]): string {
 
 /**
  * The document `accepted` then `kept` rebuild, with a closing list of the
- * kept edits it has no place for. `accepted` starts with the base the kept
- * edits were made on. Null when an update still waits on what it depends on,
+ * kept edits it has no place for. `accepted` starts with the queue's base. Null when an update still waits on what it depends on,
  * which would leave its edit out.
  */
 export function recoveredDocument(

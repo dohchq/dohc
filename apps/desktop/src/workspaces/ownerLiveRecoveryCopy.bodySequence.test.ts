@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import { lift, wrapIn } from "@tiptap/pm/commands";
 import type { Attrs, Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { person, stopEveryone, type Person } from "@dohc/ydoc-projection/body-sequence-testing";
 import type { OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
@@ -31,17 +31,11 @@ const LISTED =
 
 type Step = (editor: Person) => void;
 
-/**
- * A kept edit made by a person at a format-2 editor (client 1), against a change by someone else
- * at another editor (client 2) that the server already accepted. With `seen`, the other editor had
- * the kept edit before making theirs, as when its delivery was applied but never acknowledged.
- * `before` is an edit made to `note` before the queue started, by a third editor.
- */
 function conflict(
   mine: Step,
   theirs: Step,
   seen = false,
-  { note = NOTE, before }: { note?: string; before?: Step } = {},
+  { note = NOTE, before, owner = 1 }: { note?: string; before?: Step; owner?: number } = {},
 ): OwnerYDocOutboxRecovery {
   const start = markdownToYDoc(note, { bodySequence: true });
   let baseUpdate = Y.encodeStateAsUpdate(start);
@@ -51,7 +45,7 @@ function conflict(
     before(author);
     baseUpdate = Y.encodeStateAsUpdate(author.doc);
   }
-  const me = person(baseUpdate, 1);
+  const me = person(baseUpdate, owner);
   const other = person(baseUpdate, 2);
   mine(me);
   const update = Y.mergeUpdates(me.sent);
@@ -172,6 +166,22 @@ function removeAfterBottom(editor: Person) {
   const from = end.pos + end.node.nodeSize;
   editor.view.dispatch(editor.view.state.tr.delete(from, editor.view.state.doc.content.size));
 }
+
+function atEndOfBottom(editor: Person) {
+  const end = find(editor, named("paragraph", "Bottom"));
+  editor.view.dispatch(
+    editor.view.state.tr.setSelection(
+      TextSelection.create(editor.view.state.doc, end.pos + end.node.nodeSize - 1),
+    ),
+  );
+}
+
+const recorded = (from: string, to: string) => (editor: Person) => {
+  const [id] = [...editor.containers.entries()].find(([, type]) => type === from)!;
+  editor.doc.transact(() => editor.containers.set(id, to));
+};
+
+const nothing: Step = () => {};
 
 const LOOSE_TODO = NOTE.replace("- [ ] tick me\n\n", "- [ ] tick me\n\n  second\n\n");
 
@@ -356,10 +366,7 @@ it.each<[string, Step, Step, boolean, string, string, number]>([
   [
     "a first number on a list someone else's record made unreadable as a list",
     list("orderedList", { start: 5 }),
-    (editor) => {
-      const [id] = [...editor.containers.entries()].find(([, type]) => type === "orderedList")!;
-      editor.doc.transact(() => editor.containers.set(id, "table"));
-    },
+    recorded("orderedList", "table"),
     false,
     NOTE.replace("1. Pack\n2. Eat", "Pack\n\nEat"),
     'Set start to 5 on "Pack Eat". The note has no value.\n',
@@ -450,11 +457,112 @@ it.each<[string, Step, Step, boolean, string, string, number]>([
     "1 more kept edit, such as an image, can't be shown as text.\n",
     1,
   ],
+  [
+    "nothing for a heading level the kept edit set before making the line a paragraph",
+    both(level(2), (editor) => markup(editor, named("heading", "Plan"), "paragraph", {})),
+    nothing,
+    false,
+    NOTE.replace("# Plan", "Plan"),
+    "",
+    0,
+  ],
+  [
+    "nothing for a first number the kept edit set before making the list bulleted",
+    both(list("orderedList", { start: 5 }), list("bulletList")),
+    nothing,
+    false,
+    NOTE.replace("1. Pack\n2. Eat", "- Pack\n- Eat"),
+    "",
+    0,
+  ],
+  [
+    "nothing for a tick the kept edit set before making the to-do list bulleted",
+    both(tick(true), (editor) => {
+      const { node, pos } = find(editor, named("taskList"));
+      const { schema } = editor.view.state;
+      const items: ProseMirrorNode[] = [];
+      node.forEach((item) => items.push(schema.nodes.listItem!.create(null, item.content)));
+      editor.view.dispatch(
+        editor.view.state.tr.replaceWith(
+          pos,
+          pos + node.nodeSize,
+          schema.nodes.bulletList!.create(null, items),
+        ),
+      );
+    }),
+    nothing,
+    false,
+    NOTE.replace("- [ ] tick me", "- tick me"),
+    "",
+    0,
+  ],
+  [
+    "a move and a change of kind on a line someone else deleted",
+    both(
+      (editor) => command(editor, "one", lift),
+      (editor) => markup(editor, named("paragraph", "one"), "heading", { level: 2 }),
+    ),
+    (editor) => remove(editor, named("paragraph", "one")),
+    false,
+    NOTE.replace("> one\n>\n> two", "> two"),
+    "Moved a heading that was deleted.\n\nChanged a part that was deleted to a heading.\n",
+    2,
+  ],
+  [
+    "a heading level someone else replaced on a line they then made a code block",
+    level(2),
+    both(level(3), (editor) => markup(editor, named("heading", "Plan"), "codeBlock", {})),
+    false,
+    NOTE.replace("# Plan", "```\nPlan\n```"),
+    'Set level to 2 on "Plan". The note has it as a codeBlock.\n',
+    1,
+  ],
+  [
+    "a heading level someone else also set on a line they then made a code block",
+    level(2),
+    both(level(2), (editor) => markup(editor, named("heading", "Plan"), "codeBlock", {})),
+    false,
+    NOTE.replace("# Plan", "```\nPlan\n```"),
+    'Set level to 2 on "Plan". The note has it as a codeBlock.\n',
+    1,
+  ],
+  [
+    "nothing for a formula the kept edit added and removed, after someone else saw it",
+    (editor) => {
+      atEndOfBottom(editor);
+      editor.put("mathInline", { tex: "x" });
+      const { from } = editor.view.state.selection;
+      editor.view.dispatch(editor.view.state.tr.delete(from - 1, from));
+    },
+    level(3),
+    true,
+    NOTE.replace("# Plan", "### Plan"),
+    "",
+    0,
+  ],
+  [
+    "a tick on a to-do someone else's record made unreadable as a list",
+    tick(true),
+    recorded("taskList", "table"),
+    false,
+    NOTE.replace("- [ ] tick me", "tick me"),
+    'Ticked "tick me". The note doesn\'t show it as a to-do.\n',
+    1,
+  ],
+  [
+    "a list made bulleted that someone else's record made unreadable as a list",
+    list("bulletList"),
+    recorded("orderedList", "table"),
+    false,
+    NOTE.replace("1. Pack\n2. Eat", "Pack\n\nEat"),
+    'Changed "Pack Eat" to a bulletList. The note doesn\'t show it as a bulletList.\n',
+    1,
+  ],
 ])(
   "lists %s at the end of a format-2 note's readable copy",
   async (_case, mine, theirs, seen, note, listed, count) => {
     const copy = await saved(conflict(mine, theirs, seen));
-    expect(copy.markdown).toBe(`${note}\n${LISTED}${listed}`);
+    expect(copy.markdown).toBe(listed === "" ? note : `${note}\n${LISTED}${listed}`);
     expect(copy.notInNote).toBe(count);
   },
 );
@@ -474,5 +582,24 @@ it("lists nothing for a tick the kept edit itself took out of its list, after an
   expect(copy.markdown).toBe(
     NOTE.replace("# Plan", "### Plan").replace("- [ ] tick me", "tick me"),
   );
+  expect(copy.notInNote).toBe(0);
+});
+
+it("lists nothing for a to-do the kept edit ticked and took out of its list, when that move wins over someone else putting the list in a quote", async () => {
+  const copy = await saved(
+    conflict(
+      both(tick(true), (editor) => command(editor, "tick me", lift)),
+      (editor) => {
+        const { view } = editor;
+        const { pos } = find(editor, named("taskList"));
+        view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
+        if (!wrapIn(view.state.schema.nodes.blockquote!)(view.state, view.dispatch))
+          throw new Error("the command did nothing");
+      },
+      false,
+      { owner: 4 },
+    ),
+  );
+  expect(copy.markdown).toBe(NOTE.replace("- [ ] tick me", "tick me"));
   expect(copy.notInNote).toBe(0);
 });
