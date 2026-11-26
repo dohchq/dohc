@@ -53,10 +53,11 @@ const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc
 // Tools a joined workspace reaches through its share profile. The socket
 // refuses them in any other share view, and the relay decides each one.
 const JOINED_TOOLS = {
-  view: ["dohc_members", "dohc_collection_access"],
+  view: ["dohc_members", "dohc_collection_access", "dohc_publish_app"],
   comment: [
     "dohc_members",
     "dohc_collection_access",
+    "dohc_publish_app",
     "dohc_start_group_chat",
     "dohc_reply_to_chat",
     "dohc_start_file_chat",
@@ -64,6 +65,7 @@ const JOINED_TOOLS = {
   edit: [
     "dohc_members",
     "dohc_collection_access",
+    "dohc_publish_app",
     "dohc_start_group_chat",
     "dohc_reply_to_chat",
     "dohc_start_file_chat",

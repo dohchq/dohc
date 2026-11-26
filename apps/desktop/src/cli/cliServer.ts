@@ -179,9 +179,10 @@ import {
   type LiveDocumentEditOrigin,
   type LiveDocumentEditOutcome,
 } from "../workspaces/engineYDocSessionIpc";
-import type {
-  OwnerAppPublicationRequest,
-  OwnerAppPublicationResult,
+import {
+  PERSONAL_APP_ACTIONS,
+  type OwnerAppPublicationRequest,
+  type OwnerAppPublicationResult,
 } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -2779,7 +2780,7 @@ async function dispatch(
           args: {
             ...request.args,
             request:
-              "appRoot" in input && typeof input.appRoot === "string"
+              "appRoot" in input && typeof input.appRoot === "string" && !context.readOnly
                 ? {
                     ...input,
                     appRoot: paths.rebase(input.appRoot, "read"),
@@ -3019,10 +3020,13 @@ async function dispatch(
       : { ok: false, reason };
   }
   try {
-    return paths.result(
-      parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)),
-      request.verb === "moment",
+    const result = parseCliResult(
+      request.verb,
+      await dispatchWorkspace(rebased, context, options, completion),
     );
+    return request.verb === "appPublication" && context.readOnly
+      ? result
+      : paths.result(result, request.verb === "moment");
   } catch (error) {
     const workspacePaths = error instanceof DatasetSchemaChangeError ? error.workspacePaths : [];
     const mapped = paths.result({
@@ -3406,7 +3410,11 @@ async function dispatchWorkspace(
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.sharing(request.args);
     case "appPublication": {
-      if (context.readOnly || !context.appPublication)
+      if (
+        (context.readOnly &&
+          !(context.joined && PERSONAL_APP_ACTIONS.has(request.args.request.action))) ||
+        !context.appPublication
+      )
         throw new CliCommandError("App publication requires the owning workspace.");
       if (request.args.request.workspaceId !== context.workspaceId)
         throw new CliCommandError(
@@ -3433,7 +3441,11 @@ async function dispatchWorkspace(
       if (
         !context.dataset ||
         (context.readOnly &&
-          !(context.joined && DATASET_ADMIN_ACTIONS.has(request.args.request.action)))
+          !(
+            context.joined &&
+            (DATASET_ADMIN_ACTIONS.has(request.args.request.action) ||
+              request.args.request.action === "types")
+          ))
       )
         throw new CliCommandError("Collections require the owning workspace.");
       if (request.args.request.workspaceId !== context.workspaceId)

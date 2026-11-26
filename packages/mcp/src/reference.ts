@@ -100,6 +100,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
   verifyFrontend: ["frontendVerified"],
   createLink: ["linkCreated", "urlUnavailable"],
+  personalFolder: ["personalFolder"],
   listLocal: ["localListed"],
   checkLocal: ["localChecked"],
   prepareLocal: ["prepared"],

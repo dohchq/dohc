@@ -110,7 +110,11 @@ export function createServerCollectionsTransport(
   };
 }
 
-const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+/** The id of an app approved on this computer over Collections, the same for the same candidate. */
+export const localDatasetAppId = (workspaceId: string, candidate: AppPublicationCandidate) =>
+  createHash("sha256")
+    .update(JSON.stringify(["dohc-local-dataset-app-v1", workspaceId, candidate]))
+    .digest("hex");
 
 /** How long a withdrawal that could not reach the server waits before it goes again. */
 const WITHDRAWAL_RETRY_MS = 10_000;
@@ -320,9 +324,7 @@ export function createServerDatasetApps(options: {
         throw new Error("Choose an app connected to a Collection.");
       const capabilities = datasetCapabilitiesOf(candidate);
       const resourceId = capabilities.length === 1 ? capabilities[0]!.datasetId : "";
-      const publicationId = hash(
-        JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]),
-      );
+      const publicationId = localDatasetAppId(options.workspaceId, candidate);
       // A withdrawal of this app waits until this computer has committed the approval or given it up.
       return approve(publicationId, candidate, signal, (approved) => {
         if (approved.publicationId !== publicationId) throw new Error("Invalid app approval.");

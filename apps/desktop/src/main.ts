@@ -73,6 +73,7 @@ import {
 } from "./workspaces/ownerShareLabels";
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import {
+  addressDatasets,
   invalidateDatasetAddresses,
   isDatasetDescriptor,
   unclaimedDatasetFolders,
@@ -226,6 +227,13 @@ import {
 } from "./workspaces/datasetSourceCreation";
 import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
+import {
+  createPersonalAppPublication,
+  createPersonalApps,
+  personalAppEdits,
+  personalAppFolder,
+  writePersonalTypes,
+} from "./workspaces/personalApps";
 import { registerAppViews } from "./window/appViews";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {
@@ -11152,6 +11160,10 @@ function registerIpcHandlers(): void {
     ) =>
       (await collectionAutomationsOf(workspace.workspaceId)?.nameForHistory(automationId)) ?? null,
     currentCredentialGeneration: () => credentialCacheGeneration,
+    writePersonalTypes: (
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      description: import("@dohc/security-contract/dataset").DatasetDescription,
+    ) => writePersonalTypes(personalAppFolder(stateDir(), workspace.workspaceId), description),
     namedDataForWorkspace: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       signal: AbortSignal,
@@ -11603,6 +11615,79 @@ function registerIpcHandlers(): void {
         runBrowser: runAppFrontendBrowserVerification,
       }),
   });
+  const personalHosts = new WeakMap<
+    AbortSignal,
+    Promise<{ apps: ReturnType<typeof createPersonalApps>; launcher: LocalAppLaunchHost }>
+  >();
+  const personalAppsFor = (
+    workspace: DesktopRendererWorkspaceOperation["workspace"],
+    signal: AbortSignal,
+  ) =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async (operation) => {
+      signal.throwIfAborted();
+      operation.assertCurrent();
+      let pending = personalHosts.get(operation.signal);
+      if (!pending) {
+        const bound = operation.workspace;
+        const current = () => ({
+          ...bound,
+          shareView: findWorkspace(bound.workspaceId)?.shareView,
+        });
+        pending = (async () => {
+          const folder = personalAppFolder(stateDir(), workspace.workspaceId);
+          await mkdir(folder, { recursive: true });
+          const apps = createPersonalApps({
+            workspaceId: workspace.workspaceId,
+            databasePath: `${folder}.approvals.sqlite`,
+            lifetime: operation.signal,
+            data: (dataSignal) => datasetDependencies.namedDataForWorkspace(current(), dataSignal),
+            edits: async (datasetId, editSignal) => {
+              const signal = AbortSignal.any([editSignal ?? operation.signal, operation.signal]);
+              const data = await datasetDependencies.namedDataForWorkspace(current(), signal);
+              const description = await data.describe(datasetId);
+              const [address] =
+                (await withEngineAdapter(bound, (adapter) =>
+                  addressDatasets(adapter, bound.workspaceId, [description], signal),
+                )) ?? [];
+              return (
+                !!address?.datasetPath && personalAppEdits(current().shareView, address.datasetPath)
+              );
+            },
+          });
+          operation.signal.addEventListener("abort", () => void apps.close(), { once: true });
+          const launcher = await createLocalAppLaunchHost({
+            backend: apps.backend,
+            lifetime: operation.signal,
+          });
+          return { apps, launcher };
+        })();
+        personalHosts.set(operation.signal, pending);
+        void pending.catch(() => personalHosts.delete(operation.signal));
+      }
+      const host = await pending;
+      signal.throwIfAborted();
+      operation.assertCurrent();
+      return host;
+    });
+  const personalPublication = createPersonalAppPublication<
+    DesktopRendererWorkspaceOperation["workspace"],
+    {
+      workspace: DesktopRendererWorkspaceOperation["workspace"];
+      signal: AbortSignal;
+      scope?: string;
+      assertCurrent(): void;
+    }
+  >({
+    stateDir,
+    hostFor: personalAppsFor,
+    data: datasetDependencies.namedDataForWorkspace,
+    withAdapter: ownerPublicationDependencies.withAdapter,
+    compile: ownerPublicationDependencies.compile,
+    async openFolder(path) {
+      const failure = await shell.openPath(path);
+      if (failure) throw new Error(`dohc could not open your Personal app folder: ${failure}`);
+    },
+  });
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
     activePublication: async (operation, appRoot) => {
       const listed = await localPublication(
@@ -11644,6 +11729,7 @@ function registerIpcHandlers(): void {
   >({
     ...ownerPublicationDependencies,
     localPublication,
+    personalPublication,
     resolveDatasetRevision,
     resolveDatasetArtifacts,
   });
@@ -11654,6 +11740,7 @@ function registerIpcHandlers(): void {
   >({
     ...ownerPublicationDependencies,
     localPublication,
+    personalPublication,
     resolveDatasetRevision,
     resolveDatasetArtifacts,
     callerKey: (workspaceId) => `local-owner-cli:${workspaceId}`,

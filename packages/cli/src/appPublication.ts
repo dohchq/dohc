@@ -348,6 +348,11 @@ const APP_PUBLICATION_REQUEST_OPTIONS = [
     agentLabel: z.string().min(1).max(160).optional(),
   }),
   appPublicationAction({
+    action: z.literal("personalFolder"),
+    workspaceId: id,
+    open: z.boolean().optional(),
+  }),
+  appPublicationAction({
     action: z.literal("listLocal"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
@@ -473,6 +478,17 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion(
   },
 );
 export type OwnerAppPublicationRequest = z.infer<typeof OwnerAppPublicationRequest>;
+/** The app actions a member may run in a joined workspace, for their Personal apps. */
+export const PERSONAL_APP_ACTIONS: ReadonlySet<OwnerAppPublicationRequest["action"]> = new Set([
+  "personalFolder",
+  "prepareLocal",
+  "approve",
+  "cancel",
+  "listLocal",
+  "checkLocal",
+  "launchLocal",
+  "withdraw",
+]);
 export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z
     .object({
@@ -523,6 +539,13 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({ kind: z.literal("localListed"), publications: z.array(LocalPublication).max(64) })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("personalFolder"),
+      path: z.string().min(1).max(4096),
+      apps: z.array(z.object({ appRoot: z.string().min(1).max(1024) }).strict()).max(512),
+    })
     .strict(),
   // The source revision prepareLocal would capture now. It differs from an approval's sourceRevision once the app's source changed.
   z

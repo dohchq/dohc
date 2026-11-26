@@ -54,7 +54,7 @@ import {
 } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
-import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
+import { OwnerAppPublicationRequest, PERSONAL_APP_ACTIONS } from "@dohc/cli/app-publication";
 import { MEMBERS_CAPABILITIES, AgentMembersRequest } from "@dohc/cli/members";
 import { DATASET_CAPABILITIES, DatasetAdminRequest, DatasetRequest } from "@dohc/cli/dataset";
 import {
@@ -2354,8 +2354,6 @@ export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {
 
 /** Publication uses the same owner-local attachment as the CLI. */
 export async function publishApp(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined)
-    return { ok: false as const, reason: "App publication requires the owning workspace." };
   const parsed = OwnerAppPublicationRequest.safeParse(input);
   if (!parsed.success)
     return {
@@ -2366,6 +2364,8 @@ export async function publishApp(ctx: ToolContext, input: unknown) {
         "Invalid app publication request.",
       ),
     };
+  if (ctx.shareAccess !== undefined && !PERSONAL_APP_ACTIONS.has(parsed.data.action))
+    return { ok: false as const, reason: "App publication requires the owning workspace." };
   return requestCli(ctx, "appPublication", { request: parsed.data });
 }
 

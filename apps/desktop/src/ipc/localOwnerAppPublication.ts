@@ -7,9 +7,17 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import type { DatasetRevision } from "@dohc/security-contract/dataset";
+import type {
+  AppDatasetCapability,
+  AppDatasetReference,
+  DatasetRevision,
+} from "@dohc/security-contract/dataset";
 import { displayAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
-import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
+import {
+  prepareLocalAppPublication,
+  readLocalAppSource,
+  type AppPublicationPreparationDependencies,
+} from "../workspaces/ownerAppPublication";
 import { createLocalStagedApps, type StagedDatasetApproved } from "../workspaces/localStagedApps";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
@@ -18,6 +26,8 @@ import type { MigrateDatasetInput } from "@dohc/app-backend-runtime/dataset-host
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import type { DatasetMigrationCandidate } from "@dohc/cli/dataset";
 import { isDatasetServerNotFound } from "./errorWords";
+
+type SourceAdapter = AppPublicationPreparationDependencies["adapter"];
 
 export function createLocalOwnerAppPublicationHandler<
   Workspace extends { workspaceId: string; rootPath?: string; attachmentId?: symbol },
@@ -32,13 +42,27 @@ export function createLocalOwnerAppPublicationHandler<
   datasetForWorkspace(
     workspace: Workspace,
     signal: AbortSignal,
-  ): Promise<Pick<LocalDatasetHost, "apps"> & Partial<LocalDatasetHost>>;
+  ): Promise<
+    { apps: Pick<LocalDatasetHost["apps"], "activate" | "has" | "list" | "withdraw"> } & Partial<
+      Omit<LocalDatasetHost, "apps">
+    >
+  >;
   /** The Collection's approved rules, from wherever the workspace keeps its Collections. */
-  approvedArtifacts(
+  approvedArtifacts?(
     workspace: Workspace,
     datasetId: string,
     signal: AbortSignal,
   ): Promise<{ revision: DatasetRevision; schemaSql: string; active: boolean }>;
+  /** A Personal app's Collection access, from what the member's own grant shows. */
+  datasetCapability?(
+    workspace: Workspace,
+    reference: AppDatasetReference,
+    datasetId: string,
+    alias: string | undefined,
+    signal: AbortSignal,
+  ): Promise<AppDatasetCapability>;
+  /** Reads the app's files from somewhere other than the workspace, as a Personal app's folder. */
+  appSource?(workspace: Workspace, adapter: VersionedLiveAdapter): SourceAdapter;
   /** Optional migration authority for workspaces whose Collections live on a server or locally. */
   migrationAuthority?(
     workspace: Workspace,
@@ -122,6 +146,8 @@ export function createLocalOwnerAppPublicationHandler<
       operation.signal.throwIfAborted();
       operation.assertCurrent();
     };
+    const appSource = (adapter: VersionedLiveAdapter): SourceAdapter =>
+      deps.appSource?.(operation.workspace, adapter) ?? adapter;
     current();
     if (
       input.action === "stage" ||
@@ -365,7 +391,7 @@ export function createLocalOwnerAppPublicationHandler<
       current();
       const source = await deps.withAdapter(operation.workspace, (adapter) =>
         readLocalAppSource(input, {
-          adapter,
+          adapter: appSource(adapter),
           signal: operation.signal,
           assertCurrent: current,
           deferredWrites: capture.deferredWrites,
@@ -392,12 +418,29 @@ export function createLocalOwnerAppPublicationHandler<
       const datasets = new Map<string, { revision: DatasetRevision; schemaSql: string }>();
       const prepared = await deps.withAdapter(operation.workspace, (adapter) =>
         prepareLocalAppPublication(input, {
-          adapter,
+          adapter: appSource(adapter),
+          datasetAdapter: adapter,
           signal: operation.signal,
           assertCurrent: current,
           compile: deps.compile,
           deferredWrites: capture.deferredWrites,
+          ...(deps.datasetCapability
+            ? {
+                resolveDatasetCapability: (reference, datasetId, alias) =>
+                  deps.datasetCapability!(
+                    operation.workspace,
+                    reference,
+                    datasetId,
+                    alias,
+                    operation.signal,
+                  ),
+              }
+            : {}),
           resolveDatasetRevision: async (binding) => {
+            if (!deps.approvedArtifacts)
+              throw new Error(
+                "This app's Collection is unavailable. Open the Collection and try again.",
+              );
             const approved = await deps.approvedArtifacts(
               operation.workspace,
               binding.datasetId,

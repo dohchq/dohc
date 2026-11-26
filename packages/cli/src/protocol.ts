@@ -1257,6 +1257,7 @@ export type CliVerb = CliRequest["verb"];
 export const APP_PUBLICATION_CAPABILITIES = {
   verifyFrontend: "app.frontend.verify",
   createLink: "app.link.create",
+  personalFolder: "app.personal.folder",
   listLocal: "app.local.list",
   checkLocal: "app.local.check",
   prepareLocal: "app.local.prepare",

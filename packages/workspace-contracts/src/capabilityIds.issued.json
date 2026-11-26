@@ -32,6 +32,7 @@
   "app.local.staged.approve",
   "app.local.staged.discard",
   "app.local.staged.list",
+  "app.personal.folder",
   "app.pin.set",
   "app.publication.approve",
   "app.publication.cancel",

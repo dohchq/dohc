@@ -114,6 +114,11 @@ export function createDatasetHandler<
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<NamedDatasetData>;
+  /** Writes a joined workspace's Collection types into the member's Personal app folder. */
+  writePersonalTypes?(
+    workspace: W,
+    description: import("@dohc/security-contract/dataset").DatasetDescription,
+  ): Promise<string>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(
     workspace: W,
@@ -334,6 +339,7 @@ export function createDatasetHandler<
               ![
                 "list",
                 "describe",
+                "types",
                 "invoke",
                 "upload",
                 "file",
@@ -379,6 +385,14 @@ export function createDatasetHandler<
                 : { dataset: await data.describe(input.datasetId) };
               current();
               return { kind: "description" as const, ...addressed(result) };
+            }
+            if (input.action === "types") {
+              if (!dependencies.writePersonalTypes) throw datasetOwnerOnlyError();
+              const description = await data.describe(input.datasetId);
+              current();
+              const path = await dependencies.writePersonalTypes(operation.workspace, description);
+              current();
+              return { kind: "types-written" as const, path, revision: description.revision };
             }
             if (input.action === "upload") {
               const result = await data.upload(input);
