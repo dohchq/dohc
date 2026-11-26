@@ -46,6 +46,14 @@ type Folder = {
   readonly pages: WorkspaceFile[];
 };
 
+export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): string[] {
+  const fresh = rows.flatMap((row) =>
+    row.kind === "page" && !passed.has(row.path) ? [row.path] : [],
+  );
+  for (const path of fresh) passed.add(path);
+  return fresh;
+}
+
 export function homeRows(
   files: readonly WorkspaceFile[],
   expanded: ReadonlySet<string>,

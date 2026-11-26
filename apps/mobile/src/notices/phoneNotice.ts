@@ -143,6 +143,16 @@ export function phoneTarget(record: NoticeRecord, list: WorkspaceList): PhoneTar
   return null;
 }
 
+export const noticePages = (
+  records: readonly NoticeRecord[],
+  list: WorkspaceList,
+  workspaceId: string,
+): string[] =>
+  records.flatMap((record) => {
+    const target = phoneTarget(record, list);
+    return target?.kind === "page" && target.workspaceId === workspaceId ? [target.path] : [];
+  });
+
 const openWord = (target: PhoneTarget): NonNullable<PhoneNotice["open"]> =>
   target.kind === "page" ? "openNote" : "open";
 

@@ -20,6 +20,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -37,7 +38,7 @@ import { useTheme } from "../theme";
 import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
-import { homeRows, type FirstFiles, type HomeRow } from "./homeModel";
+import { homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
 const NO_COLLECTIONS: CollectionsState = { collections: null, problem: null, failures: 0 };
@@ -109,9 +110,11 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
   const { data, apps, collections } = useAccount();
   const pagesShown = !collapsed.has("pages");
+  const passed = useRef<{ data: unknown; paths: Set<string> }>({ data: null, paths: new Set() });
   useEffect(() => {
-    if (rows && pagesShown)
-      data?.prefetchPages(rows.pages.flatMap((row) => (row.kind === "page" ? [row.path] : [])));
+    if (!data || !rows || !pagesShown) return;
+    if (passed.current.data !== data) passed.current = { data, paths: new Set() };
+    data.prefetchPages(revealedPages(rows.pages, passed.current.paths));
   }, [data, rows, pagesShown]);
 
   // The workspace's apps and Collections read each time Home shows, and its apps after an approval or a revoke.
