@@ -1,5 +1,10 @@
 import { bytesToBase64, base64ToBytes } from "../base64";
 import * as Y from "yjs";
+import {
+  BLOCK_ELEMENT,
+  BODY_SEQUENCE_FIELD,
+  readsBodySequence,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 
 // Both halves of the recovery snapshot contract: the encoder the
 // deletion/delivery boundaries write, and the decoder every recovery surface
@@ -71,12 +76,26 @@ function crudeMarkdownFromDoc(doc: Y.Doc): string {
     }
     return "";
   };
-  const blocks = doc
-    .getXmlFragment("body")
-    .toArray()
-    .map(blockText)
-    .filter((text) => text.length > 0);
-  return frontmatterText + blocks.join("\n\n");
+  const blocks = readsBodySequence(doc)
+    ? sequenceBlocks(doc)
+    : doc.getXmlFragment("body").toArray().map(blockText);
+  return frontmatterText + blocks.filter((text) => text.length > 0).join("\n\n");
+}
+
+function sequenceBlocks(doc: Y.Doc): string[] {
+  const blocks = [""];
+  for (let item = doc.share.get(BODY_SEQUENCE_FIELD)?._start ?? null; item; item = item.right) {
+    if (item.deleted) continue;
+    const content = item.content;
+    if (content instanceof Y.ContentString) blocks[blocks.length - 1] += content.str;
+    else if (
+      content instanceof Y.ContentType &&
+      content.type instanceof Y.XmlElement &&
+      content.type.nodeName === BLOCK_ELEMENT
+    )
+      blocks.push("");
+  }
+  return blocks;
 }
 
 const YDOC_RECOVERY_MARKER = "dohc-ydoc-recovery-v1";

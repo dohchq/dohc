@@ -38,12 +38,11 @@ import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { DohcMarkdownManager, type InlineTokens } from "./inline-marks.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
-import { BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
 import {
   BODY_SEQUENCE_SCHEMA_VERSION,
-  holdsBodySequence,
   readBodySequence,
+  readsBodySequence,
 } from "./bodySequenceYjs.js";
 import {
   fitsNewNote,
@@ -1093,12 +1092,11 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
  * first-format note a change marked, and what people wrote is there.
  */
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
-  const bodyFragment = getDohcYDocBodyFragment(doc);
-  const readsItsSequence =
-    holdsBodySequence(doc) &&
-    (bodyFragment._start === null || doc.share.get(BODY_SEQUENCE_FIELD)?._start != null);
-  if (readsItsSequence) return readBodySequence(schema, doc).toJSON() as JSONContent;
-  return yXmlFragmentToProseMirrorRootNode(bodyFragment, schema).toJSON() as JSONContent;
+  if (readsBodySequence(doc)) return readBodySequence(schema, doc).toJSON() as JSONContent;
+  return yXmlFragmentToProseMirrorRootNode(
+    getDohcYDocBodyFragment(doc),
+    schema,
+  ).toJSON() as JSONContent;
 }
 
 export function serializeRichdocBody(root: JSONContent): string {

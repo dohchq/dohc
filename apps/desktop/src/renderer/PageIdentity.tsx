@@ -19,6 +19,12 @@ import {
   useSyncExternalStore,
 } from "react";
 import * as Y from "yjs";
+import {
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  bodySequenceOpensWithH1,
+  readsBodySequence,
+} from "@dohc/ydoc-projection/body-sequence-yjs";
 import type { Lexer } from "marked";
 import {
   applyFrontmatter,
@@ -127,12 +133,23 @@ function isH1(node: unknown): boolean {
 
 // In a live document, the body fragment's first child. The fragment reports
 // blocks added or removed, and the first block reports its own attributes;
-// typing inside a block reports to neither. The snapshot is a boolean, so a
-// report that leaves the answer unchanged renders nothing.
+// typing inside a block reports to neither. A format-2 note reports every
+// change to its sequence and container records. The snapshot is a boolean,
+// so a report that leaves the answer unchanged renders nothing.
 function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
   const subscribe = useCallback(
     (onChange: () => void) => {
       if (!ydoc) return () => undefined;
+      if (readsBodySequence(ydoc)) {
+        const sequence = ydoc.getText(BODY_SEQUENCE_FIELD);
+        const containers = ydoc.getMap(BODY_CONTAINERS_FIELD);
+        sequence.observeDeep(onChange);
+        containers.observe(onChange);
+        return () => {
+          sequence.unobserveDeep(onChange);
+          containers.unobserve(onChange);
+        };
+      }
       const body = ydoc.getXmlFragment(BODY_FIELD);
       let first: Y.XmlElement | null = null;
       const watchFirst = () => {
@@ -157,7 +174,11 @@ function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
     [ydoc],
   );
   return useSyncExternalStore(subscribe, () =>
-    ydoc ? isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)) : false,
+    !ydoc
+      ? false
+      : readsBodySequence(ydoc)
+        ? bodySequenceOpensWithH1(ydoc)
+        : isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)),
   );
 }
 

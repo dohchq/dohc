@@ -21,18 +21,28 @@ declare module "@tiptap/core" {
 /**
  * Binds a Tiptap editor to a note's body sequence. Configure it with the options of
  * `bodySequencePlugin`, and use it in place of the Collaboration extension, with the starter
- * kit's `undoRedo` off.
+ * kit's `undoRedo` off. Like the Collaboration extension, it binds the undo and redo keys, and
+ * its plugin comes before those of extensions of a lower priority, so their views find each
+ * edit already written.
  *
  * An undo or redo comes back from the sequence as its own transaction, so the `undo` and `redo`
  * commands tell Tiptap not to dispatch the command's own.
  */
 export const BodySequence = Extension.create<Partial<BodySequenceOptions>>({
   name: "dohcBodySequence",
+  priority: 1000,
   addProseMirrorPlugins() {
     const { sequence, containers } = this.options;
     if (!sequence || !containers)
       throw new Error("BodySequence needs the note's sequence and containers.");
     return [bodySequencePlugin({ ...this.options, sequence, containers })];
+  },
+  addKeyboardShortcuts() {
+    return {
+      "Mod-z": () => this.editor.commands.undo(),
+      "Mod-y": () => this.editor.commands.redo(),
+      "Shift-Mod-z": () => this.editor.commands.redo(),
+    };
   },
   addCommands() {
     const fromHistory =

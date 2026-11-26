@@ -57,6 +57,7 @@ export function NewPage(props: {
     // Focus cannot enter an inert subtree, and React clears it only when it
     // renders again.
     if (fileRef.current) fileRef.current.inert = false;
+    let taken = false;
     if (page) {
       const { meta } = parseFrontmatter(draftRef.current);
       page.setIdentity({
@@ -66,11 +67,11 @@ export function NewPage(props: {
       const body = bodyRef.current;
       const text = body?.value ?? "";
       const focused = pageRef.current?.contains(document.activeElement) ?? false;
-      page.editor.insertTypedText(text, body?.selectionEnd ?? text.length);
+      taken = page.editor.insertTypedText(text, body?.selectionEnd ?? text.length);
       if (focused) page.editor.focus(text ? undefined : "start");
     }
     setHandedOff(true);
-    onHandedOffRef.current(page !== null);
+    onHandedOffRef.current(taken);
   }, []);
 
   const focusBodyEnd = () => {

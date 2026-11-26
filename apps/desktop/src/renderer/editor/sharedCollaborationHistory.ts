@@ -108,3 +108,19 @@ export function createCollaborationHistoryHandle(
     },
   });
 }
+
+const bodySequenceHistories = new WeakMap<Y.Doc, Y.UndoManager>();
+
+// One history for each format-2 note, shared by every pane on it. Editors
+// never destroy a history they are given; Yjs destroys it with its document.
+export function sharedBodySequenceHistory(
+  doc: Y.Doc,
+  create: (doc: Y.Doc) => Y.UndoManager,
+): Y.UndoManager {
+  let history = bodySequenceHistories.get(doc);
+  if (!history) {
+    history = create(doc);
+    bodySequenceHistories.set(doc, history);
+  }
+  return history;
+}

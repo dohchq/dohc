@@ -8,11 +8,21 @@ import {
   type Schema,
 } from "@tiptap/pm/model";
 
-export const MAX_SEQUENCE_DEPTH = 64;
-export const BODY_SEQUENCE_FIELD = "sequence";
-export const BODY_CONTAINERS_FIELD = "containers";
-export const BLOCK_ELEMENT = "block";
-export const CONTAINER_ID = /^[A-Za-z0-9_-]{1,32}$/;
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  CONTAINER_ID,
+  MAX_SEQUENCE_DEPTH,
+} from "./bodySequenceStore.js";
+
+export {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  CONTAINER_ID,
+  MAX_SEQUENCE_DEPTH,
+};
 
 export type SequenceAttrs = Record<string, unknown>;
 export type SequenceFrame = { type: string; id: string; attrs: SequenceAttrs };

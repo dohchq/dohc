@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type * as Y from "yjs";
 import { Editor, Extension } from "@tiptap/core";
 import { dropPoint } from "@tiptap/pm/transform";
@@ -39,6 +39,14 @@ import { desktopMarkdownExtensions } from "./extensions";
 import { ListConversions } from "./listEditing";
 
 afterEach(stopEveryone);
+
+beforeAll(() => {
+  Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => new DOMRect(),
+  });
+});
 
 const BOUNDARY = { ...quiet(), boundaries: 1, attributes: 2 };
 
