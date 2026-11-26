@@ -1264,28 +1264,30 @@ describe("LinkedChatsPanel comment on a passage", () => {
     expect(screen.getAllByTestId("linked-chat-open")).toHaveLength(2);
   });
 
-  it("keeps a new comment on the same passage while the last one still posts", async () => {
+  it("starts a comment asked for while the last one posts once that one has posted", async () => {
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
-    bridgeMock.createFileChat.mockResolvedValue({
-      thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 },
-    });
+    let created!: (value: unknown) => void;
+    bridgeMock.createFileChat.mockReturnValue(new Promise((resolve) => (created = resolve)));
     let posted!: (value: unknown) => void;
     bridgeMock.sendChatMessage.mockReturnValue(new Promise((resolve) => (posted = resolve)));
     renderPanel();
     await screen.findByTestId("linked-chat-quote");
-    const ask = () =>
-      act(() =>
-        requestFileComment("workspace-1", "docs/plan.md", { kind: "comment", quote: "plan" }),
-      );
-    ask();
+    const ask = (quote: string) =>
+      act(() => requestFileComment("workspace-1", "docs/plan.md", { kind: "comment", quote }));
+    ask("plan");
     const composer = await screen.findByTestId("linked-chat-new-composer");
     fireEvent.change(composer, { target: { value: "Too soon?" } });
     fireEvent.keyDown(composer, { key: "Enter" });
-    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
-    ask();
-    expect((await screen.findByTestId("linked-chat-new-quote")).textContent).toBe("plan");
+    // Another passage, asked for before the first comment's chat exists.
+    ask("launch");
+    await act(async () =>
+      created({ thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 } }),
+    );
     await act(async () => posted({ message: { id: "m1" } }));
-    expect(screen.getByTestId("linked-chat-new-quote").textContent).toBe("plan");
+    expect((await screen.findByTestId("linked-chat-new-quote")).textContent).toBe("launch");
+    const next = screen.getByTestId("linked-chat-new-composer");
+    expect((next as HTMLTextAreaElement).value).toBe("");
+    await waitFor(() => expect(document.activeElement).toBe(next));
   });
 
   it("posts a comment whose chat was being made when a highlight opened another", async () => {

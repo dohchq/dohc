@@ -523,10 +523,12 @@ export function LinkedChatsPanel(props: {
   }, [canComment, filePath, listedThreads, workspaceId]);
 
   // The editor asks to comment on a passage or to open a comment. Each ask is
-  // taken once this file's comments are read.
+  // taken once this file's comments are read, and an ask to comment once the
+  // last comment has posted, so the new draft starts after the spent one.
   const request = useFileCommentRequest(workspaceId, filePath);
   useEffect(() => {
     if (!request || !filePath || listedThreads === undefined) return;
+    if (request.kind === "comment" && sending) return;
     takeFileCommentRequest(workspaceId, filePath, request);
     if (request.kind === "open") {
       const threads = listedThreads.filter((listedThread) =>
@@ -551,7 +553,7 @@ export function LinkedChatsPanel(props: {
     setSectionsOpen((current) => ({ ...current, chats: true }));
     setCommentQuote(request.quote);
     setCommenting((current) => current ?? "");
-  }, [canComment, filePath, listedThreads, openThread, request, workspaceId]);
+  }, [canComment, filePath, listedThreads, openThread, request, sending, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     const thread = activeThread;
