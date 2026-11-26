@@ -1649,7 +1649,7 @@ export function createSyncRelayHandler({
       if (route.route === "member-apps") {
         if (!respondToMemberApps) throw notFound();
         const authorization = request.headers.get("authorization");
-        if (request.headers.has("cookie") || !/^Bearer [^s]+$/.test(authorization ?? ""))
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
           throw notFound();
         const actor = await resolveNamedActor(
           new Request(request.url, {

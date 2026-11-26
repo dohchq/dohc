@@ -385,3 +385,38 @@ it("asks a viewer to review a Member app's reach and source, then opens it once 
     ["/api/apps/launch", target],
   ]);
 });
+it("brings back the review when a Member app changed after the viewer allowed it", async () => {
+  let consent = "current";
+  const review = () => ({
+    authorityRevision: 3,
+    consent,
+    scopeDigest: "d".repeat(64),
+    collections: [],
+    source: [],
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/account/session")
+        return jsonResponse({ user: { id: "ben", name: "Ben" } });
+      if (path === "/api/apps/summary")
+        return jsonResponse({
+          subjectName: "tracker",
+          sharerName: "Ana",
+          access: "member",
+          review: review(),
+        });
+      if (path === "/api/apps/launch") {
+        consent = "changed";
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      }
+      throw Error(path);
+    }),
+  );
+  await render();
+  await click("Open app");
+  expect(container.textContent).toContain("This app changed");
+  expect(button("Allow and open")).toBeDefined();
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});

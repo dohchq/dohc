@@ -7,6 +7,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
 import type { RelayDatasetHost } from "./datasetHost";
+import { response as datasetResponse } from "./datasetRoutes";
 import { badRequest, notFound, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import type { SyncRelayStorage } from "./storage";
@@ -137,9 +138,8 @@ export function createMemberAppRoutes(options: {
           );
         throw badRequest("Invalid Member app upload.");
       }
-      return json(
-        host.publishMemberApp(auth, { workspaceId, ...parseMemberAppUpload(bytes, limits) }),
-      );
+      const upload = parseMemberAppUpload(bytes, limits);
+      return datasetResponse(() => host.publishMemberApp(auth, { workspaceId, ...upload }));
     }
     if (type !== "application/json")
       throw badRequest("Member app changes require application/json.");

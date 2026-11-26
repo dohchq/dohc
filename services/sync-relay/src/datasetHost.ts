@@ -73,7 +73,6 @@ import {
   recordMemberAppConsent,
   writeMemberApp,
   type WriteMemberAppInput,
-  type MemberAppConsent,
   type MemberAppScopeCollection,
 } from "./storage/memberApps";
 import { createDatasetFiles } from "./storage/datasetFiles";
@@ -654,14 +653,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const { workspaceId } = auth,
       authorUserId = String(row.owner_user_id),
       authorityRevision = Number(row.authority_revision);
-    const app = memberAppRow(storage, publicationId);
+    const slug = String(row.member_slug);
     const viewerGrantId = workspaceMemberGrantId(storage, workspaceId, auth.userId);
     if (
-      !app ||
       auth.launch ||
       (auth.grantId !== undefined && auth.grantId !== viewerGrantId) ||
       getWorkspaceMembership(storage, workspaceId)?.shareId !== row.share_id ||
-      memberAppIdOf(workspaceId, authorUserId, app.slug, hash(JSON.stringify(candidate))) !==
+      memberAppIdOf(workspaceId, authorUserId, slug, hash(JSON.stringify(candidate))) !==
         publicationId
     )
       throw notFound();
@@ -675,14 +673,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth.userId,
       );
       if (!current) throw notFound();
-      const consent: MemberAppConsent =
-        auth.userId === authorUserId
-          ? "current"
-          : memberAppConsent(
-              storage,
-              { workspaceId, viewerUserId: auth.userId, publicationId },
-              current.scope,
-            );
+      const consent = memberAppConsent(
+        storage,
+        { workspaceId, viewerUserId: auth.userId, publicationId },
+        current.scope,
+      );
       if (!reviewing && consent !== "current") throw new MemberAppRefusal(consent);
       return { ...current, consent };
     };
@@ -715,7 +710,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       candidate,
       authorityRevision,
       resolveAuthority: resolve,
-      member: { ...app, ...review() },
+      member: { slug, publisherUserId: authorUserId, ...review() },
     };
   }
   function namedPublication(
@@ -730,13 +725,14 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   } {
     const row = storage.db
       .prepare(
-        "SELECT p.*,m.publication_id IS NOT NULL AS member FROM sync_relay_app_publications p LEFT JOIN sync_relay_member_apps m USING(publication_id) WHERE p.workspace_id=? AND p.publication_id=?",
+        "SELECT p.*,m.slug AS member_slug FROM sync_relay_app_publications p LEFT JOIN sync_relay_member_apps m USING(publication_id) WHERE p.workspace_id=? AND p.publication_id=?",
       )
       .get(auth.workspaceId, publicationId);
     if (
       !row ||
       row.active !== 1 ||
-      (row.member !== 1 && !storage.workspaceIsOwnedBy(auth.workspaceId, String(row.owner_user_id)))
+      (row.member_slug === null &&
+        !storage.workspaceIsOwnedBy(auth.workspaceId, String(row.owner_user_id)))
     )
       throw notFound();
     const bytes = storage.getBlob(auth.workspaceId, String(row.manifest_sha256));
@@ -746,7 +742,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       JSON.parse(Buffer.from(bytes).toString("utf8")),
       limits,
     );
-    if (row.member === 1) return memberPublication(auth, publicationId, row, candidate, reviewing);
+    if (row.member_slug !== null)
+      return memberPublication(auth, publicationId, row, candidate, reviewing);
     if (row.audience === "workspace")
       return workspacePublication(auth, publicationId, row, candidate);
     const currentGrant = readCurrentShareGrant(storage, {
@@ -2178,8 +2175,24 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             manifestHash,
             nowMs: nowMs(),
           });
-          if (!memberScope(workspaceId, publicationId, 1, candidate, auth.userId, auth.userId))
-            throw notFound();
+          const own = memberScope(
+            workspaceId,
+            publicationId,
+            1,
+            candidate,
+            auth.userId,
+            auth.userId,
+          );
+          if (!own) throw notFound();
+          if (!input.agent)
+            recordMemberAppConsent(storage, {
+              workspaceId,
+              viewerUserId: auth.userId,
+              publicationId,
+              scopeDigest: own.digest,
+              scope: own.scope,
+              nowMs: nowMs(),
+            });
           return written;
         };
         const workspaceOwner = storage.db

@@ -229,7 +229,7 @@ async function json(
     throw badRequest("Invalid dataset JSON.");
   }
 }
-async function response(run: () => unknown): Promise<Response> {
+export async function response(run: () => unknown): Promise<Response> {
   try {
     const value = await run();
     return value instanceof Response ? value : Response.json(value, { headers });

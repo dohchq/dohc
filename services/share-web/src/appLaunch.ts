@@ -3,6 +3,8 @@ import {
   APP_PUBLICATION_MAX_BUNDLE_BYTES,
   APP_PUBLICATION_MAX_DOCUMENT_BYTES,
   APP_PUBLICATION_MAX_BLOB_BYTES,
+  APP_PUBLICATION_MAX_FILES,
+  APP_PUBLICATION_MAX_METADATA_BYTES,
 } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -103,10 +105,11 @@ const memberReview = (value: unknown) =>
   ) &&
   list(
     value.source,
-    1024,
+    APP_PUBLICATION_MAX_FILES,
     (file) =>
       exact(file, "byteLength,path,sha256") &&
-      label(file.path) &&
+      typeof file.path === "string" &&
+      file.path.length > 0 &&
       Number.isSafeInteger(file.byteLength) &&
       PUBLICATION.test(String(file.sha256)),
   );
@@ -646,7 +649,11 @@ export function createAppLaunchHandler(options: {
                 response.headers.has("location")
               )
                 return refusal();
-              const data = await readBoundedJson(response, 256 * 1024, signal);
+              const data = await readBoundedJson(
+                response,
+                2 * APP_PUBLICATION_MAX_METADATA_BYTES,
+                signal,
+              );
               const member =
                 !!data && typeof data === "object" && "review" in data && memberReview(data.review);
               if (

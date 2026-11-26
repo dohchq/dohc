@@ -72,14 +72,17 @@ export default function NamedApp({ target }: { target: NamedAppTarget | null }) 
         "subjectName" in data &&
         "sharerName" in data
       ) {
+        const review =
+          "review" in data && data.review && typeof data.review === "object"
+            ? (data.review as Review)
+            : undefined;
         setSummary({
           subjectName: normalizeShareLabel(data.subjectName),
           sharerName: normalizeShareLabel(data.sharerName, 320),
           access: data.access,
-          ...("review" in data && data.review && typeof data.review === "object"
-            ? { review: data.review as Review }
-            : {}),
+          ...(review ? { review } : {}),
         });
+        return review;
       }
     }
   };
@@ -164,16 +167,17 @@ export default function NamedApp({ target }: { target: NamedAppTarget | null }) 
     void launchSharedApp(
       { workspaceId: target.workspaceId, publicationId: target.publicationId },
       controller.signal,
-    ).catch((reason: unknown) =>
-      finish(
-        controller,
+    ).catch(async (reason: unknown) => {
+      const message =
         !(reason instanceof AppLaunchError) || reason.status === 503
           ? LAUNCH_UNAVAILABLE
           : reason.status === 410
             ? LINK_REFUSALS.app_collection_missing.error
-            : LAUNCH_REFUSED,
-      ),
-    );
+            : LAUNCH_REFUSED;
+      if (!summary?.review) return finish(controller, message);
+      const review = await load(controller).catch(() => undefined);
+      finish(controller, review && review.consent !== "current" ? null : message);
+    });
   };
   const busy = pending !== null;
   return (

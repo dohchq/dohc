@@ -91,7 +91,12 @@ async function memberWorkspace(root: string) {
     capacityBytes: 1024 * 1024,
   });
   const manifest = JSON.stringify({ datasetId: definition.datasetId });
-  storage.putBlob({ workspaceId: "w", sha256: sha(manifest), content: Buffer.from(manifest), createdAtMs: 1 });
+  storage.putBlob({
+    workspaceId: "w",
+    sha256: sha(manifest),
+    content: Buffer.from(manifest),
+    createdAtMs: 1,
+  });
   storage.appendLogBatch({
     workspaceId: "w",
     originId: "desktop",
@@ -244,7 +249,8 @@ test("a workspace member reviews another member's app, reads its source, allows 
     lookupUserDisplayName: async (userId: string) => (userId === "ana" ? "Ana Reyes" : null),
     resolveActor: (request, workspaceId) => {
       if (request.headers.get("cookie") === sessionCookie) return { userId: "ben", workspaceId };
-      if (request.headers.get("authorization") === "Bearer ana") return { userId: "ana", workspaceId };
+      if (request.headers.get("authorization") === "Bearer session-ana")
+        return { userId: "ana", workspaceId };
       throw Error("Unknown account");
     },
   });
@@ -252,7 +258,7 @@ test("a workspace member reviews another member's app, reads its source, allows 
   const published = await relay(
     new Request("https://relay.example.org/sync/w/member-apps", {
       method: "POST",
-      headers: { authorization: "Bearer ana", "content-type": "application/octet-stream" },
+      headers: { authorization: "Bearer session-ana", "content-type": "application/octet-stream" },
       body: upload.body,
     }),
   );

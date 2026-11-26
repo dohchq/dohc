@@ -22,7 +22,11 @@ function fixture() {
     byteLength: bytes.length,
     contentType: "text/javascript; charset=utf-8",
   };
-  const reviewed = { path: file.path, sha256: file.sha256, byteLength: file.byteLength };
+  const reviewed = {
+    path: `app/${"long-folder/".repeat(30)}index.ts`,
+    sha256: file.sha256,
+    byteLength: file.byteLength,
+  };
   const handler = createAppLaunchHandler({
     config,
     relayUrl: "https://relay.example.org",

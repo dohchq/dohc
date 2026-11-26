@@ -1779,6 +1779,25 @@ it("asks a viewer again for a new version, and only a person can allow it", asyn
   ]);
 });
 
+it("asks the author to review an app their agent published before it runs for them", async () => {
+  const f = await memberAppFixture();
+  const agent = { kind: "agent", label: "Helper", labelSource: "agent-declared" } as const;
+  const { publicationId } = f.host.publishMemberApp(ana, {
+    workspaceId: "w",
+    slug: "tracker",
+    candidate: f.candidate(),
+    blobs: f.blobs,
+    agent,
+  });
+  await expect(f.invoke(ana, id(6), {}, publicationId, "agent-made")).rejects.toMatchObject(
+    reviewRequired,
+  );
+  f.allow(ana, publicationId);
+  expect((await f.invoke(ana, id(6), {}, publicationId, "reviewed")).result).toBe("edit");
+  const own = f.publish([id(6)]);
+  expect((await f.invoke(ana, id(6), {}, own, "own")).result).toBe("edit");
+});
+
 it("stops a member's Member apps when members may no longer share, but not an admin's", async () => {
   const f = await memberAppFixture();
   const app = f.publish();
