@@ -1183,7 +1183,8 @@ fn a_kept_base_refused_as_live_unadmitted_on_replay_keeps_its_claim_with_that_re
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
-                "INSERT INTO live_device_application_bindings VALUES (relay,ws,main,                 object-two,?1,notes/object-two.md,[],0,host,1,instance,connection,1,NULL)",
+                "INSERT INTO live_device_application_bindings VALUES ('relay','ws','main', \
+                 'object-two',?1,'notes/object-two.md','[]',0,'host',1,'instance','connection',1,NULL)",
                 [&note.claim],
             )
             .map_err(SyncError::persist)
