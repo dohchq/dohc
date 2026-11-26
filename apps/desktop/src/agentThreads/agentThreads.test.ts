@@ -50,7 +50,11 @@ function setup(
       order.push(`read ${input.upTo.messageId}`);
       left = left.filter((messageId) => messageId > input.upTo.messageId);
     },
-    getThread: async () => ({ thread: { id: "thread-a", title: "Hello" }, messageCount: 4 }),
+    getThread: async () => ({
+      thread: { id: "thread-a", title: "Hello" },
+      channel: { kind: "agent", agentId: "chief" },
+      messageCount: 4,
+    }),
     listMessagesPage: async () => ({ messages: replies, nextAfterMessageOrder: null }),
   } as unknown as Chats;
   const replies: Array<{ authorAgentId?: string }> = [];

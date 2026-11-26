@@ -83,6 +83,14 @@ ${threadId}`;
             ? { linkedFile: { pathHint: "plans/release.md" } }
             : {}),
         },
+        channel:
+          input.threadId === "thread-a"
+            ? { kind: "agent", agentId: "chief" }
+            : input.threadId === "thread-research"
+              ? { kind: "agent", agentId: "research" }
+              : input.threadId === "thread-file"
+                ? null
+                : { kind: "channel" },
       };
     },
   };
@@ -242,6 +250,8 @@ describe("forwarding", () => {
           channel: { id: "c", kind: "channel", name: "launch", slug: "launch", purpose: "" },
         }),
         request("m3", 30, { threadId: "thread-file", channel: null }),
+        // The agent is mentioned in another agent's own chat.
+        request("m4", 40, { threadId: "thread-research" }),
       ],
       {
         workspace: async () => ({
@@ -253,7 +263,7 @@ describe("forwarding", () => {
 
     await forwarding.wake(WORKSPACE);
 
-    expect(sent.map((message) => message.how)).toEqual(["steer", "line", "line"]);
+    expect(sent.map((message) => message.how)).toEqual(["steer", "line", "line", "line"]);
   });
 
   it("forwards every page of a long backlog", async () => {

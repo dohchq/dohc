@@ -172,7 +172,11 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       taken.delete(key);
       return true;
     }
-    const { thread, messageCount } = await chats.getThread({
+    const {
+      thread,
+      channel: threadChannel,
+      messageCount,
+    } = await chats.getThread({
       workspaceId: workspace.id,
       threadId: request.threadId,
     });
@@ -182,7 +186,9 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     const started = await dependencies.tool.forward({
       threadId: agent.threadId,
       how:
-        agent.whileBusy === "steer" || (agent.whileBusy === "own-chat" && channel?.kind === "agent")
+        // A mention in another agent's chat is not this agent's own chat.
+        agent.whileBusy === "steer" ||
+        (agent.whileBusy === "own-chat" && threadChannel?.agentId === agent.id)
           ? "steer"
           : "line",
       forwardId: forwardIdOf(workspace.id, agent.id, request.messageId, agent.threadId),
