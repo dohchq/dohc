@@ -18,7 +18,7 @@ import { createServerClient } from "./client";
 import { CACHE_FORMAT, openNow } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
 import { pendingSignOuts } from "./pushRegistration";
-import { A, page, version } from "./testApps";
+import { A, memberPage, page, version } from "./testApps";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
 import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
@@ -664,6 +664,7 @@ describe("the apps and Collections lists", () => {
   it("show what was read before after a relaunch, and an answer before the row is read keeps its other views", async () => {
     const server = serverWithA();
     server.on("POST", "/sync/ws-a/ops/apps", page([version(A, true)]));
+    server.on("POST", "/sync/ws-a/ops/memberApps", memberPage([]));
     server.on(
       "POST",
       "/sync/ws-a/ops/collections",
