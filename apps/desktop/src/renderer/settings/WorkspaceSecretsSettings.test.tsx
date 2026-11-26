@@ -245,6 +245,40 @@ describe("WorkspaceSecretsSettings", () => {
     expect(screen.queryByTestId("workspace-secret-uses")).toBeNull();
   });
 
+  it("shows the server's list once opening Replace refreshes it after a save", async () => {
+    const user = userEvent.setup();
+    const secret = (name: string) => ({
+      name,
+      usage: "http-header" as const,
+      allowedHosts: ["api.resend.com"],
+      generation: 1,
+      createdAtMs: 1700000000000,
+      updatedAtMs: 1700000000000,
+    });
+    const ready = (names: string[]) => ({
+      kind: "ready" as const,
+      storage: "server" as const,
+      secrets: names.map(secret),
+      limit: 2,
+    });
+    bridgeMock.listWorkspaceSecrets.mockResolvedValueOnce(ready(["FIRST_KEY"]));
+    bridgeMock.setWorkspaceSecret.mockResolvedValueOnce(ready(["FIRST_KEY", "SECOND_KEY"]));
+    render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("workspace-secrets-add"));
+    await user.type(screen.getByTestId("workspace-secret-name-input"), "SECOND_KEY");
+    await user.type(screen.getByTestId("workspace-secret-hosts-input"), "api.resend.com");
+    await user.type(screen.getByTestId("workspace-secret-value-input"), "re_secret_123");
+    await user.click(screen.getByTestId("workspace-secret-save"));
+    await screen.findByTestId("workspace-secret-row-SECOND_KEY");
+    expect(screen.getByTestId("workspace-secrets-add")).toHaveProperty("disabled", true);
+
+    bridgeMock.listWorkspaceSecrets.mockResolvedValueOnce(ready(["SECOND_KEY"]));
+    await user.click(screen.getByTestId("workspace-secret-replace-SECOND_KEY"));
+    await user.click(screen.getByTestId("workspace-secret-cancel"));
+    await waitFor(() => expect(screen.queryByTestId("workspace-secret-row-FIRST_KEY")).toBeNull());
+    expect(screen.getByTestId("workspace-secrets-add")).toHaveProperty("disabled", false);
+  });
+
   it("deletes secrets left on this computer from before the workspace synced", async () => {
     const user = userEvent.setup();
     bridgeMock.listWorkspaceSecrets.mockResolvedValue({

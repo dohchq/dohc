@@ -424,6 +424,16 @@ export function WorkspaceSecretsSettings(props: {
     load: () => bridge().listWorkspaceSecrets({ workspaceId }),
   });
   const retryQuery = query.retry;
+  const refreshedAt = useRef<number | null>(null);
+  const refreshSecrets = useCallback(() => {
+    refreshedAt.current = requests.current();
+    void retryQuery();
+  }, [requests, retryQuery]);
+  useEffect(() => {
+    const token = refreshedAt.current;
+    refreshedAt.current = null;
+    if (token !== null && requests.isCurrent(token)) setOverrideState(null);
+  }, [query.value, requests]);
   const reloadSecrets = useCallback(() => {
     requests.next();
     setOverrideState(null);
@@ -665,7 +675,7 @@ export function WorkspaceSecretsSettings(props: {
                 size="compact"
                 data-testid={`workspace-secret-replace-${secret.name}`}
                 onClick={() => {
-                  void retryQuery();
+                  refreshSecrets();
                   setEditorMode({ kind: "replace", secret });
                 }}
               >
@@ -676,7 +686,7 @@ export function WorkspaceSecretsSettings(props: {
                 title={`Delete secret ${secret.name}`}
                 data-testid={`workspace-secret-delete-${secret.name}`}
                 onClick={() => {
-                  void retryQuery();
+                  refreshSecrets();
                   setDeletingSecret(secret.name);
                 }}
               >
