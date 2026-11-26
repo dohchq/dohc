@@ -1343,10 +1343,6 @@ fn worker_main(
     if matches!(mode, ActorOpenMode::ReadWrite) {
         close_stranded_owner_bindings(&mut store, now_ms);
     }
-    // The writer thread's cache of live Y.Docs serves the replay-parity gate
-    // base on the local append path only. It lives and dies with this thread,
-    // exactly the single-writer scope its validity proof (`doc_cache.rs`,
-    // CACHE-VALID) assumes.
     let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
         replay_retained_owner_private(&mut store);

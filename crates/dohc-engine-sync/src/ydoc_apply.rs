@@ -3350,7 +3350,7 @@ fn kept_base_refusal(
                  AND json_extract(l.payload_json,'$.targetVersionId')=?2 \
                  AND json_extract(l.payload_json,'$.transition.result.objectId')=?3 \
                  AND json_extract(l.payload_json,'$.lineageTransition.successor.lineageClaimId')=?4)) \
-             LIMIT 1",
+               AND k.replayed=0 ORDER BY k.reason IS NULL LIMIT 1",
             params![key.workspace_id, key.version_id, key.object_id, claim],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -3358,11 +3358,7 @@ fn kept_base_refusal(
         .map_err(SyncError::corrupt)?;
     let sha = match kept {
         None => return Ok(None),
-        Some((_, Some(reason)))
-            if ![NEWER_BODY_FORMAT, LIVE_UNADMITTED_UPDATE].contains(&reason.as_str()) =>
-        {
-            return Ok(Some(reason));
-        }
+        Some((_, Some(reason))) if reason != LIVE_UNADMITTED_UPDATE => return Ok(Some(reason)),
         Some((sha, _)) => sha,
     };
     let bytes = get_binary_blob(conn, &sha)
@@ -8562,7 +8558,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 record_facts: Vec::new(),
             })
         })?;
-        if !batch_inactive && !leases.is_live(&key) {
+        if !batch_inactive && !leases.is_live(&key) && !crate::kept_replay::replaying_now() {
             let drained = drain_inactive_ydoc_updates(
                 store,
                 InactiveScope::Document(&key, &[]),
@@ -9968,7 +9964,8 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         CollabError::OutsideFormatTwoRoots => SyncError::InvalidInput {
             reason: OUTSIDE_FORMAT_TWO_ROOTS,
         },
-        CollabError::BaseStateDiverged | CollabError::BaseRelaySequenceCollision { .. } => {
+        CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
+        CollabError::BaseRelaySequenceCollision { .. } if crate::kept_replay::replaying_now() => {
             SyncError::CoordinateDiverged
         }
         CollabError::BaseRelaySequencePending => SyncError::RetryableState {

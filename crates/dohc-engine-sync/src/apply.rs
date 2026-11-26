@@ -503,10 +503,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             }
         }
         match &admission {
-            Admission::Refused(refusal) if kept && refusal.reason.message() != crate::ydoc_apply::NEWER_BODY_FORMAT => {
-                crate::kept_replay::refuse_claim_in_tx(tx, envelope, refusal.reason.message())?;
+            Admission::Refused(refusal) if kept && !mutation_committed => {
+                if refusal.reason.message() != crate::ydoc_apply::NEWER_BODY_FORMAT {
+                    crate::kept_replay::refuse_claim_in_tx(tx, envelope, refusal.reason.message())?;
+                }
             }
-            Admission::Refused(_) => {}
             _ if kept => crate::kept_replay::mark_replayed_in_tx(tx, envelope)?,
             _ => {}
         }
