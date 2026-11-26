@@ -51,6 +51,8 @@ const Published = z.object({
 
 type Failure = { revision: string | null; reason: string };
 
+const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 export const PHONE_APP_REFUSED =
   "Apps that create Collection files or call outside services open on your phone only through a link.";
 
@@ -62,8 +64,13 @@ export interface PhoneAppSenderDependencies<Workspace extends { workspaceId: str
     work: (workspace: Workspace, signal: AbortSignal) => Promise<void>,
   ): Promise<void>;
   credentials(workspace: Workspace): Promise<CloudCredentials>;
+  onMain(workspace: Workspace): Promise<boolean>;
   apps(workspace: Workspace): Promise<readonly SendableSite[]>;
-  sourceRevision(workspace: Workspace, appRoot: string, signal: AbortSignal): Promise<string>;
+  readSource(
+    workspace: Workspace,
+    appRoot: string,
+    signal: AbortSignal,
+  ): Promise<{ sourceRevision: string; sourcePaths: readonly string[] }>;
   prepare(
     workspace: Workspace,
     appRoot: string,
@@ -89,6 +96,8 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
 ) {
   const failures = new Map<string, Map<string, Failure>>();
   const roots = new Map<string, Set<string>>();
+  const inputs = new Map<string, Set<string>>();
+  const passFailures = new Map<string, number>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const waiting = new Set<string>();
   const pulled = new Set<string>();
@@ -106,6 +115,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
   const clearAll = (workspaceId: string) => {
     if (failures.get(workspaceId)?.size) deps.changed(workspaceId);
     failures.delete(workspaceId);
+    passFailures.delete(workspaceId);
   };
 
   const run = (workspaceId: string): Promise<void> => {
@@ -117,17 +127,26 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         if (!(await deps.enabled())) return clearAll(workspaceId);
         if (!deps.atHead(workspaceId)) return void waiting.add(workspaceId);
         waiting.delete(workspaceId);
-        await deps.withWorkspace(workspaceId, (workspace, signal) => pass(workspace, signal));
+        try {
+          await deps.withWorkspace(workspaceId, (workspace, signal) => pass(workspace, signal));
+          passFailures.delete(workspaceId);
+          settle(workspaceId, "", null);
+        } catch (error) {
+          const count = (passFailures.get(workspaceId) ?? 0) + 1;
+          passFailures.set(workspaceId, count);
+          if (count >= 3) settle(workspaceId, "", { revision: null, reason: reasonOf(error) });
+          later(workspaceId, count === 1 ? 30_000 : 120_000);
+        }
       })
       .catch((error: unknown) => console.warn("[desktop] send apps to phones:", error));
     return running;
   };
-  const later = (workspaceId: string) => {
+  const later = (workspaceId: string, delayMs = deps.delayMs ?? 10_000) => {
     clearTimeout(timers.get(workspaceId));
     const timer = setTimeout(() => {
       timers.delete(workspaceId);
       void run(workspaceId);
-    }, deps.delayMs ?? 10_000);
+    }, delayMs);
     timer.unref();
     timers.set(workspaceId, timer);
   };
@@ -153,11 +172,15 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
       } while (cursor);
       return rows;
     };
+    if (!(await deps.onMain(workspace))) return;
     const published = await current();
     const apps = (await deps.apps(workspace)).filter(sendableApp).map((app) => app.root);
+    if (!(await deps.onMain(workspace))) return;
     roots.set(workspaceId, new Set([...apps, ...published.keys()]));
+    const read = new Set<string>();
+    inputs.set(workspaceId, read);
     for (const appRoot of failures.get(workspaceId)?.keys() ?? [])
-      if (!apps.includes(appRoot)) settle(workspaceId, appRoot, null);
+      if (appRoot && !apps.includes(appRoot)) settle(workspaceId, appRoot, null);
     for (const [appRoot, row] of published) {
       if (apps.includes(appRoot)) continue;
       await deps
@@ -215,7 +238,9 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
       signal.throwIfAborted();
       let revision: string | null = null;
       try {
-        revision = await deps.sourceRevision(workspace, appRoot, signal);
+        const source = await deps.readSource(workspace, appRoot, signal);
+        revision = source.sourceRevision;
+        for (const path of source.sourcePaths) read.add(path);
         if (published.get(appRoot)?.sourceRevision !== revision) {
           if (failures.get(workspaceId)?.get(appRoot)?.revision === revision) continue;
           await send(appRoot, revision);
@@ -223,10 +248,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         settle(workspaceId, appRoot, null);
       } catch (error) {
         signal.throwIfAborted();
-        settle(workspaceId, appRoot, {
-          revision,
-          reason: error instanceof Error ? error.message : String(error),
-        });
+        settle(workspaceId, appRoot, { revision, reason: reasonOf(error) });
       }
     }
   }
@@ -238,6 +260,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         paths.some(
           (path) =>
             /(?:^|\/)(?:index\.html|app\.publish\.json)$/.test(path) ||
+            inputs.get(workspaceId)?.has(path) ||
             known.some(
               (root) => path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`),
             ),
@@ -250,17 +273,21 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
       pulled.add(workspaceId);
       later(workspaceId);
     },
+    versionSwitched(workspaceId: string) {
+      later(workspaceId);
+    },
     settingChanged(enabled: boolean) {
       if (enabled) for (const workspaceId of pulled) later(workspaceId);
       else for (const workspaceId of [...failures.keys()]) clearAll(workspaceId);
     },
-    retry(workspaceId: string, appRoot: string) {
-      if (failures.get(workspaceId)?.delete(appRoot)) deps.changed(workspaceId);
+    retry(workspaceId: string, appRoot: string | null) {
+      if (appRoot === null) passFailures.delete(workspaceId);
+      if (failures.get(workspaceId)?.delete(appRoot ?? "")) deps.changed(workspaceId);
       return run(workspaceId);
     },
     notSent(workspaceId: string) {
       return [...(failures.get(workspaceId) ?? [])].map(([appRoot, { reason }]) => ({
-        appRoot,
+        appRoot: appRoot || null,
         reason,
       }));
     },

@@ -1757,7 +1757,9 @@ const SYNC_STATUS_BASE_FIELDS = {
     })
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
-  appsNotSent: z.array(z.object({ appRoot: z.string().min(1), reason: z.string() })).optional(),
+  appsNotSent: z
+    .array(z.object({ appRoot: z.string().min(1).nullable(), reason: z.string() }))
+    .optional(),
   outsideChanges: z.array(OutsideChange).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
@@ -8472,7 +8474,7 @@ export const phoneAppOperations = {
     capabilityId: "app.phone.retry",
     scope: "workspace",
     channel: "desktop:retry-phone-app",
-    payload: WorkspaceIdPayload.extend({ appRoot: z.string().min(1) }),
+    payload: WorkspaceIdPayload.extend({ appRoot: z.string().min(1).nullable() }),
     guard: "active-workspace",
     inactiveMessage: "Open this workspace to send its apps to your phones again.",
   },

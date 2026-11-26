@@ -3964,7 +3964,10 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
-        aroundVersionSwitch: (work) => sitePreviews.holdVersionSwitch(workspace.workspaceId, work),
+        aroundVersionSwitch: (work) =>
+          sitePreviews
+            .holdVersionSwitch(workspace.workspaceId, work)
+            .finally(() => phoneAppSender?.versionSwitched(workspace.workspaceId)),
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -12128,8 +12131,14 @@ function registerIpcHandlers(): void {
       );
     },
     credentials: async (workspace) => (await remoteForWorkspace(workspace)).credentials,
+    onMain: async (workspace) => {
+      const active = await withEngineAdapter(workspace, (adapter) =>
+        adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
+      );
+      return (active?.id ?? "main") === "main";
+    },
     apps: (workspace) => ownedSiteCatalog.list(workspace),
-    sourceRevision: async (workspace, appRoot, signal) => {
+    readSource: async (workspace, appRoot, signal) => {
       const source = await withEngineAdapter(workspace, (adapter) =>
         readLocalAppSource(
           { workspaceId: workspace.workspaceId, appRoot, versionId: "main" },
@@ -12137,7 +12146,7 @@ function registerIpcHandlers(): void {
         ),
       );
       if (!source) throw new Error("dohc could not read this app. Restart dohc and try again.");
-      return source.sourceRevision;
+      return source;
     },
     prepare: async (workspace, appRoot, signal) => {
       const { deferredWrites } = await ownerPublicationDependencies.flushCapture(workspace);

@@ -34,7 +34,16 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   let next = 1;
   let refuseNextPublish = false;
+  const state = {
+    enabled: true,
+    onMain: true,
+    listingFails: false,
+    apps: input.apps,
+    revisions: input.revisions,
+    sourcePaths: {} as Record<string, string[]>,
+  };
   const relayJson = vi.fn(async (_credentials: unknown, path: string, init?: RequestInit) => {
+    if (!init?.method && state.listingFails) throw new Error("dohc could not reach the server.");
     if (!init?.method)
       return {
         publications: [...owner].map(([appRoot, row]) => ({ ...row, appRoot, active: true })),
@@ -67,7 +76,6 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     owner.set(published.appRoot, row);
     return { ...row, active: true };
   });
-  const state = { enabled: true, apps: input.apps, revisions: input.revisions };
   const prepare = vi.fn(async (_workspace: unknown, appRoot: string) => ({
     candidate: candidate(appRoot, state.revisions[appRoot]!),
     files: [{ sha256: "a".repeat(64), bytes: new Uint8Array([1]) }],
@@ -79,8 +87,12 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     atHead: () => true,
     withWorkspace: (workspaceId, work) => work({ workspaceId }, new AbortController().signal),
     credentials: async () => credentials,
+    onMain: async () => state.onMain,
     apps: async () => state.apps.map((root) => site(root)),
-    sourceRevision: async (_workspace, appRoot) => state.revisions[appRoot]!,
+    readSource: async (_workspace, appRoot) => ({
+      sourceRevision: state.revisions[appRoot]!,
+      sourcePaths: state.sourcePaths[appRoot] ?? [`${appRoot}/index.html`],
+    }),
     prepare,
     relayJson,
     upload,
@@ -234,5 +246,76 @@ describe("createPhoneAppSender", () => {
     ]);
     expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r1");
     expect(test.sender.notSent("ws")).toEqual([]);
+  });
+
+  it("tries a failed pass again later and files one workspace row after repeated failures", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+      test.state.listingFails = true;
+      await test.sender.run("ws");
+      expect(vi.getTimerCount()).toBe(1);
+      expect(test.sender.notSent("ws")).toEqual([]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(test.relayJson).toHaveBeenCalledTimes(2));
+      await test.sender.run("ws");
+      expect(test.sender.notSent("ws")).toEqual([
+        { appRoot: null, reason: "dohc could not reach the server." },
+      ]);
+
+      test.state.listingFails = false;
+      await test.sender.retry("ws", null);
+      expect(test.sender.notSent("ws")).toEqual([]);
+      expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends and withdraws nothing while a version other than main is active", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+      test.owner.set("apps/old", {
+        publicationId: "old-1",
+        authorityRevision: 1,
+        sourceRevision: "r1",
+      });
+      test.state.onMain = false;
+      await test.sender.run("ws");
+      expect(test.posts).toEqual([]);
+      expect(test.prepare).not.toHaveBeenCalled();
+
+      test.state.onMain = true;
+      test.sender.versionSwitched("ws");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() =>
+        expect(test.posts.map((post) => post.path)).toEqual([
+          "/sync/ws/app-publications/old-1/withdraw",
+          "/sync/ws/app-publications",
+        ]),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("checks an app again when a declared input outside its folder changes", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+      test.state.sourcePaths["apps/trip"] = ["apps/trip/app.publish.json", "shared/theme.css"];
+      await test.sender.run("ws");
+      test.sender.filesChanged("ws", ["notes/today.md"]);
+      expect(vi.getTimerCount()).toBe(0);
+
+      test.state.revisions["apps/trip"] = "r2";
+      test.sender.filesChanged("ws", ["shared/theme.css"]);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r2"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
