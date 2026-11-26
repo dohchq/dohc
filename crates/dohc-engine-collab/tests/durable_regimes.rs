@@ -3449,7 +3449,8 @@ fn a_remote_write_under_body_in_a_format_two_note_is_refused_and_a_typed_letter_
             };
             let refused = apply(remote(1, &under_body));
             assert!(
-                matches!(refused, Err(CollabError::MalformedUpdate { .. })),
+                refused.as_ref().err().map(CollabError::code)
+                    == Some("ydoc-update-outside-format-two-roots"),
                 "projected={projected}: {refused:?}"
             );
             apply(remote(1, &typed)).expect("a typed letter applies");
@@ -3460,5 +3461,105 @@ fn a_remote_write_under_body_in_a_format_two_note_is_refused_and_a_typed_letter_
             assert!(text.content.contains('z'), "{}", text.content);
             assert!(!text.content.contains("Typed"), "{}", text.content);
         }
+    });
+}
+
+#[test]
+fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newer() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Text, Transact};
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let base = note.encode_full_state();
+    let typed = |client: u64| {
+        let other = yrs::Doc::with_client_id(client);
+        other
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&base).expect("decode"))
+            .expect("load note");
+        let before = other.transact().state_vector();
+        let sequence = other.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
+        sequence.insert(&mut other.transact_mut(), 1, "z");
+        let after = other.transact();
+        after.encode_state_as_update_v1(&before)
+    };
+    let mut ts = fresh_store("format-two-switch-off");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        committed(
+            claim_base(
+                &mut ts.store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &NoFaults,
+                1_000,
+            )
+            .expect("claim format-2 base"),
+        );
+    });
+    let before = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("note");
+    let remote = apply_remote_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: typed(7),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_100,
+    )
+    .map(drop);
+    assert!(
+        remote.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{remote:?}"
+    );
+    let local = record_local_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &typed(8),
+        LocalAppend::default(),
+        &NoFaults,
+        1_100,
+        |_, _, _| Ok(()),
+    )
+    .map(drop);
+    assert!(
+        local.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{local:?}"
+    );
+    let after = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("note");
+    assert_eq!(after.up_to_seq, before.up_to_seq);
+    assert_eq!(
+        after.doc.encode_full_state(),
+        before.doc.encode_full_state()
+    );
+    let folded = after
+        .doc
+        .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "Changed.\n")
+        .map(drop);
+    assert!(
+        folded.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
+        "{folded:?}"
+    );
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let reread = load_persisted(&ts.store, &key)
+            .expect("load")
+            .expect("note");
+        let text = reread.doc.project(ContentKind::Richdoc).expect("project");
+        assert!(
+            text.content.contains("A note.") && !text.content.contains('z'),
+            "{}",
+            text.content
+        );
     });
 }

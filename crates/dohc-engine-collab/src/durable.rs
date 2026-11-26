@@ -3917,7 +3917,7 @@ mod successor_validation_tests {
         })
         .expect_err("refused");
         assert!(
-            matches!(error, CollabError::MalformedUpdate { .. }),
+            error.code() == "ydoc-update-outside-format-two-roots",
             "{error:?}"
         );
     }
@@ -4369,7 +4369,8 @@ mod append_compaction_query_tests {
             for mut cache in [warm, WriterDocCache::new()] {
                 let refused = append(&mut store, &mut cache, &under_body);
                 assert!(
-                    matches!(refused, Err(CollabError::MalformedUpdate { .. })),
+                    refused.as_ref().err().map(CollabError::code)
+                        == Some("ydoc-update-outside-format-two-roots"),
                     "{refused:?}"
                 );
                 assert_eq!(stored(&store), kept);

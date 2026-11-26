@@ -2143,10 +2143,12 @@ fn a_queued_base_that_splits_an_emoji_is_refused_and_the_drain_goes_on() {
     assert_eq!(persisted.marker.lineage_claim_id, Some(lineage));
 }
 
-#[test]
-fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
-    let (_scratch, _path, mut engine) = open_store();
-    VersionedTextStore::new(&mut engine)
+fn queue_a_format_two_lineage_before_a_format_one(
+    engine: &mut EngineStore,
+    newer_base: &[u8],
+    newer_delta: &[u8],
+) -> (dohc_engine_collab::DocKey, String) {
+    VersionedTextStore::new(engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
     engine
@@ -2161,12 +2163,11 @@ fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
         })
         .expect("file object");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-two").expect("doc key");
-    let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
     let newer_base = engine
-        .put_binary_blob(&newer.encode_full_state())
+        .put_binary_blob(newer_base)
         .expect("format-2 base blob");
     let newer_delta = engine
-        .put_binary_blob(&newer.richdoc_append_paragraph("Later"))
+        .put_binary_blob(newer_delta)
         .expect("format-2 delta blob");
     let older = dohc_engine_collab::Ydoc::wire();
     older
@@ -2203,37 +2204,20 @@ fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
             payload(blob, claim, base),
         );
         op.relay_seq = Some(relay_seq);
-        crate::apply_envelope_with(&mut engine, &op, &NoFaults, |tx, op| {
+        crate::apply_envelope_with(engine, &op, &NoFaults, |tx, op| {
             crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, claim, relay_seq, None)
         })
         .expect("queue");
     }
+    (key, older_base)
+}
 
-    let drained = drain_deferred_ydoc_for_key(
-        &mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &key,
-        &NoFaults,
-    )
-    .expect("the drain goes on");
-    let refused: Vec<_> = drained
-        .refusals
-        .iter()
-        .map(|refusal| {
-            (
-                refusal.origin_id.as_str(),
-                refusal.origin_seq,
-                refusal.reason.message(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        refused,
-        [
-            ("peer-a", 0, "ydoc-note-uses-a-newer-body-format"),
-            ("peer-a", 1, "ydoc-note-uses-a-newer-body-format"),
-        ]
-    );
+fn assert_the_format_one_lineage_drained(
+    engine: &EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    older_base: &str,
+    kept_for_peer_a: i64,
+) {
     let (queue, kept): (i64, i64) = engine
         .read_with(|conn| {
             conn.query_row(
@@ -2244,15 +2228,139 @@ fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
             )
         })
         .expect("queue count");
-    assert_eq!((queue, kept), (0, 2));
-    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+    assert_eq!((queue, kept), (0, kept_for_peer_a));
+    let persisted = dohc_engine_collab::load_persisted(engine, key)
         .expect("load lineage")
         .expect("persisted lineage");
-    assert_eq!(persisted.marker.lineage_claim_id, Some(older_base));
+    assert_eq!(
+        persisted.marker.lineage_claim_id.as_deref(),
+        Some(older_base)
+    );
     let text = persisted
         .doc
         .project(dohc_engine_collab::ContentKind::Richdoc)
         .expect("project")
         .content;
     assert!(text.contains("More"), "{text}");
+}
+
+fn refused_rows(drained: &YdocDrainResult) -> Vec<(&str, i64, &str)> {
+    drained
+        .refusals
+        .iter()
+        .map(|refusal| {
+            (
+                refusal.origin_id.as_str(),
+                refusal.origin_seq,
+                refusal.reason.message(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_queued_format_two_base_is_set_aside_for_its_note_and_the_drain_goes_on() {
+    let (_scratch, _path, mut engine) = open_store();
+    let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+        &mut engine,
+        &newer.encode_full_state(),
+        &newer.richdoc_append_paragraph("Later"),
+    );
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(
+        refused_rows(&drained),
+        [
+            ("peer-a", 0, "ydoc-note-uses-a-newer-body-format"),
+            ("peer-a", 1, "ydoc-note-uses-a-newer-body-format"),
+        ]
+    );
+    assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+}
+
+#[test]
+fn a_queued_format_two_base_writing_under_body_is_set_aside_for_its_note() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Transact, XmlFragment};
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        let stray = yrs::Doc::with_client_id(7);
+        stray
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&newer.encode_full_state()).expect("decode"))
+            .expect("load note");
+        let body = stray.get_or_insert_xml_fragment(dohc_engine_collab::ydoc::ROOT_BODY);
+        body.insert(
+            &mut stray.transact_mut(),
+            0,
+            yrs::XmlTextPrelim::new("Typed"),
+        );
+        let stray_base = stray
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let (_scratch, _path, mut engine) = open_store();
+        let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+            &mut engine,
+            &stray_base,
+            &newer.richdoc_append_paragraph("Later"),
+        );
+        let drained = drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults,
+        )
+        .expect("the drain goes on");
+        assert_eq!(
+            refused_rows(&drained),
+            [
+                ("peer-a", 0, "ydoc-update-outside-format-two-roots"),
+                ("peer-a", 1, "ydoc-update-outside-format-two-roots"),
+            ]
+        );
+        assert_the_format_one_lineage_drained(&engine, &key, &older_base, 0);
+    });
+}
+
+#[test]
+fn a_crash_while_setting_a_format_two_lineage_aside_leaves_a_drain_that_goes_on() {
+    let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    for point in [
+        dohc_engine_storage::FaultPoint::StorageBeforePersist,
+        dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        for nth in 0..4 {
+            let (_scratch, _path, mut engine) = open_store();
+            let (key, older_base) = queue_a_format_two_lineage_before_a_format_one(
+                &mut engine,
+                &newer.encode_full_state(),
+                &newer.richdoc_append_paragraph("Later"),
+            );
+            let crash = super::ordinary_pull_progress::CrashAt {
+                point,
+                nth,
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let _ = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &crash,
+            );
+            drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .unwrap_or_else(|error| panic!("{point:?} #{nth}: {error:?}"));
+            assert_the_format_one_lineage_drained(&engine, &key, &older_base, 2);
+        }
+    }
 }
