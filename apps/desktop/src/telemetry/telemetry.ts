@@ -19,13 +19,13 @@ import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
 import type { PrivacySettings } from "../settings/userSettings";
 import type { PublicUpdateState } from "../updates/electronUpdater";
 import { isDatasetWriteAction } from "../usage/cliUsage";
+import { DRIVE_SERVER_ORIGIN } from "../workspaces/cloudConfiguration";
 import { errorReport, type ErrorFacts, type ErrorReport, type ReportedError } from "./errorReport";
 import type { ErrorSender } from "./posthogErrors";
 import type { Reporting } from "./reportingConfig";
 
 export const CURRENT_USAGE_NOTICE_VERSION = 2;
 
-const DRIVE_SERVER_ORIGIN = "https://drive.dohc.computer";
 const CRASH_SIGNAL_REASON_PATTERN = /^[a-z-]{1,40}$/;
 
 export type CountBucket = "0" | "1" | "2-5" | "6+";

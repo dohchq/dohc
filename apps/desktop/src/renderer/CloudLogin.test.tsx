@@ -127,6 +127,39 @@ describe("CloudLogin", () => {
     );
   });
 
+  it("connects to dohc Drive in one click and keeps the address in view", async () => {
+    render(<CloudLogin />);
+    await screen.findByTestId("cloud-server-url");
+    expect(screen.getByTestId("cloud-drive").textContent).toContain("Invite-only beta");
+
+    fireEvent.click(screen.getByTestId("cloud-drive-connect"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "https://drive.dohc.computer",
+      }),
+    );
+    expect(await screen.findByTestId("cloud-user-code")).toBeTruthy();
+  });
+
+  it("opens the dohc Drive invite request in the browser", async () => {
+    render(<CloudLogin />);
+    fireEvent.click(await screen.findByTestId("cloud-drive-request-invite"));
+
+    await waitFor(() =>
+      expect(bridgeMock.openExternalUrl).toHaveBeenCalledWith({
+        url: "https://dohc.computer/#drive",
+      }),
+    );
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("leaves the dohc Drive note out of an embedded panel", async () => {
+    render(<CloudLogin embedded />);
+    await screen.findByTestId("cloud-server-url");
+    expect(screen.queryByTestId("cloud-drive")).toBeNull();
+  });
+
   it("ignores a login poll that completes after a retry address re-scoped the panel", async () => {
     vi.useFakeTimers();
     const poll = deferred<{ status: "complete"; email: string }>();

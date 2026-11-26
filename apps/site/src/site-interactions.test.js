@@ -550,7 +550,7 @@ it("pauses reader autoplay for external selector focus while finishing the selec
   flip.destroy();
 });
 
-describe("Drive waitlist", () => {
+describe("Drive invite requests", () => {
   const join = async (email = "ada@example.com") => {
     await mount("#drive");
     const form = document.querySelector("[data-waitlist]");
@@ -576,7 +576,9 @@ describe("Drive waitlist", () => {
         email: "ada@example.com",
         source: "Drive waitlist",
       });
-      expect(document.querySelector("[data-waitlist-status]").textContent).toContain("on the list");
+      expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
+        "Request received",
+      );
       expect(document.activeElement).toBe(document.querySelector("[data-waitlist-status]"));
       expect(outcomes).toEqual(["succeeded"]);
     } finally {
@@ -610,11 +612,11 @@ describe("Drive waitlist", () => {
       const form = await join();
       await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
       expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
-        "Too many signups",
+        "Too many requests",
       );
       const submit = form.querySelector('button[type="submit"]');
       expect(submit.hasAttribute("aria-disabled")).toBe(false);
-      expect(submit.textContent).toBe("Join the waitlist");
+      expect(submit.textContent).toBe("Request an invite");
       expect(outcomes).toEqual(["rate_limited"]);
     } finally {
       document.removeEventListener("dohc:waitlist-submitted", onOutcome);
@@ -635,7 +637,7 @@ describe("Drive waitlist", () => {
       );
       const form = await join();
       const status = document.querySelector("[data-waitlist-status]");
-      expect(status.textContent).toBe("Joining the waitlist…");
+      expect(status.textContent).toBe("Sending your request…");
       expect(form.querySelector('button[type="submit"]').getAttribute("aria-disabled")).toBe(
         "true",
       );
@@ -666,7 +668,7 @@ describe("Drive waitlist", () => {
     const form = await join();
     await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
     expect(document.querySelector("[data-waitlist-status]").textContent).not.toContain(
-      "on the list",
+      "Request received",
     );
   });
 });
