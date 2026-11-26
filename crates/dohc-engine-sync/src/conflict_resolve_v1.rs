@@ -5844,6 +5844,51 @@ mod tests {
     }
 
     #[test]
+    fn an_engine_that_does_not_read_format_two_resolves_a_format_two_note_in_format_one() {
+        use yrs::{Map as _, ReadTxn as _, Transact as _};
+        let (current, incoming) = ("Current text\n", "Incoming text\n");
+        let (_scratch, mut store, key) =
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                let marked = yrs::Doc::new();
+                let meta = marked.get_or_insert_map("meta");
+                meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.apply(
+                    &marked
+                        .transact()
+                        .encode_state_as_update_v1(&yrs::StateVector::default()),
+                )
+                .expect("format 2");
+                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, current)
+                    .expect("format-2 note");
+                assert_eq!(doc.note_schema_version(), 2);
+                content_conflict_store(
+                    current,
+                    incoming,
+                    Some(&doc.encode_full_state()),
+                    ContentKind::Richdoc,
+                )
+            });
+        resolve_content_conflict(&mut store, "document-conflict", "document-object", 20);
+        let loaded = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load successor")
+            .expect("active successor");
+        assert_eq!(loaded.doc.note_schema_version(), 1);
+        assert_eq!(
+            store
+                .read_with(|tx| crate::project_ydoc_with_store(
+                    tx,
+                    &key,
+                    &loaded.doc,
+                    ContentKind::Richdoc,
+                ))
+                .expect("project successor")
+                .content,
+            incoming,
+        );
+    }
+
+    #[test]
     fn same_path_scene_resolution_installs_an_exact_scene_successor() {
         let current_text = canonical_scene("current-box");
         let incoming_text = canonical_image_scene("incoming-image");
