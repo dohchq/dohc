@@ -3263,22 +3263,31 @@ pub(crate) fn refuse_rows_of_a_kept_base_in_tx(
     tx: &rusqlite::Transaction<'_>,
     envelope: &crate::ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let field = |name: &str| {
+    let field = |pointer: &str| {
         envelope
             .payload
-            .get(name)
+            .pointer(pointer)
             .and_then(serde_json::Value::as_str)
     };
-    let based = envelope
-        .payload
-        .get("isBaseState")
-        .and_then(serde_json::Value::as_bool);
-    let (Some(version), Some(object), Some(claim), Some(true)) = (
-        field("versionId"),
-        field("objectId"),
-        field("lineageClaimId"),
-        based,
-    ) else {
+    let kept = if envelope.op_kind == "conflict.resolve" {
+        (
+            field("/targetVersionId"),
+            field("/transition/result/objectId"),
+            field("/lineageTransition/successor/lineageClaimId"),
+            Some(true),
+        )
+    } else {
+        (
+            field("/versionId"),
+            field("/objectId"),
+            field("/lineageClaimId"),
+            envelope
+                .payload
+                .get("isBaseState")
+                .and_then(serde_json::Value::as_bool),
+        )
+    };
+    let (Some(version), Some(object), Some(claim), Some(true)) = kept else {
         return Ok(());
     };
     let key = DocKey::new(envelope.workspace_id.as_str(), version, object)

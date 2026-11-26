@@ -283,6 +283,7 @@ fn apply_remote_update_in_transaction(
     }
     // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        load_doc_in(tx, key)?.refuse_a_newer_format()?;
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
     crate::author_coverage::check_remote_admission_in(
