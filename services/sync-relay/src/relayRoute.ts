@@ -412,6 +412,8 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         "press",
         "activate",
         "artifacts",
+        "approval",
+        "confirm-approval",
         "invoke",
         "prepare-migration",
         "approve-migration",

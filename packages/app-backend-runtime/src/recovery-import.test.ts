@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createDatasetJournal } from "./journal";
+import { createDatasetJournal, readDatasetApprover, recordDatasetApprover } from "./journal";
 import { prepareDatasetRecoveryExport } from "./recovery-export";
 import {
   recoveryManifestSha256,
@@ -916,6 +916,39 @@ it("preserves agent-declared approval history through export and recovery instal
       authorize: f.authorize,
     });
     expect(exported[1]).toMatchObject({ kind: "checkpoint", approvalAgent: agent });
+  } finally {
+    await valid.dispose();
+  }
+});
+
+it("keeps who approved each revision's rules through export and recovery installation", async () => {
+  const f = await fixture();
+  recordDatasetApprover(f.db, f.scope, f.revision.revisionSha256, {
+    userId: "owner",
+    role: "owner",
+    approvedAtMs: 1,
+  });
+  const migrated = await f.migrate();
+  const admin = { userId: null, role: "admin" as const, approvedAtMs: 2 };
+  recordDatasetApprover(f.db, f.scope, migrated.approvedRevisionHash, admin);
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }),
+    t = target(f);
+  try {
+    await t.installer.install(
+      {},
+      {
+        transferId: "approver-transfer",
+        manifestSha256: recoveryManifestSha256(valid.manifest, limits),
+        recovery: valid,
+        authorize: f.authorize,
+      },
+    );
+    expect(readDatasetApprover(t.db, f.scope, f.revision.revisionSha256)).toEqual({
+      userId: "owner",
+      role: "owner",
+      approvedAtMs: 1,
+    });
+    expect(readDatasetApprover(t.db, f.scope, migrated.approvedRevisionHash)).toEqual(admin);
   } finally {
     await valid.dispose();
   }

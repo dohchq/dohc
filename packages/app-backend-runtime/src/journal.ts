@@ -84,6 +84,48 @@ export class JournalError extends Error {
   }
 }
 type Authorize = () => unknown;
+/** Who approved a revision's rules. A deleted account's id is cleared, and its role stays. */
+export interface DatasetApprover {
+  userId: string | null;
+  role: "owner" | "admin";
+  approvedAtMs: number;
+}
+export function readDatasetApprover(
+  db: JournalDb,
+  key: DatasetScope,
+  approvedRevisionHash: string,
+): DatasetApprover | null {
+  const row = db
+    .prepare(
+      "SELECT user_id,role,approved_at_ms FROM dohc_dataset_approvers WHERE workspace_id=? AND dataset_id=? AND approved_revision_hash=?",
+    )
+    .get(key.workspaceId, key.datasetId, approvedRevisionHash);
+  return row
+    ? {
+        userId: row.user_id === null ? null : String(row.user_id),
+        role: row.role === "admin" ? "admin" : "owner",
+        approvedAtMs: Number(row.approved_at_ms),
+      }
+    : null;
+}
+export function recordDatasetApprover(
+  db: JournalDb,
+  key: DatasetScope,
+  approvedRevisionHash: string,
+  approver: DatasetApprover,
+): void {
+  db.prepare(
+    `INSERT INTO dohc_dataset_approvers VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,approved_revision_hash)
+    DO UPDATE SET user_id=excluded.user_id,role=excluded.role,approved_at_ms=excluded.approved_at_ms`,
+  ).run(
+    key.workspaceId,
+    key.datasetId,
+    approvedRevisionHash,
+    approver.userId,
+    approver.role,
+    approver.approvedAtMs,
+  );
+}
 export interface JournalOptions {
   db: JournalDb;
   /** Must run the synchronous callback inside the host's authoritative transaction. */
@@ -160,6 +202,7 @@ export type JournalExportRecord =
       schemaSql: string;
       definitionJson: string;
       approvalAgent?: ApprovalAgent | null;
+      approvedBy?: DatasetApprover;
       recordedAtMs?: number;
       capacityBytes: number;
       byteLength: number;
@@ -503,6 +546,10 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       PRIMARY KEY(workspace_id,dataset_id,revision)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_dataset_approval_hash ON dohc_dataset_approval_provenance(workspace_id,dataset_id,approved_revision_hash);
+    CREATE TABLE IF NOT EXISTS dohc_dataset_approvers (
+      workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, approved_revision_hash TEXT NOT NULL,
+      user_id TEXT, role TEXT NOT NULL CHECK(role IN('owner','admin')), approved_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(workspace_id,dataset_id,approved_revision_hash)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_times (
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
       recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0),
@@ -778,6 +825,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           "SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=? AND dataset_id=? AND revision=?",
         )
         .get(key.workspaceId, key.datasetId, current.revision);
+      const approver = readDatasetApprover(db, key, current.approvedRevisionHash);
       return {
         kind: "checkpoint",
         cursor: current,
@@ -792,6 +840,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         ...(approval
           ? { approvalAgent: parseApprovalAgent(JSON.parse(String(approval.agent_json))) }
           : {}),
+        ...(approver ? { approvedBy: approver } : {}),
       };
     }
     const row = db
@@ -1013,6 +1062,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         for (const table of [
           "dohc_dataset_checkpoint_times",
           "dohc_dataset_approval_provenance",
+          "dohc_dataset_approvers",
           "dohc_dataset_materializations",
           "dohc_dataset_receipts",
           "dohc_dataset_events",

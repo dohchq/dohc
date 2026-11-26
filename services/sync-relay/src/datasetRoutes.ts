@@ -107,6 +107,8 @@ export interface DatasetRoute {
     | "activate"
     | "describe"
     | "artifacts"
+    | "approval"
+    | "confirm-approval"
     | "invoke"
     | "prepare-migration"
     | "approve-migration"
@@ -422,6 +424,7 @@ export function createDatasetRoutes(
       "list",
       "describe",
       "artifacts",
+      "approval",
       "permissions",
       "history",
       "history-revision",
@@ -511,6 +514,14 @@ export function createDatasetRoutes(
         }
         if (route.action === "lifecycle") return host.lifecycle(auth, { ...scope, ...page });
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
+        if (route.action === "approval") return host.approval(auth, scope);
+        if (route.action === "confirm-approval") {
+          const body = record(raw, ["revisionSha256"]);
+          return host.confirmApproval(auth, {
+            ...scope,
+            revisionSha256: digest(body.revisionSha256),
+          });
+        }
         if (route.action === "permissions") return host.permissions(auth, { ...scope, ...page });
         if (route.action === "history-revision")
           return host.historyRevision(auth, {

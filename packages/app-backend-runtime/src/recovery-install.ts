@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   journalEventStorageBytes,
+  recordDatasetApprover,
   type DatasetCursor,
   type DatasetJournal,
   type DatasetScope,
@@ -550,6 +551,12 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           db.prepare(
             `INSERT INTO dohc_dataset_approval_provenance SELECT ?,?,revision,json_extract(body,'$.cursor.approvedRevisionHash'),COALESCE(json_extract(body,'$.approvalAgent'),'null') FROM dohc_dataset_import_records WHERE import_id=? AND kind='checkpoint' AND json_type(body,'$.approvalAgent') IS NOT NULL`,
           ).run(scope.workspaceId, scope.datasetId, importId);
+          db.prepare(
+            `INSERT INTO dohc_dataset_approvers SELECT ?,?,json_extract(body,'$.cursor.approvedRevisionHash'),json_extract(body,'$.approvedBy.userId'),json_extract(body,'$.approvedBy.role'),json_extract(body,'$.approvedBy.approvedAtMs') FROM dohc_dataset_import_records WHERE import_id=? AND kind='checkpoint' AND json_type(body,'$.approvedBy') IS NOT NULL ORDER BY revision
+            ON CONFLICT(workspace_id,dataset_id,approved_revision_hash) DO UPDATE SET user_id=excluded.user_id,role=excluded.role,approved_at_ms=excluded.approved_at_ms`,
+          ).run(scope.workspaceId, scope.datasetId, importId);
+          if (cp.approvedBy)
+            recordDatasetApprover(db, scope, cp.cursor.approvedRevisionHash, cp.approvedBy);
           db.prepare(
             `INSERT INTO dohc_dataset_events SELECT ?,?,revision,json_extract(body,'$.previousDigest'),json_extract(body,'$.cursor.digest'),json_extract(body,'$.cursor.hostEpoch'),json_extract(body,'$.cursor.approvedRevisionHash'),json_extract(body,'$.proposalId'),json_extract(body,'$.operation'),json_extract(body,'$.callerKey'),json_extract(body,'$.idempotencyKey'),json_extract(body,'$.payloadSha256'),json_extract(body,'$.resultJson'),blob,json_extract(body,'$.changesetSha256'),json_extract(body,'$.attachedFileIds'),json_extract(body,'$.recordedAtMs'),storage_bytes FROM dohc_dataset_import_records WHERE import_id=? AND kind='event'`,
           ).run(scope.workspaceId, scope.datasetId, importId);

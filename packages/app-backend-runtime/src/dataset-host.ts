@@ -34,6 +34,7 @@ import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifact
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
 import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
+import { readDatasetApprover, recordDatasetApprover } from "./journal.js";
 import type {
   DatasetInvocation,
   DatasetInvocationResult,
@@ -208,6 +209,15 @@ export interface DatasetAuthority {
    */
   person?: string;
 }
+/**
+ * Who creates a Collection and approves changes to its rules: its owner, or a workspace Admin. Grants no data
+ * access. `token` changes when the approver's role or credential does, so an approval in flight stops.
+ */
+export interface DatasetGovernor {
+  role: "owner" | "admin";
+  userId: string;
+  token: string;
+}
 export interface DatasetDataGrant {
   operationIds: string[];
   discover: boolean;
@@ -235,6 +245,8 @@ export interface DatasetHostOptions<Context> {
     context: Context,
     request: { workspaceId: string; datasetId?: string; access: DatasetAccess },
   ): DatasetAuthority;
+  /** Synchronous. Without it only the owner governs, as `resolveAuthority` names them. */
+  resolveGovernor?(context: Context, key: DatasetScope): DatasetGovernor;
   runtime?: AppBackendRuntimeOptions;
   persistentRuntime?: PersistentRuntimeOptions;
   /** Compile the captured operations artifact to the runtime's supported JavaScript. */
@@ -646,6 +658,25 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (result.caller.kind !== "owner" || result.agent) denied();
     return result;
   }
+  function governor(context: Context, key: DatasetScope): DatasetGovernor {
+    if (!options.resolveGovernor) {
+      const result = owner(context, key);
+      if (result.caller.kind !== "owner") denied();
+      return { role: "owner", userId: result.caller.userId, token: JSON.stringify(result) };
+    }
+    const result = synchronous(() => options.resolveGovernor!(context, key));
+    if (result.role !== "owner" && result.role !== "admin") denied();
+    return { role: result.role, userId: text(result.userId), token: text(result.token, 4096) };
+  }
+  const governance = (context: Context, key: DatasetScope) =>
+    hash(JSON.stringify([governor(context, key), lifecycle(key).generation]));
+  function recordApprover(key: DatasetScope, revisionSha256: string, by: DatasetGovernor) {
+    recordDatasetApprover(db, key, revisionSha256, {
+      userId: by.userId,
+      role: by.role,
+      approvedAtMs: Date.now(),
+    });
+  }
   function revision(key: DatasetScope): DatasetRevision {
     const row = db
       .prepare(
@@ -1006,9 +1037,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         previous = revision(key),
         expected = { ...raw.expected };
       live(key);
-      const generation = lifecycle(key).generation,
-        ownerToken = JSON.stringify(owner(context, key)),
-        authorityKey = hash(JSON.stringify([ownerToken, generation]));
+      const authorityKey = governance(context, key);
       if (
         expected.workspaceId !== key.workspaceId ||
         expected.datasetId !== key.datasetId ||
@@ -1022,11 +1051,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const authorize = () => {
         raw.signal?.throwIfAborted();
         live(key);
-        if (
-          lifecycle(key).generation !== generation ||
-          JSON.stringify(owner(context, key)) !== ownerToken
-        )
-          denied();
+        if (governance(context, key) !== authorityKey) denied();
         assertDatasetAttemptsCommitted(db, key);
       };
       authorize();
@@ -1096,17 +1121,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "conflict",
           "This preview is no longer available. Preview the change again.",
         );
-      const authorityKey = hash(
-        JSON.stringify([JSON.stringify(owner(context, key)), lifecycle(key).generation]),
-      );
+      const approver = governor(context, key),
+        authorityKey = governance(context, key);
       const authorize = () => {
         raw.signal?.throwIfAborted();
         live(key);
-        if (
-          hash(JSON.stringify([JSON.stringify(owner(context, key)), lifecycle(key).generation])) !==
-          saved.authorityKey
-        )
-          denied();
+        if (governance(context, key) !== saved.authorityKey) denied();
         assertDatasetAttemptsCommitted(db, key);
       };
       authorize();
@@ -1166,6 +1186,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare(
             "UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?",
           ).run(revisionJson, artifactsJson, key.workspaceId, key.datasetId);
+          recordApprover(key, saved.approved.revisionSha256, approver);
           generatedVerdicts.delete(saved.previous.revisionSha256);
         },
       });
@@ -1191,17 +1212,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "conflict",
           "This preview is no longer available. Preview the change again.",
         );
-      const authorityKey = hash(
-        JSON.stringify([JSON.stringify(owner(context, key)), lifecycle(key).generation]),
-      );
+      const authorityKey = governance(context, key);
       const authorize = () => {
         raw.signal?.throwIfAborted();
         live(key);
-        if (
-          hash(JSON.stringify([JSON.stringify(owner(context, key)), lifecycle(key).generation])) !==
-          saved.authorityKey
-        )
-          denied();
+        if (governance(context, key) !== saved.authorityKey) denied();
       };
       return options.supervisor.migrationPreviewPage({
         scope: key,
@@ -1222,11 +1237,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         throw new DatasetHostError("invalid", "This host cannot preview Collection changes.");
       const key = scope(raw),
         saved = migrationCandidates.get(text(raw.candidateId));
-      owner(context, key);
+      const authorityKey = governance(context, key);
       if (!saved) return;
-      const authorityKey = hash(
-        JSON.stringify([JSON.stringify(owner(context, key)), lifecycle(key).generation]),
-      );
       await options.supervisor.discardMigration({
         scope: key,
         tables: saved.previous.definition.tables.map((table) => table.sqlName),
@@ -1235,7 +1247,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         signal: raw.signal,
         authorize() {
           raw.signal?.throwIfAborted();
-          owner(context, key);
+          governor(context, key);
         },
       });
       migrationCandidates.delete(raw.candidateId);
@@ -1677,11 +1689,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         source = raw.operationSource,
         capacityBytes = raw.capacityBytes,
         signal = raw.signal;
-      const captured = owner(context, key),
-        ownerToken = JSON.stringify(captured);
+      const approver = governor(context, key),
+        authorityKey = governance(context, key);
       const authorize = () => {
         signal?.throwIfAborted();
-        if (JSON.stringify(owner(context, key)) !== ownerToken) denied();
+        if (governance(context, key) !== authorityKey) denied();
       };
       journal.assertNotDeleted(key, authorize);
       const existing = db
@@ -1751,6 +1763,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             revisionJson,
             artifactsJson,
           );
+          recordApprover(key, approved.revisionSha256, approver);
         },
       });
       authorize();
@@ -1850,6 +1863,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare(
             "UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?",
           ).run(revisionJson, artifactsJson, key.workspaceId, key.datasetId);
+          if (captured.caller.kind === "owner")
+            recordApprover(key, approved.revisionSha256, {
+              role: "owner",
+              userId: captured.caller.userId,
+              token: ownerToken,
+            });
           generatedVerdicts.delete(previous.revisionSha256);
         },
       });
@@ -2114,7 +2133,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     approvedArtifacts(context: Context, raw: DatasetScope) {
       const key = scope(raw);
       const current = journal.head(key, () => {
-        owner(context, key);
+        governor(context, key);
       });
       return {
         revision: revision(key),
@@ -2123,6 +2142,32 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         cursor: current.cursor,
         checkpointSha256: current.checkpointSha256,
       };
+    },
+    /** Who approved the rules the Collection runs now, or null when no approval was recorded. */
+    approval(context: Context, raw: DatasetScope) {
+      const key = scope(raw);
+      return transaction(() => {
+        governor(context, key);
+        const { revisionSha256 } = revision(key);
+        return { revisionSha256, approvedBy: readDatasetApprover(db, key, revisionSha256) };
+      });
+    },
+    /** The owner approves the rules the Collection runs now again, without changing them. */
+    confirmApproval(context: Context, raw: DatasetScope & { revisionSha256: string }) {
+      const key = scope(raw);
+      return transaction(() => {
+        const by = governor(context, key);
+        if (by.role !== "owner") denied();
+        live(key);
+        const { revisionSha256 } = revision(key);
+        if (revisionSha256 !== raw.revisionSha256)
+          throw new DatasetHostError(
+            "conflict",
+            "This Collection's rules changed. Review them again before you approve them.",
+          );
+        recordApprover(key, revisionSha256, by);
+        return { revisionSha256, approvedBy: readDatasetApprover(db, key, revisionSha256) };
+      });
     },
     history(
       context: Context,

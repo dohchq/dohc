@@ -2,7 +2,7 @@ import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance"
 import { createHash } from "node:crypto";
 import { APP_BACKEND_BULK_LIMITS, appBackendLimit } from "@dohc/security-contract/app-backend";
 import { journalEventStorageBytes } from "./journal.js";
-import type { DatasetCursor, JournalExportRecord } from "./journal.js";
+import type { DatasetApprover, DatasetCursor, JournalExportRecord } from "./journal.js";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 export function invalidRecovery(reason: string): never {
@@ -55,6 +55,15 @@ export function parseRecoveryCursor(v: unknown): DatasetCursor {
     digest: recoveryDigest(r.digest),
   };
 }
+function recoveryApprover(v: unknown): DatasetApprover {
+  const r = recoveryObject(v, ["userId", "role", "approvedAtMs"]);
+  if (r.role !== "owner" && r.role !== "admin") return invalidRecovery("invalid approver.");
+  return {
+    userId: r.userId === null ? null : recoveryText(r.userId, 256),
+    role: r.role,
+    approvedAtMs: recoveryInteger(r.approvedAtMs),
+  };
+}
 export function equalRecoveryCursor(a: DatasetCursor, b: DatasetCursor): boolean {
   return (
     a.workspaceId === b.workspaceId &&
@@ -85,7 +94,7 @@ export function parseRecoveryJournalRecord(
         "byteLength",
         "sha256",
       ],
-      ["approvalAgent", "recordedAtMs"],
+      ["approvalAgent", "approvedBy", "recordedAtMs"],
     );
     const c = parseRecoveryCursor(r.cursor),
       p = r.previous === null ? null : parseRecoveryCursor(r.previous);
@@ -138,6 +147,7 @@ export function parseRecoveryJournalRecord(
       ...(r.approvalAgent === undefined
         ? {}
         : { approvalAgent: parseApprovalAgent(r.approvalAgent) }),
+      ...(r.approvedBy === undefined ? {} : { approvedBy: recoveryApprover(r.approvedBy) }),
     };
   }
   if (kind !== "event") return invalidRecovery("unexpected journal record.");
