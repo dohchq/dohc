@@ -129,6 +129,7 @@
   "desktop:cancel-allow-dohc-in-t3-code": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:list-t3-code-projects": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:list-t3-code-threads": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:start-t3-code-thread": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:ready-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:set-agent-thread-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-agent-thread-lines": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

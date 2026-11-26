@@ -165,6 +165,7 @@ test("MCP config copies the canonical workspace path", async () => {
     const sheet = page.getByTestId("agent-add-sheet");
     await sheet.getByTestId("agent-runs-with-mcp").click();
     await sheet.getByTestId("agent-add-name").fill("Terminal");
+    await sheet.getByTestId("agent-add-next").click();
     await sheet.getByTestId("agent-add-confirm").click();
     await expect(sheet).toHaveCount(0);
     const added = page.locator('[data-testid="agent-row"][aria-label="Terminal"]');

@@ -199,6 +199,7 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await section.getByTestId("agent-add").click();
     const addSheet = page.getByTestId("agent-add-sheet");
     await addSheet.getByTestId("agent-runs-with-link").click();
+    await addSheet.getByTestId("agent-add-next").click();
     await expect(addSheet.getByTestId("agent-add-link")).toContainText(new URL(proxy.origin).host);
     await expect(addSheet.getByTestId("agent-add-link-copy")).toBeEnabled();
     await page.mouse.move(0, 0);

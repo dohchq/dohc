@@ -104,6 +104,26 @@ describe("dohc's connection to T3 Code", () => {
     expect(await connection.access()).toBeNull();
   });
 
+  it("starts an idle thread and leaves its mode to T3 Code", async () => {
+    const { t3, connection } = await setup({ program: true });
+    t3.tools.t3_thread_launch = () => ({ threadId: "mcp:t-new", runId: null, status: null });
+    const start = () =>
+      connection.startThread({ projectId: "p1", title: "Planner", requestId: "r1" });
+    const launched = () => t3.calls.filter((call) => call.tool === "t3_thread_launch");
+
+    expect(await problemOf(start())).toBe("not-allowed");
+    expect(launched()).toEqual([]);
+
+    await connection.signIn({ open: browser, access: "auto" });
+    await expect(start()).resolves.toEqual({ id: "mcp:t-new" });
+    expect(launched().at(-1)?.args).toEqual({
+      projectId: "p1",
+      title: "Planner",
+      generateTitle: false,
+      clientRequestId: "r1",
+    });
+  });
+
   it("says it cannot allow dohc here, and keeps what it has, when its own code cannot be made", async () => {
     const without = await setup();
     expect(without.connection.canAllowHere()).toBe(false);

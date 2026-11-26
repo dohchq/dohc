@@ -851,6 +851,9 @@ const LISTED_CAPABILITIES = {
   "agent.thread.t3code.list": capability("List your projects and threads in T3 Code.", {
     ipc: ["listT3CodeProjects", "listT3CodeThreads"],
   }),
+  "agent.thread.t3code.start": capability("Start a thread in T3 Code for an agent you add.", {
+    ipc: ["startT3CodeThread"],
+  }),
   "agent.thread.t3code.read": capability(
     "Read whether dohc is allowed in T3 Code on this computer.",
     { ipc: ["readT3CodeConnection"] },

@@ -700,6 +700,24 @@ export async function listT3CodeThreads(
   };
 }
 
+const Launched = z.object({ threadId: z.string() });
+
+export async function startT3CodeThread(
+  session: T3CodeSession,
+  input: { projectId: string; title: string; requestId: string },
+): Promise<{ id: string }> {
+  const launched = shaped(
+    Launched,
+    await session.call("t3_thread_launch", {
+      projectId: input.projectId,
+      title: input.title,
+      generateTitle: false,
+      clientRequestId: input.requestId,
+    }),
+  );
+  return { id: launched.threadId };
+}
+
 const Sent = z.object({ runId: z.string().nullable().optional() });
 
 /**

@@ -113,6 +113,7 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     const sheet = page.getByTestId("agent-add-sheet");
     await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
     await sheet.getByTestId("agent-runs-with-mcp").click();
+    await sheet.getByTestId("agent-add-next").click();
     await expect(sheet.locator('[data-testid="agent-add-config-copy"]:enabled')).toHaveCount(1);
     await page.mouse.move(0, 0);
     await shoot(page, page, "agents-you-run-b-add");

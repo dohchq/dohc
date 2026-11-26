@@ -8624,6 +8624,18 @@ export const agentThreadOperations = {
     result: T3CodeThreadPage,
     guard: "trusted-sender",
   },
+  startT3CodeThread: {
+    capabilityId: "agent.thread.t3code.start",
+    scope: "device",
+    channel: "desktop:start-t3-code-thread",
+    payload: z.strictObject({
+      projectId: z.string().min(1).max(512),
+      title: z.string().trim().min(1).max(200),
+      requestId: z.string().min(1).max(128),
+    }),
+    result: z.strictObject({ threadId: AgentThread.shape.id }),
+    guard: "trusted-sender",
+  },
   // Opens the agent's thread in its tool's own window. Main builds the link
   // from the agent's saved thread, so a window names an agent and never a link.
   openAgentThread: {
