@@ -15,7 +15,8 @@ export function createPhysicalWorkspaceRemoval<
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
-  confirmDraftRemoval?(workspaceId: string): Promise<boolean>;
+  removeSecrets?(workspaceId: string): Promise<void>;
+  confirmRemoval?(workspaceId: string): Promise<boolean>;
   onError(workspaceId: string, error: unknown): void;
 }) {
   return async function removePhysicalWorkspace(
@@ -24,13 +25,13 @@ export function createPhysicalWorkspaceRemoval<
     // Runs once the person has agreed, before the workspace closes.
     confirmed: () => void | Promise<void> = () => undefined,
     // A join that failed takes its unfinished entry out of the list without
-    // asking, because its typing waiting to recover stays on disk.
-    { keepDrafts = false } = {},
+    // asking, because its typing waiting to recover and its saved secrets stay on disk.
+    { keepLocalData = false } = {},
   ): Promise<boolean> {
     if (
-      !keepDrafts &&
-      dependencies.confirmDraftRemoval &&
-      !(await dependencies.confirmDraftRemoval(binding.workspaceId))
+      !keepLocalData &&
+      dependencies.confirmRemoval &&
+      !(await dependencies.confirmRemoval(binding.workspaceId))
     )
       return false;
     await confirmed();
@@ -44,11 +45,13 @@ export function createPhysicalWorkspaceRemoval<
         dependencies.removeWorkspace(binding.workspaceId);
       },
     });
-    if (keepDrafts) return true;
-    try {
-      await dependencies.removeDrafts(binding.workspaceId);
-    } catch (error) {
-      dependencies.onError(binding.workspaceId, error);
+    if (keepLocalData) return true;
+    for (const remove of [dependencies.removeDrafts, dependencies.removeSecrets]) {
+      try {
+        await remove?.(binding.workspaceId);
+      } catch (error) {
+        dependencies.onError(binding.workspaceId, error);
+      }
     }
     return true;
   };

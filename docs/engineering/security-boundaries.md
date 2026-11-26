@@ -440,7 +440,10 @@ Storage follows the workspace's sync mode:
   storage keeps values out of workspace files and API responses; it does not defend
   against arbitrary code running as the same OS user, and it does not detect a rollback to
   an older copy of a vault or approval file. Turning on sync later does not copy local
-  secrets to the server; the owner enters them on the server directly. Pausing sync on a
+  secrets to the server; the owner enters them on the server directly, and Settings offers
+  to delete the copies left on this computer. Removing or forgetting a workspace deletes
+  its vault and approval file after the owner confirms and the workspace leaves the list;
+  a failed delete is logged and leaves only an unused file. Pausing sync on a
   synced workspace keeps its server binding and refuses secret reads or changes until sync
   resumes instead of switching to local keychain storage.
 - **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
@@ -473,6 +476,13 @@ sending, the relay rereads every secret it loaded and refuses the request if one
 and the desktop executor compares each secret it reads with the one the approval saw,
 checking a webhook link again after it looks up the link's address.
 
+An HTTP step runs only while nobody but the owner can edit its Collection, its
+automations file, or code it runs. A workspace member counts only when their access
+reaches Edit on one of those paths: members at the default Comment level or at View don't
+hold the step. A pending member invite counts the same way, by its invited level and the
+folder rules, because it becomes that access as soon as someone claims it. See the
+[outbound webhook route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
+
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
 enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),
 raw IPv4/IPv6 literals, trailing dots, single-label hosts, and reserved local suffixes
@@ -495,14 +505,14 @@ and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceS
 ### Automation `http` steps
 
 An automation's `http` step sends `POST` (the default) or `GET` to a static HTTPS URL or an
-`http-url` secret, with optional `http-header` secrets. It runs only in a private Collection
-that no one else can edit. The owner must Allow it in Desktop. That approval is a digest of
+`http-url` secret, with optional `http-header` secrets. It runs only while no one else can
+edit the Collection. The owner must Allow it in Desktop. That approval is a digest of
 the Collection, the step's place, its URL target, method, header names, secret names and
 prefixes, the whole automation definition, and the hash of each code file it runs. Any edit
 to the automation or its code files holds the step until the owner allows it again. A
 synced workspace sends through the relay. The relay reads the method and the destination
 from the committed definition, never from the request, and checks the committed definition,
-the approval, and that the Collection is private again right before it sends.
+the approval, and that no one else can edit the Collection again right before it sends.
 
 Without `as`, the step reads only the status, and the response cap is 64 KiB. With
 `as: name`, the step fetches data: it reads up to 192 KiB of uncompressed, strict UTF-8

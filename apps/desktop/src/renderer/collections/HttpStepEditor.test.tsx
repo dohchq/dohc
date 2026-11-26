@@ -68,7 +68,7 @@ describe("HttpStepEditor", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Add secret header" }));
+    await user.click(screen.getByRole("button", { name: "Add API key header" }));
     expect(current.secretHeaders).toEqual([
       { name: "Authorization", secret: "RESEND_API_KEY", prefix: "Bearer " },
     ]);
@@ -128,5 +128,47 @@ describe("HttpStepEditor", () => {
     expect(current.as).toBe("s");
     rerender(editor());
     expect(screen.getByText("s.count")).toBeTruthy();
+  });
+
+  it("offers a new API key named after the missing secret, for the step's website", async () => {
+    const user = userEvent.setup();
+    let current: HttpStep = {
+      kind: "http",
+      url: { kind: "literal", url: "https://api.resend.com/emails" },
+      method: "POST",
+      headers: [],
+      secretHeaders: [{ name: "Authorization", secret: "RESEND_API_KEY", prefix: "Bearer " }],
+      body: null,
+      as: null,
+    };
+    const onAddSecret = vi.fn();
+    const editor = (add?: typeof onAddSecret) => (
+      <HttpStepEditor
+        number={1}
+        stepKey={1}
+        step={current}
+        secrets={[]}
+        secretsUnavailable={null}
+        problem={() => null}
+        onChange={(next) => {
+          current = next;
+        }}
+        onAddSecret={add}
+      />
+    );
+
+    const { rerender } = render(editor());
+    expect(screen.queryByRole("button", { name: "New API key" })).toBeNull();
+
+    rerender(editor(onAddSecret));
+    await user.click(screen.getByRole("button", { name: "New API key" }));
+    expect(onAddSecret).toHaveBeenCalledWith(
+      { name: "RESEND_API_KEY", usage: "http-header", hosts: ["api.resend.com"] },
+      expect.any(Function),
+    );
+    onAddSecret.mock.calls[0]?.[1]("RESEND_KEY");
+    expect(current.secretHeaders).toEqual([
+      { name: "Authorization", secret: "RESEND_KEY", prefix: "Bearer " },
+    ]);
   });
 });

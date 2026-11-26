@@ -16,6 +16,7 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import {
   computeHttpStepApprovalDigest,
+  httpStepSecretNames,
   httpStepSecretProblem,
   workspaceSecretApprovalBindings,
 } from "@dohc/workspace-contracts/http-step-approvals";
@@ -145,6 +146,7 @@ import {
   SHARED_BUTTON_UNCHECKED,
   type DatasetOperationCeiling,
 } from "./buttonPresser";
+import type { WorkspaceSecretUse } from "@dohc/workspace-contracts/workspace-secrets";
 import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
@@ -2199,6 +2201,32 @@ export class CollectionAutomations {
   /** Whether any Collection has an automation dohc can run, switched on or not. */
   hasAutomations(): boolean {
     return this.everyAutomation().length > 0;
+  }
+
+  /**
+   * The automations whose webhook steps name each workspace secret, including
+   * ones that can't run now, or null until this executor has opened.
+   */
+  secretUses(): Map<string, WorkspaceSecretUse[]> | null {
+    if (this.state !== "open") return null;
+    const uses = new Map<string, Array<{ collectionPath: string; automationName: string }>>();
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      for (const entry of indexed.file.entries) {
+        if (entry.status !== "valid") continue;
+        const names = new Set(
+          stepsInOrder(entry.automation).flatMap(({ step }) =>
+            step.kind === "http" ? httpStepSecretNames(step) : [],
+          ),
+        );
+        for (const name of names) {
+          const list = uses.get(name) ?? [];
+          list.push({ collectionPath, automationName: entry.automation.name });
+          uses.set(name, list);
+        }
+      }
+    }
+    return uses;
   }
 
   /** The automations in one Collection's file, with why each can or cannot run. */

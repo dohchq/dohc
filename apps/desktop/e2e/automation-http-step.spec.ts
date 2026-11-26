@@ -173,8 +173,6 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
       )
       .toBe(200);
 
-    await addHeaderSecret(page, "RESEND_API_KEY", "api.resend.com", headerSecretValue);
-
     const panel = await openTasksAutomations(page);
     await panel.getByRole("button", { name: "New automation" }).click();
     await panel.getByLabel("Name").fill("Notify on new task");
@@ -185,10 +183,24 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
     await panel.getByRole("button", { name: "Add header", exact: true }).click();
     await panel.getByLabel("Step 2, header 1 name", { exact: true }).fill("X-Source");
     await panel.getByLabel("Step 2, header 1 value", { exact: true }).fill("dohc");
-    await panel.getByRole("button", { name: "Add secret header", exact: true }).click();
+    await panel.getByRole("button", { name: "Add API key header", exact: true }).click();
+    await expect(panel.getByLabel("Step 2, secret header 1 secret", { exact: true })).toHaveValue(
+      "",
+    );
+    await panel.getByRole("button", { name: "New API key", exact: true }).click();
+    const editor = page.getByTestId("workspace-secret-editor-dialog");
+    await expect(editor.getByTestId("workspace-secret-hosts-input")).toHaveValue("api.resend.com");
+    await expect(editor.getByRole("heading", { name: "Add API key" })).toBeVisible();
+    await expect(editor.getByRole("radio", { name: "Webhook link" })).toHaveCount(0);
+    await editor.getByTestId("workspace-secret-name-input").fill("RESEND_API_KEY");
+    await editor.getByTestId("workspace-secret-value-input").fill(headerSecretValue);
+    await shoot(page, editor, "secrets-add-from-builder");
+    await editor.getByTestId("workspace-secret-save").click();
+    await expect(editor).toHaveCount(0);
     await expect(panel.getByLabel("Step 2, secret header 1 secret", { exact: true })).toHaveValue(
       "RESEND_API_KEY",
     );
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("Notify on new task");
     await panel.getByLabel("Step 2, body type", { exact: true }).selectOption("json");
     await shoot(page, panel, "pr2-http-builder");
 
@@ -461,7 +473,7 @@ test("holds a GET fetch with plain copy, holds it again after an edit, and keeps
     await builder.getByLabel("Step 2, method", { exact: true }).selectOption("GET");
     await expect(builder.getByLabel("Step 2, body type", { exact: true })).toHaveCount(0);
     await builder.getByLabel("Step 2, webhook URL").fill("https://httpbin.org/bearer");
-    await builder.getByRole("button", { name: "Add secret header", exact: true }).click();
+    await builder.getByRole("button", { name: "Add API key header", exact: true }).click();
     await builder.getByLabel("Step 2, save the answer as", { exact: true }).fill("check");
     await expect(builder).toContainText("Fetch data");
     await shoot(desktop.page, builder, "fetch-builder");

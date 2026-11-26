@@ -1,7 +1,7 @@
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowDown, ArrowUp, Clock, Info, Plus, Trash2 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type {
   AutomationDiagnostic,
@@ -29,6 +29,7 @@ import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import { HttpStepEditor } from "./HttpStepEditor";
+import { SecretEditorDialog, type SecretDraft } from "../settings/WorkspaceSecretsSettings";
 import {
   automationTableOf,
   conditionFormula,
@@ -217,7 +218,7 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "invalid-path":
     "Write the path inside its folder, with / between folders, and no .. or leading /.",
   "invalid-http-url":
-    "Enter a public https:// URL on port 443 with no braces, credentials, or fragment, or choose a Secret URL.",
+    "Enter a public https:// URL on port 443 with no braces, credentials, or fragment, or choose Secret webhook link.",
   "invalid-http-method": "Choose GET or POST.",
   "http-get-with-body": "A GET request sends no body. Choose POST or remove the body.",
   "invalid-secret-name":
@@ -1802,6 +1803,14 @@ export function AutomationBuilder(props: {
       : secretsQuery.error
         ? "Could not load workspace secrets."
         : null;
+  const secretRequests = useRequestSequence([workspaceId, collectionPath]);
+  const [addingSecret, setAddingSecret] = useState<{
+    draft: SecretDraft;
+    apply: (name: string) => void;
+  } | null>(null);
+  const canAddSecret =
+    secretsQuery.value?.kind === "ready" &&
+    secretsQuery.value.secrets.length < secretsQuery.value.limit;
   const edits = (entry: StepEntry) =>
     entry.step.kind === "if" ||
     entry.step.kind === "run" ||
@@ -2200,9 +2209,9 @@ export function AutomationBuilder(props: {
     if (message?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
     if (step.kind === "http") {
       if (step.url.kind === "literal" && step.url.url.trim() === "") {
-        problems.set(`step-${key}/http`, "Enter an HTTPS webhook URL.");
+        problems.set(`step-${key}/http`, "Enter an https:// link.");
       } else if (step.url.kind === "secret" && step.url.secret.trim() === "") {
-        problems.set(`step-${key}/http`, "Choose a webhook URL secret.");
+        problems.set(`step-${key}/http`, "Choose a secret webhook link.");
       }
       if (step.as !== null && !RESULT_NAME.test(step.as)) {
         problems.set(
@@ -3363,6 +3372,9 @@ export function AutomationBuilder(props: {
             secretsUnavailable={workspaceSecretsUnavailable}
             problem={problem}
             onChange={(next) => setStep(key, (current) => ({ ...current, step: next }))}
+            onAddSecret={
+              canAddSecret ? (draft, apply) => setAddingSecret({ draft, apply }) : undefined
+            }
           />
         ) : step.kind === "wake-agent" ? (
           // Another person's agent step acts as them, so its words stay theirs. Moving or removing it keeps its verdict.
@@ -4329,6 +4341,25 @@ export function AutomationBuilder(props: {
           </div>
         </Overlay>
       ) : null}
+      {addingSecret && secretsQuery.value?.kind === "ready"
+        ? createPortal(
+            <SecretEditorDialog
+              mode={{ kind: "add", draft: addingSecret.draft }}
+              storage={secretsQuery.value.storage}
+              existingNames={new Set(secretsQuery.value.secrets.map((secret) => secret.name))}
+              onCancel={() => setAddingSecret(null)}
+              onSave={async (secret) => {
+                const token = secretRequests.next();
+                await bridge().setWorkspaceSecret({ workspaceId, secret });
+                if (!secretRequests.isCurrent(token)) return;
+                addingSecret.apply(secret.name);
+                setAddingSecret(null);
+                void secretsQuery.retry();
+              }}
+            />,
+            document.body,
+          )
+        : null}
     </form>
   );
 }

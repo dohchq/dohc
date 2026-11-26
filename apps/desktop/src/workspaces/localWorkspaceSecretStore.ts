@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -134,6 +134,7 @@ export interface LocalWorkspaceSecretStore {
     name: string,
   ): Promise<{ summary: WorkspaceSecretSummary; value: string } | null>;
   clearWorkspace(workspaceId: string): Promise<void>;
+  hasSaved(workspaceId: string): Promise<boolean>;
 }
 
 function summarizeEntries(entries: StoredFile["entries"]): WorkspaceSecretSummary[] {
@@ -301,5 +302,12 @@ export function createLocalWorkspaceSecretStore(options: {
           if (error.code !== "ENOENT") throw error;
         });
       }),
+    hasSaved: (workspaceId) =>
+      inOrder(() =>
+        access(fileFor(workspaceId)).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => error.code !== "ENOENT",
+        ),
+      ),
   };
 }

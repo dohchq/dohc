@@ -1,5 +1,10 @@
 import { Info, Plus, Trash2 } from "lucide-react";
-import type { WorkspaceSecretSummary } from "@dohc/workspace-contracts/workspace-secrets";
+import {
+  normalizeSecretAllowedHost,
+  type WorkspaceSecretSummary,
+  type WorkspaceSecretUsage,
+} from "@dohc/workspace-contracts/workspace-secrets";
+import type { SecretDraft } from "../settings/WorkspaceSecretsSettings";
 import { IconButton, SecondaryButton } from "../ui/controls";
 import { StatusLine } from "./AutomationParts";
 import type { AutomationStep, AutomationValue } from "./automationSentence";
@@ -25,6 +30,28 @@ function Problem({ shown }: { shown: Shown }) {
     <p id={shown.id} data-problem className="m-0 mt-1 text-[12px] leading-snug text-danger">
       {shown.text}
     </p>
+  );
+}
+
+function hostOf(url: string): string[] {
+  try {
+    const host = normalizeSecretAllowedHost(new URL(url).hostname);
+    return host ? [host] : [];
+  } catch {
+    return [];
+  }
+}
+
+function NewSecretButton(props: { label: string; onClick: () => void }) {
+  return (
+    <SecondaryButton
+      size="compact"
+      className="flex items-center gap-1 self-start"
+      onClick={props.onClick}
+    >
+      <Plus size={12} aria-hidden />
+      {props.label}
+    </SecondaryButton>
   );
 }
 
@@ -86,8 +113,19 @@ export function HttpStepEditor(props: {
   secretsUnavailable: string | null;
   problem: (key: string) => Shown;
   onChange: (next: HttpStep) => void;
+  onAddSecret?: (draft: SecretDraft, apply: (name: string) => void) => void;
 }) {
-  const { number, stepKey, step, problem, onChange } = props;
+  const { number, stepKey, step, problem, onChange, onAddSecret } = props;
+  const savedNames = new Set((props.secrets ?? []).map((secret) => secret.name));
+  const addSecret = (named: string, usage: WorkspaceSecretUsage, apply: (name: string) => void) =>
+    onAddSecret?.(
+      {
+        name: named !== "" && !savedNames.has(named) ? named : "",
+        usage,
+        hosts: usage === "http-header" && step.url.kind === "literal" ? hostOf(step.url.url) : [],
+      },
+      apply,
+    );
   const urlSecrets = (props.secrets ?? []).filter((secret) => secret.usage === "http-url");
   const headerSecrets = (props.secrets ?? []).filter((secret) => secret.usage === "http-header");
   const totalHeaders = step.headers.length + step.secretHeaders.length;
@@ -136,8 +174,8 @@ export function HttpStepEditor(props: {
             }}
             className={selectClass}
           >
-            <option value="literal">HTTPS URL</option>
-            <option value="secret">Secret URL</option>
+            <option value="literal">Link in this step</option>
+            <option value="secret">Secret webhook link</option>
           </select>
           {step.url.kind === "literal" ? (
             <input
@@ -155,7 +193,7 @@ export function HttpStepEditor(props: {
             />
           ) : (
             <select
-              aria-label={`Step ${number}, webhook URL secret`}
+              aria-label={`Step ${number}, secret webhook link`}
               data-focus={`step-${stepKey}-first`}
               value={step.url.secret}
               onChange={(event) =>
@@ -165,7 +203,7 @@ export function HttpStepEditor(props: {
               {...invalid(urlProblem)}
             >
               <option value="" disabled>
-                {urlSecrets.length === 0 ? "No webhook URL secrets yet" : "Choose a secret"}
+                {urlSecrets.length === 0 ? "No webhook links saved yet" : "Choose a secret"}
               </option>
               {step.url.secret !== "" &&
               !urlSecrets.some(
@@ -182,9 +220,19 @@ export function HttpStepEditor(props: {
           )}
         </div>
         <Problem shown={urlProblem} />
-        {step.url.kind === "secret" && urlSecrets.length === 0 && !props.secretsUnavailable ? (
+        {step.url.kind === "secret" && onAddSecret ? (
+          <NewSecretButton
+            label="New webhook link"
+            onClick={() => {
+              const named = step.url.kind === "secret" ? step.url.secret : "";
+              addSecret(named, "http-url", (secret) =>
+                onChange({ ...step, url: { kind: "secret", secret } }),
+              );
+            }}
+          />
+        ) : step.url.kind === "secret" && urlSecrets.length === 0 && !props.secretsUnavailable ? (
           <p className="m-0 text-[12px] text-muted">
-            Add a Webhook URL secret in Workspace Settings first.
+            Add a webhook link in Workspace Settings first.
           </p>
         ) : null}
       </div>
@@ -260,7 +308,7 @@ export function HttpStepEditor(props: {
       </div>
 
       <div className="flex flex-col gap-1">
-        <span className="text-[12px] font-medium text-muted">Secret headers</span>
+        <span className="text-[12px] font-medium text-muted">API keys</span>
         {step.secretHeaders.map((header, index) => (
           <div key={`sh-${index}`} className="flex items-start gap-1">
             <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -293,7 +341,7 @@ export function HttpStepEditor(props: {
                 className={selectClass}
               >
                 <option value="" disabled>
-                  {headerSecrets.length === 0 ? "No header secrets yet" : "Choose a secret"}
+                  {headerSecrets.length === 0 ? "No API keys saved yet" : "Choose a secret"}
                 </option>
                 {header.secret !== "" &&
                 !headerSecrets.some((secret) => secret.name === header.secret) ? (
@@ -325,6 +373,21 @@ export function HttpStepEditor(props: {
                 }
                 className={inputClass}
               />
+              {onAddSecret ? (
+                <NewSecretButton
+                  label="New API key"
+                  onClick={() =>
+                    addSecret(header.secret, "http-header", (secret) =>
+                      onChange({
+                        ...step,
+                        secretHeaders: step.secretHeaders.map((entry, at) =>
+                          at === index ? { ...entry, secret } : entry,
+                        ),
+                      }),
+                    )
+                  }
+                />
+              ) : null}
             </div>
             <IconButton
               aria-label={`Remove secret header ${index + 1}`}
@@ -355,7 +418,7 @@ export function HttpStepEditor(props: {
           }
         >
           <Plus size={12} aria-hidden />
-          Add secret header
+          Add API key header
         </SecondaryButton>
         <Problem shown={secretHeadersProblem} />
       </div>
@@ -519,7 +582,8 @@ export function HttpStepEditor(props: {
       </label>
 
       <StatusLine tone="muted" icon={Info} label="Confirmation required">
-        Confirm this step with Allow before it sends. Runs only while this Collection is private.
+        Confirm this step with Allow before it sends. Runs only while nobody else can edit this
+        Collection.
       </StatusLine>
     </div>
   );

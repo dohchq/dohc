@@ -1274,7 +1274,17 @@ automations:
     const store = createAutomationRunStore(testStoreFolder(dir));
     const evaluator = createAutomationFormulaEvaluator();
     const files = new Map<string, string>([
-      ["Tasks/automations.yaml", HOOK_YAML],
+      [
+        "Tasks/automations.yaml",
+        `${HOOK_YAML}  - id: stale-field
+    name: Send on a removed field
+    when: {field-changed: Removed}
+    do:
+      - http:
+          secret: SLACK_HOOK
+`,
+      ],
+      ["Tasks/collection.yaml", "fields: {Title: {type: text}}"],
       ["Tasks/helper.js", 'export default () => "v1";'],
     ]);
     const approvedDigests = new Set<string>();
@@ -1332,8 +1342,19 @@ automations:
       nowMs: () => 1_000,
     });
     try {
+      expect(executor.secretUses()).toBeNull();
       await executor.open();
       await executor.automationsIn("Tasks");
+      const sendWebhook = { collectionPath: "Tasks", automationName: "Send webhook" };
+      expect(executor.secretUses()).toEqual(
+        new Map([
+          ["API_TOKEN", [sendWebhook]],
+          [
+            "SLACK_HOOK",
+            [sendWebhook, { collectionPath: "Tasks", automationName: "Send on a removed field" }],
+          ],
+        ]),
+      );
       const initialHold = executor.holds()[0];
       expect(initialHold).toBeDefined();
       expect(

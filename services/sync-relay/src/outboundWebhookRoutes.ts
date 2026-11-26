@@ -40,6 +40,7 @@ import {
   workspaceSecretApprovalBinding,
   type OutboundWebhookDispatchResponse,
 } from "@dohc/workspace-contracts/http-step-approvals";
+import { isShareAccessValue } from "@dohc/security-contract";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import { isSharedWithMePath, stripWindowsAliasSuffix } from "@dohc/workspace-core";
 import {
@@ -60,6 +61,7 @@ import {
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { SyncRelayQuotaExceededError } from "./storage/errors";
 import type { SyncRelayStorage } from "./storage";
+import type { ActiveWorkspaceShareGrantRow } from "./storage/outboundWebhooks";
 import { unsealWorkspaceSecret, type WorkspaceSecretKeyring } from "./workspaceSecretCrypto";
 
 export const MAX_HTTP_APPROVAL_BODY_BYTES = 8 * 1024;
@@ -119,6 +121,25 @@ function readCommittedCollectionId(
   }
 }
 
+function memberMayEdit(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  grant: ActiveWorkspaceShareGrantRow,
+  sourcePaths: readonly string[],
+): boolean {
+  if (!isShareAccessValue(grant.access)) return true;
+  const userId = grant.pendingMemberInvite
+    ? `pending:${grant.grantId}`
+    : grant.principalKind === "user"
+      ? grant.principalUserId
+      : null;
+  if (userId === null) return true;
+  if (!grant.pendingMemberInvite && storage.workspaceRoleOf(workspaceId, userId)?.role !== "member")
+    return true;
+  const reach = storage.memberReach(workspaceId, userId, "member", grant.access);
+  return sourcePaths.some((path) => reach.levelAt(path) === "edit");
+}
+
 function hasActiveNonOwnerEditGrantForPaths(
   storage: SyncRelayStorage,
   workspaceId: string,
@@ -129,17 +150,15 @@ function hasActiveNonOwnerEditGrantForPaths(
   for (const grant of storage.listActiveWorkspaceShareGrants(workspaceId)) {
     if (grant.principalKind === "user" && grant.principalUserId === ownerUserId) continue;
     const storedSelector = parseStoredAnyShareSelectorJson(grant.selectorJson);
-    // A workspace member reaches every Collection, so the workspace isn't private.
-    if (
-      storedSelector === null ||
-      ("kind" in storedSelector && storedSelector.kind === "workspace")
-    )
-      return true;
+    if (storedSelector === null) return true;
+    if ("kind" in storedSelector && storedSelector.kind === "workspace") {
+      if (memberMayEdit(storage, workspaceId, grant, sourcePaths)) return true;
+      continue;
+    }
     const effective = effectiveShareSelector(storedSelector, grant.access);
     if (effective === null) return true;
     const fileSide = fileSideOf(effective);
     if (fileSide === null) continue;
-    // Only a workspace share builds a reach with a level per path, and its grant returned above.
     if (!("access" in fileSide)) return true;
     if (fileSide.access !== "edit") continue;
     for (const granted of fileSide.paths) {

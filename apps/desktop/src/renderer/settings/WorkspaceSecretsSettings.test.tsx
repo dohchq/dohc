@@ -205,6 +205,107 @@ describe("WorkspaceSecretsSettings", () => {
     expect(bridgeMock.clearLocalWorkspaceSecrets).toHaveBeenCalledWith({ workspaceId: "ws-1" });
   });
 
+  it("names the automations that use a secret before it is replaced or deleted", async () => {
+    const user = userEvent.setup();
+    const secret = {
+      usage: "http-header" as const,
+      allowedHosts: ["api.resend.com"],
+      generation: 1,
+      createdAtMs: 1700000000000,
+      updatedAtMs: 1700000000000,
+    };
+    bridgeMock.listWorkspaceSecrets.mockResolvedValue({
+      kind: "ready",
+      storage: "local",
+      secrets: [
+        { name: "RESEND_API_KEY", ...secret },
+        { name: "UNUSED_KEY", ...secret },
+      ],
+      limit: 50,
+      uses: {
+        RESEND_API_KEY: [{ collectionPath: "Signups", automationName: "Email new signups" }],
+      },
+    });
+
+    render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("workspace-secret-replace-RESEND_API_KEY"));
+    await waitFor(() => expect(bridgeMock.listWorkspaceSecrets).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("workspace-secret-uses")).toHaveProperty(
+      "textContent",
+      "Used byEmail new signups in Signups",
+    );
+    await user.click(screen.getByTestId("workspace-secret-cancel"));
+
+    await user.click(screen.getByTestId("workspace-secret-delete-RESEND_API_KEY"));
+    expect(screen.getByTestId("workspace-secret-uses").textContent).toContain("Email new signups");
+    await user.click(screen.getByTestId("workspace-secret-cancel-delete"));
+
+    await user.click(screen.getByTestId("workspace-secret-delete-UNUSED_KEY"));
+    expect(await screen.findByTestId("workspace-secret-confirm-delete")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-secret-uses")).toBeNull();
+  });
+
+  it("shows the server's list once opening Replace refreshes it after a save", async () => {
+    const user = userEvent.setup();
+    const secret = (name: string) => ({
+      name,
+      usage: "http-header" as const,
+      allowedHosts: ["api.resend.com"],
+      generation: 1,
+      createdAtMs: 1700000000000,
+      updatedAtMs: 1700000000000,
+    });
+    const ready = (names: string[]) => ({
+      kind: "ready" as const,
+      storage: "server" as const,
+      secrets: names.map(secret),
+      limit: 2,
+    });
+    bridgeMock.listWorkspaceSecrets.mockResolvedValueOnce(ready(["FIRST_KEY"]));
+    bridgeMock.setWorkspaceSecret.mockResolvedValueOnce(ready(["FIRST_KEY", "SECOND_KEY"]));
+    render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("workspace-secrets-add"));
+    await user.type(screen.getByTestId("workspace-secret-name-input"), "SECOND_KEY");
+    await user.type(screen.getByTestId("workspace-secret-hosts-input"), "api.resend.com");
+    await user.type(screen.getByTestId("workspace-secret-value-input"), "re_secret_123");
+    await user.click(screen.getByTestId("workspace-secret-save"));
+    await screen.findByTestId("workspace-secret-row-SECOND_KEY");
+    expect(screen.getByTestId("workspace-secrets-add")).toHaveProperty("disabled", true);
+
+    bridgeMock.listWorkspaceSecrets.mockResolvedValueOnce(ready(["SECOND_KEY"]));
+    await user.click(screen.getByTestId("workspace-secret-replace-SECOND_KEY"));
+    await user.click(screen.getByTestId("workspace-secret-cancel"));
+    await waitFor(() => expect(screen.queryByTestId("workspace-secret-row-FIRST_KEY")).toBeNull());
+    expect(screen.getByTestId("workspace-secrets-add")).toHaveProperty("disabled", false);
+  });
+
+  it("deletes secrets left on this computer from before the workspace synced", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listWorkspaceSecrets.mockResolvedValue({
+      kind: "ready",
+      storage: "server",
+      secrets: [],
+      limit: 50,
+      localCopies: true,
+    });
+    bridgeMock.clearLocalWorkspaceSecrets.mockResolvedValueOnce({
+      kind: "ready",
+      storage: "server",
+      secrets: [],
+      limit: 50,
+    });
+
+    render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
+    expect(await screen.findByTestId("workspace-secrets-local-copies")).toBeTruthy();
+    await user.click(screen.getByTestId("workspace-secrets-clear-local"));
+    expect(screen.getByTestId("workspace-secrets-confirm-clear-local").textContent).toContain(
+      "The secrets on your server stay.",
+    );
+    await user.click(screen.getByTestId("workspace-secrets-confirm-clear-local-action"));
+    await waitFor(() => expect(screen.queryByTestId("workspace-secrets-local-copies")).toBeNull());
+    expect(bridgeMock.clearLocalWorkspaceSecrets).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+  });
+
   it("ignores a slow workspace A mutation after switching to workspace B and refreshes on sign-out", async () => {
     const user = userEvent.setup();
     let sessionListener:
@@ -262,7 +363,7 @@ describe("WorkspaceSecretsSettings", () => {
 
     await user.click(screen.getByTestId("workspace-secrets-add"));
     await user.type(screen.getByTestId("workspace-secret-name-input"), "NEW_A");
-    await user.click(screen.getByRole("radio", { name: "Webhook URL" }));
+    await user.click(screen.getByRole("radio", { name: "Webhook link" }));
     await user.type(
       screen.getByTestId("workspace-secret-value-input"),
       "https://hooks.example.com/a",
