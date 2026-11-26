@@ -424,20 +424,20 @@ function ScopedCollection({
     manual: true,
     load: async (): Promise<DatasetApproval | null> => {
       if (!owner || !datasetId) return null;
-      const result = await bridge().dataset({
-        workspaceId,
-        datasetPath,
-        expectedDatasetId: datasetId,
-        action: "approval",
-      });
-      return result.kind === "approval" ? result : null;
+      const result = await bridge()
+        .dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "approval" })
+        .catch(() => null);
+      return result?.kind === "approval" ? result : null;
     },
   });
   const rereadApproval = approval.retry;
   useEffect(() => {
     void rereadApproval();
   }, [dataset, rereadApproval]);
-  const approvalRead = approval.error ? null : approval.value;
+  const approvalRead = approval.value;
+  useEffect(() => {
+    if (approvalRead && !approvalRead.needsOwnerConfirmation) onSettled?.(approvalIdentity);
+  }, [approvalRead, approvalIdentity, onSettled]);
   const shownApproval =
     approvalRead && approvalRead.revisionSha256 === dataset?.revisionSha256 ? approvalRead : null;
   const refreshedFor = useRef<string | null>(null);
@@ -463,6 +463,7 @@ function ScopedCollection({
       onSettled?.(approvalIdentity);
       await approval.retry();
     } catch (error) {
+      if (!pageOpen.current) return;
       onError(
         "dohc could not confirm this approval.",
         error,
@@ -792,7 +793,7 @@ function ScopedCollection({
           onOpenSource={() => onOpenFile(datasetPath)}
           copy={copy}
           rulesStatus={
-            !toConfirm && shownApproval?.approvedBy?.role === "admin" ? (
+            shownApproval?.approvedBy?.role === "admin" ? (
               <CollectionApprovedBy approvedBy={shownApproval.approvedBy} />
             ) : undefined
           }

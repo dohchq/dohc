@@ -116,9 +116,10 @@ export function createDatasetHandler<
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<NamedDatasetData>;
-  /** Where the Owner approves a Collection's rules on the workspace's server, or null where this computer keeps them. */
+  /** Where the Owner approves a Collection's rules on its server, or null where this computer keeps them. */
   governanceForWorkspace?(
     workspace: W,
+    datasetId: string,
     signal: AbortSignal,
   ): Promise<Pick<RemoteDatasetData, "approval" | "confirmApproval"> | null>;
   /** Writes a joined workspace's Collection types into the member's Personal app folder. */
@@ -459,7 +460,7 @@ export function createDatasetHandler<
           if (
             agent &&
             agent.depth > 0 &&
-            (input.action === "approve" || input.action === "approveMigration")
+            ["approve", "approveMigration", "confirmApproval"].includes(input.action)
           )
             throw new Error("Automations cannot approve Collection rules.");
           const approvalAgent = agent
@@ -640,6 +641,7 @@ export function createDatasetHandler<
           if (input.action === "approval" || input.action === "confirmApproval") {
             const governing = await dependencies.governanceForWorkspace?.(
               operation.workspace,
+              input.datasetId,
               operation.signal,
             );
             current();

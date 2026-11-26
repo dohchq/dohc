@@ -1637,15 +1637,20 @@ it("flushes and retries a missing address once after an agent moves its folder",
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(2);
 });
 
-it.each(["approve", "approveMigration"])(
+it.each(["approve", "approveMigration", "confirmApproval"])(
   "refuses automation and received-share %s authority before calling a host",
   async (action) => {
-    const f = fixture(),
+    const governed = { approval: vi.fn(), confirmApproval: vi.fn() };
+    const f = fixture(undefined, undefined, undefined, undefined, undefined, {
+        governanceForWorkspace: async () => governed,
+      }),
       input = {
         action,
         workspaceId: "workspace",
-        preparationId: datasetId,
         revisionSha256: f.revision.revisionSha256,
+        ...(action === "confirmApproval"
+          ? { datasetPath: "data/dataset.json" }
+          : { preparationId: datasetId }),
         ...(action === "approveMigration" ? { approvalDigest: "a".repeat(64) } : {}),
       };
     await expect(f.handler("agent", input, { depth: 1 })).rejects.toThrow(
@@ -1653,6 +1658,7 @@ it.each(["approve", "approveMigration"])(
     );
     f.workspace.shareView = {};
     await expect(f.handler("agent", input, { depth: 0 })).rejects.toThrow("original workspace");
+    expect(governed.confirmApproval).not.toHaveBeenCalled();
   },
 );
 
@@ -1964,8 +1970,9 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
     confirmApproval: vi.fn(async () => confirmed),
   };
   const selection = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
+  const governanceForWorkspace = vi.fn(async () => governed);
   const owner = fixture(undefined, undefined, undefined, undefined, undefined, {
-    governanceForWorkspace: async () => governed,
+    governanceForWorkspace,
   });
   expect(await owner.handler("window", { ...selection, action: "approval" })).toEqual({
     kind: "approval",
@@ -1979,6 +1986,11 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
     }),
   ).toEqual({ kind: "approval", ...confirmed });
   expect(governed.confirmApproval).toHaveBeenCalledWith(datasetId, approval.revisionSha256);
+  expect(governanceForWorkspace).toHaveBeenCalledWith(
+    owner.workspace,
+    datasetId,
+    expect.any(AbortSignal),
+  );
 
   const local = fixture();
   expect(await local.handler("window", { ...selection, action: "approval" })).toEqual({

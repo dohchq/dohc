@@ -144,8 +144,14 @@ it("reads who approved a Collection's rules on the owner's workspace, and says w
   await expect(governed.approval(datasetId)).rejects.toThrow(
     "The server didn't show you who approved this Collection's rules. You may no longer be an Admin, or the Owner keeps this Collection on their computer.",
   );
-  for (const shareView of [marker, { ...joined, role: "member" }])
-    await expect(
-      createNamedDatasetData({ ...deps, shareView }).approval(datasetId),
-    ).rejects.toThrow("Open the original workspace to manage this Collection.");
+  deps.relayJson.mockClear();
+  await expect(
+    createNamedDatasetData({ ...deps, shareView: { ...joined, role: "member" } }).approval(
+      datasetId,
+    ),
+  ).resolves.toEqual(approval);
+  expect(deps.relayJson).toHaveBeenCalledOnce();
+  await expect(
+    createNamedDatasetData({ ...deps, shareView: marker }).approval(datasetId),
+  ).rejects.toThrow("Only an Admin of a joined workspace manages Collection access.");
 });

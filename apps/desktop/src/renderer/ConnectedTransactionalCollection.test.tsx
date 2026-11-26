@@ -2964,7 +2964,7 @@ describe("who approved a Collection's rules", () => {
     needsOwnerConfirmation = false,
     revisionSha256 = dataset.revisionSha256,
   ) => ({ kind: "approval", revisionSha256, approvedBy, needsOwnerConfirmation });
-  const renderPage = (owner: boolean, onError = vi.fn()) =>
+  const renderPage = (owner: boolean, onError = vi.fn(), onSettled = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
         owner={owner}
@@ -2972,6 +2972,7 @@ describe("who approved a Collection's rules", () => {
         datasetPath="data/dataset.json"
         tableId={id(2)}
         onError={onError}
+        onSettled={onSettled}
         onFormCreated={vi.fn()}
         onOpenFile={vi.fn()}
         onOpenScheduleSettings={vi.fn()}
@@ -3030,6 +3031,62 @@ describe("who approved a Collection's rules", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
     await waitFor(() => expect(screen.queryByTestId("collection-approved-by")).toBeNull());
+    const reread = Promise.withResolvers<ReturnType<typeof approval>>();
+    answer(() => reread.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    await waitFor(() =>
+      expect(
+        backend.dataset.mock.calls.filter(([input]) => input.action === "approval"),
+      ).toHaveLength(3),
+    );
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+    await act(async () =>
+      reread.resolve(approval({ role: "admin", name: "Ada", former: false, approvedAtMs: 1 })),
+    );
+    expect(await screen.findByTestId("collection-approved-by")).toBeTruthy();
+  });
+
+  it("clears a failed confirmation once another computer confirmed, and reports nothing after the page closes", async () => {
+    const former = approval(formerAda, true);
+    answer(former, () => {
+      throw Error("conflict");
+    });
+    const onError = vi.fn(),
+      onSettled = vi.fn();
+    const page = renderPage(true, onError, onSettled);
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    onSettled.mockClear();
+    answer(approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 2 }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    await waitFor(() =>
+      expect(onSettled).toHaveBeenCalledWith("collection-approval:data/dataset.json"),
+    );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
+
+    const refused = Promise.withResolvers<never>();
+    answer(former, () => refused.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
+    await waitFor(() =>
+      expect(backend.dataset).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "confirmApproval" }),
+      ),
+    );
+    page.unmount();
+    await act(async () => {
+      refused.reject(Error("conflict"));
+      await refused.promise.catch(() => undefined);
+    });
+    expect(onError).toHaveBeenCalledOnce();
   });
 
   it("shows the rules the Owner confirms: a newer approval refreshes the Collection first", async () => {
@@ -3071,6 +3128,9 @@ describe("who approved a Collection's rules", () => {
     const onError = vi.fn();
     renderPage(true, onError);
     const notice = await screen.findByTestId("collection-confirm-approval");
+    expect(screen.getByTestId("collection-approved-by").textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
     expect(notice.textContent).toBe(
       "Ada approved these rules and is no longer an Admin. They keep running. Confirm to approve them as yourself.Confirm approval",
     );

@@ -1620,11 +1620,14 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     await expect(opened.getByTestId("collection-confirm-approval")).toBeVisible({
       timeout: 30_000,
     });
-    await expect(opened.getByTestId("collection-approved-by")).toHaveCount(0);
+    await expect(opened.getByTestId("collection-approved-by")).toHaveText(
+      /^Approved by .+ · former Admin$/,
+    );
     await expect(guest()).toBeVisible();
     await themed(page, "rules-confirm-approval", async () => {
       const region = await openCollection(page, "Registrations");
       await expect(region.getByTestId("collection-confirm-approval")).toBeVisible();
+      await expect(region.getByTestId("collection-approved-by")).toBeVisible();
       await expect(region.getByRole("columnheader").filter({ hasText: "Guest" })).toBeVisible();
       return region;
     });

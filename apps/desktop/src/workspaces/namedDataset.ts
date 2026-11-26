@@ -13,7 +13,7 @@ import type { NamedDatasetPageCache } from "./namedDatasetCache";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { joinedByAccount } from "./shareWriteGate";
-import { datasetOwnerOnlyError, isDatasetServerNotFound } from "../ipc/errorWords";
+import { isDatasetServerNotFound } from "../ipc/errorWords";
 import type { DatasetApproval } from "@dohc/cli/dataset";
 
 const NOT_SHOWN =
@@ -52,7 +52,6 @@ export function createNamedDatasetData(input: {
     grantedSelector?: unknown;
     ended?: unknown;
     membersWorkspaceId?: unknown;
-    role?: unknown;
   } | null;
   if (marker?.ended === true)
     throw new Error("Your access to this share ended. Ask the owner to share it again.");
@@ -106,14 +105,12 @@ export function createNamedDatasetData(input: {
     permissions: async (value) => manager().permissions(value),
     setGrant: async (value) => manager().setGrant(value),
     setDefaults: async (value) => manager().setDefaults(value),
-    approval: async (datasetId) => {
-      if (!membersWorkspaceId || marker.role !== "admin") throw datasetOwnerOnlyError();
-      return manager()
+    approval: async (datasetId) =>
+      manager()
         .approval(datasetId)
         .catch((error: unknown) => {
           throw isDatasetServerNotFound(error) ? new Error(NOT_SHOWN) : error;
-        });
-    },
+        }),
   };
   const exposed = {
     list: data.list,

@@ -45,12 +45,7 @@ export function ConfirmApprovalNotice({
           : "A former Admin approved these rules."}{" "}
         They keep running. Confirm to approve them as yourself.
       </span>
-      <SecondaryButton
-        size="row"
-        disabled={confirming}
-        title="Records you as the person who approved these rules. Nothing else changes."
-        onClick={onConfirm}
-      >
+      <SecondaryButton size="row" disabled={confirming} onClick={onConfirm}>
         {confirming ? "Confirming…" : "Confirm approval"}
       </SecondaryButton>
     </div>

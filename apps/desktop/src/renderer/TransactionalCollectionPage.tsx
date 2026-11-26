@@ -2417,7 +2417,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       }
       status={
         props.copy || props.rulesStatus ? (
-          <>
+          <span className="flex min-w-0 flex-[999_1_0%] items-center justify-end gap-2">
             {props.rulesStatus}
             {props.rulesStatus && props.copy ? (
               <span aria-hidden className="h-3 w-px shrink-0 bg-line" />
@@ -2436,7 +2436,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
                 · {new Date(props.copy.savedAtMs).toLocaleString()}
               </span>
             ) : null}
-          </>
+          </span>
         ) : undefined
       }
       tabs={tabs}
@@ -2615,9 +2615,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       // The table starts at the tabs' line, as a document Collection's does. What stands above or in place of it keeps 12px under the tabs.
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3">
-        {props.rulesNotice ? <div className="shrink-0 px-5 pt-3">{props.rulesNotice}</div> : null}
+        {props.rulesNotice ? (
+          <div className="shrink-0 px-5 first:pt-3">{props.rulesNotice}</div>
+        ) : null}
         {unshown.length > 0 ? (
-          <div className="shrink-0 px-5 pt-3">
+          <div className="shrink-0 px-5 first:pt-3">
             <UnshownChanges
               items={unshown}
               onRetry={(id) => queue.retry(id)}

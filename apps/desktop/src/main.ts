@@ -11444,10 +11444,12 @@ function registerIpcHandlers(): void {
     },
     governanceForWorkspace: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
+      datasetId: string,
       signal: AbortSignal,
     ) => {
-      const server = await serverCollectionsFor(workspace, signal);
-      return server ? server.data(signal, () => signal.throwIfAborted()) : null;
+      const server = await serverCollectionOf(workspace, datasetId, signal);
+      if (server && "unfinished" in server) throw new Error(server.unfinished);
+      return server?.data ?? null;
     },
     dataForWorkspace: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
