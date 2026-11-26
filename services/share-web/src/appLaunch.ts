@@ -3,6 +3,8 @@ import {
   APP_PUBLICATION_MAX_BUNDLE_BYTES,
   APP_PUBLICATION_MAX_DOCUMENT_BYTES,
   APP_PUBLICATION_MAX_BLOB_BYTES,
+  APP_PUBLICATION_MAX_FILES,
+  APP_PUBLICATION_MAX_METADATA_BYTES,
 } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -76,6 +78,41 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
+const label = (value: unknown) => typeof value === "string" && value.length <= 320;
+const list = (value: unknown, max: number, item: (value: unknown) => boolean) =>
+  Array.isArray(value) && value.length <= max && value.every(item);
+const memberReview = (value: unknown) =>
+  exact(value, "authorityRevision,collections,consent,scopeDigest,source") &&
+  Number.isSafeInteger(value.authorityRevision) &&
+  ["none", "changed", "current"].includes(String(value.consent)) &&
+  PUBLICATION.test(String(value.scopeDigest)) &&
+  list(
+    value.collections,
+    64,
+    (collection) =>
+      exact(collection, "access,name,operations") &&
+      label(collection.name) &&
+      ["view", "comment", "edit"].includes(String(collection.access)) &&
+      list(
+        collection.operations,
+        256,
+        (operation) =>
+          exact(operation, "name,readOnly") &&
+          label(operation.name) &&
+          typeof operation.readOnly === "boolean",
+      ),
+  ) &&
+  list(
+    value.source,
+    APP_PUBLICATION_MAX_FILES,
+    (file) =>
+      exact(file, "byteLength,path,sha256") &&
+      typeof file.path === "string" &&
+      file.path.length > 0 &&
+      Number.isSafeInteger(file.byteLength) &&
+      PUBLICATION.test(String(file.sha256)),
+  );
+const MAX_SOURCE_BYTES = 256 * 1024;
 interface Descriptor {
   publicationId: string;
   authorityRevision: number;
@@ -380,9 +417,13 @@ export function createAppLaunchHandler(options: {
     matches(request: Request) {
       return (
         appHost(request.headers.get("host") ?? "") ||
-        ["/api/apps/launch", "/api/apps/summary", "/api/apps/phone-launch"].includes(
-          new URL(request.url).pathname,
-        )
+        [
+          "/api/apps/launch",
+          "/api/apps/summary",
+          "/api/apps/consent",
+          "/api/apps/source",
+          "/api/apps/phone-launch",
+        ].includes(new URL(request.url).pathname)
       );
     },
     async handle(request: Request): Promise<Response> {
@@ -404,10 +445,16 @@ export function createAppLaunchHandler(options: {
       )
         return refusal();
       const summaryRequest = url.pathname === "/api/apps/summary";
+      const consentRequest = url.pathname === "/api/apps/consent";
+      const sourceRequest = url.pathname === "/api/apps/source";
       const phoneIssue = host === viewerHost && url.pathname === "/api/apps/phone-launch";
       const issue =
         phoneIssue ||
-        (host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest));
+        (host === viewerHost &&
+          (url.pathname === "/api/apps/launch" ||
+            summaryRequest ||
+            consentRequest ||
+            sourceRequest));
       if (!issue && !appHost(host)) return refusal();
       const address = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       if (issue) {
@@ -509,7 +556,14 @@ export function createAppLaunchHandler(options: {
               signal,
             );
           } else if (
-            exact(issueBody, "publicationId,workspaceId") &&
+            exact(
+              issueBody,
+              consentRequest
+                ? "publicationId,scopeDigest,workspaceId"
+                : sourceRequest
+                  ? "authorityRevision,publicationId,sha256,workspaceId"
+                  : "publicationId,workspaceId",
+            ) &&
             typeof issueBody.workspaceId === "string" &&
             /^[A-Za-z0-9_-]{1,128}$/.test(issueBody.workspaceId) &&
             !issueBody.workspaceId.includes("\n") &&
@@ -527,6 +581,57 @@ export function createAppLaunchHandler(options: {
             return namedIssue && material.status === 503 ? unavailable() : refusal();
           scope.material = material;
           signal.throwIfAborted();
+          if (consentRequest || sourceRequest) {
+            if (
+              !namedMaterial(material) ||
+              !PUBLICATION.test(String(issueBody.scopeDigest ?? issueBody.sha256)) ||
+              (sourceRequest &&
+                (!Number.isSafeInteger(issueBody.authorityRevision) ||
+                  (issueBody.authorityRevision as number) < 1))
+            )
+              return refusal();
+            const response = consentRequest
+              ? await fetchForLaunch(
+                  { material },
+                  new Request(
+                    new URL(
+                      `/sync/link/app-publications/${body.publicationId}/consent`,
+                      options.relayUrl,
+                    ),
+                    {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ scopeDigest: issueBody.scopeDigest }),
+                      signal,
+                      redirect: "manual",
+                    },
+                  ),
+                )
+              : await relay(
+                  { publicationId: body.publicationId, material },
+                  `/blobs/${String(issueBody.sha256)}?authorityRevision=${String(issueBody.authorityRevision)}`,
+                  signal,
+                );
+            try {
+              if (response.status >= 500) throw new RelayUnavailable();
+              if (consentRequest && response.status === 409)
+                return Response.json(
+                  { code: "member_app_review_changed" },
+                  { status: 409, headers },
+                );
+              if (
+                response.status !== 200 ||
+                response.redirected ||
+                response.headers.has("location")
+              )
+                return refusal();
+              if (consentRequest) return Response.json({ consent: "current" }, { headers });
+              const bytes = await boundedBytes(response, MAX_SOURCE_BYTES, signal);
+              return Response.json({ text: new TextDecoder().decode(bytes) }, { headers });
+            } finally {
+              await response.body?.cancel().catch(() => {});
+            }
+          }
           if (summaryRequest) {
             if (!namedMaterial(material)) return refusal();
             const response = await relay(
@@ -542,10 +647,21 @@ export function createAppLaunchHandler(options: {
                 response.headers.has("location")
               )
                 return refusal();
-              const data = await readBoundedJson(response, 4096, signal);
+              const data = await readBoundedJson(
+                response,
+                2 * APP_PUBLICATION_MAX_METADATA_BYTES,
+                signal,
+              );
+              const member =
+                !!data && typeof data === "object" && "review" in data && memberReview(data.review);
               if (
-                !exact(data, "access,sharerName,subjectName") ||
-                !["view", "comment", "edit", "owner"].includes(String(data.access)) ||
+                !exact(
+                  data,
+                  member ? "access,review,sharerName,subjectName" : "access,sharerName,subjectName",
+                ) ||
+                !(member ? ["member"] : ["view", "comment", "edit", "owner"]).includes(
+                  String(data.access),
+                ) ||
                 [data.subjectName, data.sharerName].some(
                   (value) => value !== null && (typeof value !== "string" || value.length > 320),
                 )

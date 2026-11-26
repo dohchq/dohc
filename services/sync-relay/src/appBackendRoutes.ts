@@ -8,6 +8,7 @@ export type AppBackendAction =
   | "events"
   | "descriptor"
   | "summary"
+  | "consent"
   | "blob"
   /** Share-web redeems a phone's launch grant. */
   | "redeem";

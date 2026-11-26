@@ -37,6 +37,8 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/apps": ["GET"],
   "/api/apps/launch": ["POST"],
   "/api/apps/summary": ["POST"],
+  "/api/apps/consent": ["POST"],
+  "/api/apps/source": ["POST"],
   "/api/apps/phone-launch": ["POST"],
 };
 // A share link's MCP address, `/mcp/s/<secret>`.

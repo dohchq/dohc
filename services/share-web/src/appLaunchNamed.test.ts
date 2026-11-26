@@ -11,7 +11,8 @@ function fixture() {
     revision = 1,
     relayDown = false,
     materialDown = false,
-    collectionMissing = false;
+    collectionMissing = false,
+    member = false;
   const requests: Request[] = [],
     resolutions: unknown[] = [];
   const bytes = Buffer.from("document.getElementById('root').textContent='Admin app';");
@@ -20,6 +21,11 @@ function fixture() {
     sha256: createHash("sha256").update(bytes).digest("hex"),
     byteLength: bytes.length,
     contentType: "text/javascript; charset=utf-8",
+  };
+  const reviewed = {
+    path: `app/${"long-folder/".repeat(30)}index.ts`,
+    sha256: file.sha256,
+    byteLength: file.byteLength,
   };
   const handler = createAppLaunchHandler({
     config,
@@ -55,6 +61,15 @@ function fixture() {
             return Response.json(linkRefusalBody("app_collection_missing"), { status: 410 });
           const url = new URL(request.url);
           expect(url.pathname).toContain(`/sync/link/app-publications/${publicationId}`);
+          if (member && url.pathname.endsWith("/summary"))
+            return Response.json({
+              ...memberSummary,
+              review: { ...memberSummary.review, source: [reviewed] },
+            });
+          if (url.pathname.endsWith("/consent"))
+            return (await request.json()).scopeDigest === memberSummary.review.scopeDigest
+              ? Response.json({ consent: "current" })
+              : Response.json({ code: "member_app_review_changed" }, { status: 409 });
           if (url.pathname.endsWith("/summary"))
             return Response.json({
               subjectName: "Trip planner",
@@ -137,8 +152,76 @@ function fixture() {
     loseCollection() {
       collectionMissing = true;
     },
+    becomeMemberApp() {
+      member = true;
+      return reviewed;
+    },
+    post,
   };
 }
+
+const memberSummary = {
+  subjectName: "tracker",
+  sharerName: "Ana",
+  access: "member",
+  review: {
+    authorityRevision: 1,
+    consent: "none",
+    scopeDigest: "c".repeat(64),
+    collections: [
+      {
+        name: "Registrations",
+        access: "edit",
+        operations: [{ name: "edit", readOnly: false }],
+      },
+    ],
+  },
+};
+
+it("shows a Member app's review and source, and records the viewer's consent only for the digest shown", async () => {
+  const f = fixture(),
+    file = f.becomeMemberApp();
+  const viewer = (path: string, body: unknown) =>
+    f.post(`${config.viewerOrigin}${path}`, body, {
+      origin: config.viewerOrigin,
+      cookie: "account=owner-session",
+    });
+  expect(await (await f.summary()).json()).toEqual({
+    ...memberSummary,
+    review: { ...memberSummary.review, source: [file] },
+  });
+  const source = await viewer("/api/apps/source", {
+    workspaceId,
+    publicationId,
+    sha256: file.sha256,
+    authorityRevision: 1,
+  });
+  expect(await source.json()).toEqual({ text: expect.stringContaining("Admin app") });
+  expect(f.requests.at(-1)!.url).toContain(`/blobs/${file.sha256}?authorityRevision=1`);
+  const consent = (scopeDigest: string) =>
+    viewer("/api/apps/consent", { workspaceId, publicationId, scopeDigest });
+  expect(await (await consent(memberSummary.review.scopeDigest)).json()).toEqual({
+    consent: "current",
+  });
+  const changed = await consent("d".repeat(64));
+  expect(changed.status).toBe(409);
+  expect(await changed.json()).toEqual({ code: "member_app_review_changed" });
+  for (const body of [
+    { workspaceId, publicationId, scopeDigest: "not-a-digest" },
+    { workspaceId, publicationId, scopeDigest: memberSummary.review.scopeDigest, agent: {} },
+  ])
+    expect((await viewer("/api/apps/consent", body)).status).toBe(404);
+  expect(
+    (
+      await viewer("/api/apps/source", {
+        workspaceId,
+        publicationId,
+        sha256: file.sha256,
+        authorityRevision: 0,
+      })
+    ).status,
+  ).toBe(404);
+});
 
 it("launches a signed-in app without exposing account cookies or named credentials to its document", async () => {
   const f = fixture(),

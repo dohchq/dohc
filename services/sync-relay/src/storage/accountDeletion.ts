@@ -20,6 +20,7 @@ import {
   serviceHostEnrollmentsCoveredByShare,
 } from "./serviceHostEnrollment";
 import type { StorageContext } from "./context";
+import { retireMemberAppsOf } from "./memberApps";
 import type { SyncRelayStorage } from "./types";
 
 const keys = new WeakMap<SyncRelayStorage, string>();
@@ -168,6 +169,7 @@ export function fenceAccount(
       .prepare("SELECT publication_id FROM sync_relay_app_publications WHERE owner_user_id=?")
       .all(userId)
       .map((row) => String(row.publication_id));
+    retireMemberAppsOf(storage, userId);
     const manifest = { workspaces, shareIds, datasets, grantIds, publicationIds };
     for (const row of workspaces)
       storage.db

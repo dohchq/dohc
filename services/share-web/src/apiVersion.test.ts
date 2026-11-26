@@ -62,6 +62,8 @@ const routes = [
   ["GET", "/api/apps"],
   ["POST", "/api/apps/launch"],
   ["POST", "/api/apps/summary"],
+  ["POST", "/api/apps/consent"],
+  ["POST", "/api/apps/source"],
   // Refused before share-web redeems the phone's one-use grant: no upstream call.
   ["POST", "/api/apps/phone-launch"],
   ["GET", mcpPath],
@@ -228,7 +230,13 @@ it("keeps wrong hosts, unknown paths, unsupported methods and excluded routes op
 });
 
 it("gates viewer app routes the same way with or without app launch configured", async () => {
-  for (const path of ["/api/apps/launch", "/api/apps/summary", "/api/apps/phone-launch"]) {
+  for (const path of [
+    "/api/apps/launch",
+    "/api/apps/summary",
+    "/api/apps/consent",
+    "/api/apps/source",
+    "/api/apps/phone-launch",
+  ]) {
     const results = [];
     for (const appLaunch of [undefined, { viewerOrigin: origin, appDomain: "example.net" }]) {
       const f = fixture({ appLaunch });

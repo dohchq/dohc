@@ -82,6 +82,13 @@ const HASHED_VIEWER_FILE = /^assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
+const VIEWER_APP_ROUTES = [
+  "/api/apps/launch",
+  "/api/apps/summary",
+  "/api/apps/consent",
+  "/api/apps/source",
+  "/api/apps/phone-launch",
+] as const;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 // The relay's own bound on a link post: an 8,000-byte body, escaped, and its fields.
 const MAX_LINK_CHAT_POST_BYTES = 64 * 1024;
@@ -1892,10 +1899,7 @@ export function createShareWebApplication({
     const host = (request.headers.get("host") ?? "").toLowerCase();
     const appRequest = appLaunch?.matches(request) ?? false;
     if (!appRequest && !publicHosts.has(host)) return refused();
-    const viewerAppRoute =
-      pathname === "/api/apps/launch" ||
-      pathname === "/api/apps/summary" ||
-      pathname === "/api/apps/phone-launch";
+    const viewerAppRoute = VIEWER_APP_ROUTES.find((route) => route === pathname);
     const onViewer = viewerHost === undefined || request.headers.get("host") === viewerHost;
     if (viewerAppRoute ? onViewer : !appRequest) {
       const refusal = shareWebApiVersionRefusal(request, apiVersions);
@@ -1903,14 +1907,7 @@ export function createShareWebApplication({
     }
     if (appRequest) {
       // A published app chooses its own paths, the viewer's app routes included.
-      mark(
-        onViewer &&
-          (pathname === "/api/apps/launch" ||
-            pathname === "/api/apps/summary" ||
-            pathname === "/api/apps/phone-launch")
-          ? pathname
-          : "app",
-      );
+      mark(onViewer && viewerAppRoute ? viewerAppRoute : "app");
       return appLaunch!.handle(request);
     }
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;

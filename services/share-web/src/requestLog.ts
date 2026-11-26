@@ -18,6 +18,8 @@ export const SHARE_WEB_REQUEST_LOG = createRequestLog("share-web", [
   "app",
   "/api/apps/launch",
   "/api/apps/summary",
+  "/api/apps/consent",
+  "/api/apps/source",
   "/api/apps/phone-launch",
   "/api/mcp",
   ...MCP_ROUTE_PATTERNS,

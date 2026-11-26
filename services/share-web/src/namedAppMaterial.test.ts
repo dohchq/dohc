@@ -47,6 +47,7 @@ it("maps only the bound publication routes and forwards filtered account authori
     ["POST", "/backend/invoke", "/invoke"],
     ["POST", "/backend/upload", "/upload"],
     ["POST", "/backend/file", "/file"],
+    ["POST", "/consent", "/consent"],
   ] as const) {
     const request = new Request(prefix + suffix, {
       method,

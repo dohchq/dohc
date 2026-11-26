@@ -132,9 +132,9 @@ export interface LinkAppPublicationAuthority {
   expiresAtMs: number;
 }
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
-const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
+export const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
-function validateBuildIdentity(candidate: AppPublicationCandidate): void {
+export function validateBuildIdentity(candidate: AppPublicationCandidate): void {
   const sourceDigest = digest("dohc-app-source-v2", {
     entry: candidate.entryPath,
     files: candidate.inputs,
@@ -207,7 +207,7 @@ function authority(
   )
     throw notFound();
 }
-function put(
+export function putPublicationBlob(
   storage: StorageContext,
   workspace: string,
   hash: string,
@@ -233,15 +233,19 @@ function header(
   publicationId: string,
   workspaceId: string,
   ownerUserId: string,
+  member = false,
 ) {
   const row = storage.db
-    .prepare("SELECT * FROM sync_relay_app_publications WHERE publication_id=?")
+    .prepare(
+      "SELECT p.*,m.publication_id IS NOT NULL AS member FROM sync_relay_app_publications p LEFT JOIN sync_relay_member_apps m USING(publication_id) WHERE p.publication_id=?",
+    )
     .get(publicationId);
   if (
     !row ||
     row.workspace_id !== workspaceId ||
     row.owner_user_id !== ownerUserId ||
-    !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)
+    (row.member === 1) !== member ||
+    (!member && !storage.workspaceIsOwnedBy(workspaceId, ownerUserId))
   )
     throw notFound();
   const state: AppPublicationState = {
@@ -349,7 +353,7 @@ export function publishAppPublication(
       const content = provided.get(file.sha256) ?? storage.getBlob(owner.workspaceId, file.sha256);
       if (!content || content.byteLength !== file.byteLength)
         throw badRequest("Publication bundle is incomplete.");
-      put(storage, owner.workspaceId, file.sha256, content, now);
+      putPublicationBlob(storage, owner.workspaceId, file.sha256, content, now);
     }
     const existing = storage.db
       .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?")
@@ -360,7 +364,7 @@ export function publishAppPublication(
         stored(storage, { ...owner, publicationId, limits: input.limits }),
       ); // A retry never reactivates a withdrawn publication.
     assertPublishingNotHeld(storage, owner.ownerUserId);
-    put(storage, owner.workspaceId, manifestHash, bytes, now);
+    putPublicationBlob(storage, owner.workspaceId, manifestHash, bytes, now);
     storage.db
       .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision,audience)
       VALUES(?,?,?,?,?,?,?,?,1,1,?)`)
@@ -579,14 +583,19 @@ export function disableAppPublication(
   return storage.tx(() => {
     const row = storage.db
       .prepare(
-        "SELECT workspace_id,owner_user_id,manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?",
+        "SELECT workspace_id,owner_user_id,manifest_sha256,EXISTS(SELECT 1 FROM sync_relay_member_apps m WHERE m.publication_id=p.publication_id) AS member FROM sync_relay_app_publications p WHERE publication_id=?",
       )
       .get(input.publicationId);
     if (!row) throw notFound();
     const current = withOperatorTakedown(
       storage,
-      header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id))
-        .state,
+      header(
+        storage,
+        input.publicationId,
+        String(row.workspace_id),
+        String(row.owner_user_id),
+        row.member === 1,
+      ).state,
     );
     // A takedown holds the owner's app publishing, and a retry after a lift holds it again.
     storage.db
@@ -631,7 +640,7 @@ export function disableAppPublication(
   });
 }
 
-function assertPublishingNotHeld(storage: StorageContext, ownerUserId: string): void {
+export function assertPublishingNotHeld(storage: StorageContext, ownerUserId: string): void {
   if (
     storage.db
       .prepare("SELECT 1 FROM sync_relay_app_publishing_holds WHERE owner_user_id=?")
@@ -656,7 +665,7 @@ export function liftAppPublishingHold(storage: StorageContext, publicationId: st
   );
 }
 
-function recordApproval(
+export function recordApproval(
   storage: StorageContext,
   publicationId: string,
   authorityRevision: number,

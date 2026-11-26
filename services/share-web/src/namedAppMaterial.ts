@@ -69,6 +69,14 @@ function relayFetcher(
         return refuse();
       path = target + url.pathname.slice(prefix.length) + url.search;
     } else if (
+      summary &&
+      request.method === "POST" &&
+      url.pathname === prefix + "/consent" &&
+      !url.search
+    ) {
+      if (request.headers.get("content-type") !== "application/json") return refuse();
+      path = target + "/consent";
+    } else if (
       request.method === "POST" &&
       ["invoke", "upload", "file", "attempt"].some(
         (action) => url.pathname === prefix + "/backend/" + action,

@@ -243,7 +243,8 @@ export function phoneAppLaunch(
        WHERE l.token_hash = ? AND l.launch_host IS NOT NULL AND l.expires_at_ms > ?
          AND a.authority_revision = l.authority_revision
          AND p.workspace_id = l.workspace_id AND p.owner_user_id = l.user_id
-         AND p.active = 1 AND p.authority_revision = l.authority_revision`,
+         AND p.active = 1 AND p.authority_revision = l.authority_revision
+         AND NOT EXISTS (SELECT 1 FROM sync_relay_member_apps m WHERE m.publication_id = p.publication_id)`,
     )
     .get(launchHash, nowMs);
   return row ? binding(row) : null;
