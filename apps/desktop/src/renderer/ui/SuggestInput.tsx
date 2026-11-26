@@ -77,14 +77,18 @@ export function SuggestInput(props: {
     props.onChange(option.value);
     setShown(false);
   };
-  // Only the list scrolls to show the active row.
+  // Only the list scrolls to show a row the arrow keys chose. A row the
+  // pointer is on stays put, so the click lands on it.
+  const reveal = useRef(false);
   useLayoutEffect(() => {
+    if (!reveal.current) return;
+    reveal.current = false;
     if (open && list.current && activeIndex >= 0)
       revealMenuRow(
         list.current,
         list.current.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`),
       );
-  }, [open, activeIndex]);
+  });
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (isComposingKey(event)) return;
@@ -98,6 +102,7 @@ export function SuggestInput(props: {
           : down
             ? 0
             : options.length - 1;
+      reveal.current = true;
       setShown(true);
       setActive(options[next]?.value ?? null);
       return;
