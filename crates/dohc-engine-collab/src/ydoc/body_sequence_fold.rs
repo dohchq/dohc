@@ -185,11 +185,21 @@ pub(super) fn plan<T: ReadTxn>(
         } {
             slid += 1;
         }
-        let opens = |slid: usize| match have > want {
-            true => matches!(before.slots[start - slid], Slot::Line(_)),
-            false => matches!(target.slots[start - slid], Wanted::Line(_)),
+        let clean = |slid: usize| match have > want {
+            true => [start - slid, have - end - slid].iter().all(|&at| {
+                before
+                    .slots
+                    .get(at)
+                    .is_none_or(|slot| matches!(slot, Slot::Line(_)))
+            }),
+            false => [start - slid, want - end - slid].iter().all(|&at| {
+                target
+                    .slots
+                    .get(at)
+                    .is_none_or(|slot| matches!(slot, Wanted::Line(_)))
+            }),
         };
-        if let Some(slid) = (0..=slid).find(|&slid| opens(slid)) {
+        if let Some(slid) = (0..=slid).find(|&slid| clean(slid)) {
             (start, end) = (start - slid, end + slid);
         }
     }
@@ -208,7 +218,7 @@ pub(super) fn plan<T: ReadTxn>(
     let kept = (0..start).map(|at| (at, at));
     let kept = kept.chain((have - end..have).map(|at| (at, at + want - have)));
     let (mut formats, mut cursor, mut last) = (Vec::new(), 0, None);
-    let mut touched = (usize::MAX, 0);
+    let mut restyled = BTreeSet::new();
     for (at, wanted) in kept.clone() {
         let (Slot::Unit(_, had), Wanted::Unit(_, given)) =
             (&before.slots[at], &target.slots[wanted])
@@ -220,7 +230,7 @@ pub(super) fn plan<T: ReadTxn>(
         if had == shown || target.hidden[*given] || coded {
             continue;
         }
-        touched = (touched.0.min(at), at);
+        restyled.insert(before.lines.partition_point(|line| line.slot <= at));
         let mut diff: Attrs = shown
             .iter()
             .filter(|(name, value)| had.get(*name) != Some(*value))
@@ -298,9 +308,13 @@ pub(super) fn plan<T: ReadTxn>(
             let (owner_from, owner_to) = span(owner);
             (from, to) = (from.min(owner_from), to.max(owner_to));
         }
+        let owner = had.owner.unwrap_or(line);
         let given_again = had.owner.is_some_and(|owner| written[owner])
             || (edited && low <= to && high >= from)
-            || (touched.0 < to && touched.1 >= from)
+            || restyled
+                .range(line.min(owner) + 1..=line.max(owner) + 1)
+                .next()
+                .is_some()
             || !changes(had, given, &before, &ids).is_empty();
         if given_again {
             let promoted = (offsets[had.slot], boundary(given));
