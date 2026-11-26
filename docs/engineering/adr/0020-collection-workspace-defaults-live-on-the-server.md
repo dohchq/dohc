@@ -4,8 +4,6 @@ status: accepted
 
 # Collection workspace defaults live on the server beside folder access rules
 
-This records a design from [the team apps and Collections plan](../plans/team-apps-and-collections.md).
-
 Transactional Collections require explicit operation grants so no app or folder share can widen access by accident. Granting operations one person at a time does not scale when a team of 30 to 100 people joins a workspace. To reconcile explicit Collection capabilities with workspace roles, each Collection can opt in to workspace defaults keyed by folder access level (`View`, `Comment`, `Edit`), capped by folder access rules ([ADR 0017](0017-folder-access-rules-live-on-the-server.md)).
 
 Those defaults live on `sync-relay`, not inside `dataset.json`. Existing Collections default to no operations until the Owner or an Admin configures defaults for that Collection. Operations marked `owner` can never appear in workspace defaults. When a person's effective folder level on a Collection is `View` or `Comment`, only `readOnly` operations can run through workspace apps. Because Admins hold `Edit` reach on every folder, Admins inherit a Collection's `Edit` workspace defaults plus any explicit per-person grants. Explicit per-person grants remain available for narrow exceptions.

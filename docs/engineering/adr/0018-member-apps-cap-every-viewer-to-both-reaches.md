@@ -4,8 +4,6 @@ status: accepted
 
 # Member apps cap every viewer to both the author's and viewer's reach
 
-This records a design from [the team apps and Collections plan](../plans/team-apps-and-collections.md).
-
 A Member or Admin can share a Member app inside a workspace without waiting for the workspace Owner to approve it. Every call a Member app makes to a Collection runs under the intersection of four caps: the operations the app declares, the author's current Collection grants, the viewer's current Collection grants, and the exact operation set the viewer approved on first open. When the lower of the author's and viewer's folder levels on that Collection is below Edit, only read-only operations run.
 
 This cap applies even when the workspace Owner or an Admin opens a Member app. The Owner never runs a Member app with `owner` authority, and a Member app can never run an `owner`-only operation. Without the author cap, a Member could publish an app whose frontend calls delete or write operations the Member cannot run, and those calls would run with the Owner's or an Admin's access as soon as that person opened the app.
