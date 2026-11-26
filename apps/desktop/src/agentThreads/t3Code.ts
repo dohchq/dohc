@@ -722,8 +722,9 @@ const Sent = z.object({ runId: z.string().nullable().optional() });
 
 /**
  * Gives a thread one message. "line" puts it behind the thread's current
- * work; "steer" hands it over during that work. `forwardId` names this
- * message for its whole life, so sending it again cannot give it twice.
+ * work; "steer" hands it over during that work, or starts the thread when it
+ * has none. `forwardId` names this message for its whole life, so sending it
+ * again cannot give it twice.
  */
 export async function sendToT3CodeThread(
   session: T3CodeSession,
@@ -734,7 +735,8 @@ export async function sendToT3CodeThread(
     await session.call("t3_thread_send", {
       threadId: input.threadId,
       message: input.message,
-      mode: input.how === "steer" ? "steer" : "queue",
+      // T3 Code refuses "steer" for a thread with no turn going; "auto" steers or starts one.
+      mode: input.how === "steer" ? "auto" : "queue",
       clientRequestId: input.forwardId,
     }),
   );
