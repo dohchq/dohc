@@ -1,7 +1,7 @@
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowDown, ArrowUp, Clock, Info, Plus, Trash2 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type {
   AutomationDiagnostic,
@@ -3883,485 +3883,483 @@ export function AutomationBuilder(props: {
   const waiting = props.reach?.kind === "waiting";
 
   return (
-    <>
-      <form
-        ref={form}
-        className="flex flex-col gap-4 px-3 py-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
+    <form
+      ref={form}
+      className="flex flex-col gap-4 px-3 py-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      {props.readOnly ? (
+        <StatusLine tone="danger" icon={AlertTriangle} label="Cannot save">
+          <p className="m-0">
+            dohc cannot read every automation in automations.yaml, so you cannot save this now.
+          </p>
+          <SecondaryButton
+            size="compact"
+            className="mt-1"
+            onClick={() => props.onOpenFile(`${collectionPath}/automations.yaml`)}
+          >
+            Open file
+          </SecondaryButton>
+        </StatusLine>
+      ) : null}
+      {/* Nothing changes while a save runs, or while the file cannot be saved. */}
+      <fieldset
+        disabled={props.saving || checking || props.readOnly}
+        className="m-0 flex min-w-0 flex-col gap-4 border-0 p-0"
       >
-        {props.readOnly ? (
-          <StatusLine tone="danger" icon={AlertTriangle} label="Cannot save">
-            <p className="m-0">
-              dohc cannot read every automation in automations.yaml, so you cannot save this now.
-            </p>
-            <SecondaryButton
-              size="compact"
-              className="mt-1"
-              onClick={() => props.onOpenFile(`${collectionPath}/automations.yaml`)}
-            >
-              Open file
-            </SecondaryButton>
+        <input
+          aria-label="Name"
+          value={draft.name}
+          maxLength={MAX_NAME_LENGTH}
+          placeholder={sentenceText(automationSentence({ ...automation, name: "" }))}
+          onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+          className={`${inputClass} font-medium`}
+          {...invalid(problem("name"))}
+        />
+        <Problem shown={problem("name")} />
+        {cannotRun ? (
+          <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">
+            {cannotRun}
+          </StatusLine>
+        ) : waiting ? (
+          <StatusLine tone="muted" icon={Clock} label="Waiting">
+            Waiting to check who can edit {own}.
           </StatusLine>
         ) : null}
-        {/* Nothing changes while a save runs, or while the file cannot be saved. */}
-        <fieldset
-          disabled={props.saving || checking || props.readOnly}
-          className="m-0 flex min-w-0 flex-col gap-4 border-0 p-0"
-        >
-          <input
-            aria-label="Name"
-            value={draft.name}
-            maxLength={MAX_NAME_LENGTH}
-            placeholder={sentenceText(automationSentence({ ...automation, name: "" }))}
-            onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-            className={`${inputClass} font-medium`}
-            {...invalid(problem("name"))}
-          />
-          <Problem shown={problem("name")} />
-          {cannotRun ? (
-            <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">
-              {cannotRun}
-            </StatusLine>
-          ) : waiting ? (
-            <StatusLine tone="muted" icon={Clock} label="Waiting">
-              Waiting to check who can edit {own}.
-            </StatusLine>
-          ) : null}
 
-          <section aria-label="When" className="flex flex-col gap-1.5">
-            <SectionLabel>When</SectionLabel>
+        <section aria-label="When" className="flex flex-col gap-1.5">
+          <SectionLabel>When</SectionLabel>
+          <select
+            aria-label="Trigger"
+            value={builderTrigger ?? ""}
+            onChange={(event) => {
+              const kind = event.target.value as BuilderTrigger;
+              setDraft((current) => ({
+                ...current,
+                when:
+                  kind === "group-message" && current.when.kind !== "group-message"
+                    ? // A new Group trigger starts on the first Group whose messages can start it.
+                      { kind, group: firstGroup("read"), startsWith: null }
+                    : triggerFor(
+                        kind,
+                        current.when,
+                        recordFields,
+                        buttonFields,
+                        table?.name ?? null,
+                      ),
+                // A record starts to match rows, until someone writes a formula.
+                matching:
+                  kind === "starts-matching" && current.matching.mode === "always"
+                    ? { mode: "rows", formula: "", rows: [newCondition()], saved: null }
+                    : current.matching,
+              }));
+            }}
+            className={selectClass}
+          >
+            {builderTrigger === null ? (
+              <option value="" disabled>
+                {sentenceText(triggerParts(trigger))}
+              </option>
+            ) : null}
+            {Object.entries(TRIGGER_LABELS).map(([kind, label]) => (
+              <option key={kind} value={kind}>
+                {label}
+              </option>
+            ))}
+          </select>
+          {table !== null && "table" in trigger && table.tables.size > 1 ? (
             <select
-              aria-label="Trigger"
-              value={builderTrigger ?? ""}
-              onChange={(event) => {
-                const kind = event.target.value as BuilderTrigger;
-                setDraft((current) => ({
-                  ...current,
-                  when:
-                    kind === "group-message" && current.when.kind !== "group-message"
-                      ? // A new Group trigger starts on the first Group whose messages can start it.
-                        { kind, group: firstGroup("read"), startsWith: null }
-                      : triggerFor(
-                          kind,
-                          current.when,
-                          recordFields,
-                          buttonFields,
-                          table?.name ?? null,
-                        ),
-                  // A record starts to match rows, until someone writes a formula.
-                  matching:
-                    kind === "starts-matching" && current.matching.mode === "always"
-                      ? { mode: "rows", formula: "", rows: [newCondition()], saved: null }
-                      : current.matching,
-                }));
-              }}
+              aria-label="Table"
+              value={watched}
+              onChange={(event) => setWhen({ ...trigger, table: event.target.value })}
               className={selectClass}
             >
-              {builderTrigger === null ? (
-                <option value="" disabled>
-                  {sentenceText(triggerParts(trigger))}
-                </option>
-              ) : null}
-              {Object.entries(TRIGGER_LABELS).map(([kind, label]) => (
-                <option key={kind} value={kind}>
-                  {label}
+              {table.tables.has(watched) ? null : <option value={watched}>{watched}</option>}
+              {[...table.tables.keys()].map((name) => (
+                <option key={name} value={name}>
+                  {name}
                 </option>
               ))}
             </select>
-            {table !== null && "table" in trigger && table.tables.size > 1 ? (
+          ) : null}
+          {trigger.kind === "field-changed" ? (
+            <>
+              <FieldSelect
+                label="Field that changes"
+                fields={recordFields}
+                value={trigger.field}
+                collection={watched}
+                problem={problem("when/field")}
+                onChange={(field) =>
+                  setWhen({ kind: "field-changed", field, to: null, table: trigger.table })
+                }
+              />
+              <ToValue>
+                <ValueInput
+                  label="Changes to"
+                  field={recordFields.find((field) => field.name === trigger.field)}
+                  value={trigger.to}
+                  allowAny
+                  problem={problem("when/to")}
+                  onChange={(to) => setWhen({ ...trigger, to })}
+                />
+              </ToValue>
+            </>
+          ) : trigger.kind === "record-changed" ? (
+            <>
               <select
-                aria-label="Table"
-                value={watched}
-                onChange={(event) => setWhen({ ...trigger, table: event.target.value })}
+                aria-label="Which fields"
+                value={trigger.fields === null ? "any" : "chosen"}
+                onChange={(event) =>
+                  setWhen({ ...trigger, fields: event.target.value === "any" ? null : [] })
+                }
+                className={selectClass}
+                // With no field to check, the problem belongs to this choice.
+                {...(fieldChoices.length === 0 ? invalid(problem("when/fields")) : {})}
+              >
+                <option value="any">Any field</option>
+                <option value="chosen">Chosen fields</option>
+              </select>
+              {trigger.fields !== null ? (
+                <div
+                  role="group"
+                  aria-label="Fields that change"
+                  className="flex flex-col gap-0.5 rounded-md border border-line bg-bg px-2 py-1"
+                >
+                  {fieldChoices.map((name) => (
+                    <label key={name} className="flex items-center gap-1.5 text-[13px] text-ink">
+                      <input
+                        type="checkbox"
+                        checked={trigger.fields!.includes(name)}
+                        onChange={(event) => {
+                          const chosen = trigger.fields ?? [];
+                          setWhen({
+                            ...trigger,
+                            fields: fieldChoices.filter((candidate) =>
+                              candidate === name
+                                ? event.target.checked
+                                : chosen.includes(candidate),
+                            ),
+                          });
+                        }}
+                        {...invalid(problem("when/fields"))}
+                      />
+                      {name}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              {missingFields.length > 0 && problem("when/fields") === null ? (
+                <StatusLine tone="warning" icon={AlertTriangle} label="Not a field">
+                  {missingFields.join(", ")}{" "}
+                  {missingFields.length === 1 ? "is not a field" : "are not fields"} in {watched}.
+                </StatusLine>
+              ) : null}
+              <Problem shown={problem("when/fields")} />
+            </>
+          ) : trigger.kind === "starts-matching" ? (
+            <ConditionEditor
+              part={{ kind: "match" }}
+              condition={draft.matching}
+              expression={conditionOf(draft.matching)}
+              fields={recordFields}
+              collection={watched}
+              problemKey="when/condition"
+              problem={problem}
+              newRow={newCondition}
+              focusAfter={focusAfter}
+              onChange={(change) =>
+                setDraft((current) => ({ ...current, matching: change(current.matching) }))
+              }
+            />
+          ) : trigger.kind === "schedule" ? (
+            <>
+              <select
+                aria-label="Repeats"
+                value={trigger.every}
+                onChange={(event) =>
+                  setWhen(
+                    scheduleFor(event.target.value as AutomationScheduleTrigger["every"], trigger),
+                  )
+                }
                 className={selectClass}
               >
-                {table.tables.has(watched) ? null : <option value={watched}>{watched}</option>}
-                {[...table.tables.keys()].map((name) => (
-                  <option key={name} value={name}>
-                    {name}
+                {Object.entries(FREQUENCY_LABELS).map(([every, label]) => (
+                  <option key={every} value={every}>
+                    {label}
                   </option>
                 ))}
               </select>
-            ) : null}
-            {trigger.kind === "field-changed" ? (
-              <>
-                <FieldSelect
-                  label="Field that changes"
-                  fields={recordFields}
-                  value={trigger.field}
-                  collection={watched}
-                  problem={problem("when/field")}
-                  onChange={(field) =>
-                    setWhen({ kind: "field-changed", field, to: null, table: trigger.table })
-                  }
-                />
-                <ToValue>
-                  <ValueInput
-                    label="Changes to"
-                    field={recordFields.find((field) => field.name === trigger.field)}
-                    value={trigger.to}
-                    allowAny
-                    problem={problem("when/to")}
-                    onChange={(to) => setWhen({ ...trigger, to })}
-                  />
-                </ToValue>
-              </>
-            ) : trigger.kind === "record-changed" ? (
-              <>
-                <select
-                  aria-label="Which fields"
-                  value={trigger.fields === null ? "any" : "chosen"}
-                  onChange={(event) =>
-                    setWhen({ ...trigger, fields: event.target.value === "any" ? null : [] })
-                  }
-                  className={selectClass}
-                  // With no field to check, the problem belongs to this choice.
-                  {...(fieldChoices.length === 0 ? invalid(problem("when/fields")) : {})}
-                >
-                  <option value="any">Any field</option>
-                  <option value="chosen">Chosen fields</option>
-                </select>
-                {trigger.fields !== null ? (
+              {trigger.every === "week" ? (
+                <div role="group" aria-label="Days" className="flex flex-wrap gap-x-2.5 gap-y-1">
+                  {WEEKDAYS.map(([day, label]) => (
+                    <label key={day} className="flex items-center gap-1 text-[13px] text-ink">
+                      <input
+                        type="checkbox"
+                        checked={trigger.days.includes(day)}
+                        onChange={(event) =>
+                          setWhen({
+                            ...trigger,
+                            days: WEEKDAYS.flatMap(([candidate]) =>
+                              (
+                                candidate === day
+                                  ? event.target.checked
+                                  : trigger.days.includes(candidate)
+                              )
+                                ? [candidate]
+                                : [],
+                            ),
+                          })
+                        }
+                        {...invalid(problem("when/days"))}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              ) : trigger.every === "month" ? (
+                <>
                   <div
                     role="group"
-                    aria-label="Fields that change"
-                    className="flex flex-col gap-0.5 rounded-md border border-line bg-bg px-2 py-1"
+                    aria-label="Days of the month"
+                    className="grid grid-cols-7 gap-1"
                   >
-                    {fieldChoices.map((name) => (
-                      <label key={name} className="flex items-center gap-1.5 text-[13px] text-ink">
-                        <input
-                          type="checkbox"
-                          checked={trigger.fields!.includes(name)}
-                          onChange={(event) => {
-                            const chosen = trigger.fields ?? [];
-                            setWhen({
-                              ...trigger,
-                              fields: fieldChoices.filter((candidate) =>
-                                candidate === name
-                                  ? event.target.checked
-                                  : chosen.includes(candidate),
-                              ),
-                            });
-                          }}
-                          {...invalid(problem("when/fields"))}
-                        />
-                        {name}
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
-                {missingFields.length > 0 && problem("when/fields") === null ? (
-                  <StatusLine tone="warning" icon={AlertTriangle} label="Not a field">
-                    {missingFields.join(", ")}{" "}
-                    {missingFields.length === 1 ? "is not a field" : "are not fields"} in {watched}.
-                  </StatusLine>
-                ) : null}
-                <Problem shown={problem("when/fields")} />
-              </>
-            ) : trigger.kind === "starts-matching" ? (
-              <ConditionEditor
-                part={{ kind: "match" }}
-                condition={draft.matching}
-                expression={conditionOf(draft.matching)}
-                fields={recordFields}
-                collection={watched}
-                problemKey="when/condition"
-                problem={problem}
-                newRow={newCondition}
-                focusAfter={focusAfter}
-                onChange={(change) =>
-                  setDraft((current) => ({ ...current, matching: change(current.matching) }))
-                }
-              />
-            ) : trigger.kind === "schedule" ? (
-              <>
-                <select
-                  aria-label="Repeats"
-                  value={trigger.every}
-                  onChange={(event) =>
-                    setWhen(
-                      scheduleFor(
-                        event.target.value as AutomationScheduleTrigger["every"],
-                        trigger,
-                      ),
-                    )
-                  }
-                  className={selectClass}
-                >
-                  {Object.entries(FREQUENCY_LABELS).map(([every, label]) => (
-                    <option key={every} value={every}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-                {trigger.every === "week" ? (
-                  <div role="group" aria-label="Days" className="flex flex-wrap gap-x-2.5 gap-y-1">
-                    {WEEKDAYS.map(([day, label]) => (
-                      <label key={day} className="flex items-center gap-1 text-[13px] text-ink">
+                    {MONTH_DAYS.map((day) => (
+                      <label
+                        key={day}
+                        className="flex items-center gap-1 tabular-nums text-[12px] text-ink"
+                      >
                         <input
                           type="checkbox"
                           checked={trigger.days.includes(day)}
                           onChange={(event) =>
                             setWhen({
                               ...trigger,
-                              days: WEEKDAYS.flatMap(([candidate]) =>
-                                (
-                                  candidate === day
-                                    ? event.target.checked
-                                    : trigger.days.includes(candidate)
-                                )
-                                  ? [candidate]
-                                  : [],
+                              days: MONTH_DAYS.filter((candidate) =>
+                                candidate === day
+                                  ? event.target.checked
+                                  : trigger.days.includes(candidate),
                               ),
                             })
                           }
                           {...invalid(problem("when/days"))}
                         />
-                        {label}
+                        {day}
                       </label>
                     ))}
                   </div>
-                ) : trigger.every === "month" ? (
-                  <>
-                    <div
-                      role="group"
-                      aria-label="Days of the month"
-                      className="grid grid-cols-7 gap-1"
-                    >
-                      {MONTH_DAYS.map((day) => (
-                        <label
-                          key={day}
-                          className="flex items-center gap-1 tabular-nums text-[12px] text-ink"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={trigger.days.includes(day)}
-                            onChange={(event) =>
-                              setWhen({
-                                ...trigger,
-                                days: MONTH_DAYS.filter((candidate) =>
-                                  candidate === day
-                                    ? event.target.checked
-                                    : trigger.days.includes(candidate),
-                                ),
-                              })
-                            }
-                            {...invalid(problem("when/days"))}
-                          />
-                          {day}
-                        </label>
-                      ))}
-                    </div>
-                    {trigger.days.some((day) => day > 28) ? (
-                      <p className="m-0 text-[12px] text-muted">
-                        In a shorter month, a later day runs on the month's last day.
-                      </p>
-                    ) : null}
-                  </>
-                ) : null}
-                <Problem shown={problem("when/days")} />
-                {trigger.every === "hour" ? (
-                  <select
-                    aria-label="Minutes past the hour"
-                    value={trigger.at}
-                    onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
-                    className={`${selectClass} tabular-nums`}
-                    {...invalid(problem("when/at"))}
-                  >
-                    {MINUTES.includes(trigger.at) ? null : (
-                      <option value={trigger.at}>{trigger.at}</option>
-                    )}
-                    {MINUTES.map((minute) => (
-                      <option key={minute} value={minute}>
-                        {minute}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    aria-label="Time"
-                    type="time"
-                    value={trigger.at}
-                    onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
-                    className={inputClass}
-                    {...invalid(problem("when/at"))}
-                  />
-                )}
-                <Problem shown={problem("when/at")} />
+                  {trigger.days.some((day) => day > 28) ? (
+                    <p className="m-0 text-[12px] text-muted">
+                      In a shorter month, a later day runs on the month's last day.
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
+              <Problem shown={problem("when/days")} />
+              {trigger.every === "hour" ? (
                 <select
-                  aria-label="Time zone"
-                  value={trigger.timezone}
-                  onChange={(event) => setWhen({ ...trigger, timezone: event.target.value })}
-                  className={selectClass}
-                  {...invalid(problem("when/timezone"))}
+                  aria-label="Minutes past the hour"
+                  value={trigger.at}
+                  onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
+                  className={`${selectClass} tabular-nums`}
+                  {...invalid(problem("when/at"))}
                 >
-                  {/* A zone the file names another way, such as Asia/Calcutta, stays as written. */}
-                  {timeZoneNames().includes(trigger.timezone) ? null : (
-                    <option value={trigger.timezone}>{trigger.timezone}</option>
+                  {MINUTES.includes(trigger.at) ? null : (
+                    <option value={trigger.at}>{trigger.at}</option>
                   )}
-                  {timeZoneNames().map((zone) => (
-                    <option key={zone} value={zone}>
-                      {zone}
+                  {MINUTES.map((minute) => (
+                    <option key={minute} value={minute}>
+                      {minute}
                     </option>
                   ))}
                 </select>
-                <Problem shown={problem("when/timezone")} />
-                {nextRun === null ? null : (
-                  <StatusLine tone="muted" icon={Clock} label="Schedule">
-                    {nextRun.text}
-                  </StatusLine>
-                )}
-                {props.scheduleHost}
-              </>
-            ) : trigger.kind === "group-message" ? (
-              <>
-                {groupPicker("Group", trigger.group, "read", "when/group", "group-first", (group) =>
-                  setWhen({ ...trigger, group }),
-                )}
+              ) : (
                 <input
-                  aria-label="Starts with"
-                  value={trigger.startsWith ?? ""}
-                  placeholder="Starts with, such as /task"
-                  onChange={(event) =>
-                    setWhen({
-                      ...trigger,
-                      startsWith: event.target.value === "" ? null : event.target.value,
-                    })
-                  }
+                  aria-label="Time"
+                  type="time"
+                  value={trigger.at}
+                  onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
                   className={inputClass}
-                  {...invalid(problem("when/startsWith"))}
+                  {...invalid(problem("when/at"))}
                 />
-                <Problem shown={problem("when/startsWith")} />
-                {props.scheduleHost}
-              </>
-            ) : trigger.kind === "button" ? (
-              <>
-                {buttonFields.length > 0 || trigger.field !== "" ? (
-                  <FieldSelect
-                    label="Button"
-                    fields={buttonFields}
-                    value={trigger.field}
-                    collection={watched}
-                    problem={problem("when/button")}
-                    onChange={(field) => setWhen({ ...trigger, field })}
-                  />
-                ) : (
-                  <Problem shown={problem("when/button")} />
+              )}
+              <Problem shown={problem("when/at")} />
+              <select
+                aria-label="Time zone"
+                value={trigger.timezone}
+                onChange={(event) => setWhen({ ...trigger, timezone: event.target.value })}
+                className={selectClass}
+                {...invalid(problem("when/timezone"))}
+              >
+                {/* A zone the file names another way, such as Asia/Calcutta, stays as written. */}
+                {timeZoneNames().includes(trigger.timezone) ? null : (
+                  <option value={trigger.timezone}>{trigger.timezone}</option>
                 )}
-                {buttonFields.length === 0 ? (
-                  <StatusLine tone="muted" icon={Info} label="No button">
-                    <p className="m-0">
-                      The Collection {watched} has no Button field. Add one, then choose it here.
-                    </p>
-                    {props.onOpenFields && watched === own ? (
-                      <SecondaryButton size="compact" className="mt-1" onClick={props.onOpenFields}>
-                        Edit fields
-                      </SecondaryButton>
-                    ) : null}
-                  </StatusLine>
-                ) : null}
-              </>
-            ) : null}
-            <Problem shown={problem("when")} />
-          </section>
+                {timeZoneNames().map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+              <Problem shown={problem("when/timezone")} />
+              {nextRun === null ? null : (
+                <StatusLine tone="muted" icon={Clock} label="Schedule">
+                  {nextRun.text}
+                </StatusLine>
+              )}
+              {props.scheduleHost}
+            </>
+          ) : trigger.kind === "group-message" ? (
+            <>
+              {groupPicker("Group", trigger.group, "read", "when/group", "group-first", (group) =>
+                setWhen({ ...trigger, group }),
+              )}
+              <input
+                aria-label="Starts with"
+                value={trigger.startsWith ?? ""}
+                placeholder="Starts with, such as /task"
+                onChange={(event) =>
+                  setWhen({
+                    ...trigger,
+                    startsWith: event.target.value === "" ? null : event.target.value,
+                  })
+                }
+                className={inputClass}
+                {...invalid(problem("when/startsWith"))}
+              />
+              <Problem shown={problem("when/startsWith")} />
+              {props.scheduleHost}
+            </>
+          ) : trigger.kind === "button" ? (
+            <>
+              {buttonFields.length > 0 || trigger.field !== "" ? (
+                <FieldSelect
+                  label="Button"
+                  fields={buttonFields}
+                  value={trigger.field}
+                  collection={watched}
+                  problem={problem("when/button")}
+                  onChange={(field) => setWhen({ ...trigger, field })}
+                />
+              ) : (
+                <Problem shown={problem("when/button")} />
+              )}
+              {buttonFields.length === 0 ? (
+                <StatusLine tone="muted" icon={Info} label="No button">
+                  <p className="m-0">
+                    The Collection {watched} has no Button field. Add one, then choose it here.
+                  </p>
+                  {props.onOpenFields && watched === own ? (
+                    <SecondaryButton size="compact" className="mt-1" onClick={props.onOpenFields}>
+                      Edit fields
+                    </SecondaryButton>
+                  ) : null}
+                </StatusLine>
+              ) : null}
+            </>
+          ) : null}
+          <Problem shown={problem("when")} />
+        </section>
 
-          <section aria-label="Only if" className="flex flex-col gap-1.5">
-            <SectionLabel>Only if</SectionLabel>
-            <ConditionEditor
-              part={{ kind: "condition" }}
-              condition={draft.condition}
-              expression={automation.if}
-              fields={recordFields}
-              collection={watched}
-              problemKey="if"
-              problem={problem}
-              newRow={newCondition}
-              focusAfter={focusAfter}
-              onChange={(change) =>
-                setDraft((current) => ({ ...current, condition: change(current.condition) }))
-              }
-            />
-          </section>
+        <section aria-label="Only if" className="flex flex-col gap-1.5">
+          <SectionLabel>Only if</SectionLabel>
+          <ConditionEditor
+            part={{ kind: "condition" }}
+            condition={draft.condition}
+            expression={automation.if}
+            fields={recordFields}
+            collection={watched}
+            problemKey="if"
+            problem={problem}
+            newRow={newCondition}
+            focusAfter={focusAfter}
+            onChange={(change) =>
+              setDraft((current) => ({ ...current, condition: change(current.condition) }))
+            }
+          />
+        </section>
 
-          <section aria-label="Do" className="flex flex-col gap-2">
-            <SectionLabel>Do</SectionLabel>
-            {stepList("do", draft.steps)}
-          </section>
-        </fieldset>
+        <section aria-label="Do" className="flex flex-col gap-2">
+          <SectionLabel>Do</SectionLabel>
+          {stepList("do", draft.steps)}
+        </section>
+      </fieldset>
 
-        <Problem shown={problem("save")} />
-        <p role="status" className="sr-only">
-          {announced}
-        </p>
-        <div className="flex justify-end gap-2 border-t border-line pt-3">
-          <SecondaryButton size="compact" onClick={props.onCancel}>
-            Cancel
-          </SecondaryButton>
-          <PrimaryButton
-            type="submit"
-            size="compact"
-            disabled={props.saving || checking || props.readOnly}
+      <Problem shown={problem("save")} />
+      <p role="status" className="sr-only">
+        {announced}
+      </p>
+      <div className="flex justify-end gap-2 border-t border-line pt-3">
+        <SecondaryButton size="compact" onClick={props.onCancel}>
+          Cancel
+        </SecondaryButton>
+        <PrimaryButton
+          type="submit"
+          size="compact"
+          disabled={props.saving || checking || props.readOnly}
+        >
+          Save
+        </PrimaryButton>
+      </div>
+
+      {props.leaveRequested && dirty && !saveChosen ? (
+        <Overlay onClose={props.onStay}>
+          <div
+            data-testid="automation-unsaved"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="automation-unsaved-title"
+            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
           >
-            Save
-          </PrimaryButton>
-        </div>
-
-        {props.leaveRequested && dirty && !saveChosen ? (
-          <Overlay onClose={props.onStay}>
-            <div
-              data-testid="automation-unsaved"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="automation-unsaved-title"
-              className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
-            >
-              <h3 id="automation-unsaved-title" className="m-0 text-base font-semibold text-ink">
-                Save your changes?
-              </h3>
-              <p className="m-0 mt-2 text-[13px] text-muted">
-                {automation.name.trim()
-                  ? `The automation ${automation.name.trim()}`
-                  : "This automation"}{" "}
-                has unsaved changes.
-              </p>
-              <div className="mt-4 flex justify-end gap-2">
-                <SecondaryButton onClick={props.onStay}>Keep editing</SecondaryButton>
-                <DangerButton onClick={props.onLeave}>Discard</DangerButton>
-                <PrimaryButton
-                  onClick={() => {
-                    setSaveChosen(true);
-                    void save().then((saved) => {
-                      if (!saved) props.onStay();
-                    });
-                  }}
-                  disabled={props.readOnly}
-                >
-                  Save
-                </PrimaryButton>
-              </div>
+            <h3 id="automation-unsaved-title" className="m-0 text-base font-semibold text-ink">
+              Save your changes?
+            </h3>
+            <p className="m-0 mt-2 text-[13px] text-muted">
+              {automation.name.trim()
+                ? `The automation ${automation.name.trim()}`
+                : "This automation"}{" "}
+              has unsaved changes.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <SecondaryButton onClick={props.onStay}>Keep editing</SecondaryButton>
+              <DangerButton onClick={props.onLeave}>Discard</DangerButton>
+              <PrimaryButton
+                onClick={() => {
+                  setSaveChosen(true);
+                  void save().then((saved) => {
+                    if (!saved) props.onStay();
+                  });
+                }}
+                disabled={props.readOnly}
+              >
+                Save
+              </PrimaryButton>
             </div>
-          </Overlay>
-        ) : null}
-      </form>
-      {addingSecret && secretsQuery.value?.kind === "ready" ? (
-        <SecretEditorDialog
-          mode={{ kind: "add", draft: addingSecret.draft }}
-          storage={secretsQuery.value.storage}
-          existingNames={new Set(secretsQuery.value.secrets.map((secret) => secret.name))}
-          onCancel={() => setAddingSecret(null)}
-          onSave={async (secret) => {
-            const token = secretRequests.next();
-            await bridge().setWorkspaceSecret({ workspaceId, secret });
-            if (!secretRequests.isCurrent(token)) return;
-            addingSecret.apply(secret.name);
-            setAddingSecret(null);
-            void secretsQuery.retry();
-          }}
-        />
+          </div>
+        </Overlay>
       ) : null}
-    </>
+      {addingSecret && secretsQuery.value?.kind === "ready"
+        ? createPortal(
+            <SecretEditorDialog
+              mode={{ kind: "add", draft: addingSecret.draft }}
+              storage={secretsQuery.value.storage}
+              existingNames={new Set(secretsQuery.value.secrets.map((secret) => secret.name))}
+              onCancel={() => setAddingSecret(null)}
+              onSave={async (secret) => {
+                const token = secretRequests.next();
+                await bridge().setWorkspaceSecret({ workspaceId, secret });
+                if (!secretRequests.isCurrent(token)) return;
+                addingSecret.apply(secret.name);
+                setAddingSecret(null);
+                void secretsQuery.retry();
+              }}
+            />,
+            document.body,
+          )
+        : null}
+    </form>
   );
 }

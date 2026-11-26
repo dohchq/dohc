@@ -227,6 +227,7 @@ export function SecretEditorDialog(props: {
           className="flex flex-col gap-4"
           onSubmit={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             if (!saving) void handleSubmit();
           }}
         >
