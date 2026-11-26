@@ -657,6 +657,7 @@ export interface EngineRelayWorkspaceClient {
     shareId: string;
     grantedSelector: GrantedSelector;
     reach?: ListedReach | null;
+    admin?: boolean;
   }): Promise<PushDirectWritesResult>;
 
   // What a push that stopped in transit left unsent. A local read.
@@ -1103,13 +1104,14 @@ export class EngineRelayClient {
           morePending: booleanField(result, "morePending", "share.proposal.submit"),
         };
       },
-      pushDirectWrites: async ({ shareId, grantedSelector, reach }) => {
+      pushDirectWrites: async ({ shareId, grantedSelector, reach, admin = false }) => {
         const method = "share.direct.push";
         const result = resultRecord(
           await request(method, {
             workspaceId: workspace.workspaceId,
             shareId,
             grantedSelector: engineGrantedSelector(grantedSelector, reach),
+            admin,
           }),
           method,
         );

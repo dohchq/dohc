@@ -58,7 +58,7 @@ const proposal = {
   ops: [op],
 };
 
-async function harness() {
+async function harness(memberRole?: "admin" | "member") {
   const workspace: RegistryEntry = {
     workspaceId: "workspace",
     rootPath: resolve("/share-proposals"),
@@ -184,6 +184,7 @@ async function harness() {
     shareViewFiles: { reconcile },
     receivedShareEngine: { relayFor },
     joinedByAnotherAccount: () => account.other,
+    memberRoleOf: () => memberRole,
   });
   registerOperations<typeof shareProposalOperations, Event, Operation>(
     {
@@ -612,11 +613,39 @@ describe("registered share proposal handlers", () => {
     });
   });
 
-  it("pushes direct writes through the pinned grant without settling files first", async () => {
-    const h = await harness();
-    h.recipient();
-    h.pushDirect
-      .mockResolvedValueOnce({
+  it.each(["admin", "member"] as const)(
+    "pushes direct writes for an %s through the pinned grant without settling files first",
+    async (role) => {
+      const h = await harness(role);
+      h.recipient();
+      h.pushDirect
+        .mockResolvedValueOnce({
+          writes: [
+            { paths: ["docs/packing/collection.yaml"], result: "written" },
+            {
+              paths: ["docs/ideas/collection.yaml"],
+              result: "stale",
+              stalePath: "docs/ideas",
+              recoveredDraftPath: null,
+              currentBlobSha256: null,
+            },
+          ],
+          morePending: true,
+        })
+        .mockResolvedValueOnce({
+          writes: [
+            { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
+          ],
+          morePending: false,
+        });
+      await expect(
+        h.invoke(shareProposalOperations.pushShareDirectWrites.channel, {
+          workspaceId: "workspace",
+          shareId: "forged",
+        }),
+      ).resolves.toBeUndefined();
+      expect(h.reported).toHaveBeenLastCalledWith("workspace", {
+        status: "pushed",
         writes: [
           { paths: ["docs/packing/collection.yaml"], result: "written" },
           {
@@ -624,44 +653,20 @@ describe("registered share proposal handlers", () => {
             result: "stale",
             stalePath: "docs/ideas",
             recoveredDraftPath: null,
-            currentBlobSha256: null,
           },
-        ],
-        morePending: true,
-      })
-      .mockResolvedValueOnce({
-        writes: [
           { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
         ],
-        morePending: false,
       });
-    await expect(
-      h.invoke(shareProposalOperations.pushShareDirectWrites.channel, {
-        workspaceId: "workspace",
-        shareId: "forged",
-      }),
-    ).resolves.toBeUndefined();
-    expect(h.reported).toHaveBeenLastCalledWith("workspace", {
-      status: "pushed",
-      writes: [
-        { paths: ["docs/packing/collection.yaml"], result: "written" },
-        {
-          paths: ["docs/ideas/collection.yaml"],
-          result: "stale",
-          stalePath: "docs/ideas",
-          recoveredDraftPath: null,
-        },
-        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
-      ],
-    });
-    expect(h.reconcile).not.toHaveBeenCalled();
-    expect(h.pushDirect).toHaveBeenCalledTimes(2);
-    expect(h.pushDirect).toHaveBeenCalledWith({
-      shareId: "pinned-share",
-      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
-      reach: null,
-    });
-  });
+      expect(h.reconcile).not.toHaveBeenCalled();
+      expect(h.pushDirect).toHaveBeenCalledTimes(2);
+      expect(h.pushDirect).toHaveBeenCalledWith({
+        shareId: "pinned-share",
+        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+        reach: null,
+        admin: role === "admin",
+      });
+    },
+  );
 
   it("reports a failed push with the writes answered before it, and whether trying again can help", async () => {
     const h = await harness();

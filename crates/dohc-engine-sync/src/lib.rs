@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod apply;
+mod collection_rules;
 mod conflict_apply;
 mod conflict_outbox;
 mod conflict_resolve_v1;

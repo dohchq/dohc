@@ -38,6 +38,7 @@ import {
   filterPersonalCollectionWrite,
   MAIN_VERSION_ID,
   MAX_COLLECTION_WRITE_BYTES,
+  isDatasetRulePath,
   type CollectionWrite,
   type MemberFolders,
   type ProposedChange,
@@ -67,7 +68,7 @@ import {
 } from "./personalAgents";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
-import { workspaceRoleOf } from "./workspaceMembers";
+import { workspaceMemberGrantId, workspaceRoleOf } from "./workspaceMembers";
 import { assertMemberChanges } from "../memberActions";
 
 // The same bound the relay puts on a schema it reads for an app Collection.
@@ -275,14 +276,17 @@ export function commitCollectionWrite(
   // The writer's authority first, so content checks answer nobody who may
   // not write. The transaction checks it again, and decides.
   storage.readTx(() => currentWriter(storage, input));
-  const unchecked = validateContent(
-    storage,
-    workspaceId,
-    input.write,
-    writer.kind !== "named"
-      ? suppliedBytes(writer.content)
-      : storedBytes(storage, workspaceId, input.write),
-  );
+  const unchecked =
+    input.write.kind === "dataset-rules"
+      ? []
+      : validateContent(
+          storage,
+          workspaceId,
+          input.write,
+          writer.kind !== "named"
+            ? suppliedBytes(writer.content)
+            : storedBytes(storage, workspaceId, input.write),
+        );
 
   return storage.tx(() => {
     const current = currentWriter(storage, input);
@@ -300,7 +304,9 @@ export function commitCollectionWrite(
       {
         channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
       },
-      current.kind === "named" ? memberFolders(storage, workspaceId, current.userId) : null,
+      current.kind === "named"
+        ? memberFolders(storage, workspaceId, current.userId, input.grantId)
+        : null,
     );
     if (!decision.allowed || writeDigest(input.shareId, decision.write) !== payloadSha256) {
       throw relayError("share_op_rejected");
@@ -317,6 +323,9 @@ export function commitCollectionWrite(
       );
     }
     checkBases(storage, workspaceId, decision.write);
+    if (decision.write.kind === "dataset-rules") {
+      validateDatasetRules(storage, workspaceId, decision.write);
+    }
     if (decision.write.kind === "new-record") {
       checkRecordCreation(
         storage,
@@ -404,12 +413,14 @@ export function commitCollectionWrite(
     );
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
-    const ops = changesOf(decision.write).map((change, index) => ({
+    const write = decision.write;
+    const ops = changesOf(write).map((change, index) => ({
       originSeq: firstOriginSeq + index,
       opKind: "moment.append",
-      payloadJson: stableJsonStringify(
-        momentFor(storage, workspaceId, change, index, author, input),
-      ),
+      payloadJson: stableJsonStringify({
+        ...momentFor(storage, workspaceId, change, index, author, input),
+        ...(write.kind === "dataset-rules" ? { collectionRulesFolder: write.collectionPath } : {}),
+      }),
       recordedAtMs: input.nowMs,
       admittedAuthorSnapshot,
     }));
@@ -688,6 +699,7 @@ export function memberFolders(
   storage: StorageContext,
   workspaceId: string,
   userId: string,
+  grantId?: string,
 ): MemberFolders | null {
   const role = workspaceRoleOf(storage, workspaceId, userId);
   if (role === null || role.role === "owner") return null;
@@ -699,6 +711,17 @@ export function memberFolders(
           currentFile(storage, workspaceId, folder === "" ? file : `${folder}/${file}`) !== null,
       ),
     createsFolders: role.role === "admin",
+    ...(role.role === "admin" && grantId === workspaceMemberGrantId(storage, workspaceId, userId)
+      ? {
+          datasetFolderFor: (path: string) => {
+            for (let end = path.lastIndexOf("/"); end > 0; end = path.lastIndexOf("/", end - 1)) {
+              const folder = path.slice(0, end);
+              if (currentFile(storage, workspaceId, `${folder}/dataset.json`)) return folder;
+            }
+            return null;
+          },
+        }
+      : {}),
   };
 }
 
@@ -731,7 +754,7 @@ function folderSpellingTaken(storage: StorageContext, workspaceId: string, path:
 }
 
 function changesOf(write: CollectionWrite): ProposedChange[] {
-  return write.kind === "new-collection" ? write.changes : [write.change];
+  return "changes" in write ? write.changes : [write.change];
 }
 
 function checkRecordCreation(
@@ -992,9 +1015,23 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
     return;
   }
   const schemaPath = `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`;
-  if (write.kind === "new-collection") {
+  if (write.kind === "new-collection" || (write.kind === "dataset-rules" && write.creates)) {
     if (spellingTaken(storage, workspaceId, write.collectionPath)) {
       throw new CollectionWriteStaleError(write.collectionPath, null);
+    }
+    if (write.kind === "new-collection") return;
+  }
+  if (write.kind === "dataset-rules") {
+    for (const change of write.changes) {
+      const path = change.afterPath!;
+      const current = currentFile(storage, workspaceId, path)?.blobSha256 ?? null;
+      if (
+        current !== change.basedOnBlobSha256 ||
+        (current === null &&
+          (spellingTaken(storage, workspaceId, path) ||
+            folderSpellingTaken(storage, workspaceId, path)))
+      )
+        throw new CollectionWriteStaleError(path, current);
     }
     return;
   }
@@ -1023,7 +1060,99 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   }
 }
 
-/** Only automations may use a dataset folder. Rule files keep their approval lane. */
+function validateDatasetRules(
+  storage: StorageContext,
+  workspaceId: string,
+  write: Extract<CollectionWrite, { kind: "dataset-rules" }>,
+): void {
+  const descriptorPath = `${write.collectionPath}/dataset.json`;
+  const parse = (text: string | null) => {
+    try {
+      return parseDatasetDefinition(JSON.parse(text ?? ""), { descriptorPath });
+    } catch {
+      throw refusal("The Collection descriptor is invalid.");
+    }
+  };
+  const prior = currentFile(storage, workspaceId, descriptorPath);
+  const before = prior
+    ? parse(priorText(storage, workspaceId, prior.blobSha256, DATASET_METADATA_MAX_BYTES))
+    : null;
+  const bytesOf = storedBytes(storage, workspaceId, write);
+  const texts = new Map<string, string>();
+  for (const change of write.changes) {
+    const path = change.afterPath!;
+    const size = change.afterByteLength!;
+    if (path === descriptorPath && size > DATASET_METADATA_MAX_BYTES)
+      throw refusal(`${path} is ${size} bytes. The limit is ${DATASET_METADATA_MAX_BYTES} bytes.`);
+    texts.set(
+      path,
+      readChangeText(bytesOf, change, `${path} must be UTF-8 text of its stated size.`),
+    );
+  }
+  const next = texts.has(descriptorPath) ? parse(texts.get(descriptorPath)!) : before;
+  if (!next || (before && before.datasetId !== next.datasetId))
+    throw refusal("The Collection ID must stay the same.");
+  const { schemaPath, operationsPath } = next;
+  if (before && (before.schemaPath !== schemaPath || before.operationsPath !== operationsPath))
+    throw refusal("The Collection must keep the same schema and operations files.");
+  if (
+    ![schemaPath, operationsPath].every(
+      (path) => path.startsWith(`${write.collectionPath}/`) && isDatasetRulePath(path),
+    ) ||
+    [...texts.keys()].some(
+      (path) => path !== descriptorPath && path !== operationsPath && !path.endsWith(".sql"),
+    )
+  )
+    throw refusal(
+      "Write only the Collection descriptor, schema, operations, and SQL migrations in its folder.",
+    );
+  const files = new Set([...texts.keys()].map(pathCollisionKey));
+  const folders = new Map<string, string>();
+  for (const path of texts.keys()) {
+    const key = pathCollisionKey(path);
+    for (let end = key.lastIndexOf("/"); end > 0; end = key.lastIndexOf("/", end - 1)) {
+      if (files.has(key.slice(0, end))) throw refusal("A Collection file cannot also be a folder.");
+    }
+    for (let end = path.lastIndexOf("/"); end > 0; end = path.lastIndexOf("/", end - 1)) {
+      const folder = path.slice(0, end);
+      const key = pathCollisionKey(folder);
+      if (folders.has(key) && folders.get(key) !== folder)
+        throw refusal("Use one spelling for each folder in a Collection write.");
+      folders.set(key, folder);
+    }
+  }
+  if (!write.creates) return;
+  if (!texts.has(schemaPath) || !texts.has(operationsPath))
+    throw refusal("A new Collection needs its schema and operations in the same write.");
+  const catalogExists = storage.db
+    .prepare("SELECT 1 FROM sqlite_schema WHERE name = 'dohc_dataset_catalog' AND type = 'table'")
+    .get();
+  const duplicate = () => refusal("This Collection ID already exists in the workspace.");
+  if (
+    catalogExists &&
+    storage.db
+      .prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id = ? AND dataset_id = ?")
+      .get(workspaceId, next.datasetId)
+  )
+    throw duplicate();
+  for (const row of storage.db
+    .prepare(
+      `SELECT b.content FROM sync_relay_current_files f JOIN sync_relay_blobs b
+       ON b.workspace_id = f.workspace_id AND b.sha256 = f.blob_sha256
+       WHERE f.workspace_id = ? AND f.version_id = ? AND (f.path = 'dataset.json' OR f.path GLOB '*/dataset.json')
+       AND b.byte_length <= ?`,
+    )
+    .iterate(workspaceId, MAIN_VERSION_ID, DATASET_METADATA_MAX_BYTES)) {
+    let id: unknown;
+    try {
+      id = JSON.parse(utf8(row.content as Uint8Array) ?? "null")?.datasetId;
+    } catch {
+      continue;
+    }
+    if (id === next.datasetId) throw duplicate();
+  }
+}
+
 export function automationSwitchableFolder(
   storage: StorageContext,
   workspaceId: string,
@@ -1223,6 +1352,14 @@ function suppliedBytes(content: ReadonlyMap<string, Uint8Array>): ContentBytes {
   };
 }
 
+function readChangeText(bytesOf: ContentBytes, change: ProposedChange, reason?: string): string {
+  const bytes = bytesOf(change.afterBlobSha256!, change.afterByteLength!);
+  if (bytes === null) throw refusal(reason ?? `${change.afterPath} does not match its stated size`);
+  const text = utf8(bytes);
+  if (text === null) throw refusal(reason ?? `${change.afterPath} is not UTF-8 text`);
+  return text;
+}
+
 // Content checks with the shared parsers, before the write's transaction.
 // Content is named by its hash, so what is read here is what the moments
 // will name. Each blob is read and each record checked once, however many
@@ -1247,11 +1384,7 @@ function validateContent(
     const sha256 = change.afterBlobSha256!;
     let read = texts.get(sha256);
     if (read === undefined) {
-      const bytes = bytesOf(sha256, change.afterByteLength!);
-      if (bytes === null) throw refusal(`${change.afterPath} does not match its stated size`);
-      const decoded = utf8(bytes);
-      if (decoded === null) throw refusal(`${change.afterPath} is not UTF-8 text`);
-      read = { text: decoded, byteLength: bytes.byteLength };
+      read = { text: readChangeText(bytesOf, change), byteLength: change.afterByteLength! };
       texts.set(sha256, read);
     } else if (read.byteLength !== change.afterByteLength) {
       throw refusal(`${change.afterPath} does not match its stated size`);
@@ -1321,13 +1454,13 @@ function priorText(
   storage: StorageContext,
   workspaceId: string,
   sha256: string,
+  maxBytes = MAX_AUTOMATIONS_FILE_BYTES,
 ): string | "unreadable" {
   const row = storage.db
     .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
     .get(workspaceId, sha256);
   const byteLength = Number(row?.byte_length);
-  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_AUTOMATIONS_FILE_BYTES)
-    return "unreadable";
+  if (!Number.isSafeInteger(byteLength) || byteLength > maxBytes) return "unreadable";
   const bytes = storedBlob(storage, workspaceId, sha256, byteLength);
   return (bytes && utf8(bytes)) ?? "unreadable";
 }

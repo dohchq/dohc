@@ -845,6 +845,22 @@ describe("an agent writing a Collection through an Edit link", () => {
     );
   }
 
+  it("refuses an Edit-link agent's transactional Collection source files", async () => {
+    const { f, link } = await collectionFixture();
+    const agent = await connect(f, link);
+    const changes = [
+      linkCreate("trip/people/dataset.json", '{"formatVersion":2}'),
+      linkCreate("trip/people/schema.sql", "SELECT 1;"),
+      linkCreate("trip/people/operations.js", "globalThis.operations = {};"),
+    ];
+    const response = await f.h(
+      agentRequest(agent, "/sync/link/collection-writes", writeBody("rules", changes)),
+    );
+    expect(response.status).toBe(403);
+    expect(await json(response)).toMatchObject({ code: "share_op_rejected" });
+    expect(ledger(f)).toEqual([]);
+  });
+
   it("writes as its connection's principal and records the connection on the ledger", async () => {
     const { f, link } = await collectionFixture();
     const agent = await connect(f, link);

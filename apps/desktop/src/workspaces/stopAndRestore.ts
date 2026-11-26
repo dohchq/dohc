@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { DATASET_DESCRIPTOR_FILENAME } from "@dohc/security-contract/dataset";
 import { durableBatch, DURABLE_BATCH_ITEMS } from "@dohc/automation-executor/durable-batch";
 import { restoreReceiptOf } from "./restoreWriteIdentity";
 import { livePageTitle, sharedLiveRestoreDetail } from "../ipc/errorWords";
@@ -209,14 +210,18 @@ function definitionsIn(text: string | null): Map<string, boolean> {
   );
 }
 
+function isCollectionDescriptor(name: string): boolean {
+  return name === SCHEMA_FILE || name === DATASET_DESCRIPTOR_FILENAME;
+}
+
 // Automations first, so none of the person's runs again, and a schema last.
 function restoreOrder(entry: { first: DirectWriteFile }): number {
   const name = posix.basename(entry.first.path);
-  return name === AUTOMATIONS_FILE ? 0 : name === SCHEMA_FILE ? 2 : 1;
+  return name === AUTOMATIONS_FILE ? 0 : isCollectionDescriptor(name) ? 2 : 1;
 }
 
 function isCreatedSchema(entry: Written): boolean {
-  return entry.first.created && posix.basename(entry.first.path) === SCHEMA_FILE;
+  return entry.first.created && isCollectionDescriptor(posix.basename(entry.first.path));
 }
 
 /**
@@ -585,10 +590,31 @@ export async function restoreDirectWrites(
         if (isCreatedSchema(entry)) {
           // Only the schema may be left now. A record History would not
           // restore, or a file someone added since, keeps the Collection.
+          const descriptor = posix.basename(entry.first.path);
+          const transactional = descriptor === DATASET_DESCRIPTOR_FILENAME;
+          if (transactional) {
+            const subfolders = new Set<string>();
+            for (const { first } of written) {
+              if (!first.created || !first.path.startsWith(`${folder}/`)) continue;
+              for (
+                let dir = posix.dirname(first.path);
+                dir.startsWith(`${folder}/`);
+                dir = posix.dirname(dir)
+              )
+                subfolders.add(dir);
+            }
+            if (subfolders.size) await receipts.flush();
+            for (const dir of [...subfolders].sort((a, b) => b.length - a.length)) {
+              dependencies.assertCurrent();
+              await dependencies.removeEmptyFolder(dir);
+            }
+          }
           const entries = await dependencies.folderEntries(folder);
           if (
-            entries.some((name) => name !== SCHEMA_FILE) ||
-            [...review.keys()].some((path) => posix.dirname(path) === folder)
+            entries.some((name) => name !== descriptor) ||
+            [...review.keys()].some((path) =>
+              transactional ? path.startsWith(`${folder}/`) : posix.dirname(path) === folder,
+            )
           ) {
             review.set(entry.last.path, { path: entry.last.path, reason: "folder-in-use" });
             continue;

@@ -265,7 +265,12 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
       },
     ),
     folderEntries: vi.fn(async (path: string) => folders[path] ?? []),
-    removeEmptyFolder: vi.fn(async () => undefined),
+    removeEmptyFolder: vi.fn(async (path: string) => {
+      if (folders[path]?.length) return;
+      const parent = path.slice(0, path.lastIndexOf("/"));
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      if (folders[parent]) folders[parent] = folders[parent].filter((entry) => entry !== name);
+    }),
     undoRuns: vi.fn(
       async (
         _definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
@@ -1125,53 +1130,91 @@ describe("restoring what a person wrote directly", () => {
     });
   });
 
-  it("removes a Collection they created, schema last, and its empty folder", async () => {
-    const schema = moment(
-      "m-new-schema",
-      "o-new-schema",
-      "trip/ideas/collection.yaml",
-      null,
-      SCHEMA,
-    );
-    const record = moment("m-new-record", "o-new-record", "trip/ideas/a.md", null, RECORD);
-    const { dependencies, restored } = engine([schema, record], {
-      "trip/ideas": ["collection.yaml", "a.md"],
-    });
+  it.each(["collection.yaml", "dataset.json"])(
+    "removes a Collection they created, %s last, and its empty folder",
+    async (descriptor) => {
+      const schema = moment(
+        "m-new-schema",
+        "o-new-schema",
+        `trip/ideas/${descriptor}`,
+        null,
+        SCHEMA,
+      );
+      const record = moment("m-new-record", "o-new-record", "trip/ideas/a.md", null, RECORD);
+      const { dependencies, restored } = engine([schema, record], {
+        "trip/ideas": [descriptor, "a.md"],
+      });
 
-    const outcome = await restoreDirectWrites(dependencies, [
-      file("m-new-schema", "o-new-schema", "trip/ideas/collection.yaml", true),
-      file("m-new-record", "o-new-record", "trip/ideas/a.md", true),
-    ]);
+      const outcome = await restoreDirectWrites(dependencies, [
+        file("m-new-schema", "o-new-schema", `trip/ideas/${descriptor}`, true),
+        file("m-new-record", "o-new-record", "trip/ideas/a.md", true),
+      ]);
 
-    expect(restored).toEqual(["m-new-record", "m-new-schema"]);
-    expect(dependencies.removeEmptyFolder).toHaveBeenCalledWith("trip/ideas");
-    expect(outcome).toMatchObject({ review: [] });
-  });
+      expect(restored).toEqual(["m-new-record", "m-new-schema"]);
+      expect(dependencies.removeEmptyFolder).toHaveBeenCalledWith("trip/ideas");
+      expect(outcome).toMatchObject({ review: [] });
+    },
+  );
 
-  it("keeps a Collection they created, with a reason, when someone else's file remains in it", async () => {
-    const schema = moment(
-      "m-new-schema",
-      "o-new-schema",
-      "trip/ideas/collection.yaml",
-      null,
-      SCHEMA,
-    );
-    const record = moment("m-new-record", "o-new-record", "trip/ideas/a.md", null, RECORD);
-    const { dependencies, restored } = engine([schema, record], {
-      "trip/ideas": ["collection.yaml", "a.md", "mine.md"],
-    });
+  it.each([false, true])(
+    "restores a Collection with nested migrations (other files: %s)",
+    async (othersRemain) => {
+      const descriptor = "trip/ideas/dataset.json";
+      const migration = "trip/ideas/migrations/latest/001.sql";
+      const { dependencies, restored } = engine(
+        [
+          moment("descriptor", "descriptor", descriptor, null, "{}"),
+          moment("migration", "migration", migration, null, "SELECT 1;"),
+        ],
+        {
+          "trip/ideas": ["dataset.json", "migrations"],
+          "trip/ideas/migrations": ["latest"],
+          "trip/ideas/migrations/latest": othersRemain ? ["001.sql", "002.sql"] : ["001.sql"],
+        },
+      );
+      const outcome = await restoreDirectWrites(dependencies, [
+        file("descriptor", "descriptor", descriptor, true),
+        file("migration", "migration", migration, true),
+      ]);
+      expect(restored).toEqual(othersRemain ? ["migration"] : ["migration", "descriptor"]);
+      expect(outcome).toMatchObject({
+        review: othersRemain ? [{ path: descriptor, reason: "folder-in-use" }] : [],
+      });
+      expect(dependencies.removeEmptyFolder.mock.calls.map(([path]) => path)).toEqual([
+        "trip/ideas/migrations/latest",
+        "trip/ideas/migrations",
+        ...(!othersRemain ? ["trip/ideas"] : []),
+      ]);
+    },
+  );
 
-    const outcome = await restoreDirectWrites(dependencies, [
-      file("m-new-schema", "o-new-schema", "trip/ideas/collection.yaml", true),
-      file("m-new-record", "o-new-record", "trip/ideas/a.md", true),
-    ]);
+  it.each(["collection.yaml", "dataset.json"])(
+    "keeps a Collection's %s when someone else's file remains in it",
+    async (descriptor) => {
+      const schema = moment(
+        "m-new-schema",
+        "o-new-schema",
+        `trip/ideas/${descriptor}`,
+        null,
+        SCHEMA,
+      );
+      const record = moment("m-new-record", "o-new-record", "trip/ideas/a.md", null, RECORD);
+      const { dependencies, restored } = engine([schema, record], {
+        "trip/ideas": [descriptor, "a.md", "mine.md"],
+      });
 
-    expect(restored).toEqual(["m-new-record"]);
-    expect(dependencies.removeEmptyFolder).not.toHaveBeenCalled();
-    expect(outcome).toMatchObject({
-      review: [{ path: "trip/ideas/collection.yaml", reason: "folder-in-use" }],
-    });
-  });
+      const outcome = await restoreDirectWrites(dependencies, [
+        file("m-new-schema", "o-new-schema", `trip/ideas/${descriptor}`, true),
+        file("m-new-record", "o-new-record", "trip/ideas/a.md", true),
+      ]);
+
+      expect(restored).toEqual(["m-new-record"]);
+      expect(dependencies.removeEmptyFolder).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        review: [{ path: `trip/ideas/${descriptor}`, reason: "folder-in-use" }],
+      });
+    },
+  );
 
   it("keeps a created Collection's schema when History will not restore one of its records", async () => {
     const schema = moment(

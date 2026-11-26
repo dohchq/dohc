@@ -1224,7 +1224,7 @@ export interface SyncRelayStorage {
     input: import("./collectionWrites").CommitPersonalCollectionWriteInput,
   ): import("./collectionWrites").CommittedCollectionWrite;
   /** The folders a person in the workspace may write pages in, or null without a role. */
-  memberFolders(workspaceId: string, userId: string): MemberFolders | null;
+  memberFolders(workspaceId: string, userId: string, grantId?: string): MemberFolders | null;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(
     input: import("./ownerCollectionWrites").OwnerCollectionWritesInput,

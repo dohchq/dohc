@@ -158,6 +158,7 @@ pub enum RelayOperation {
         workspace_id: String,
         share_id: String,
         granted: dohc_engine_sync::ShareGrant,
+        admin: bool,
         max_read_bytes: usize,
     },
     CommitShareViewCursor {
@@ -3400,6 +3401,7 @@ fn run_relay_operation(
             workspace_id,
             share_id,
             granted,
+            admin,
             max_read_bytes,
         } => client
             .push_direct_writes(
@@ -3407,6 +3409,7 @@ fn run_relay_operation(
                 &workspace_id,
                 &share_id,
                 &granted,
+                admin,
                 &NoFaults,
                 max_read_bytes,
             )
@@ -4248,6 +4251,7 @@ mod hosted_refusal_tests {
                 workspace_id: ws(),
                 share_id: "share".into(),
                 granted: granted(),
+                admin: false,
                 max_read_bytes: 0,
             },
             RelayOperation::CommitShareViewCursor {

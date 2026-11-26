@@ -14,6 +14,7 @@ import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeleti
 import type { StorageContext } from "./storage/context";
 import {
   filterCollectionWriteForShare,
+  MAX_COLLECTION_WRITE_BYTES,
   type ProposedChange,
   type ShareSelector,
 } from "./shareFilter";
@@ -1830,6 +1831,364 @@ describe("a new page in the owner's workspace", () => {
       ),
     );
   }
+
+  const datasetId = "00000000-0000-4000-8000-000000000001";
+  const rulesSchema = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL);";
+  const rulesSource = "globalThis.operations = {};";
+
+  function rulesDescriptor(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      formatVersion: 2,
+      datasetId,
+      name: "People",
+      tables: [
+        {
+          sqlName: "people",
+          primaryKey: "id",
+          fields: [{ sqlColumn: "id", type: "text", required: true, unique: true }],
+        },
+      ],
+      operations: [
+        { name: "read", table: "people", kind: "read", access: "helper", fields: ["id"] },
+      ],
+      ...overrides,
+    });
+  }
+
+  function ruleFiles(folder: string, descriptor = rulesDescriptor()) {
+    return {
+      [`${folder}/dataset.json`]: descriptor,
+      [`${folder}/schema.sql`]: rulesSchema,
+      [`${folder}/operations.js`]: rulesSource,
+      [`${folder}/migrations/001.sql`]: "SELECT 1;",
+    };
+  }
+
+  function ruleWrite(
+    r: Relay,
+    who: { userId: string; shareId: string },
+    changes: ProposedChange[],
+    submitId = "rules",
+  ) {
+    return r.h(
+      request(
+        who.userId,
+        `/sync/shares/${who.shareId}/collection-writes`,
+        jsonBody({ submitId, changes }),
+      ),
+    );
+  }
+
+  async function rulesSetup() {
+    const r = await workspace();
+    const admin = await member(r, "ana", "admin");
+    const files = ruleFiles("docs/people");
+    for (const text of Object.values(files)) await uploadAs(r, admin, text);
+    const changes = Object.entries(files)
+      .reverse()
+      .map(([path, text]) => create(path, text));
+    return { r, admin, changes };
+  }
+
+  it("commits an Admin's rule files atomically, admits in-place edits, and lists both for stop and restore", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    const created = await ruleWrite(r, admin, changes);
+    expect(created.status, await created.clone().text()).toBe(200);
+    expect(await json(await ruleWrite(r, admin, changes))).toMatchObject({ created: false });
+
+    const next = "globalThis.operations = { read() {} };";
+    await uploadAs(r, admin, next);
+    const edited = await ruleWrite(
+      r,
+      admin,
+      [edit("docs/people/operations.js", rulesSource, next)],
+      "edit",
+    );
+    expect(edited.status, await edited.clone().text()).toBe(200);
+    const moments = await r.owner.directMoments();
+    expect(moments).toHaveLength(5);
+    expect(moments[0]!.payload.path).toBe("docs/people/dataset.json");
+    expect(moments.every((moment) => moment.payload.collectionRulesFolder === "docs/people")).toBe(
+      true,
+    );
+    expect(moments.at(-1)!.payload.authors).toEqual([
+      expect.objectContaining({ kind: "named", userId: admin.userId, grantId: admin.grantId }),
+    ]);
+    const ledger = `/sync/${WORKSPACE}/collection-writes/${admin.grantId}`;
+    const first = await json(await r.h(request(OWNER, `${ledger}?limit=1`)));
+    expect(first.writes).toEqual([
+      expect.objectContaining({
+        files: expect.arrayContaining([
+          expect.objectContaining({ path: "docs/people/dataset.json", created: true }),
+        ]),
+      }),
+    ]);
+    expect(
+      await json(await r.h(request(OWNER, `${ledger}?afterOriginSeq=${first.nextAfterOriginSeq}`))),
+    ).toMatchObject({
+      writes: [
+        { submitId: "edit", files: [{ path: "docs/people/operations.js", created: false }] },
+      ],
+      nextAfterOriginSeq: null,
+    });
+  });
+
+  it("adds a migration alongside an Admin's descriptor and schema edits in one write", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    const ben = await member(r, "ben");
+    await membersAt(r, "edit");
+    const descriptor = rulesDescriptor({ name: "Volunteers" });
+    const schema = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL, due_date TEXT);";
+    const migration = "ALTER TABLE people ADD COLUMN due_date TEXT;";
+    const batch = [
+      edit("docs/people/schema.sql", rulesSchema, schema),
+      create("docs/people/migrations/002-x.sql", migration),
+      edit("docs/people/dataset.json", rulesDescriptor(), descriptor),
+    ];
+    for (const text of [descriptor, schema, migration]) await uploadAs(r, admin, text);
+
+    await expectCode(await ruleWrite(r, ben, batch, "migration"), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toHaveLength(4);
+    const committed = await ruleWrite(r, admin, batch, "migration");
+    expect(committed.status, await committed.clone().text()).toBe(200);
+    expect((await r.owner.directMoments()).slice(4).map((moment) => moment.payload.path)).toEqual([
+      "docs/people/dataset.json",
+      "docs/people/schema.sql",
+      "docs/people/migrations/002-x.sql",
+    ]);
+    expect(await json(await ruleWrite(r, admin, batch, "migration"))).toMatchObject({
+      created: false,
+    });
+  });
+
+  it.each([
+    ["operationsPath", "frontend.ts", rulesSource],
+    ["schemaPath", "other.sql", rulesSchema],
+  ])("pins the descriptor's %s on its own and in a batch", async (key, name, original) => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    await r.owner.write("other-source", `docs/people/${name}`, original);
+    const descriptor = rulesDescriptor({ [key]: name });
+    await uploadAs(r, admin, descriptor);
+    const retarget = edit("docs/people/dataset.json", rulesDescriptor(), descriptor);
+    for (const batch of [
+      [retarget],
+      [edit(`docs/people/${name}`, original, rulesSchema), retarget],
+    ]) {
+      await expectCode(await ruleWrite(r, admin, batch, "retarget"), 403, "share_op_rejected");
+    }
+    expect(await r.owner.directMoments()).toHaveLength(4);
+  });
+
+  it("refuses a create under a differently spelled current folder", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    const batch = Object.entries(ruleFiles("Docs/People")).map(([path, text]) =>
+      create(path, text),
+    );
+    await expectCode(await ruleWrite(r, admin, batch), 409, "stale");
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+  });
+
+  it.each([
+    ["migrations", "Migrations"],
+    ["café", "café"],
+  ])("refuses sibling folders spelled %s and %s in one batch", async (left, right) => {
+    const { r, admin, changes } = await rulesSetup();
+    const batch = [
+      ...changes.filter((change) => !change.afterPath!.endsWith("001.sql")),
+      create(`docs/people/${left}/001.sql`, rulesSchema),
+      create(`docs/people/${right}/002.sql`, rulesSchema),
+    ];
+    await expectCode(await ruleWrite(r, admin, batch), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses migration creates with occupied paths, another Collection, or a non-SQL file", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    expect((await ruleWrite(r, admin, changes)).status).toBe(200);
+    await r.owner.write("nested", "docs/people/nested/dataset.json", rulesDescriptor());
+    const schema = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL, due_date TEXT);";
+    await uploadAs(r, admin, schema);
+    const schemaEdit = edit("docs/people/schema.sql", rulesSchema, schema);
+    for (const path of [
+      "docs/people/migrations/001.sql",
+      "docs/people/migrations/001.SQL/child.sql",
+      "docs/people/Migrations/002.sql",
+    ]) {
+      await expectCode(
+        await ruleWrite(r, admin, [schemaEdit, create(path, rulesSchema)], "migration"),
+        409,
+        "stale",
+      );
+    }
+    for (const extra of [
+      [create("docs/people/nested/migration.sql", rulesSchema)],
+      [create("docs/people/operations.ts", rulesSource)],
+      [
+        create("docs/people/migrations/002.sql", rulesSchema),
+        create("docs/people/migrations/002.sql/child.sql", rulesSchema),
+      ],
+    ]) {
+      await expectCode(
+        await ruleWrite(r, admin, [schemaEdit, ...extra], "migration"),
+        403,
+        "share_op_rejected",
+      );
+    }
+    expect(await r.owner.directMoments()).toHaveLength(4);
+  });
+
+  it("refuses a Member, the Owner, and an Admin's separate folder grant", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    const ben = await member(r, "ben");
+    await membersAt(r, "edit");
+    await expectCode(await ruleWrite(r, ben, changes), 403, "share_op_rejected");
+    await expectCode(
+      await ruleWrite(r, { userId: OWNER, shareId: admin.shareId }, changes),
+      404,
+      "not_found",
+    );
+    const folderShareId = await createShare(r.h, OWNER, WORKSPACE, {
+      recipientUserId: admin.userId,
+      paths: ["docs"],
+      access: "edit",
+    });
+    await expectCode(
+      await ruleWrite(r, { userId: admin.userId, shareId: folderShareId }, changes),
+      403,
+      "share_op_rejected",
+    );
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("checks the active Admin role again at commit even when the grant generation did not change", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    await membersAt(r, "edit");
+    const decision = filterCollectionWriteForShare(
+      {
+        kind: "workspace",
+        role: "admin",
+        reach: r.storage.memberReach(WORKSPACE, admin.userId, "admin", "edit"),
+      },
+      changes,
+      undefined,
+      r.storage.memberFolders(WORKSPACE, admin.userId, admin.grantId),
+    );
+    if (!decision.allowed) throw new Error("Admin admission failed");
+    expect(decision.write.kind).toBe("dataset-rules");
+    const grantGeneration = r.storage.getShareGrant(admin.grantId)!.generation;
+    expect(
+      (
+        await r.h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/members/${admin.memberId}/role`,
+            jsonBody({ role: "member" }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(r.storage.getShareGrant(admin.grantId)!.generation).toBe(grantGeneration);
+    expect(() =>
+      r.storage.commitCollectionWrite({
+        shareId: admin.shareId,
+        grantId: admin.grantId,
+        grantGeneration,
+        writer: { kind: "named", userId: admin.userId, humanName: "Ana" },
+        submitId: "demoted",
+        rawChanges: changes,
+        write: decision.write,
+        nowMs: CLOCK,
+        newId: () => "id",
+      }),
+    ).toThrow(expect.objectContaining({ code: "share_op_rejected" }));
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it.each([
+    "docs/other/migration.sql",
+    "docs/people/../migration.sql",
+    "/docs/people/migration.sql",
+    "docs/people/.env",
+    "docs/people/.ENV.sql",
+    "docs/people/.env/one.sql",
+    "docs/people/.\uFF45nv/one.sql",
+    "docs/people/.env.example/one.sql",
+    "docs/people/.dohc-access",
+    "docs/people/.DOHC-ACCESS/one.sql",
+    "docs/people/.dohc/migration.sql",
+    "docs/people/mig\tration.sql",
+    `docs/people/${"é".repeat(510)}.sql`,
+    "docs/people/other.ts",
+  ])("refuses a whole batch containing %s", async (path) => {
+    const { r, admin, changes } = await rulesSetup();
+    await expectCode(
+      await ruleWrite(r, admin, [...changes, create(path, rulesSchema)]),
+      403,
+      "share_op_rejected",
+    );
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it.each([
+    "../operations.js",
+    "/operations.js",
+    "C:/operations.js",
+    ".env/operations.js",
+    ".dohc-access/operations.js",
+  ])("refuses a descriptor pointing to %s", async (operationsPath) => {
+    const { r, admin, changes } = await rulesSetup();
+    const descriptor = rulesDescriptor({ operationsPath });
+    await uploadAs(r, admin, descriptor);
+    await expectCode(
+      await ruleWrite(r, admin, [
+        ...changes.slice(0, -1),
+        create("docs/people/dataset.json", descriptor),
+      ]),
+      403,
+      "share_op_rejected",
+    );
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it.each(["", '"datasetId":"00000000-0000-4000-8000-000000000002",'])(
+    "refuses a dataset ID already in the workspace before approval with prefix %s",
+    async (duplicateKey) => {
+      const { r, admin, changes } = await rulesSetup();
+      const descriptor = rulesDescriptor().replace("{", `{${duplicateKey}`);
+      await uploadAs(r, admin, descriptor);
+      const first = Object.entries(ruleFiles("another", descriptor)).map(([path, text]) =>
+        create(path, text),
+      );
+      expect((await ruleWrite(r, admin, first, "first")).status).toBe(200);
+      await expectCode(await ruleWrite(r, admin, changes), 403, "share_op_rejected");
+      expect(await r.owner.directMoments()).toHaveLength(4);
+    },
+  );
+
+  it("refuses a partial create and names the actual size and byte limit for an over-cap batch", async () => {
+    const { r, admin, changes } = await rulesSetup();
+    await expectCode(
+      await ruleWrite(
+        r,
+        admin,
+        changes.filter((change) => !change.afterPath!.endsWith("schema.sql")),
+      ),
+      403,
+      "share_op_rejected",
+    );
+    const oversized = [
+      { ...changes[0]!, afterByteLength: MAX_COLLECTION_WRITE_BYTES },
+      ...changes.slice(1),
+    ];
+    const total = oversized.reduce((sum, change) => sum + change.afterByteLength!, 0);
+    const body = await expectCode(await ruleWrite(r, admin, oversized), 403, "share_op_rejected");
+    expect(body.error).toBe(
+      `Collection write is ${total} bytes. The limit is ${MAX_COLLECTION_WRITE_BYTES} bytes.`,
+    );
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
 
   it("writes a member's page into the owner's log under the member's name", async () => {
     const r = await workspace();

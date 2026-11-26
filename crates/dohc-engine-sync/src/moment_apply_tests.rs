@@ -1276,6 +1276,254 @@ fn public_create_author_survives_replay_but_is_not_republished_without_proof() {
 const NAMED_ORIGIN: &str = "relay:collection-file:grant";
 const TRIP_SCHEMA: &str = "name: Trip\n";
 
+#[test]
+fn collection_rule_writes_accept_integral_json_numbers_as_format_versions() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = r#"{"formatVersion":2.0}"#;
+    hydrate_texts(&mut store, &[descriptor]);
+    let mut payload =
+        absent_text_payload("descriptor", "descriptor", "trip/dataset.json", descriptor);
+    payload["collectionRulesFolder"] = json!("trip");
+    let op = envelope(
+        NAMED_ORIGIN,
+        0,
+        "ws",
+        with_author(payload, named_author("grant")),
+    );
+    let result = apply_moment_envelope(&mut store, &op, &NoFaults).unwrap();
+    assert_eq!(result.primary, ApplyDisposition::Applied(0));
+}
+
+#[test]
+fn collection_rule_writes_apply_a_descriptor_with_one_utf8_bom() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = "\u{feff}{\"formatVersion\":2}";
+    let files = [
+        ("descriptor", "trip/people/dataset.json", descriptor),
+        ("schema", "trip/people/schema.sql", "SELECT 1;"),
+        (
+            "operations",
+            "trip/people/operations.js",
+            "globalThis.operations = {};",
+        ),
+    ];
+    hydrate_texts(&mut store, &files.map(|(_, _, body)| body));
+    for (seq, (id, path, body)) in files.into_iter().enumerate() {
+        let mut payload = absent_text_payload(id, id, path, body);
+        payload["collectionRulesFolder"] = json!("trip/people");
+        let op = envelope(
+            NAMED_ORIGIN,
+            seq as i64,
+            "ws",
+            with_author(payload, named_author("grant")),
+        );
+        let outcome = apply_moment_envelope(&mut store, &op, &NoFaults).unwrap();
+        assert_eq!(outcome.primary, ApplyDisposition::Applied(0), "{path}");
+    }
+}
+
+#[test]
+fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = r#"{"formatVersion":2,"operationsPath":"code/actions.ts"}"#;
+    let escaping = r#"{"formatVersion":2,"operationsPath":"../actions.ts"}"#;
+    let repointed_operations = r#"{"formatVersion":2,"operationsPath":"other.ts"}"#;
+    let repointed_schema =
+        r#"{"formatVersion":2,"operationsPath":"code/actions.ts","schemaPath":"other.sql"}"#;
+    let same_sources =
+        r#"{"formatVersion":2.0,"operationsPath":"code/actions.ts","schemaPath":"schema.sql"}"#;
+    let sql = "SELECT 1;";
+    let next = "SELECT 2;";
+    hydrate_texts(
+        &mut store,
+        &[
+            descriptor,
+            escaping,
+            repointed_operations,
+            repointed_schema,
+            same_sources,
+            sql,
+            next,
+        ],
+    );
+    let paths = [
+        ("descriptor", "trip/people/dataset.json", descriptor),
+        ("schema", "trip/people/schema.sql", sql),
+        ("operations", "trip/people/code/actions.ts", sql),
+        ("migration", "trip/people/migrations/001.sql", sql),
+    ];
+    let tag = |mut payload: Value, author: Value, folder: &str| {
+        payload["collectionRulesFolder"] = json!(folder);
+        with_author(payload, author)
+    };
+    let mut seq = 0;
+    for (id, path, body) in paths {
+        let payload = tag(
+            absent_text_payload(id, id, path, body),
+            named_author("grant"),
+            "trip/people",
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(result.primary, ApplyDisposition::Applied(0), "{path}");
+        seq += 1;
+    }
+    let edit = present_text_payload(
+        "edit",
+        "schema",
+        "write",
+        "trip/people/schema.sql",
+        "trip/people/schema.sql",
+        sql,
+        "schema",
+        next,
+    );
+    let outcome = apply_moment_envelope(
+        &mut store,
+        &envelope(
+            NAMED_ORIGIN,
+            seq,
+            "ws",
+            tag(edit, named_author("grant"), "trip/people"),
+        ),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
+    seq += 1;
+    let next_migration = tag(
+        absent_text_payload(
+            "next-migration",
+            "next-migration",
+            "trip/people/migrations/002.sql",
+            next,
+        ),
+        named_author("grant"),
+        "trip/people",
+    );
+    let outcome = apply_moment_envelope(
+        &mut store,
+        &envelope(NAMED_ORIGIN, seq, "ws", next_migration),
+        &NoFaults,
+    )
+    .expect("append a migration to the existing Collection");
+    assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
+    seq += 1;
+
+    for body in [repointed_operations, repointed_schema, same_sources] {
+        let edit = present_text_payload(
+            "edit-descriptor",
+            "descriptor",
+            "write",
+            paths[0].1,
+            paths[0].1,
+            descriptor,
+            "descriptor",
+            body,
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(
+                NAMED_ORIGIN,
+                seq,
+                "ws",
+                tag(edit, named_author("grant"), "trip/people"),
+            ),
+            &NoFaults,
+        )
+        .unwrap();
+        if body == same_sources {
+            assert_eq!(result.primary, ApplyDisposition::Applied(0));
+        } else {
+            assert!(
+                matches!(result.primary, ApplyDisposition::Refused(_)),
+                "{body}"
+            );
+        }
+        seq += 1;
+    }
+
+    for (path, body, folder, author) in [
+        ("trip/other.sql", sql, "trip/people", named_author("grant")),
+        (
+            "trip/people/other.ts",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/pages.md",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/.ENV.sql",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/.dohc-access/migration.sql",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/other/dataset.json",
+            escaping,
+            "trip/other",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            named_author("another-grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            link_author("grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner"}),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1,"role":"admin"}),
+        ),
+    ] {
+        let payload = tag(
+            absent_text_payload("refused", "refused", path, body),
+            author,
+            folder,
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Refused(_)),
+            "{path}"
+        );
+        seq += 1;
+    }
+    assert!(snapshot(&store, "refused").is_none());
+}
+
 fn named_author(grant_id: &str) -> Value {
     json!({"kind":"named", "userId":"ana", "grantId":grant_id, "grantGeneration":1})
 }

@@ -280,6 +280,8 @@ struct ShareProposalSubmitParams {
 struct ShareDirectPushParams {
     workspace_id: String,
     share_id: String,
+    #[serde(default)]
+    admin: bool,
     /// Required, for the same reason the submit requires it: the grant scopes
     /// what this replica may write, and its level decides whether it may.
     granted_selector: GrantedSelectorParams,
@@ -2673,6 +2675,7 @@ impl EngineService {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
                     granted,
+                    admin: params.admin,
                     max_read_bytes: self
                         .relay_sync_admission()
                         .map_or(0, |(policy, _)| policy.max_read_bytes),
