@@ -5,7 +5,7 @@ const launch = { command: "run-agent --secret-flag" };
 const agent = (id: string, name: string, enabled = true) => ({ id, name, enabled, launch });
 
 describe("a computer's runner declaration", () => {
-  it("declares each agent dohc can start, on or off, with no command", () => {
+  it("declares each agent dohc can start, on or off, with no command, and the others by name", () => {
     const answer = chatRunnerDeclaration({
       installId: "local:mac",
       computerLabel: "Ana's Mac",
@@ -24,17 +24,37 @@ describe("a computer's runner declaration", () => {
           { agentId: "default", displayName: "Claude", enabled: true },
           { agentId: "codex", displayName: "Codex", enabled: false },
         ],
+        agents: [{ agentId: "mine", displayName: "Mine" }],
       },
     });
     expect(JSON.stringify(answer)).not.toContain("secret-flag");
   });
 
-  it("declares no runners to withdraw the computer", () => {
+  it("declares an empty list for a computer with no agents", () => {
     expect(
       chatRunnerDeclaration({ installId: "local:mac", computerLabel: "Mac", agents: [] }),
     ).toEqual({
       ok: true,
-      declaration: { installId: "local:mac", computerLabel: "Mac", runners: [] },
+      declaration: { installId: "local:mac", computerLabel: "Mac", runners: [], agents: [] },
+    });
+  });
+
+  it("leaves the list unknown, not the runners refused, when another agent can't be sent", () => {
+    const answer = chatRunnerDeclaration({
+      installId: "local:mac",
+      computerLabel: "Mac",
+      agents: [
+        agent("default", "Claude"),
+        { id: "mine", name: " padded ", enabled: true, launch: undefined },
+      ],
+    });
+    expect(answer).toEqual({
+      ok: true,
+      declaration: {
+        installId: "local:mac",
+        computerLabel: "Mac",
+        runners: [{ agentId: "default", displayName: "Claude", enabled: true }],
+      },
     });
   });
 

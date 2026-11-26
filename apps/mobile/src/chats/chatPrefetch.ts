@@ -17,6 +17,7 @@ export function unreadPrefetch(writes: boolean) {
   return (data: Store, sections: readonly ChatSection[]) => {
     if (warmed === data) return;
     const unread = sections
+      .filter((section) => section.key !== "archived")
       .flatMap((section) => section.rows)
       .filter((row) => row.unread)
       .slice(0, PREFETCHED_UNREAD);

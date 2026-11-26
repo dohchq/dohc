@@ -14,7 +14,7 @@ import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { observeChatWakeChanges } from "./relayWriteChanges";
 import { parseString, parseWorkspaceId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import type { ChatRunner } from "./storage/chatWakes";
+import type { ChatRunner, DeclaredAgent } from "./storage/chatWakes";
 
 // The routes an owner's computers use to wake its agents: declare the agents
 // each computer runs in a workspace, wait for wakes that list the computer,
@@ -31,8 +31,8 @@ export type ChatWakeRoute =
 const CHAT_WAKE_WAITS_PER_ACCOUNT = 16;
 /** The wake reads one computer, or one phone sign-in, may hold waiting at once. */
 export const CHAT_WAKE_WAITS_PER_INSTALL = 2;
-// A runners or claim body is small.
-const BODY_MAX_BYTES = 32 * 1024;
+// A claim body is small; a runners body names at most twice CHAT_RUNNER_AGENTS agents.
+const BODY_MAX_BYTES = 64 * 1024;
 const BODY_RECEIPT_MS = 10_000;
 const SEQUENCE = /^(?:0|[1-9]\d{0,15})$/u;
 
@@ -163,13 +163,19 @@ type Declaration = {
   installId: string;
   computerLabel: string;
   runners: Array<Omit<ChatRunner, "installId" | "computerLabel">>;
+  agents: DeclaredAgent[] | null;
 };
 
 // `{installId, computerLabel, runners: [{agentId, displayName, enabled}]}`. The handle comes from the name, as the desktop derives it.
 function parseDeclaration(body: Record<string, unknown>): Declaration {
   const shape =
-    "the body must be exactly { installId, computerLabel, runners: [{ agentId, displayName, enabled }] }";
-  if (!exactly(body, ["installId", "computerLabel", "runners"]) || !Array.isArray(body.runners))
+    "the body must be exactly { installId, computerLabel, runners: [{ agentId, displayName, enabled }], agents?: [{ agentId, displayName }] }";
+  const keys = ["installId", "computerLabel", "runners"];
+  if (
+    !exactly(body, Object.hasOwn(body, "agents") ? [...keys, "agents"] : keys) ||
+    !Array.isArray(body.runners) ||
+    (Object.hasOwn(body, "agents") && !Array.isArray(body.agents))
+  )
     throw badRequest(shape);
   const installId = parseString(body.installId, "installId", 256);
   const computerLabel = parseString(body.computerLabel, "computerLabel", 64);
@@ -202,7 +208,27 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
   ) {
     throw badRequest("each agent needs its own ID and its own name");
   }
-  return { installId, computerLabel, runners };
+  const others = Object.hasOwn(body, "agents") ? (body.agents as unknown[]) : null;
+  if (others !== null && others.length > CHAT_RUNNER_AGENTS)
+    throw badRequest(`a computer declares at most ${CHAT_RUNNER_AGENTS} other agents`);
+  const agents =
+    others?.map((value) => {
+      const agent = asRecord(value);
+      if (
+        agent === null ||
+        !exactly(agent, ["agentId", "displayName"]) ||
+        typeof agent.agentId !== "string" ||
+        !isChatRunnerAgentId(agent.agentId)
+      )
+        throw badRequest(shape);
+      return {
+        agentId: agent.agentId,
+        displayName: parseString(agent.displayName, "displayName", 200),
+      };
+    }) ?? null;
+  const ids = [...runners, ...(agents ?? [])].map((agent) => agent.agentId);
+  if (new Set(ids).size !== ids.length) throw badRequest("each agent needs its own ID");
+  return { installId, computerLabel, runners, agents };
 }
 
 function parseInstall(body: Record<string, unknown>): string {

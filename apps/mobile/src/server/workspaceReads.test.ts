@@ -286,6 +286,37 @@ describe("the account's unread state", () => {
     });
   });
 
+  it("keeps an agent's chat the server archived, and says whose the default one was", async () => {
+    const agent = (id: string, name: string, channelWireId: string, archived?: boolean) => ({
+      id,
+      channelWireId,
+      name,
+      slug: id,
+      kind: "agent",
+      threadCount: 0,
+      threads: [],
+      ...(archived === undefined ? {} : { archived }),
+    });
+    const { client } = serveOps("groupsFull", {
+      ok: true,
+      groups: [
+        agent("channel-agent-default", "My agent", "channel_wire_agent_v1", true),
+        agent("channel-agent-old", "Old one", "channel_wire_agent_v1_old", true),
+        agent("channel-agent-t3", "vibe-guy", "channel_wire_agent_v1_t3"),
+      ],
+    });
+    expect(
+      (await readChats(client, "ws-a", signal)).value.map(({ name, archived }) => ({
+        name,
+        archived,
+      })),
+    ).toEqual([
+      { name: "Your agent", archived: true },
+      { name: "Old one", archived: true },
+      { name: "vibe-guy", archived: undefined },
+    ]);
+  });
+
   it("fails the whole chat list when a thread's unread count doesn't check", async () => {
     for (const unreadCount of [undefined, -1, 1.5, "2", null]) {
       const { client } = serveOps(

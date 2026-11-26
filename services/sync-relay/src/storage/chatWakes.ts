@@ -157,6 +157,32 @@ export function initializeChatWakeSchema(db: SqliteDb): void {
 export const CHAT_WAKE_CLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 /** How long a claimed wake waits for its winner's queued before it is unconfirmed. */
 export const CHAT_WAKE_CONFIRM_MS = 24 * 60 * 60 * 1000;
+// Agent lists: per owned workspace, each computer's agents that aren't runners, by name only, which with its runner
+// rows is every agent the computer has there. A row means that computer's list is known, even when empty; no row means
+// it isn't (a withdrawal, or a desktop from before lists). The phone names agent chats from these and runner rows, and
+// archives one whose agent no computer has. No lease: a computer that is off keeps its agents' chats where they are.
+const AGENT_LISTS_MARKER = "chat-agent-lists-v1";
+const AGENT_LISTS_SQL = `CREATE TABLE sync_relay_chat_agent_lists (
+  account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),
+  workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  install_id TEXT NOT NULL CHECK (length(install_id) BETWEEN 1 AND 256),
+  agents_json TEXT NOT NULL CHECK (json_valid(agents_json) AND json_type(agents_json) = 'array'),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms BETWEEN 0 AND 9007199254740991),
+  PRIMARY KEY (workspace_id, account_id, install_id)
+) STRICT`;
+
+export function initializeChatAgentListSchema(db: SqliteDb): void {
+  if (
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(AGENT_LISTS_MARKER)
+  )
+    return;
+  db.exec(AGENT_LISTS_SQL);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    AGENT_LISTS_MARKER,
+    Date.now(),
+  );
+}
+
 /** How long a wake is kept once it ends. */
 export const CHAT_WAKE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 /**
@@ -181,6 +207,12 @@ export interface ChatRunner {
   handle: string;
   displayName: string;
   enabled: boolean;
+}
+
+/** One of a computer's agents that dohc doesn't start: only its name. */
+export interface DeclaredAgent {
+  agentId: string;
+  displayName: string;
 }
 
 /** One wake target, frozen when its message was written. */
@@ -331,6 +363,8 @@ export function replaceChatRunners(
     installId: string;
     computerLabel: string;
     runners: readonly Omit<ChatRunner, "installId" | "computerLabel">[];
+    /** The computer's other agents; absent or null when its list isn't known. */
+    agents?: readonly DeclaredAgent[] | null;
     nowMs: number;
   },
 ): boolean {
@@ -364,6 +398,40 @@ export function replaceChatRunners(
         input.nowMs,
       );
     }
+    if (input.agents == null) {
+      storage.db
+        .prepare(
+          "DELETE FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ? AND install_id = ?",
+        )
+        .run(input.workspaceId, input.accountId, input.installId);
+    } else {
+      storage.db
+        .prepare(
+          `INSERT INTO sync_relay_chat_agent_lists (account_id, workspace_id, install_id, agents_json, updated_at_ms)
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT (workspace_id, account_id, install_id)
+           DO UPDATE SET agents_json = excluded.agents_json, updated_at_ms = excluded.updated_at_ms`,
+        )
+        .run(
+          input.accountId,
+          input.workspaceId,
+          input.installId,
+          JSON.stringify(input.agents),
+          input.nowMs,
+        );
+    }
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ? AND install_id IN (
+         SELECT install_id FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ?
+         ORDER BY updated_at_ms DESC, install_id LIMIT -1 OFFSET ?)`,
+      )
+      .run(
+        input.workspaceId,
+        input.accountId,
+        input.workspaceId,
+        input.accountId,
+        CHAT_RUNNER_COMPUTERS,
+      );
     storage.db
       .prepare(
         `DELETE FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id IN (
@@ -378,6 +446,43 @@ export function replaceChatRunners(
         CHAT_RUNNER_COMPUTERS,
       );
     return true;
+  });
+}
+
+/**
+ * Every agent the account's computers have in the workspace, by ID, with its name, leased or not. Null when that isn't
+ * known: no computer sent its list, or one that has runners sent none. Where two computers name an agent apart, the
+ * first by install ID names it, so a daily renewal never changes the name.
+ */
+export function declaredAgentNames(
+  storage: StorageContext,
+  input: { accountId: string; workspaceId: string },
+): Map<string, string> | null {
+  return storage.readTx(() => {
+    const args = [input.workspaceId, input.accountId] as const;
+    const listed = new Set(
+      storage.db
+        .prepare(
+          "SELECT install_id FROM sync_relay_chat_agent_lists WHERE workspace_id = ? AND account_id = ?",
+        )
+        .all(...args)
+        .map((row) => String(row.install_id)),
+    );
+    const agents = storage.db
+      .prepare(
+        `SELECT install_id, agent_id, display_name FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ?
+         UNION ALL
+         SELECT l.install_id, json_extract(a.value, '$.agentId'), json_extract(a.value, '$.displayName')
+         FROM sync_relay_chat_agent_lists l, json_each(l.agents_json) a WHERE l.workspace_id = ? AND l.account_id = ?
+         ORDER BY 1`,
+      )
+      .all(...args, ...args);
+    if (listed.size === 0 || agents.some((row) => !listed.has(String(row.install_id)))) return null;
+    const names = new Map<string, string>();
+    for (const row of agents)
+      if (!names.has(String(row.agent_id)))
+        names.set(String(row.agent_id), String(row.display_name));
+    return names;
   });
 }
 

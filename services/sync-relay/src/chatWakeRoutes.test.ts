@@ -188,7 +188,34 @@ it("declares a computer's agents only where its account owns the workspace, with
     const response = await call("PUT", "/sync/workspaces/trip/runners", body);
     expect(response.status, JSON.stringify(body)).toBe(400);
   }
+  const other = { agentId: "t3-code", displayName: "d3-code" };
+  for (const agents of [
+    "none",
+    [{ ...other, enabled: true }],
+    [{ ...other, agentId: "p-nova" }],
+    [{ ...other, agentId: "default" }],
+    [other, other],
+  ]) {
+    const response = await call("PUT", "/sync/workspaces/trip/runners", { ...declaration, agents });
+    expect(response.status, JSON.stringify(agents)).toBe(400);
+  }
   expect((await call("GET", "/sync/workspaces/trip/runners")).status).toBe(405);
+  expect(
+    storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
+  ).toHaveLength(1);
+  expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "trip" })).toBeNull();
+
+  // The agents dohc doesn't start come by name, and are never wake targets.
+  expect(
+    (await call("PUT", "/sync/workspaces/trip/runners", { ...declaration, agents: [other] }))
+      .status,
+  ).toBe(200);
+  expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "trip" })).toEqual(
+    new Map([
+      ["default", "Claude Code"],
+      ["t3-code", "d3-code"],
+    ]),
+  );
   expect(
     storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
   ).toHaveLength(1);

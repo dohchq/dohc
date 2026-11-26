@@ -3,6 +3,8 @@ import {
   type CliResultByVerb,
   type ServerOperation,
 } from "@dohc/cli/protocol";
+import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { isChatRunnerAgentId } from "@dohc/workspace-contracts/chat-wakes";
 import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -48,11 +50,39 @@ import type { SyncRelayStorage } from "./storage";
 // every secret file, out of the answer.
 
 export type AccountOperationResult =
-  | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText">]
+  | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText" | "groupsFull">]
+  | PhoneGroupsResult
   | FileListResult
   | TextReadResult
   | PageTooLargeResult
   | MissingResult;
+
+/**
+ * The phone's chat list: an agent's chat named as the account's computers name its agent, and marked archived when no
+ * computer has it, as a desktop files one whose agent isn't in its Settings. Only the phone's route adds `archived`.
+ */
+type GroupsResult = CliResultByVerb["groupsFull"];
+export type PhoneGroupsResult =
+  | GroupsResult
+  | (Extract<GroupsResult, { ok: true }> & {
+      groups: Array<Extract<GroupsResult, { ok: true }>["groups"][number] & { archived?: true }>;
+    });
+
+function phoneGroups(names: Map<string, string> | null, result: GroupsResult): PhoneGroupsResult {
+  if (names === null || !result.ok) return result;
+  return {
+    ...result,
+    groups: result.groups.map((group) => {
+      const agentId =
+        group.kind === "agent" && group.channelWireId
+          ? agentIdForChannelWireId(group.channelWireId)
+          : null;
+      if (agentId === null || !isChatRunnerAgentId(agentId)) return group;
+      const name = names.get(agentId);
+      return name === undefined ? { ...group, archived: true as const } : { ...group, name };
+    }),
+  };
+}
 
 /** A page whose file is over the desktop's editor limit, refused before the server fetches its body. */
 export type PageTooLargeResult = { ok: false; reason: string; refusal: "too-large" };
@@ -156,10 +186,20 @@ export async function runAccountOperation(
           request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica);
         await timed("sync", stale ? replica.sync(signal) : Promise.resolve());
         await authorize();
-        const result = await timed(
+        const read = await timed(
           "read",
           untilAborted(answer(server.storage, replica, input.workspaceId, request), signal),
         );
+        const result =
+          request.operation === "groupsFull" && input.visitor.phone
+            ? phoneGroups(
+                server.storage.declaredAgentNames({
+                  accountId: input.owner,
+                  workspaceId: input.workspaceId,
+                }),
+                read as GroupsResult,
+              )
+            : read;
         await authorize();
         if (!("ok" in result) || result.ok) server.copies.hold(input.owner, input.workspaceId);
         return { result, cursor };

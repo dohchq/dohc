@@ -937,3 +937,73 @@ it("lists the threads whose wakes changed after a position, only in the workspac
   expect(changes(0, "bens")).toEqual({ next: storage.chatWakeHead("ana"), threadIds: [] });
   expect(changes(0, "trip", "ben")).toEqual({ next: 1, threadIds: [] });
 });
+
+it("knows every agent of the account's computers only once each computer sent its list, leased or not", async () => {
+  const storage = await relay();
+  const context = storage as StorageContext;
+  const names = () => storage.declaredAgentNames({ accountId: "ana", workspaceId: "trip" });
+  const claude = { agentId: "default", handle: "claude", displayName: "Claude", enabled: true };
+  const declare = (
+    installId: string,
+    runners: (typeof claude)[],
+    agents?: { agentId: string; displayName: string }[] | null,
+    nowMs = NOW,
+  ) =>
+    storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId,
+      computerLabel: installId,
+      runners,
+      ...(agents === undefined ? {} : { agents }),
+      nowMs,
+    });
+
+  // Nobody sent a list: unknown, so the phone changes nothing.
+  expect(names()).toBeNull();
+  // An older desktop's runners alone still say nothing of the agents it runs itself.
+  declare("old-mac", [claude]);
+  expect(names()).toBeNull();
+  // A computer with no agents at all says so; the older one beside it still leaves the whole unknown.
+  declare("pc", [], []);
+  expect(names()).toBeNull();
+  declare("old-mac", [claude], []);
+  expect(names()).toEqual(new Map([["default", "Claude"]]));
+  // A sleeping computer keeps its agents past the wake lease; the first by install ID names an agent both have.
+  declare(
+    "pc",
+    [],
+    [
+      { agentId: "t3-code", displayName: "d3-code" },
+      { agentId: "default", displayName: "Codex" },
+    ],
+  );
+  expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "trip" })).toEqual(
+    new Map([
+      ["default", "Claude"],
+      ["t3-code", "d3-code"],
+    ]),
+  );
+  declare("old-mac", [claude], [], NOW + CHAT_RUNNER_LEASE_MS * 2);
+  expect(names()?.get("default")).toBe("Claude");
+  // Another account's or workspace's lists are apart.
+  expect(storage.declaredAgentNames({ accountId: "ana", workspaceId: "other" })).toBeNull();
+  // A withdrawal takes the computer's list back.
+  declare("pc", []);
+  expect(names()).toEqual(new Map([["default", "Claude"]]));
+  declare("old-mac", [], null);
+  expect(names()).toBeNull();
+  expect(count(storage, "sync_relay_chat_agent_lists")).toBe(0);
+
+  // The list goes with its account.
+  declare("pc", [], [{ agentId: "t3-code", displayName: "d3-code" }]);
+  initializeAccountDeletion(context, "account-deletion-test-key");
+  purgeAccountRows(context, "ana", "ana@dohc.test", {
+    workspaces: [],
+    shareIds: [],
+    datasets: [],
+    grantIds: [],
+    publicationIds: [],
+  });
+  expect(count(storage, "sync_relay_chat_agent_lists")).toBe(0);
+});

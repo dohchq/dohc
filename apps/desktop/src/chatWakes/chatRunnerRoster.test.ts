@@ -248,11 +248,13 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
   };
 }
 
-const declared = (runners: ChatRunnerDeclaration["runners"]): ChatRunnerDeclaration => ({
-  installId: "mac",
-  computerLabel: "Mac",
-  runners,
-});
+const MINE = [{ agentId: "mine", displayName: "Mine" }];
+const declared = (
+  runners: ChatRunnerDeclaration["runners"],
+  agents: NonNullable<ChatRunnerDeclaration["agents"]> = MINE,
+): ChatRunnerDeclaration => ({ installId: "mac", computerLabel: "Mac", runners, agents });
+/** Takes back everything this computer declared in a workspace: no runners, and no list of its agents. */
+const WITHDRAWN: ChatRunnerDeclaration = { installId: "mac", computerLabel: "Mac", runners: [] };
 const CLAUDE_ON = [{ agentId: "default", displayName: "Claude", enabled: true }];
 const CLAUDE_OFF = [{ agentId: "default", displayName: "Claude", enabled: false }];
 
@@ -274,7 +276,7 @@ describe("publishing this computer's agents", () => {
     expect(r.deps.log).not.toHaveBeenCalled();
   });
 
-  it("keeps a last agent switched off declared as off, and withdraws it once removed", async () => {
+  it("keeps a last agent switched off declared as off, and an empty list once it is removed", async () => {
     const r = setup();
     r.owned.A = ["ws1"];
     const a = session("A");
@@ -285,14 +287,19 @@ describe("publishing this computer's agents", () => {
     r.setAgents([]);
     await r.roster.reconcile(a);
     expect(r.server.row("A", "ws1")).toEqual([]);
-    expect(r.ledger.state.rows).toEqual([]);
+    expect(r.server.puts.at(-1)?.declaration).toEqual(declared([], []));
+    // An empty list is still this computer's list, which a sign-out takes back.
+    expect(r.ledger.state.rows).toEqual([{ account: "A", installId: "mac", workspaceId: "ws1" }]);
   });
 
-  it("declares nothing where it has nothing to declare and nothing to take back", async () => {
+  it("names the agents it runs itself even with no runners, so the phone files their chats as Settings does", async () => {
     const r = setup();
     r.setAgents([{ id: "mine", name: "Mine", enabled: true }]);
     await r.roster.reconcile(session("A"));
-    expect(r.server.puts).toEqual([]);
+    expect(r.server.puts).toEqual([
+      { scope: "A", workspaceId: "ws1", declaration: declared([]) },
+      { scope: "A", workspaceId: "ws2", declaration: declared([]) },
+    ]);
   });
 
   it("never lets an older declaration land after a newer one, and shares one pass between calls made before it starts", async () => {
@@ -325,7 +332,7 @@ describe("publishing this computer's agents", () => {
     expect(r.server.puts.at(-1)).toEqual({
       scope: "A",
       workspaceId: "ws2",
-      declaration: declared([]),
+      declaration: WITHDRAWN,
     });
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
     expect(r.ledger.state.rows).toEqual([{ account: "A", installId: "mac", workspaceId: "ws1" }]);
@@ -436,7 +443,7 @@ describe("publishing this computer's agents", () => {
     r.owned.A = ["ws1"];
     const a = session("A");
     await r.roster.reconcile(a);
-    r.setAgents([]);
+    r.owned.A = [];
     r.ledger.state.removeFailsOnce = true;
     await r.roster.reconcile(a);
     expect(r.server.row("A", "ws1")).toEqual([]);
@@ -521,8 +528,8 @@ describe("withdrawing an account that left", () => {
     const published = r.roster.reconcile(b);
     await Promise.all([withdrawn, published]);
     expect(r.server.puts.slice(2)).toEqual([
-      { scope: "A", workspaceId: "ws1", declaration: declared([]) },
-      { scope: "A", workspaceId: "ws2", declaration: declared([]) },
+      { scope: "A", workspaceId: "ws1", declaration: WITHDRAWN },
+      { scope: "A", workspaceId: "ws2", declaration: WITHDRAWN },
       { scope: "B", workspaceId: "ws9", declaration: declared(CLAUDE_ON) },
     ]);
     expect(r.deps.client).toHaveBeenNthCalledWith(2, a);

@@ -709,6 +709,8 @@ function Stream({
   const { data } = useAccount();
   const visible = useVisible();
   const chats = useView(views.chats).state.value;
+  // An agent's chat is named as the chat list names it, after the agent, never by its stored name.
+  const listed = chats?.find((group) => group.id === groupId && group.kind === "agent");
   const unreadThreadIds = useMemo(
     () => (chats ? new Set(chats.flatMap((group) => group.unreadThreadIds)) : null),
     [chats],
@@ -773,7 +775,10 @@ function Stream({
   const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream, writes?.writable ?? null);
   return (
     <Conversation
-      title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
+      title={chatTitle(
+        kindOf(listed?.kind ?? stream?.groupKind ?? "group"),
+        listed?.name ?? stream?.name ?? name,
+      )}
       state={state}
       messages={messages}
       retry={retry}

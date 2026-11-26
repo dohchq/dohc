@@ -39,4 +39,13 @@ describe("the unread chats read before they open", () => {
     unreadPrefetch(true)(data, [section(["a", true])]);
     expect(data.read).toEqual(["stream:a", "lanes:a"]);
   });
+
+  it("leaves archived chats folded away unread", () => {
+    const data = store();
+    unreadPrefetch(false)(data, [
+      { ...section(["old", true]), key: "archived", title: "Archived" },
+      section(["a", true]),
+    ]);
+    expect(data.read).toEqual(["stream:a"]);
+  });
 });

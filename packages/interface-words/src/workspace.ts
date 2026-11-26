@@ -21,6 +21,10 @@ export const workspaceWords = {
   groups: "Groups",
   people: "People",
   agents: "Agents",
+  /** Agent chats whose agent no computer of yours has now, as the desktop's sidebar files them. */
+  archived: "Archived",
+  /** The default agent's chat once no computer has that agent, as the desktop names it (agentChat.ts). */
+  yourAgent: "Your agent",
   noChats: "No chats in this workspace yet.",
   thread: "Thread",
   today: "Today",
