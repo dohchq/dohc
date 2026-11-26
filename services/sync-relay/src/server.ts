@@ -1402,7 +1402,7 @@ export function createSyncRelayHandler({
         storage,
         limits: appPublicationLimits,
         ...(shareWebOrigin ? { shareWebOrigin } : {}),
-        authorName: (userId) => shareSenderLabel(userId),
+        authorName: (userId) => accountDisplayName(lookupUserDisplayName, userId),
       })
     : undefined;
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({

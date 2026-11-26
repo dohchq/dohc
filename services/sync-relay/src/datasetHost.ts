@@ -139,6 +139,9 @@ type Defaults = CollectionWorkspaceDefaults;
 const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
 
 /** The existing relay connection owns every authoritative dataset transaction. */
+const outsideAppRoot = (candidate: AppPublicationCandidate) =>
+  candidate.inputs.some((file) => !file.path.startsWith(`${candidate.appRoot}/`));
+
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const { storage, limits, publicEditRelease } = options,
     nowMs = options.nowMs ?? Date.now;
@@ -594,6 +597,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     )
       return null;
     if (
+      outsideAppRoot(candidate) ||
       !memberReach(workspaceId, authorUserId, undefined) ||
       !memberReach(workspaceId, viewerUserId, undefined)
     )
@@ -2155,7 +2159,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           )
         )
           throw badRequest("Share apps from the main version of visible files.");
-        if (candidate.inputs.some((file) => !file.path.startsWith(`${candidate.appRoot}/`)))
+        if (outsideAppRoot(candidate))
           throw badRequest(
             `Keep every file of ${candidate.appRoot} inside its folder to share it.`,
           );

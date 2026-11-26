@@ -246,6 +246,7 @@ test("a workspace member reviews another member's app, reads its source, allows 
     relayExchangeKey: exchangeKey,
     shareWebOrigin: viewer,
     lookupUserDisplayName: async (userId: string) => (userId === "ana" ? "Ana Reyes" : null),
+    lookupUserEmail: async (userId: string) => `${userId}@example.test`,
     resolveActor: (request, workspaceId) => {
       const cookie = request.headers.get("cookie");
       if (cookie === sessionCookie || cookie === desktopCookie)
@@ -275,6 +276,14 @@ test("a workspace member reviews another member's app, reads its source, allows 
   );
   expect(published.status).toBe(200);
   const { publicationId } = (await published.json()) as { publicationId: string };
+  const listed = await relay(
+    new Request("https://relay.example.org/sync/w/member-apps?cursor=m", {
+      headers: { authorization: "Bearer session-ben" },
+    }),
+  );
+  expect(await listed.json()).toMatchObject({
+    apps: [{ publicationId, authorName: "Ana Reyes" }],
+  });
   for (const headers of <Array<Record<string, string>>>[
     { authorization: "Bearer session-ben" },
     {

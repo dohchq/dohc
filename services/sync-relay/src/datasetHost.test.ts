@@ -15,7 +15,12 @@ import {
   parseAppPublicationCandidate,
   type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
-import { setMemberAppSetting, withdrawMemberApp } from "./storage/memberApps";
+import {
+  memberAppIdOf,
+  setMemberAppSetting,
+  withdrawMemberApp,
+  writeMemberApp,
+} from "./storage/memberApps";
 import { disableAppPublication } from "./storage/publications";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { AccountSession, AccountSessions } from "@dohc/workspace-auth/session";
@@ -1588,15 +1593,17 @@ async function memberAppFixture() {
     ownerUserId: "owner",
     limits,
   }).candidate;
-  const candidate = (operationIds = [id(5), id(6), id(7)], revisions = [memberRevision]) => {
+  const candidate = (
+    operationIds = [id(5), id(6), id(7)],
+    revisions = [memberRevision],
+    extra?: string,
+  ) => {
     const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
-    const inputs = [
-      {
-        path: "app/index.ts",
-        sha256: sha(memberAppSource),
-        byteLength: memberAppSource.byteLength,
-      },
-    ];
+    const inputs = ["app/index.ts", ...(extra ? [extra] : [])].map((path) => ({
+      path,
+      sha256: sha(memberAppSource),
+      byteLength: memberAppSource.byteLength,
+    }));
     const files = [
       {
         path: "bundle.js",
@@ -1616,7 +1623,7 @@ async function memberAppFixture() {
       {
         ...base,
         inputs,
-        dependencies: ["app/index.ts"],
+        dependencies: inputs.map((input) => input.path),
         files,
         sourceDigest,
         dependencyLockDigest,
@@ -2297,19 +2304,35 @@ it("shares a Personal app whose folder name members can't reach, and refuses fil
   const app = f.publish();
   f.allow(ben, app);
   expect((await f.invoke(ben, id(6), {}, app, "personal")).result).toBe("edit");
-  const plain = f.candidate([id(6)]);
+  const outside = f.candidate([id(6)], undefined, "notes/index.ts");
   expect(() =>
     f.host.publishMemberApp(ana, {
       workspaceId: "w",
       slug: "tracker",
-      candidate: {
-        ...plain,
-        inputs: plain.inputs.map((input) => ({ ...input, path: "notes/index.ts" })),
-      },
+      candidate: outside,
       blobs: f.blobs,
       agent: null,
     }),
   ).toThrow(expect.objectContaining({ code: "bad_request" }));
+  const manifest = Buffer.from(JSON.stringify(outside)),
+    manifestHash = sha(manifest),
+    stored = memberAppIdOf("w", "ana", "notes", manifestHash);
+  f.storage.tx(() =>
+    writeMemberApp(f.storage, {
+      workspaceId: "w",
+      slug: "notes",
+      candidate: outside,
+      blobs: f.blobs,
+      agent: null,
+      publisherUserId: "ana",
+      publicationId: stored,
+      manifest,
+      manifestHash,
+      nowMs: 9,
+    }),
+  );
+  for (const viewer of [ana, ben])
+    expect(() => f.review(viewer, stored)).toThrow(expect.objectContaining({ code: "not_found" }));
 });
 
 it("lists the official apps a person can open, then Member apps, across pages the viewer can't see into", async () => {
@@ -2335,12 +2358,13 @@ it("lists the official apps a person can open, then Member apps, across pages th
 it("lets every member read the sharing switch and only the Owner and Admins change it", async () => {
   const f = await memberAppFixture();
   const app = f.publish();
+  const official = f.app([await f.collection(id(12), "team")]);
   const route = createMemberAppRoutes({
     host: f.host,
     storage: f.storage,
     limits,
     shareWebOrigin: "https://share.test",
-    authorName: async (userId) => (userId === "ana" ? "Ana" : null),
+    authorName: async (userId) => ({ ana: "Ana", owner: "Olive" })[userId] ?? null,
   });
   const call = (action: "apps" | "settings", userId: string, body?: unknown) =>
     route(
@@ -2370,7 +2394,7 @@ it("lets every member read the sharing switch and only the Owner and Admins chan
   f.share(true);
   f.allow(ben, app);
   expect(await (await call("apps", "ben")).json()).toMatchObject({
-    apps: [],
+    apps: [{ kind: "workspace", publicationId: official, authorName: "Olive" }],
     nextCursor: "m",
   });
   const page = new URL("https://relay.test/apps?cursor=m");

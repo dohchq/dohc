@@ -305,7 +305,7 @@ export function workspaceAppPage(storage: StorageContext, workspaceId: string, c
         ? `SELECT m.publication_id,m.publisher_user_id,m.slug,m.created_at_ms FROM ${MEMBER_APPS} m
     JOIN sync_relay_app_publications p USING(publication_id)
     WHERE m.workspace_id=? AND p.active=1 AND m.publication_id>? ORDER BY m.publication_id LIMIT 26`
-        : `SELECT p.publication_id,NULL AS publisher_user_id,NULL AS slug,p.created_at_ms FROM sync_relay_app_publications p
+        : `SELECT p.publication_id,p.owner_user_id AS publisher_user_id,NULL AS slug,p.created_at_ms FROM sync_relay_app_publications p
     WHERE p.workspace_id=? AND p.active=1 AND p.audience='workspace' AND p.publication_id>?
     AND NOT EXISTS (SELECT 1 FROM ${MEMBER_APPS} m WHERE m.publication_id=p.publication_id)
     ORDER BY p.publication_id LIMIT 26`,
