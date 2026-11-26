@@ -51,6 +51,7 @@ impl Budget {
 pub(super) fn copy(point: &Ydoc, staged: &Ydoc, max_bytes: usize) -> Result<(), CollabError> {
     let reader = point.has_reader_source();
     let clear_reader = !reader && staged.has_reader_source();
+    let format_two = staged.body_sequence_roots().is_some();
     let source_body = point.doc.get_or_insert_xml_fragment(ROOT_BODY);
     let source_frontmatter = point.doc.get_or_insert_map(ROOT_FRONTMATTER);
     let source_meta = point.doc.get_or_insert_map(ROOT_META);
@@ -69,9 +70,11 @@ pub(super) fn copy(point: &Ydoc, staged: &Ydoc, max_bytes: usize) -> Result<(), 
         let value = copy_value(&source, value, 0, &mut budget)?;
         frontmatter.insert(&mut target, key, value);
     }
-    let length = body.len(&target);
-    body.remove_range(&mut target, 0, length);
-    copy_children(&source, &source_body, &mut target, &body, 0, &mut budget)?;
+    if !format_two {
+        let length = body.len(&target);
+        body.remove_range(&mut target, 0, length);
+        copy_children(&source, &source_body, &mut target, &body, 0, &mut budget)?;
+    }
     match source_meta.get(&source, MARKDOWN_CRLF_META_KEY) {
         Some(Out::Any(Any::Bool(true))) => {
             meta.insert(&mut target, MARKDOWN_CRLF_META_KEY, true);

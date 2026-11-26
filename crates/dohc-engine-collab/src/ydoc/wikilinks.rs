@@ -1,15 +1,28 @@
 use super::*;
 use std::ops::Range;
+use yrs::types::text::TextItem;
 
 type WikilinkProjection = (String, Vec<(Range<usize>, usize)>);
 
 impl Ydoc {
     fn wikilink_elements(&self) -> Vec<yrs::XmlElementRef> {
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence = self.body_roots(&body);
         let txn = self.doc.transact();
+        let mut elements = Vec::new();
+        if let Some((sequence, _)) = sequence {
+            let _ = sequence.try_visit_items(&txn, |item| {
+                if let TextItem::Embed(Out::YXmlElement(element)) = item {
+                    if element.tag().as_ref() == "wikilink" {
+                        elements.push(element);
+                    }
+                }
+                Ok::<_, ()>(())
+            });
+            return elements;
+        }
         let mut pending: Vec<_> = body.children(&txn).collect();
         pending.reverse();
-        let mut elements = Vec::new();
         while let Some(child) = pending.pop() {
             if let XmlOut::Element(element) = child {
                 if element.tag().as_ref() == "wikilink" {
