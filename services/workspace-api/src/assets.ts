@@ -289,7 +289,6 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 
 .server-address button { width: auto; padding: 0.3125rem 0.625rem; }
 
-/* The phone app also opens dohc: links, and phones sign in by scanning. */
 .open-dohc { display: none !important; }
 @media (hover: hover) and (pointer: fine) {
   .open-dohc { display: inline-flex !important; margin-bottom: 1.25rem; }

@@ -2143,9 +2143,6 @@ function takesShareHandoff(window: BrowserWindow | null): boolean {
   return window !== null && window === liveWorkspaceWindow();
 }
 
-// The newest dohc://connect server this computer accepts, until the window it
-// lands in takes it. That window only fills in the address: the person still
-// chooses Connect server.
 let connectServerRequest: string | null = null;
 const connectServer = {
   hold(serverUrl: string): void {
@@ -2157,7 +2154,6 @@ const connectServer = {
   },
   async deliver(): Promise<void> {
     if (connectServerRequest === null) return;
-    // A window still loading takes the request when its renderer starts.
     const window = await showOrCreateMainWindow();
     if (!window.isDestroyed()) window.webContents.send(CHANNELS.connectServerRequest);
   },

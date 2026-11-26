@@ -40,7 +40,6 @@ async function expectAddressFilledIn(page: Page): Promise<void> {
   await expect(panel).toBeVisible();
   await expect(panel.getByTestId("cloud-server-url")).toHaveValue(SERVER);
   await expect(panel.getByTestId("cloud-drive")).toHaveCount(0);
-  // Any website can open a dohc:// link, so sign-in waits for Connect server.
   await expect(panel.getByTestId("cloud-connect-start")).toBeEnabled();
   await expect(panel.getByTestId("cloud-login-pending")).toHaveCount(0);
 }

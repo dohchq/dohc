@@ -479,7 +479,6 @@ describe("workspace manager", () => {
     expect(await screen.findByTestId("cloud-user-code")).toBeTruthy();
     expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://drive.example" });
 
-    // A second link while a code waits for approval leaves that sign-in alone.
     rerender(view(null));
     rerender(view("https://other.example"));
     expect(shown).toHaveBeenCalledTimes(2);

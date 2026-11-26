@@ -529,8 +529,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         }
         if (linked) flushPendingWorkLink();
         else if (connecting) void connectServer.deliver();
-        // A work or connect link shows its own window, and a dohc: argument
-        // that is not a link dohc knows opens nothing.
         if ((linked || connecting || handoffIntent === "rejected") && workspacePaths.length === 0)
           return;
         void windows.showOrCreate().then((window) => openWorkspacePaths(workspacePaths, window));

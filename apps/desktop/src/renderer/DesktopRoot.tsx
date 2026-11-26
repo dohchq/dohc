@@ -385,7 +385,6 @@ export function DesktopRoot() {
     };
   }, []);
 
-  // Held here so a switch between the shell and the manager cannot lose it.
   const [connectServerUrl, setConnectServerUrl] = useState<string | null>(null);
   const connectServerShown = useCallback(() => setConnectServerUrl(null), []);
   useEffect(() => {

@@ -436,8 +436,6 @@ export function WorkspaceManager(props: {
     setOpeningShare(false);
   }, [handoffStatus.status]);
 
-  // A route that connects holds the link until it closes. A dialog already
-  // open may be waiting on a code, so it keeps its address.
   const { connectServerUrl, onConnectServerShown } = props;
   const routeConnects = joining || openingShare || handoffStatus.status !== "idle";
   useEffect(() => {

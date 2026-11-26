@@ -1748,10 +1748,6 @@ function WorkspaceShell(props: {
     },
     [reviewingAccountDeletion, openCloud, reportShellFailure],
   );
-  // A dohc://connect link fills in the dialog's address. The person still
-  // chooses Connect server. An open dialog may be waiting on a code, and a
-  // deletion review holds the account, so neither is interrupted. A share
-  // dialog would cover it, so the link waits for that to close.
   const { connectServerUrl, onConnectServerShown } = props;
   const openingShare =
     openShare !== null || shareTarget !== null || handoffStatus.status !== "idle";

@@ -9409,7 +9409,6 @@ export const systemPrivacySettingsOperations = {
   },
 } as const satisfies OperationTable;
 
-// Only the window a dohc://connect link brought forward gets its server, once.
 export const connectServerOperations = {
   takeConnectServerRequest: {
     capabilityId: "cloud.connect.link.take",
@@ -9602,7 +9601,6 @@ export interface DohcDesktopBridge
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   onShareHandoffStatus(listener: (status: ShareHandoffStatus) => void): () => void;
-  // A dohc://connect link is waiting for this window: take it.
   onConnectServerRequest(listener: () => void): () => void;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
   cloudJoinWorkspace(payload: CloudJoinWorkspacePayload): Promise<CloudJoinWorkspaceResult>;

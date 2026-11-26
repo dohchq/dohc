@@ -218,9 +218,6 @@ ${STATUS}`,
     });
   }
   if (state.kind === "prompt") {
-    // The address is what dohc's Server address field takes. Open in dohc fills
-    // it in on a computer; the phone app also owns dohc: links but signs in by
-    // scanning, so the stylesheet shows the button only with a mouse or trackpad.
     return shell({
       title: "Connect your device",
       page: "device-prompt",

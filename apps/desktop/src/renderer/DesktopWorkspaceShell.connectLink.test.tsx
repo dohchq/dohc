@@ -23,7 +23,6 @@ describe("a dohc://connect link in an open workspace", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     let shown = 0;
     let deliver: (serverUrl: string) => void = () => undefined;
-    // Holds the request until the shell shows it, as DesktopRoot does.
     function Root() {
       const [connectServerUrl, setConnectServerUrl] = useState<string | null>(null);
       deliver = setConnectServerUrl;
