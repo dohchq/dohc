@@ -1,5 +1,6 @@
 import { type StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
+import { reclaimableOwnerPublications, reclaimOwnerPublications } from "./publications";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
 import {
   BLOB_LOG_TEXT_CHUNK,
@@ -91,6 +92,8 @@ export async function collectUnreferencedBlobs(
   workspaceId: string,
   options: { nowMs: number },
 ): Promise<CollectUnreferencedBlobsResult> {
+  if (reclaimableOwnerPublications(storage, workspaceId, options.nowMs).length)
+    storage.tx(() => reclaimOwnerPublications(storage, workspaceId, options.nowMs));
   // Grace window (item 4): never reclaim a blob younger than blobGraceMs, so
   // a blob uploaded just before its referencing log op is appended survives
   // the gap between the two phases. cutoff is the newest created_at_ms still

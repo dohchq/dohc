@@ -1834,11 +1834,20 @@ export function createSyncRelayHandler({
             (session) => session.clientKind === "browser" && session.userId === actor.userId,
             () => false,
           ));
+        const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+        const desktop =
+          route.action === "activate" &&
+          !!sessionResolver &&
+          (await bearerAccountSession(storage, sessionResolver, actorRequest).then(
+            (session) => session.clientKind === "desktop" && session.userId === actor.userId,
+            () => false,
+          ));
         const auth = {
           kind: "named" as const,
           workspaceId: route.workspaceId,
           userId: actor.userId,
           ...(person ? { person: true as const } : {}),
+          ...(desktop ? { device: "desktop" as const } : {}),
         };
         const signedIn = async () => {
           const again = await resolveActor(actorRequest, actor.workspaceId);

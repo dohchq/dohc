@@ -9,6 +9,7 @@ import {
 import {
   initializeAppPublicationAudience,
   initializeAppPublicationSchema,
+  initializeOwnerAppPublications,
 } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
@@ -1709,6 +1710,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeAccountNames(db);
   initializeWorkspaceLevelChanges(db);
   initializeMemberAppSchema(db);
+  initializeOwnerAppPublications(db);
   initializeDirectMessageSchema(db);
   initializeGroupRuleSchema(db);
   initializeDeletedMessageSchema(db);

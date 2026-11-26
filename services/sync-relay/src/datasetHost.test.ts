@@ -219,7 +219,7 @@ async function fixture(
   /** Publishes the fixture's app again, requesting `capabilities`, to the link or to the workspace's members. */
   function publishWith(
     capabilities: AppPublicationCandidate["capabilities"],
-    audience: "link" | "workspace" = "link",
+    audience: "link" | "workspace" | "owner" = "link",
     external?: AppPublicationCandidate["external"],
   ) {
     const previous = base.storage.readAppPublication({
@@ -248,9 +248,11 @@ async function fixture(
     const result = base.storage.publishAppPublication({
       workspaceId: "w",
       ownerUserId: "owner",
-      ...(audience === "workspace"
-        ? { shareId: "members" }
-        : { shareId: "s", grantId: "g", generation: 1 }),
+      ...(audience === "owner"
+        ? {}
+        : audience === "workspace"
+          ? { shareId: "members" }
+          : { shareId: "s", grantId: "g", generation: 1 }),
       candidate,
       blobs: [],
       limits,
@@ -2688,5 +2690,71 @@ it("lets every member read the sharing switch and only the Owner and Admins chan
         url: `https://share.test/s/apps/w/${app}`,
       },
     ],
+  });
+});
+
+it("opens an Owner Publication only on its owner's phone, keeps a running launch through a replacement, and binds only from the desktop", async () => {
+  const f = await memberFixture();
+  const version = (operationIds: string[]) =>
+    f.publishWith(
+      [
+        resolveAppDatasetCapability(
+          {
+            kind: "dataset",
+            datasetId: memberRevision.datasetId,
+            revision: 1,
+            revisionSha256: memberRevision.revisionSha256,
+            operationIds,
+          },
+          memberRevision,
+        ),
+      ],
+      "owner",
+    );
+  const desktop: AppBackendAuth = {
+    kind: "named",
+    workspaceId: "w",
+    userId: "owner",
+    device: "desktop",
+  };
+  const missing = expect.objectContaining({ code: "not_found" });
+  const app = version([id(5), id(6), id(7)]);
+  expect(() => f.host.bindPublication(owner, { workspaceId: "w", publicationId: app })).toThrow(
+    missing,
+  );
+  expect(f.host.bindPublication(desktop, { workspaceId: "w", publicationId: app })).toEqual([
+    memberRevision.datasetId,
+  ]);
+  const phone = (auth: AppBackendAuth, grantId?: string): AppBackendAuth =>
+    auth.kind === "named" ? { ...auth, ...(grantId ? { grantId } : {}), device: "phone" } : auth;
+  for (const auth of [owner, ana, phone(ana), phone(owner, "ana-grant"), f.link("visitor")])
+    expect(() => f.host.servedPublication(auth, app)).toThrow(missing);
+  const add = (auth: AppBackendAuth, appId: string, key: string) =>
+    f.host.invoke(auth, {
+      workspaceId: "w",
+      datasetId: memberRevision.datasetId,
+      revision: 1,
+      revisionSha256: memberRevision.revisionSha256,
+      operationId: id(5),
+      input: { name: "From the phone" },
+      idempotencyKey: key,
+      access: { kind: "app", appId },
+    });
+  await expect(add(owner, app, "desktop")).rejects.toMatchObject({ code: "not_found" });
+  const { run, open } = ownerPhone(f);
+  expect((await run("apps", {})).apps).toContainEqual(
+    expect.objectContaining({ publicationId: app, approved: false }),
+  );
+  await run("appApprove", { publicationId: app, authorityRevision: 1 });
+  const launch = await open(app);
+  expect((await add(launch, app, "first")).revision).toBeGreaterThan(0);
+  const next = version([id(5), id(6)]);
+  f.host.bindPublication(desktop, { workspaceId: "w", publicationId: next });
+  expect((await add(launch, app, "still-open")).revision).toBeGreaterThan(0);
+  const listed = (await run("apps", {})).apps as { publicationId: string }[];
+  expect(listed.map((row) => row.publicationId)).toContain(next);
+  expect(listed.map((row) => row.publicationId)).not.toContain(app);
+  await expect(run("appReview", { publicationId: app })).rejects.toMatchObject({
+    code: "not_found",
   });
 });

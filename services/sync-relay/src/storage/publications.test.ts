@@ -9,6 +9,9 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { openSyncRelayStorage, type SyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
+import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
+import { approvePhoneApp, issuePhoneAppGrant } from "./phoneApps";
+import { rebuildTables } from "./rebuildTables";
 import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
@@ -1125,4 +1128,208 @@ it("refuses to recreate a missing marked takedown table", () => {
   expect(() => openSyncRelayStorage(f.path)).toThrow(
     "Publication takedown schema is missing or damaged.",
   );
+});
+
+const ownRequest = (sourceRevision = "1".repeat(64), nowMs = 10) => {
+  const { shareId: _s, grantId: _g, generation: _n, ...input } = request();
+  return { ...input, nowMs, candidate: { ...input.candidate, sourceRevision } };
+};
+const ownRead = (publicationId: string) => ({
+  workspaceId: "w",
+  publicationId,
+  ownerUserId: "owner",
+  limits,
+});
+const listed = (f: ReturnType<typeof fixture>, audience?: "owner") =>
+  f.storage
+    .listAppPublications({ workspaceId: "w", ownerUserId: "owner", limits, audience })
+    .publications.map((row) => row.publicationId);
+const rowExists = (f: ReturnType<typeof fixture>, publicationId: string) =>
+  !!f.raw
+    .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?")
+    .get(publicationId);
+
+it("keeps every publication, Member app and consent when the owner audience migration runs on a populated store", () => {
+  const f = fixture();
+  const link = f.storage.publishAppPublication(request());
+  const manifest = String(
+    f.raw
+      .prepare("SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(link.publicationId)!.manifest_sha256,
+  );
+  const member = "c".repeat(64);
+  f.raw
+    .exec(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision,audience)
+    VALUES('${member}','w','s',NULL,NULL,'reader','${manifest}',5,1,1,'workspace');
+    INSERT INTO sync_relay_member_apps VALUES('${member}','w','reader','member','poll',5);
+    INSERT INTO sync_relay_app_viewer_consents VALUES('w','owner','${member}','','[]',6);
+    DROP INDEX idx_sync_relay_owner_publications;
+    DELETE FROM sync_relay_migrations WHERE migration_id='app-publication-owner-audience-v1';`);
+  const before = f.raw
+    .prepare("SELECT sql FROM sqlite_schema WHERE name='sync_relay_app_publications'")
+    .get()!;
+  const audienceSql = String(before.sql)
+    .replace("share_id TEXT,", "share_id TEXT NOT NULL,")
+    .replace("'workspace', 'owner'", "'workspace'")
+    .replace(/\s*app_root TEXT,\s*replaced[^\n]*\n/, "\n")
+    .replace(/\s*CHECK \(\(audience = 'owner'\)[^\n]*/g, "")
+    .replace(/\s*CHECK \(replaced[^\n]*/, "");
+  (f.storage as StorageContext).tx(() =>
+    rebuildTables(
+      f.raw,
+      [
+        "sync_relay_app_publications",
+        "sync_relay_app_publication_approvals",
+        "sync_relay_app_publication_blobs",
+        "sync_relay_app_publication_takedowns",
+        "sync_relay_app_collection_approvals",
+        "sync_relay_member_apps",
+        "sync_relay_app_viewer_consents",
+      ],
+      (table, sql) => (table === "sync_relay_app_publications" ? audienceSql : sql),
+      ["app_root", "replaced"],
+    ),
+  );
+  const count = (table: string) =>
+    Number(f.raw.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n);
+  const tables = [
+    "sync_relay_app_publications",
+    "sync_relay_app_publication_approvals",
+    "sync_relay_app_publication_blobs",
+    "sync_relay_member_apps",
+    "sync_relay_app_viewer_consents",
+  ];
+  const counts = tables.map(count);
+  expect(audienceSql).not.toMatch(/app_root|replaced|'owner'/);
+  expect(counts).toEqual([2, 1, 3, 1, 1]);
+  f.restart();
+  expect(tables.map(count)).toEqual(counts);
+  expect(f.storage.readAppPublication(ownRead(link.publicationId))).toMatchObject({
+    active: true,
+    linkCurrent: true,
+  });
+  const own = f.storage.publishAppPublication(ownRequest());
+  expect(own.owner).toEqual({ workspaceId: "w", ownerUserId: "owner" });
+  f.restart();
+  expect(f.storage.readAppPublication(ownRead(own.publicationId)).linkCurrent).toBe(true);
+});
+
+it("replaces an owner's earlier version of an app, and deletes each once no launch runs it", async () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  expect(listed(f)).toEqual([]);
+  expect(listed(f, "owner")).toEqual([first]);
+  approvePhoneApp(f.storage, {
+    userId: "owner",
+    workspaceId: "w",
+    publicationId: first,
+    authorityRevision: 1,
+    newApprovalId: "a".repeat(32),
+    nowMs: 10,
+  });
+  issuePhoneAppGrant(f.storage, {
+    userId: "owner",
+    sessionId: "phone",
+    workspaceId: "w",
+    publicationId: first,
+    authorityRevision: 1,
+    approvalId: "a".repeat(32),
+    grantHash: "b".repeat(64),
+    expiresAtMs: 100,
+    nowMs: 10,
+  });
+  const second = f.storage.publishAppPublication(ownRequest("2".repeat(64), 20)).publicationId;
+  expect(listed(f, "owner")).toEqual([second]);
+  expect(f.storage.readAppPublication(ownRead(first))).toMatchObject({
+    active: true,
+    replaced: true,
+  });
+  const third = f.storage.publishAppPublication(ownRequest("3".repeat(64), 30)).publicationId;
+  expect(rowExists(f, second)).toBe(false);
+  expect(rowExists(f, first)).toBe(true);
+  const manifestOf = (id: string) =>
+    String(
+      f.raw
+        .prepare("SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?")
+        .get(id)!.manifest_sha256,
+    );
+  const firstManifest = manifestOf(first);
+  await f.storage.collectUnreferencedBlobs("w", { nowMs: 1000 });
+  expect(rowExists(f, first)).toBe(false);
+  expect(f.storage.getBlob("w", firstManifest)).toBeNull();
+  expect(f.storage.getBlob("w", manifestOf(third))).not.toBeNull();
+  const again = f.storage.publishAppPublication(ownRequest("1".repeat(64), 1000));
+  expect(again).toMatchObject({ publicationId: first, active: true, authorityRevision: 1 });
+  expect(listed(f, "owner")).toEqual([first]);
+  expect(rowExists(f, third)).toBe(false);
+  f.storage.withdrawAppPublication({ ...ownRead(first), expectedAuthorityRevision: 1 });
+  expect(() =>
+    f.storage.reactivateAppPublication({ ...ownRead(first), expectedAuthorityRevision: 2 }),
+  ).toThrow(expect.objectContaining({ code: "not_found" }));
+  await f.storage.collectUnreferencedBlobs("w", { nowMs: 1000 });
+  expect(rowExists(f, first)).toBe(false);
+});
+
+it("publishes to the owner's phones over HTTP only without outside calls or Collection files, and lists them only when asked", async () => {
+  const f = httpFixture();
+  await f.upload();
+  const { candidate } = ownRequest();
+  const body = { audience: "owner", candidate };
+  expect((await f.http("w/app-publications", body, "reader")).status).toBe(404);
+  expect((await f.http("w/app-publications", { ...body, shareId: "s", grantId: "g" })).status).toBe(
+    400,
+  );
+  const creating = {
+    ...body,
+    candidate: {
+      ...candidate,
+      capabilities: [
+        {
+          kind: "collection-create",
+          collectionPath: "app/responses",
+          schemaSha256: "f".repeat(64),
+          allowedFields: ["name"],
+          requiredFields: ["name"],
+          readFields: ["name"],
+        },
+      ],
+    },
+  };
+  const refusal = {
+    error:
+      "Apps that create Collection files or call outside services open on your phone only through a link.",
+  };
+  expect(await (await f.http("w/app-publications", creating)).json()).toMatchObject(refusal);
+  const calling = {
+    ...body,
+    candidate: {
+      ...candidate,
+      external: parseAppExternalDeclaration({
+        count: {
+          method: "GET",
+          url: "https://api.example.com/count",
+          secret: { name: "KEY", header: "X-Key" },
+          access: "viewers",
+        },
+      }),
+    },
+  };
+  expect(await (await f.http("w/app-publications", calling)).json()).toMatchObject(refusal);
+  const response = await f.http("w/app-publications", body);
+  expect(response.status).toBe(200);
+  const published = await response.json();
+  expect(published.owner).toEqual({ workspaceId: "w", ownerUserId: "owner" });
+  const list = async (query = "") =>
+    (await (await f.http(`w/app-publications${query}`)).json()).publications;
+  expect(await list()).toEqual([]);
+  expect(await list("?audience=owner")).toEqual([
+    expect.objectContaining({
+      publicationId: published.publicationId,
+      audience: "owner",
+      shareId: null,
+      grantId: null,
+      linkCurrent: true,
+    }),
+  ]);
+  expect((await f.http("w/app-publications?audience=link")).status).toBe(400);
 });

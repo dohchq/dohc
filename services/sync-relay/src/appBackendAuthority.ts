@@ -12,6 +12,11 @@ export type AppBackendAuth =
        * desktop's sign-in, so only this lane can allow a Member app.
        */
       person?: true;
+      /**
+       * Set only by the relay: the owner's phone account operation, or the desktop sign-in activating an app. With a
+       * phone launch, only these reach an Owner Publication.
+       */
+      device?: "phone" | "desktop";
       /** A phone launch's binding, which the owner's authority checks at admission, before each commit, and inside it. */
       launch?: PhoneAppLaunchGuard;
     };

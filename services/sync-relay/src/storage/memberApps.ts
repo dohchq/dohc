@@ -10,6 +10,7 @@ import {
   assertPublishingNotHeld,
   putPublicationBlob,
   recordApproval,
+  retirePublication,
   validateBuildIdentity,
 } from "./publications";
 import { notFound, relayError } from "../errors";
@@ -40,7 +41,7 @@ const SETTINGS_SQL = `CREATE TABLE ${SETTINGS} (
   generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991)
 ) STRICT`;
 
-/** Runs after the publication table's last rebuild, which would drop references to it. */
+/** Runs after the audience rebuild, which would drop references to it, and before the owner rebuild, which names them. */
 export function initializeMemberAppSchema(db: SqliteDb): void {
   initializeMarkedTable(db, "member-apps-v1", MEMBER_APPS, MEMBER_APPS_SQL, "Member app");
   initializeMarkedTable(db, "member-app-consents-v1", CONSENTS, CONSENTS_SQL, "Member app consent");
@@ -175,22 +176,6 @@ export function recordMemberAppConsent(
     );
 }
 
-function retire(storage: StorageContext, publicationId: string): void {
-  storage.db
-    .prepare("DELETE FROM sync_relay_phone_app_approvals WHERE publication_id=?")
-    .run(publicationId);
-  storage.db
-    .prepare(
-      "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=? AND active=1",
-    )
-    .run(publicationId);
-  storage.db
-    .prepare(
-      "DELETE FROM sync_relay_app_publications WHERE publication_id=? AND NOT EXISTS (SELECT 1 FROM sync_relay_app_publication_takedowns WHERE publication_id=?)",
-    )
-    .run(publicationId, publicationId);
-}
-
 export interface WriteMemberAppInput {
   workspaceId: string;
   publisherUserId: string;
@@ -258,7 +243,7 @@ export function writeMemberApp(storage: StorageContext, input: WriteMemberAppInp
         `UPDATE ${CONSENTS} SET publication_id=?,scope_digest='',operations_json='[]' WHERE publication_id=?`,
       )
       .run(publicationId, old);
-    retire(storage, old);
+    retirePublication(storage, old);
   }
   const used = Number(
     storage.db
@@ -289,7 +274,7 @@ export function withdrawMemberApp(
       (role === "member" && app.publisherUserId !== input.actorUserId)
     )
       throw notFound();
-    retire(storage, input.publicationId);
+    retirePublication(storage, input.publicationId);
     return { publicationId: input.publicationId, active: false };
   });
 }

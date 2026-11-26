@@ -46,15 +46,30 @@ export interface WorkspacePublicationOwner {
   shareId: string;
   ownerUserId: string;
 }
-export type PublicationOwner = LinkPublicationOwner | WorkspacePublicationOwner;
+/** An Owner Publication's owner, whose phones alone open it, with no share. */
+export interface OwnPublicationOwner {
+  workspaceId: string;
+  ownerUserId: string;
+}
+export type PublicationOwner =
+  | LinkPublicationOwner
+  | WorkspacePublicationOwner
+  | OwnPublicationOwner;
 export const publicationAudience = (owner: PublicationOwner) =>
-  "grantId" in owner ? ("link" as const) : ("workspace" as const);
+  "grantId" in owner
+    ? ("link" as const)
+    : "shareId" in owner
+      ? ("workspace" as const)
+      : ("owner" as const);
+const PUBLICATION_DOMAINS = {
+  link: "dohc-app-publication-v1",
+  workspace: "dohc-app-workspace-publication-v1",
+  owner: "dohc-app-owner-publication-v1",
+};
 export function publicationIdOf(owner: PublicationOwner, manifestHash: string): string {
-  const domain =
-    publicationAudience(owner) === "link"
-      ? "dohc-app-publication-v1"
-      : "dohc-app-workspace-publication-v1";
-  return sha(JSON.stringify([domain, owner, manifestHash]));
+  return sha(
+    JSON.stringify([PUBLICATION_DOMAINS[publicationAudience(owner)], owner, manifestHash]),
+  );
 }
 export type PublishAppPublicationInput = PublicationOwner & {
   agent?: ApprovalAgent | null;
@@ -65,8 +80,9 @@ export type PublishAppPublicationInput = PublicationOwner & {
 };
 export interface AppPublicationApproval {
   agent: ApprovalAgent | null;
+  /** The share's selector, or null for an Owner Publication. */
   selector: unknown;
-  /** The link's access, or null for a Workspace Publication, which each member reaches at their own level. */
+  /** The link's access, or null for a Workspace or Owner Publication, which each person reaches at their own level. */
   access: "view" | "comment" | "edit" | null;
   committedCandidateDigest: string;
   sourceRevision: string;
@@ -89,6 +105,8 @@ export interface AppPublicationRow {
   candidate: AppPublicationCandidate;
   owner: PublicationOwner;
   active: boolean;
+  /** An Owner Publication a newer one of its app replaced, kept only for the launch still running it. */
+  replaced?: true;
   authorityRevision: number;
   createdAtMs: number;
 }
@@ -173,10 +191,11 @@ function authority(
   candidate?: AppPublicationCandidate,
 ): void {
   if (!("grantId" in owner)) {
-    const share = storage.getShare(owner.shareId);
     if (
-      getWorkspaceMembership(storage, owner.workspaceId)?.shareId !== owner.shareId ||
-      share?.granterUserId !== owner.ownerUserId ||
+      ("shareId" in owner
+        ? getWorkspaceMembership(storage, owner.workspaceId)?.shareId !== owner.shareId ||
+          storage.getShare(owner.shareId)?.granterUserId !== owner.ownerUserId
+        : !storage.workspaceIsOwnedBy(owner.workspaceId, owner.ownerUserId)) ||
       (candidate &&
         (candidate.versionId !== MAIN_VERSION_ID ||
           [candidate.appRoot, ...candidate.inputs.map((file) => file.path)].some(
@@ -261,8 +280,11 @@ function header(
             generation: Number(row.grant_generation),
             ownerUserId,
           }
-        : { workspaceId, shareId: String(row.share_id), ownerUserId },
+        : row.audience === "workspace"
+          ? { workspaceId, shareId: String(row.share_id), ownerUserId }
+          : { workspaceId, ownerUserId },
     active: row.active === 1,
+    ...(row.replaced === 1 ? { replaced: true as const } : {}),
     authorityRevision: Number(row.authority_revision),
     createdAtMs: Number(row.created_at_ms),
   };
@@ -333,7 +355,10 @@ export function publishAppPublication(
           generation: input.generation,
           ownerUserId: input.ownerUserId,
         }
-      : { workspaceId: input.workspaceId, shareId: input.shareId, ownerUserId: input.ownerUserId };
+      : "shareId" in input
+        ? { workspaceId: input.workspaceId, shareId: input.shareId, ownerUserId: input.ownerUserId }
+        : { workspaceId: input.workspaceId, ownerUserId: input.ownerUserId };
+  const own = publicationAudience(owner) === "owner";
   const now = integer(input.nowMs),
     bytes = Buffer.from(JSON.stringify(candidate)),
     manifestHash = sha(bytes);
@@ -361,28 +386,32 @@ export function publishAppPublication(
       putPublicationBlob(storage, owner.workspaceId, file.sha256, content, now);
     }
     const existing = storage.db
-      .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?")
+      .prepare("SELECT active FROM sync_relay_app_publications WHERE publication_id=?")
       .get(publicationId);
-    if (existing)
+    if (existing) {
+      if (own && existing.active === 1)
+        replaceOwnerPublications(storage, owner, candidate.appRoot, publicationId, now);
       return withOperatorTakedown(
         storage,
         stored(storage, { ...owner, publicationId, limits: input.limits }),
       ); // A retry never reactivates a withdrawn publication.
+    }
     assertPublishingNotHeld(storage, owner.ownerUserId);
     putPublicationBlob(storage, owner.workspaceId, manifestHash, bytes, now);
     storage.db
-      .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision,audience)
-      VALUES(?,?,?,?,?,?,?,?,1,1,?)`)
+      .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision,audience,app_root)
+      VALUES(?,?,?,?,?,?,?,?,1,1,?,?)`)
       .run(
         publicationId,
         owner.workspaceId,
-        owner.shareId,
+        "shareId" in owner ? owner.shareId : null,
         "grantId" in owner ? owner.grantId : null,
         "grantId" in owner ? owner.generation : null,
         owner.ownerUserId,
         manifestHash,
         now,
         publicationAudience(owner),
+        own ? candidate.appRoot : null,
       );
     for (const hash of new Set([manifestHash, ...candidate.files.map((file) => file.sha256)])) {
       storage.db
@@ -399,6 +428,7 @@ export function publishAppPublication(
       candidate,
       input.agent,
     );
+    if (own) replaceOwnerPublications(storage, owner, candidate.appRoot, publicationId, now);
     return {
       publicationId,
       candidate,
@@ -410,6 +440,61 @@ export function publishAppPublication(
     };
   });
 }
+function replaceOwnerPublications(
+  storage: StorageContext,
+  owner: PublicationOwner,
+  appRoot: string,
+  publicationId: string,
+  nowMs: number,
+): void {
+  storage.db
+    .prepare(`UPDATE sync_relay_app_publications SET replaced=(publication_id<>?)
+    WHERE workspace_id=? AND owner_user_id=? AND audience='owner' AND app_root=? AND active=1`)
+    .run(publicationId, owner.workspaceId, owner.ownerUserId, appRoot);
+  reclaimOwnerPublications(storage, owner.workspaceId, nowMs);
+}
+
+/** The workspace's Owner Publications that are withdrawn, or replaced with no launch left, so their blobs can go. */
+export function reclaimableOwnerPublications(
+  storage: StorageContext,
+  workspaceId: string,
+  nowMs: number,
+): string[] {
+  return storage.db
+    .prepare(`SELECT publication_id FROM sync_relay_app_publications p WHERE workspace_id=? AND audience='owner'
+    AND (active=0 OR replaced=1 AND NOT EXISTS (SELECT 1 FROM sync_relay_phone_app_launches l
+      WHERE l.publication_id=p.publication_id AND l.authority_revision=p.authority_revision AND l.expires_at_ms>?))
+    AND NOT EXISTS (SELECT 1 FROM sync_relay_app_publication_takedowns t WHERE t.publication_id=p.publication_id)`)
+    .all(workspaceId, nowMs)
+    .map((row) => String(row.publication_id));
+}
+
+export function reclaimOwnerPublications(
+  storage: StorageContext,
+  workspaceId: string,
+  nowMs: number,
+): void {
+  for (const id of reclaimableOwnerPublications(storage, workspaceId, nowMs))
+    retirePublication(storage, id);
+}
+
+/** Stops a publication and its phone approvals, then deletes it unless an operator took it down. */
+export function retirePublication(storage: StorageContext, publicationId: string): void {
+  storage.db
+    .prepare("DELETE FROM sync_relay_phone_app_approvals WHERE publication_id=?")
+    .run(publicationId);
+  storage.db
+    .prepare(
+      "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=? AND active=1",
+    )
+    .run(publicationId);
+  storage.db
+    .prepare(
+      "DELETE FROM sync_relay_app_publications WHERE publication_id=? AND NOT EXISTS (SELECT 1 FROM sync_relay_app_publication_takedowns WHERE publication_id=?)",
+    )
+    .run(publicationId, publicationId);
+}
+
 export function readAppPublication(
   storage: StorageContext,
   input: ReadAppPublicationInput,
@@ -426,14 +511,16 @@ export interface ListAppPublicationsInput {
   limits: AppPublicationLimits;
   cursor?: string;
   appRoot?: string;
+  /** Owner Publications are left out unless asked for, alone or with the rest. */
+  audience?: "owner" | "all";
 }
 export type AppPublicationListRow = {
   operatorTakedown?: AppPublicationTakedown;
   approvalProvenance?: AppPublicationApproval;
   publicationId: string;
   authorityRevision: number;
-  audience: "link" | "workspace";
-  shareId: string;
+  audience: "link" | "workspace" | "owner";
+  shareId: string | null;
   grantId: string | null;
   active: boolean;
   linkCurrent: boolean;
@@ -446,7 +533,7 @@ export type AppPublicationListRow = {
 
 const listedOwner = (owner: PublicationOwner) => ({
   audience: publicationAudience(owner),
-  shareId: owner.shareId,
+  shareId: "shareId" in owner ? owner.shareId : null,
   grantId: "grantId" in owner ? owner.grantId : null,
 });
 
@@ -469,8 +556,15 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
     const rows = storage.db
       .prepare(`SELECT p.publication_id,a.capability_json FROM sync_relay_app_publications p
       LEFT JOIN sync_relay_app_collection_approvals a ON a.publication_id=p.publication_id AND a.workspace_id=p.workspace_id AND a.active=1
-      WHERE p.workspace_id=? AND p.owner_user_id=? AND p.publication_id>? ORDER BY p.publication_id LIMIT 26`)
-      .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
+      WHERE p.workspace_id=? AND p.owner_user_id=? AND p.publication_id>? AND p.replaced=0
+      AND (?=1 OR (p.audience='owner')=?) ORDER BY p.publication_id LIMIT 26`)
+      .all(
+        input.workspaceId,
+        input.ownerUserId,
+        input.cursor ?? "",
+        input.audience === "all" ? 1 : 0,
+        input.audience === "owner" ? 1 : 0,
+      );
     const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>((row) => {
       const publicationId = String(row.publication_id);
       let collectionCapability: AppPublicationListRow["collectionCapability"] = null;
@@ -544,11 +638,12 @@ export function withdrawAppPublication(
       storage,
       header(storage, input.publicationId, input.workspaceId, input.ownerUserId).state,
     );
-    const share = storage.getShare(current.owner.shareId);
+    const share = "shareId" in current.owner ? storage.getShare(current.owner.shareId) : null;
     if (
-      !share ||
-      share.workspaceId !== current.owner.workspaceId ||
-      share.granterUserId !== input.ownerUserId
+      "shareId" in current.owner &&
+      (!share ||
+        share.workspaceId !== current.owner.workspaceId ||
+        share.granterUserId !== input.ownerUserId)
     )
       throw notFound();
     if (current.authorityRevision !== input.expectedAuthorityRevision)
@@ -680,7 +775,7 @@ export function recordApproval(
 ): AppPublicationApproval {
   const facts: AppPublicationApproval = {
     agent: parseApprovalAgent(agent),
-    selector: JSON.parse(storage.getShare(owner.shareId)!.selectorJson),
+    selector: "shareId" in owner ? JSON.parse(storage.getShare(owner.shareId)!.selectorJson) : null,
     access:
       "grantId" in owner
         ? (storage.getShareGrant(owner.grantId)!.access as AppPublicationApproval["access"])
@@ -742,6 +837,7 @@ export function reactivateAppPublication(
         "conflict",
         "The server operator disabled this publication. Contact the server operator.",
       );
+    if (publicationAudience(current.owner) === "owner") throw notFound();
     if (current.authorityRevision !== input.expectedAuthorityRevision)
       throw relayError("conflict", "Publication authority changed.");
     const candidate = stored(storage, input).candidate;
@@ -938,8 +1034,8 @@ export function listLinkAppPublications(
           if (
             !state.active ||
             state.authorityRevision !== publication.authorityRevision ||
-            state.owner.shareId !== authorized.share.shareId ||
             !("grantId" in state.owner) ||
+            state.owner.shareId !== authorized.share.shareId ||
             state.owner.grantId !== session.grantId ||
             state.owner.generation !== session.generation ||
             row.manifest_sha256 !== publication.manifestHash
