@@ -26,6 +26,7 @@ import {
   GhostButton,
   IconButton,
   PrimaryButton,
+  RetryRow,
   SecondaryButton,
 } from "../ui/controls";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -513,20 +514,32 @@ function FolderField(props: {
     [listing.value],
   );
   return (
-    <SuggestInput
-      id={props.id}
-      name="folder"
-      listLabel="Folders"
-      icon={Folder}
-      value={props.value}
-      onChange={props.onChange}
-      suggestions={suggestions}
-      maxLength={4096}
-      placeholder="Projects/Research"
-      autoFocus
-      disabled={props.disabled}
-      invalid={props.invalid}
-      describedBy={props.describedBy}
-    />
+    <>
+      <SuggestInput
+        id={props.id}
+        name="folder"
+        listLabel="Folders"
+        icon={Folder}
+        value={props.value}
+        onChange={props.onChange}
+        suggestions={suggestions}
+        maxLength={4096}
+        placeholder="Projects/Research"
+        autoFocus
+        disabled={props.disabled}
+        invalid={props.invalid}
+        describedBy={props.describedBy}
+      />
+      {/* A path can still be typed, so the field stays usable without the list. */}
+      {listing.error ? (
+        <RetryRow
+          testId="folder-access-folders-retry"
+          disabled={listing.pending}
+          onRetry={() => void listing.retry()}
+        >
+          dohc could not list this workspace's folders.
+        </RetryRow>
+      ) : null}
+    </>
   );
 }

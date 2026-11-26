@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -301,6 +301,23 @@ describe("Folder access", () => {
     const options = within(dialog.getByRole("listbox", { name: "Folders" })).getAllByRole("option");
     expect(options.at(-1)!.textContent).toBe("Research/Old");
     expect(field.getAttribute("aria-activedescendant")).toBe(options.at(-1)!.id);
+  });
+
+  it("says when the folder list failed, and Try again loads it", async () => {
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("engine stopped"));
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: adminView() });
+    renderMembers();
+    const user = userEvent.setup();
+    await user.click(within(await section()).getByRole("button", { name: "Remove marker" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Remove an unknown marker" }));
+    const failed = await dialog.findByTestId("folder-access-folders-retry");
+    expect(failed.textContent).toContain("dohc could not list this workspace's folders.");
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(dialog.queryByTestId("folder-access-folders-retry")).toBeNull());
+    await user.type(dialog.getByLabelText("Folder path"), "dra");
+    expect(
+      within(dialog.getByRole("listbox", { name: "Folders" })).getByRole("option").textContent,
+    ).toBe("Drafts");
   });
 
   it("keeps folder rules and marker removal out of the member view", async () => {
