@@ -6,7 +6,6 @@ import { hiddenFile } from "./accountFeed";
 import type { AppBackendAuth, PhoneAppLaunchGuard } from "./appBackendAuthority";
 import type { RelayDatasetHost } from "./datasetHost";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
-import type { PhoneMember } from "./phoneMember";
 import type { SyncRelayStorage } from "./storage";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -278,8 +277,8 @@ export function createPhoneApps(options: {
 
     /**
      * One app operation for `caller` in a workspace it owns or joined while it
-     * shows on their phone. The route has checked both, and passes a Member's
-     * or an Admin's reach. Approving and launching take a phone sign-in.
+     * shows on their phone. The route has checked both. Approving and launching
+     * take a phone sign-in.
      */
     run(
       caller: AccountSession,
@@ -287,7 +286,6 @@ export function createPhoneApps(options: {
       operation: string,
       input: unknown,
       names: ReadonlyMap<string, string | null> = new Map(),
-      member: PhoneMember | null = null,
     ): unknown {
       const userId = caller.userId;
       if (operation === "memberApps") {
@@ -333,32 +331,37 @@ export function createPhoneApps(options: {
         if (cursor !== undefined && (typeof cursor !== "string" || !PUBLICATION.test(cursor)))
           throw badRequest("Invalid app cursor.");
         if (!options.limits) return { apps: [], nextCursor: null };
-        if (member !== null) {
+        const listed = (row: {
+          publicationId: string;
+          authorityRevision: number;
+          appRoot: string;
+          sourceRevision: string;
+        }) => ({
+          publicationId: row.publicationId,
+          authorityRevision: row.authorityRevision,
+          appRoot: row.appRoot,
+          sourceRevision: row.sourceRevision,
+          approved:
+            phoneAppApproval(storage, { userId, workspaceId, publicationId: row.publicationId })
+              ?.authorityRevision === row.authorityRevision,
+        });
+        if (!storage.workspaceIsOwnedBy(workspaceId, userId)) {
           const page = workspaceAppPage(context, workspaceId, `w${cursor ?? ""}`);
           return {
-            apps: page.rows.flatMap((row) => {
-              if (row.kind !== "workspace") return [];
-              let found;
+            apps: page.rows.flatMap(({ kind, publicationId }) => {
+              if (kind !== "workspace") return [];
               try {
-                found = workspaceApp(userId, workspaceId, row.publicationId);
+                const { authorityRevision, candidate } = workspaceApp(
+                  userId,
+                  workspaceId,
+                  publicationId,
+                );
+                const { appRoot, sourceRevision } = candidate;
+                return [listed({ publicationId, authorityRevision, appRoot, sourceRevision })];
               } catch (error) {
                 if (error instanceof RelayError) return [];
                 throw error;
               }
-              return [
-                {
-                  publicationId: row.publicationId,
-                  authorityRevision: found.authorityRevision,
-                  appRoot: found.candidate.appRoot,
-                  sourceRevision: found.candidate.sourceRevision,
-                  approved:
-                    phoneAppApproval(storage, {
-                      userId,
-                      workspaceId,
-                      publicationId: row.publicationId,
-                    })?.authorityRevision === found.authorityRevision,
-                },
-              ];
             }),
             nextCursor: page.nextCursor?.startsWith("w") ? page.nextCursor.slice(1) : null,
           };
@@ -381,20 +384,7 @@ export function createPhoneApps(options: {
             // Serves only a dataset app or one that requests nothing; a Collection awaiting approval is neither.
             !servable(userId, workspaceId, row.publicationId)
               ? []
-              : [
-                  {
-                    publicationId: row.publicationId,
-                    authorityRevision: row.authorityRevision,
-                    appRoot: row.appRoot,
-                    sourceRevision: row.sourceRevision,
-                    approved:
-                      phoneAppApproval(storage, {
-                        userId,
-                        workspaceId,
-                        publicationId: row.publicationId,
-                      })?.authorityRevision === row.authorityRevision,
-                  },
-                ],
+              : [listed(row)],
           ),
           nextCursor: page.nextCursor,
         };

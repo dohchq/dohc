@@ -287,7 +287,6 @@ export function createAccountOperationRoute(options: {
           route.operation,
           args,
           names ?? undefined,
-          member,
         ),
       });
     }
