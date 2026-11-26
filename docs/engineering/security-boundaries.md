@@ -414,6 +414,14 @@ shared fixtures test. Older builds kept templates as protected files. An engine 
 deletes those encrypted rows once and leaves the file on disk and its ordinary history
 alone. Sync still skips template operations that older peers send.
 
+The protected copies dohc keeps in `.dohc/local` are plain text, because the key sits
+beside them. On Windows that folder and every staged file are private to the user
+(`crates/dohc-windows-files/src/private_dir.rs`,
+`crates/dohc-engine-files/src/materialize/staged_dacl.rs`). Deleting a protected file in
+the Explorer removes it outright when History holds its exact bytes, so it never reaches
+the system trash in plain text; restore it from History. A file History can't hold, or
+one dohc can't move aside first, goes to the trash as before.
+
 ## Workspace secrets and outbound HTTPS
 
 Workspace automation secrets are separate from `.env` secret files. They stay write-only
