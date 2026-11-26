@@ -26,7 +26,8 @@ pub(crate) struct RuleSources {
 
 impl RuleSources {
     fn parse(text: &str, folder: &str) -> Option<Self> {
-        let descriptor: serde_json::Value = serde_json::from_str(text).ok()?;
+        let descriptor: serde_json::Value =
+            serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()?;
         let format = descriptor.get("formatVersion")?.as_f64()?;
         let source = |key: &str, default: &str| match format {
             1.0 => Some(descriptor.get(key)?.as_str()?.to_owned()),
@@ -61,8 +62,12 @@ impl RuleSources {
         Ok(raw.and_then(|text| Self::parse(&text, folder)))
     }
 
-    pub(crate) fn complete<'a>(&self, paths: impl Iterator<Item = &'a str> + Clone) -> bool {
-        [&self.schema, &self.operations]
+    pub(crate) fn complete<'a>(
+        &self,
+        descriptor: &str,
+        paths: impl Iterator<Item = &'a str> + Clone,
+    ) -> bool {
+        [descriptor, &self.schema, &self.operations]
             .into_iter()
             .all(|required| paths.clone().any(|path| path == required))
     }

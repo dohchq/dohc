@@ -394,7 +394,9 @@ server-minted link principal recorded as authors.
 
 An active Admin can use their workspace grant to send a new transactional
 Collection's descriptor, schema, operations, and SQL migrations in one write.
-They can edit existing rule files in place and add new SQL migrations to an
+The descriptor, schema, and operations must be new files in the same scan.
+Changes from an incomplete create can go to the Owner as proposals.
+Admins can edit existing rule files in place and add new SQL migrations to an
 existing Collection. The descriptor must keep the same schema and operations
 files. The relay rechecks their role at commit, rejects duplicate Collection
 IDs on creation, and keeps every path

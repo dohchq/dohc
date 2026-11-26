@@ -2113,6 +2113,8 @@ describe("a new page in the owner's workspace", () => {
     "docs/people/.env",
     "docs/people/.ENV.sql",
     "docs/people/.env/one.sql",
+    "docs/people/.\uFF45nv/one.sql",
+    "docs/people/.env.example/one.sql",
     "docs/people/.dohc-access",
     "docs/people/.DOHC-ACCESS/one.sql",
     "docs/people/.dohc/migration.sql",

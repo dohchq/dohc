@@ -1295,6 +1295,34 @@ fn collection_rule_writes_accept_integral_json_numbers_as_format_versions() {
 }
 
 #[test]
+fn collection_rule_writes_apply_a_descriptor_with_one_utf8_bom() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = "\u{feff}{\"formatVersion\":2}";
+    let files = [
+        ("descriptor", "trip/people/dataset.json", descriptor),
+        ("schema", "trip/people/schema.sql", "SELECT 1;"),
+        (
+            "operations",
+            "trip/people/operations.js",
+            "globalThis.operations = {};",
+        ),
+    ];
+    hydrate_texts(&mut store, &files.map(|(_, _, body)| body));
+    for (seq, (id, path, body)) in files.into_iter().enumerate() {
+        let mut payload = absent_text_payload(id, id, path, body);
+        payload["collectionRulesFolder"] = json!("trip/people");
+        let op = envelope(
+            NAMED_ORIGIN,
+            seq as i64,
+            "ws",
+            with_author(payload, named_author("grant")),
+        );
+        let outcome = apply_moment_envelope(&mut store, &op, &NoFaults).unwrap();
+        assert_eq!(outcome.primary, ApplyDisposition::Applied(0), "{path}");
+    }
+}
+
+#[test]
 fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
     let (_scratch, mut store) = test_store();
     let descriptor = r#"{"formatVersion":2,"operationsPath":"code/actions.ts"}"#;

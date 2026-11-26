@@ -1246,51 +1246,55 @@ fn push_as_member(
         .expect("direct push")
 }
 
+fn save_dataset_descriptor(engine: &mut EngineStore, descriptor: &str) {
+    VersionedTextStore::new(engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "descriptor".to_owned(),
+                path: "docs/people/dataset.json".to_owned(),
+                text: descriptor.to_owned(),
+                moment_id: "local-descriptor".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+}
+
 #[test]
 fn admin_plans_all_transactional_collection_sources_together() {
     let descriptor = r#"{"formatVersion":2,"operationsPath":"code/rules.ts"}"#;
     let files = [
+        ("descriptor", "docs/people/dataset.json", descriptor),
+        (
+            "schema",
+            "docs/people/schema.sql",
+            "CREATE TABLE people(id TEXT);",
+        ),
         (
             "operations",
             "docs/people/code/rules.ts",
             "globalThis.operations = {};",
         ),
         ("migration", "docs/people/migrations/001.sql", "SELECT 1;"),
-        (
-            "schema",
-            "docs/people/schema.sql",
-            "CREATE TABLE people(id TEXT);",
-        ),
-        ("descriptor", "docs/people/dataset.json", descriptor),
     ];
-    for admin in [false, true] {
-        let bodies = files.map(|(_, _, body)| body);
-        let (_scratch, _path, mut engine) = proposal_fixture(&bodies);
-        VersionedTextStore::new(&mut engine)
-            .write_text(
-                &dohc_engine_domain::WriteText {
-                    workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
-                    object_id: "descriptor".to_owned(),
-                    path: "docs/people/dataset.json".to_owned(),
-                    text: descriptor.to_owned(),
-                    moment_id: "local-descriptor".to_owned(),
-                    metadata_origin: "local-file".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 1_500,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .expect("local descriptor");
-        for (i, (id, path, body)) in files.into_iter().enumerate() {
-            journal_local_moment(
-                &mut engine,
-                &create_moment(id, id, path, body),
-                2_000 + i as i64,
-            );
+    for (admin, order) in [
+        (false, [1, 2, 3, 0]),
+        (true, [1, 2, 3, 0]),
+        (true, [0, 1, 2, 3]),
+    ] {
+        let (_scratch, _path, mut engine) = proposal_fixture(&files.map(|(_, _, body)| body));
+        save_dataset_descriptor(&mut engine, descriptor);
+        for index in order {
+            let (id, path, body) = files[index];
+            journal_local_moment(&mut engine, &create_moment(id, id, path, body), 2_000);
         }
         let client = RelaySyncClient::new(PagedShareRelay::new([], []));
         client
@@ -1304,119 +1308,92 @@ fn admin_plans_all_transactional_collection_sources_together() {
                 0,
             )
             .unwrap();
-        let expected = if admin {
-            vec![vec![
-                "docs/people/dataset.json".to_owned(),
-                "docs/people/code/rules.ts".to_owned(),
-                "docs/people/migrations/001.sql".to_owned(),
-                "docs/people/schema.sql".to_owned(),
-            ]]
+        let writes = written_paths(&client);
+        if admin {
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0][0], files[0].1);
+            assert_eq!(
+                writes[0]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(files.map(|(_, path, _)| path)),
+            );
         } else {
-            vec![]
-        };
-        assert_eq!(written_paths(&client), expected);
+            assert!(writes.is_empty());
+        }
     }
 }
 
 #[test]
-fn admin_waits_for_all_new_dataset_sources_before_writing_or_proposing() {
-    let descriptor = r#"{"formatVersion":2,"operationsPath":"rules.ts"}"#;
-    let paths = [
-        "docs/people/dataset.json",
-        "docs/people/schema.sql",
-        "docs/people/rules.ts",
+fn split_transactional_collection_creates_and_later_edits_reach_proposals() {
+    let descriptor = r#"{"formatVersion":2}"#;
+    let files = [
+        ("descriptor", "docs/people/dataset.json", descriptor),
+        ("schema", "docs/people/schema.sql", "SELECT 1;"),
+        (
+            "operations",
+            "docs/people/operations.js",
+            "globalThis.operations = {};",
+        ),
     ];
-    for (scan_cut, all_pending) in [(true, true), (false, false), (true, false)] {
-        let (_scratch, _path, mut engine) = proposal_fixture(&[descriptor, "SELECT 1;"]);
+    for (order, split) in [([0, 1, 2], 1), ([1, 2, 0], 2), ([0, 1, 2], 2)] {
+        let (_scratch, _path, mut engine) =
+            proposal_fixture(&[descriptor, files[1].2, files[2].2, "before", "after"]);
         let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-        let push = |engine: &mut EngineStore| {
-            client
-                .push_direct_writes(engine, "ws", SHARE, &workspace_grant(), true, &NoFaults, 0)
-                .unwrap()
-        };
-        let hold_descriptor = |engine: &mut EngineStore, object: &str, path: &str| {
-            VersionedTextStore::new(engine)
-                .write_text(
-                    &dohc_engine_domain::WriteText {
-                        workspace_id: "ws".to_owned(),
-                        version_id: "main".to_owned(),
-                        object_id: object.to_owned(),
-                        path: path.to_owned(),
-                        text: descriptor.to_owned(),
-                        moment_id: format!("local-{object}"),
-                        metadata_origin: "local-file".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: 1_500,
-                        request_id: None,
-                    },
+        for (batch, indices) in [&order[..split], &order[split..]].into_iter().enumerate() {
+            for &index in indices {
+                let (id, path, body) = files[index];
+                if index == 0 {
+                    save_dataset_descriptor(&mut engine, descriptor);
+                }
+                journal_local_moment(&mut engine, &create_moment(id, id, path, body), 2_000);
+            }
+            if batch == 0 {
+                journal_local_moment(
+                    &mut engine,
+                    &edit_moment("note-edit", "note", "docs/note.txt", "before", "after"),
+                    2_001,
+                );
+            }
+            let outcome = client
+                .push_direct_writes(
+                    &mut engine,
+                    "ws",
+                    SHARE,
+                    &workspace_grant(),
+                    true,
                     &NoFaults,
+                    0,
                 )
                 .unwrap();
-        };
-        hold_descriptor(&mut engine, "descriptor", paths[0]);
-        let add_descriptor = |engine: &mut EngineStore| {
-            journal_local_moment(
-                engine,
-                &create_moment("descriptor", "descriptor", paths[0], descriptor),
-                2_000,
-            );
-        };
-        let add_sources = |engine: &mut EngineStore| {
-            for (id, path) in ["schema", "operations"].into_iter().zip(&paths[1..]) {
-                journal_local_moment(engine, &create_moment(id, id, path, "SELECT 1;"), 2_000);
-            }
-        };
-        if scan_cut {
-            add_sources(&mut engine);
-            if all_pending {
-                let path = "docs/unfinished/dataset.json";
-                hold_descriptor(&mut engine, "unfinished", path);
-                journal_local_moment(
+            assert!(outcome.writes.is_empty());
+            assert!(!outcome.more_pending);
+            let proposal = client
+                .submit_share_proposal(
                     &mut engine,
-                    &create_moment("unfinished", "unfinished", path, descriptor),
-                    2_000,
-                );
-            }
-            for i in (2 + usize::from(all_pending))..crate::MAX_SHARE_PROPOSAL_OPS {
-                let id = format!("filler-{i}");
-                let path = if all_pending {
-                    format!("docs/unfinished/{id}.sql")
-                } else {
-                    format!("docs/{id}.txt")
-                };
-                journal_local_moment(
-                    &mut engine,
-                    &create_moment(&id, &id, &path, "SELECT 1;"),
-                    2_000,
-                );
-            }
-            add_descriptor(&mut engine);
-        } else {
-            add_descriptor(&mut engine);
+                    "ws",
+                    SHARE,
+                    &workspace_grant(),
+                    &format!("submit-{batch}"),
+                    &NoFaults,
+                    0,
+                )
+                .unwrap();
+            assert_eq!(proposal.submitted, indices.len() + usize::from(batch == 0));
+            assert!(!proposal.more_pending);
         }
-
-        let first = push(&mut engine);
-        assert!(first.writes.is_empty());
-        assert_eq!(first.more_pending, scan_cut);
-        let proposal = client
-            .submit_share_proposal(
-                &mut engine,
-                "ws",
-                SHARE,
-                &workspace_grant(),
-                "submit-1",
-                &NoFaults,
-                0,
-            )
-            .unwrap();
-        assert_eq!(proposal.submitted, 0);
-        if !scan_cut {
-            add_sources(&mut engine);
-        }
-        push(&mut engine);
-        assert_eq!(written_paths(&client), [paths.map(str::to_owned).to_vec()]);
+        let mut paths = proposed_paths(&client);
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "docs/note.txt",
+                "docs/people/dataset.json",
+                "docs/people/operations.js",
+                "docs/people/schema.sql"
+            ],
+        );
     }
 }
 

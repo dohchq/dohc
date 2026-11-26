@@ -1084,10 +1084,10 @@ function validateDatasetRules(
     const size = change.afterByteLength!;
     if (path === descriptorPath && size > DATASET_METADATA_MAX_BYTES)
       throw refusal(`${path} is ${size} bytes. The limit is ${DATASET_METADATA_MAX_BYTES} bytes.`);
-    const bytes = bytesOf(change.afterBlobSha256!, size);
-    const text = bytes && utf8(bytes);
-    if (text === null) throw refusal(`${path} must be UTF-8 text of its stated size.`);
-    texts.set(path, text);
+    texts.set(
+      path,
+      readChangeText(bytesOf, change, `${path} must be UTF-8 text of its stated size.`),
+    );
   }
   const next = texts.has(descriptorPath) ? parse(texts.get(descriptorPath)!) : before;
   if (!next || (before && before.datasetId !== next.datasetId))
@@ -1352,6 +1352,14 @@ function suppliedBytes(content: ReadonlyMap<string, Uint8Array>): ContentBytes {
   };
 }
 
+function readChangeText(bytesOf: ContentBytes, change: ProposedChange, reason?: string): string {
+  const bytes = bytesOf(change.afterBlobSha256!, change.afterByteLength!);
+  if (bytes === null) throw refusal(reason ?? `${change.afterPath} does not match its stated size`);
+  const text = utf8(bytes);
+  if (text === null) throw refusal(reason ?? `${change.afterPath} is not UTF-8 text`);
+  return text;
+}
+
 // Content checks with the shared parsers, before the write's transaction.
 // Content is named by its hash, so what is read here is what the moments
 // will name. Each blob is read and each record checked once, however many
@@ -1376,11 +1384,7 @@ function validateContent(
     const sha256 = change.afterBlobSha256!;
     let read = texts.get(sha256);
     if (read === undefined) {
-      const bytes = bytesOf(sha256, change.afterByteLength!);
-      if (bytes === null) throw refusal(`${change.afterPath} does not match its stated size`);
-      const decoded = utf8(bytes);
-      if (decoded === null) throw refusal(`${change.afterPath} is not UTF-8 text`);
-      read = { text: decoded, byteLength: bytes.byteLength };
+      read = { text: readChangeText(bytesOf, change), byteLength: change.afterByteLength! };
       texts.set(sha256, read);
     } else if (read.byteLength !== change.afterByteLength) {
       throw refusal(`${change.afterPath} does not match its stated size`);
