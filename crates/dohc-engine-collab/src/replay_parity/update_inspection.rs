@@ -63,6 +63,9 @@ pub enum StructuralHold {
     /// scan rejects, such as a client's block section given twice, or a block
     /// whose origins sit in another parent or key.
     Unclassifiable,
+    /// In a format-2 note, a formula, raw source or callout title the head
+    /// shows is no longer shown as it was.
+    HiddenContent,
 }
 
 /// Decide whether applying `candidate` to `head` could delete, overwrite or

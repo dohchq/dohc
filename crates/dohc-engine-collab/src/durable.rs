@@ -4363,6 +4363,91 @@ mod append_compaction_query_tests {
             }
         });
     }
+
+    #[test]
+    fn a_stored_format_two_note_takes_a_bold_and_a_join_from_another_device() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Map, ReadTxn, Text, Transact};
+
+        crate::ydoc::reading_body_sequence_here(|| {
+            let scratch = ScratchDir::new_named("format-two-released-edits").expect("scratch");
+            let mut store = EngineStore::open(&scratch.join("engine.db"), 1).expect("open store");
+            let key = DocKey::new("ws", "main", "object").expect("key");
+            store
+                .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+                    tx.execute_batch(
+                        "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                         VALUES ('ws', 'main'); \
+                         INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                         VALUES ('ws', 'object', 1);",
+                    )
+                    .map_err(map_sql)
+                })
+                .expect("seed parents");
+            ensure_marker(
+                &mut store,
+                &key,
+                ContentKind::Richdoc,
+                Regime::LocalOnly,
+                &NoFaults,
+                2,
+            )
+            .expect("ensure marker");
+            let marked = yrs::Doc::new();
+            let meta = marked.get_or_insert_map(crate::ROOT_META);
+            meta.insert(&mut marked.transact_mut(), "schemaVersion", 2.0);
+            let note = Ydoc::wire();
+            note.apply(
+                &marked
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default()),
+            )
+            .expect("format 2");
+            note.rewrite_content_to_markdown(ContentKind::Richdoc, "ab\n\ncd\n")
+                .expect("format-2 note");
+            let seeded = record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &note.encode_full_state(),
+                LocalAppend::default(),
+                &NoFaults,
+                3,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("seed");
+            assert!(matches!(seeded, TxnOutcome::Committed(_)));
+            let head = store
+                .read_with(|conn| load_doc_in(conn, &key))
+                .expect("the stored head");
+            let device = |edit: &dyn Fn(&mut yrs::TransactionMut, &yrs::TextRef)| {
+                let other = yrs::Doc::with_client_id(7);
+                let sequence = other.get_or_insert_text(crate::ydoc::ROOT_SEQUENCE);
+                other
+                    .transact_mut()
+                    .apply_update(
+                        yrs::Update::decode_v1(&head.encode_full_state()).expect("decode"),
+                    )
+                    .expect("load note");
+                let before = other.transact().state_vector();
+                edit(&mut other.transact_mut(), &sequence);
+                let after = other.transact();
+                after.encode_state_as_update_v1(&before)
+            };
+            let bold = yrs::types::Attrs::from([(
+                std::sync::Arc::from("bold"),
+                yrs::Any::from(std::collections::HashMap::<String, yrs::Any>::new()),
+            )]);
+            let bolded = device(&|txn, sequence| sequence.format(txn, 1, 2, bold.clone()));
+            let joined = device(&|txn, sequence| sequence.remove_range(txn, 3, 1));
+            for update in [bolded, joined] {
+                assert_eq!(
+                    crate::inspect_update(&head, &update),
+                    crate::UpdateInspection::Admissible
+                );
+            }
+        });
+    }
 }
 
 /// Replay uses the same publication guard as an ordinary live append.

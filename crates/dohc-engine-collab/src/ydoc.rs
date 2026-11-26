@@ -697,6 +697,30 @@ impl Ydoc {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn hides_kept_content(
+        head_state: &[u8],
+        candidate: &[u8],
+    ) -> Result<bool, CollabError> {
+        let copy = Ydoc::wire();
+        copy.apply(head_state)?;
+        let kept = copy.kept_content()?;
+        if kept.is_empty() {
+            return Ok(false);
+        }
+        copy.apply(candidate)?;
+        Ok(!kept.is_subset(&copy.kept_content()?))
+    }
+
+    #[cfg(test)]
+    fn kept_content(&self) -> Result<BTreeSet<(body_sequence::KeptAt, String)>, CollabError> {
+        let Some((sequence, containers)) = self.body_sequence_roots() else {
+            return Ok(BTreeSet::new());
+        };
+        let reading = self.doc.transact();
+        Ok(body_sequence::traced(&reading, &sequence, &containers)?.kept_content())
+    }
+
     fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
         if !self.reads_body_sequence {
             return None;
@@ -12575,3 +12599,7 @@ mod successor_format_two_tests;
 #[cfg(test)]
 #[path = "ydoc/body_sequence_fold_tests.rs"]
 mod body_sequence_fold_tests;
+
+#[cfg(test)]
+#[path = "ydoc/released_format_two_tests.rs"]
+mod released_format_two_tests;
