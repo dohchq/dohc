@@ -236,8 +236,7 @@ it("shows bound app names, drift statuses, reasons, and incomplete notice", asyn
   expect(screen.getByText(/Some connected apps could not be checked right now/)).toBeTruthy();
 });
 
-it("sets what each workspace level gets by default, and only reads below Edit", async () => {
-  const edit = id(5);
+function permissionsWithDefaults(edit: string, revision: number, revisionSha256: string) {
   api.dataset.mockImplementation(async (input) =>
     input.action === "permissions"
       ? {
@@ -248,8 +247,8 @@ it("sets what each workspace level gets by default, and only reads below Edit", 
             view: [],
             comment: [],
             edit: [id(2), "removed"],
-            revision: 1,
-            revisionSha256: "b".repeat(64),
+            revision,
+            revisionSha256,
             generation: 3,
           },
           rules: {
@@ -273,13 +272,23 @@ it("sets what each workspace level gets by default, and only reads below Edit", 
       onError={vi.fn()}
     />,
   );
+}
+const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+
+it("sets what each workspace level gets by default, and only reads below Edit", async () => {
+  const edit = id(5);
+  permissionsWithDefaults(edit, 2, "a".repeat(64));
   const save = await screen.findByRole("button", { name: "Save for members" });
   expect((save as HTMLButtonElement).disabled).toBe(true);
-  const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+  expect(screen.queryByText(/earlier rules/)).toBeNull();
   expect(box("Read orders for members with Edit").checked).toBe(true);
   expect(box("edit for members with View").disabled).toBe(true);
   expect(box("edit for members with Comment").disabled).toBe(true);
   fireEvent.click(box("Read orders for members with View"));
+  for (const level of ["Comment", "Edit"]) {
+    expect(box(`Read orders for members with ${level}`).checked).toBe(true);
+    expect(box(`Read orders for members with ${level}`).disabled).toBe(true);
+  }
   fireEvent.click(box("edit for members with Edit"));
   fireEvent.click(save);
   await waitFor(() =>
@@ -296,5 +305,27 @@ it("sets what each workspace level gets by default, and only reads below Edit", 
         revisionSha256: "a".repeat(64),
       },
     }),
+  );
+});
+
+it("lets the Owner save defaults chosen under earlier rules again", async () => {
+  permissionsWithDefaults(id(5), 1, "b".repeat(64));
+  const save = await screen.findByRole("button", { name: "Save for members" });
+  expect(screen.getByText(/earlier rules/)).toBeTruthy();
+  expect((save as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(save);
+  await waitFor(() =>
+    expect(api.dataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "setDefaults",
+        defaults: {
+          view: [],
+          comment: [],
+          edit: [id(2)],
+          revision: 2,
+          revisionSha256: "a".repeat(64),
+        },
+      }),
+    ),
   );
 });

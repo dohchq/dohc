@@ -144,6 +144,7 @@ function Permissions({
   const [rules, setRules] = useState<Rules | null>(null);
   const [saved, setSaved] = useState<Levels | null>(null);
   const [levels, setLevels] = useState<Levels | null>(null);
+  const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
   const report = useContext(ShellErrorReporter);
   const alive = useRef(true),
@@ -173,6 +174,10 @@ function Permissions({
         setRules(permissions.rules ?? null);
         setSaved(levelsOf(permissions));
         setLevels(levelsOf(permissions));
+        setStale(
+          !!permissions.defaults &&
+            permissions.defaults.revisionSha256 !== permissions.rules?.revisionSha256,
+        );
         setBoundApps(permissions.boundApps ?? []);
         setBoundAppsIncomplete(Boolean(permissions.boundAppsIncomplete));
       }
@@ -302,25 +307,31 @@ function Permissions({
                       <th scope="row" className="py-1.5 text-left font-normal text-ink">
                         {name}
                       </th>
-                      {LEVELS.map(([level, label]) => (
-                        <td key={level} className="text-center">
-                          <input
-                            type="checkbox"
-                            aria-label={`${name} for members with ${label}`}
-                            disabled={busy || (!action.readOnly && level !== "edit")}
-                            className="disabled:opacity-40"
-                            checked={levels[level].includes(action.operationId)}
-                            onChange={(event) =>
-                              setLevels({
-                                ...levels,
-                                [level]: event.target.checked
-                                  ? [...levels[level], action.operationId].sort()
-                                  : levels[level].filter((id) => id !== action.operationId),
-                              })
-                            }
-                          />
-                        </td>
-                      ))}
+                      {LEVELS.map(([level, label], at) => {
+                        const lower = LEVELS.slice(0, at).find(([below]) =>
+                          levels[below].includes(action.operationId),
+                        );
+                        return (
+                          <td key={level} className="text-center">
+                            <input
+                              type="checkbox"
+                              aria-label={`${name} for members with ${label}`}
+                              title={lower ? `Included with ${lower[1]}` : undefined}
+                              disabled={busy || !!lower || (!action.readOnly && level !== "edit")}
+                              className="disabled:opacity-40"
+                              checked={!!lower || levels[level].includes(action.operationId)}
+                              onChange={(event) =>
+                                setLevels({
+                                  ...levels,
+                                  [level]: event.target.checked
+                                    ? [...levels[level], action.operationId].sort()
+                                    : levels[level].filter((id) => id !== action.operationId),
+                                })
+                              }
+                            />
+                          </td>
+                        );
+                      })}
                     </tr>
                   );
                 })}
@@ -328,6 +339,7 @@ function Permissions({
             </table>
             <p className="m-0 text-[12px] text-muted">
               Members get these by their folder access. View and Comment get only reads.
+              {stale ? " These were chosen under earlier rules. Save to keep them." : null}
             </p>
             <div>
               <p
@@ -339,7 +351,7 @@ function Permissions({
               </p>
               <PrimaryButton
                 type="submit"
-                disabled={JSON.stringify(levels) === JSON.stringify(saved)}
+                disabled={!stale && JSON.stringify(levels) === JSON.stringify(saved)}
                 aria-disabled={busy || undefined}
                 className="aria-disabled:cursor-wait aria-disabled:opacity-50"
               >
