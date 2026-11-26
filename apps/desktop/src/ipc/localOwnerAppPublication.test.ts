@@ -149,7 +149,11 @@ describe("local app publication review", () => {
       h.operation,
       agent,
     );
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, agent);
+    expect(h.activate).toHaveBeenCalledWith(
+      { candidate, files: [], likelySecrets: [] },
+      h.controller.signal,
+      agent,
+    );
   });
   it("captures before approval and activates the captured bundle without remote credentials", async () => {
     const h = harness();
@@ -168,7 +172,11 @@ describe("local app publication review", () => {
         h.operation,
       ),
     ).toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, null);
+    expect(h.activate).toHaveBeenCalledWith(
+      { candidate, files: [], likelySecrets: [] },
+      h.controller.signal,
+      null,
+    );
     expect(
       await h.handler(
         {
@@ -242,7 +250,7 @@ describe("local app publication review", () => {
       ),
     ).toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
     expect(h.activate).toHaveBeenCalledWith(
-      { candidate: unconnected, files: [] },
+      { candidate: unconnected, files: [], likelySecrets: [] },
       h.controller.signal,
       null,
     );
@@ -398,7 +406,7 @@ describe("local app publication review", () => {
       h.operation,
     );
     expect(h.activate).toHaveBeenCalledWith(
-      { candidate: { ...candidate, capabilities: [collection] }, files: [] },
+      { candidate: { ...candidate, capabilities: [collection] }, files: [], likelySecrets: [] },
       h.controller.signal,
       null,
     );
