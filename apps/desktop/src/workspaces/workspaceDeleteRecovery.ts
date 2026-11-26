@@ -368,18 +368,33 @@ export async function stageDeleteRecovery(
     return { operationId };
   }
 }
+export function protectedRemovedNote(removed: readonly string[]): string {
+  const one = removed.length === 1;
+  return `${removed.join(", ")} skipped the trash because ${one ? "it holds" : "they hold"} secrets. Restore ${one ? "it" : "them"} in History, which keeps ${one ? "an encrypted copy" : "encrypted copies"}.`;
+}
 export async function finishDeleteRecovery(
   workspace: LocalStateWorkspace,
   plan: DeleteRecoveryPlan,
-  { trashed, staged }: { trashed: boolean; staged?: string },
+  {
+    trashed,
+    staged,
+    removed = [],
+  }: { trashed: boolean; staged?: string; removed?: readonly string[] },
 ): Promise<OperationRecovery> {
   const { operationId, record } = plan;
   try {
     if (!record) throw new Error("Recovery collection failed");
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
-    if (!plan.noUndo && trashed && record.paths.length) {
+    const notes: string[] = [];
+    if (trashed && record.paths.length) {
       const where = `in the ${systemTrash}`;
-      plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
+      notes.push(
+        `${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`,
+      );
+    }
+    if (removed.length) notes.push(protectedRemovedNote(removed));
+    if (!plan.noUndo && notes.length) {
+      plan.noUndo = `Cannot undo the delete. ${notes.join(" ")}`;
       record.noUndo = plan.noUndo;
       await saveRecoveryRecord(workspace, record).catch(() => undefined);
       scheduleRecoveryPrune(workspace);
@@ -396,7 +411,10 @@ export async function finishDeleteRecovery(
       undo: {
         available: false,
         paths: record?.paths ?? [],
-        reason: `Delete finished. dohc could not save Undo information. Restore files from History or ${trashed ? "the system trash" : WORKSPACE_TRASH}.`,
+        reason: [
+          `Delete finished. dohc could not save Undo information. Restore files from History or ${trashed ? "the system trash" : WORKSPACE_TRASH}.`,
+          ...(removed.length ? [protectedRemovedNote(removed)] : []),
+        ].join(" "),
       },
     };
   }

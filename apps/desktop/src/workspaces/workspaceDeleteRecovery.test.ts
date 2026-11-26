@@ -74,6 +74,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
       groups.push(authored.operationId);
       const result = await work({
         policy: await readWorkspaceEnginePolicy(root),
+        removeKeptProtectedFiles: async () => [],
         recordDisk,
         delete: vi.fn(async () => "moment"),
       } as never);

@@ -817,6 +817,7 @@ describe("agent move and delete admission", () => {
       duplicateFile: async () => {
         throw new Error("unexpected Duplicate");
       },
+      removeKeptProtectedFiles: async () => [],
       recordDisk: vi.fn(async () => []),
       moveFile: vi.fn(async () => false),
       rename: vi.fn(async () => {
@@ -990,12 +991,18 @@ describe("a person's delete", () => {
     );
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks")).toMatchObject({ trashed: true });
+      expect(await f.removeByHand("tasks")).toMatchObject({
+        trashed: true,
+        undo: {
+          available: false,
+          reason: expect.stringContaining(
+            "tasks/.env skipped the trash because it holds secrets. Restore it in History",
+          ),
+        },
+      });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks")]]);
       expect(await readFile(join(f.systemTrash, "tasks", "build", "out.js"), "utf8")).toBe("built");
-      expect(await readFile(join(f.systemTrash, "tasks", ".env"), "utf8")).toBe(
-        "SECRET=kept private",
-      );
+      expect(existsSync(join(f.systemTrash, "tasks", ".env"))).toBe(false);
       expect((await lstat(join(f.systemTrash, "tasks", "link"))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
       expect(existsSync(join(f.rootPath, "tasks"))).toBe(false);
@@ -1004,6 +1011,45 @@ describe("a person's delete", () => {
       ]);
     } finally {
       delete faults.readdir;
+      await f.engine().stop();
+    }
+  });
+});
+
+describe("a person's delete of a protected file", () => {
+  it("removes it without a trash when History holds its text", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", "TOKEN=held\n");
+    await f.start();
+    try {
+      expect(await f.removeByHand(".env")).toMatchObject({
+        trashed: false,
+        undo: {
+          available: false,
+          reason:
+            "Cannot undo the delete. .env skipped the trash because it holds secrets. Restore it in History, which keeps an encrypted copy.",
+        },
+      });
+      expect(f.trashItem).not.toHaveBeenCalled();
+      expect(existsSync(join(f.rootPath, ".env"))).toBe(false);
+      expect(await f.workspaceTrash()).toEqual([]);
+      expect(f.markDeleted).toHaveBeenCalledWith(".env");
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
+  it("trashes it when History cannot hold its bytes", async () => {
+    const f = await fixture();
+    await write(f.rootPath, ".env", Uint8Array.from([0x54, 0x3d, 0xff, 0x0a]));
+    await f.start();
+    try {
+      expect(await f.removeByHand(".env")).toMatchObject({ trashed: true });
+      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, ".env")]]);
+      expect(await readFile(join(f.systemTrash, ".env"))).toEqual(
+        Buffer.from([0x54, 0x3d, 0xff, 0x0a]),
+      );
+    } finally {
       await f.engine().stop();
     }
   });

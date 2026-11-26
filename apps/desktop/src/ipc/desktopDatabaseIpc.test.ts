@@ -184,6 +184,7 @@ async function harness() {
     changePathsAs: vi.fn(async (_paths, _author, work) =>
       work({
         policy: await readWorkspaceEnginePolicy(rootPath),
+        removeKeptProtectedFiles: async () => [],
         recordDisk: async () => ["data.sqlite"],
         delete: captureDeletes,
       }),

@@ -213,6 +213,7 @@ function fixture(
           duplicateFile: async () => {
             throw new Error("unexpected Duplicate");
           },
+          removeKeptProtectedFiles: async () => [],
           recordDisk: async (_path, files) => [...files],
           moveFile: async () => false,
           rename: async () => undefined,
@@ -1770,6 +1771,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
         duplicateFile: async () => {
           throw new Error("unexpected Duplicate");
         },
+        removeKeptProtectedFiles: async () => [],
         recordDisk: async () => ["folder/tracked.txt"],
         delete: async () => {
           await expect(lstat(join(f.root, "folder"))).rejects.toMatchObject({ code: "ENOENT" });

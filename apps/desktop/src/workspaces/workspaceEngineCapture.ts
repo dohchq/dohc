@@ -126,6 +126,7 @@ import {
   realpath,
   rm,
   rmdir,
+  unlink,
   type FileHandle,
 } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
@@ -145,6 +146,7 @@ import { createFile } from "./workspaceFiles";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { type ActiveAgentRun } from "../agents/activeAgentRun";
 import {
+  historyExcludesSubtree,
   historyMomentPathsAdmitted,
   historyPathAdmission,
   readWorkspaceEnginePolicy,
@@ -436,6 +438,10 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  // Removes each protected file at or under `path` whose text History already
+  // holds, so it never reaches a trash in plain text, and answers their paths.
+  // Never follows a link or enters a folder History excludes.
+  removeKeptProtectedFiles(path: string): Promise<string[]>;
   orderFilePaths?(paths: string[], deleting: boolean): Promise<string[]>;
   readDuplicate(operationId: string, path: string): Promise<{ path: string } | null>;
   hasPath(path: string): Promise<boolean>;
@@ -8768,6 +8774,37 @@ export function createWorkspaceEngineCapture(
             result = {
               value: await work({
                 policy,
+                removeKeptProtectedFiles: async (path) => {
+                  const removed: string[] = [];
+                  const walk = async (entry: string): Promise<void> => {
+                    const info = await lstat(join(rootPath, entry));
+                    if (info.isDirectory()) {
+                      if (
+                        classifyEngineFilePath(entry).kind === "ignored" ||
+                        historyExcludesSubtree(policy, entry)
+                      )
+                        return;
+                      for (const name of (await readdir(join(rootPath, entry))).sort())
+                        await walk(`${entry}/${name}`);
+                      return;
+                    }
+                    if (!info.isFile() || !isSecretPath(entry)) return;
+                    const disk = await readContainedSecretState(rootPath, entry);
+                    if (
+                      disk.kind !== "text" ||
+                      !(await secretStoreFor().secretTextRecorded({
+                        workspaceId,
+                        path: entry,
+                        text: disk.text,
+                      }))
+                    )
+                      return;
+                    await unlink(join(rootPath, entry));
+                    removed.push(entry);
+                  };
+                  await walk(path);
+                  return removed;
+                },
                 recordDisk: async (path, files) => {
                   const readable = async (file: string) => {
                     assertEngineWritablePath(file, policy);

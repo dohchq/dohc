@@ -60,6 +60,7 @@ import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   beginPendingRecovery,
   finishDeleteRecovery,
+  protectedRemovedNote,
   removeRecoveryRecord,
   saveRecoveryRecord,
   stageDeleteRecovery,
@@ -1562,9 +1563,24 @@ export async function deleteWorkspacePathByHand(
       return { trashed: false, refused: undefined };
     }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
-    const trash = async (recorded: readonly string[]) => {
+    const trash = async (recorded: readonly string[], removed: readonly string[] = []) => {
       assertWritable(operation);
       await options.admit?.();
+      if (removed.includes(endpoint)) {
+        markChanged();
+        options.markDeleted(endpoint);
+        return {
+          trashed: false,
+          recovery: {
+            operationId,
+            undo: {
+              available: false,
+              reason: `Cannot undo the delete. ${protectedRemovedNote(removed)}`,
+              paths: [],
+            },
+          },
+        };
+      }
       const plan = await stageDeleteRecovery(
         operationId,
         join(rootPath, endpoint),
@@ -1586,6 +1602,7 @@ export async function deleteWorkspacePathByHand(
         recovery: await finishDeleteRecovery(workspace, collected, {
           trashed: trashed.trashed,
           staged,
+          removed,
         }),
       };
     };
@@ -1623,7 +1640,7 @@ export async function deleteWorkspacePathByHand(
         );
         // Edits capture has not seen yet land as their own rows first.
         const recorded = await engine.recordDisk(endpoint, files);
-        const trashed = await trash(recorded);
+        const trashed = await trash(recorded, await engine.removeKeptProtectedFiles(endpoint));
         gone = [endpoint];
         for (const file of (await engine.orderFilePaths?.(recorded, true)) ?? recorded) {
           try {
