@@ -512,8 +512,31 @@ describe("T3 Code's thread tools", () => {
       t3.calls.filter((call) => call.tool === "t3_thread_send").map((call) => call.args),
     ).toEqual([
       { threadId: "t1", message: "status?", mode: "queue", clientRequestId: "f1" },
-      { threadId: "t1", message: "now", mode: "steer", clientRequestId: "f2" },
+      { threadId: "t1", message: "now", mode: "auto", clientRequestId: "f2" },
     ]);
+  });
+
+  it("gives a message that goes right away to a thread with no work going", async () => {
+    const t3 = await fakeT3Code();
+    // T3 Code's own rule: a steer needs a turn that is going.
+    t3.tools.t3_thread_send = ({ mode }) => {
+      if (mode === "steer")
+        throw new Error(
+          'thread_not_sendable: Thread t1 has no running turn that can be steered. Send with mode: "auto" or "queue" to start a new turn there.',
+        );
+      return { threadId: "t1", runId: "run-1" };
+    };
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    cleanups.push(() => session.close());
+
+    await expect(
+      sendToT3CodeThread(session, {
+        threadId: "t1",
+        message: "now",
+        how: "steer",
+        forwardId: "f1",
+      }),
+    ).resolves.toEqual({ runId: "run-1" });
   });
 
   it("sends a sign-in only to the address it was issued at, and ends a session whose handshake failed", async () => {

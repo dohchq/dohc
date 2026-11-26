@@ -19,7 +19,7 @@ export interface FakeT3Code {
   /** Answers an approval with another address, made from the sign-in's own. */
   redirectTo: ((own: URL) => string) | null;
   calls: Array<{ tool: string; args: Record<string, unknown> }>;
-  /** What each tool answers, keyed by name. */
+  /** What each tool answers, keyed by name. A tool that throws refuses the call with the error's words. */
   tools: Record<string, (args: Record<string, unknown>) => unknown>;
   /** The words each tool refuses its calls with, keyed by name. */
   refusals: Record<string, string>;
@@ -175,16 +175,19 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
         else {
           const { name, arguments: args } = message.params!;
           fake.calls.push({ tool: name, args });
-          const answer = fake.tools[name];
+          const answer = fake.tools[name] as
+            | ((args: Record<string, unknown>) => unknown)
+            | undefined;
+          const refuse = (text: string) => ({ isError: true, content: [{ type: "text", text }] });
           const refusal = fake.refusals[name];
-          result = refusal
-            ? { isError: true, content: [{ type: "text", text: refusal }] }
-            : answer
-              ? { structuredContent: answer(args) }
-              : {
-                  isError: true,
-                  content: [{ type: "text", text: `No thread tool named ${name}.` }],
-                };
+          if (refusal) result = refuse(refusal);
+          else if (!answer) result = refuse(`No thread tool named ${name}.`);
+          else
+            try {
+              result = { structuredContent: answer(args) };
+            } catch (error) {
+              result = refuse(error instanceof Error ? error.message : String(error));
+            }
         }
         const envelope = { jsonrpc: "2.0", id: message.id, result };
         // One event's JSON spread over several data lines, as the event stream format allows.
