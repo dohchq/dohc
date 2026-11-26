@@ -53,8 +53,9 @@ test("Add an agent in Chats opens the Settings sheet, each installed tool replie
       await sheet.getByTestId("agent-add-name").fill(name);
       await sheet.getByTestId("agent-add-confirm").click();
       await expect(sheet).toHaveCount(0);
+      // Adding an agent dohc starts checks it at once. A second check started
+      // before this one's runner exits would find the workspace busy.
       await settings.locator(`[data-testid="agent-row"][aria-label="${name}"]`).click();
-      await settings.getByTestId("agent-check").click();
       await expect(settings.getByTestId("agent-check-state")).toContainText(/Replied in \d+ s/u);
       await page.keyboard.press("Escape");
       await expect(settings).toHaveCount(0);
