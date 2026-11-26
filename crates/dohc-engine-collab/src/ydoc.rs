@@ -1445,13 +1445,7 @@ impl Ydoc {
         let sequence = self.body_roots(&body);
         let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
         let txn = self.doc.transact();
-        Ok(body_reading(
-            &txn,
-            &body,
-            sequence.as_ref(),
-            &mut nodes,
-            &mut bytes,
-        )?)
+        body_reading(&txn, &body, sequence.as_ref(), &mut nodes, &mut bytes)
     }
 
     fn project_richdoc(&self) -> Result<String, CollabError> {
