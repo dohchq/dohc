@@ -349,6 +349,24 @@
     ],
     "inboxMove": [
       "inbox.move"
+    ],
+    "memberAppsList": [
+      "app.member.list"
+    ],
+    "memberAppInspect": [
+      "app.member.inspect"
+    ],
+    "memberAppShare": [
+      "app.member.share"
+    ],
+    "memberAppFork": [
+      "app.member.fork"
+    ],
+    "memberAppWithdraw": [
+      "app.member.withdraw"
+    ],
+    "memberAppSharing": [
+      "app.member.sharing"
     ]
   },
   "public": {
@@ -495,6 +513,12 @@
     "inbox list": "inbox.list",
     "inbox add": "inbox.add",
     "inbox archive": "inbox.archive",
-    "inbox move": "inbox.move"
+    "inbox move": "inbox.move",
+    "member-apps list": "app.member.list",
+    "member-apps inspect": "app.member.inspect",
+    "member-apps share": "app.member.share",
+    "member-apps fork": "app.member.fork",
+    "member-apps withdraw": "app.member.withdraw",
+    "member-apps sharing": "app.member.sharing"
   }
 }

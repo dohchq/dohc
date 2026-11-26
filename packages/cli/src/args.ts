@@ -8,6 +8,14 @@ import {
   InboxStatusSchema,
   MAX_INBOX_LIST_LIMIT,
 } from "@dohc/workspace-contracts/inbox";
+import {
+  MemberAppForkInput,
+  MemberAppInspectInput,
+  MemberAppShareInput,
+  MemberAppSharingInput,
+  MemberAppsListInput,
+  MemberAppWithdrawInput,
+} from "@dohc/workspace-contracts/member-apps";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
@@ -2215,6 +2223,15 @@ const DECLARED_PARSERS: {
       ...(limit !== undefined ? { limit } : {}),
     });
   },
+  memberAppsList: (input, command) => {
+    noExtraArgs(input.operands, command);
+    return MemberAppsListInput.parse({ cursor: lastValue(input, "--cursor") });
+  },
+  memberAppInspect: (input, command) => {
+    const [publicationId, ...extra] = input.operands;
+    noExtraArgs(extra, command);
+    return MemberAppInspectInput.parse({ publicationId });
+  },
   workspaceSearch: (input, command) => {
     const [query, ...extra] = input.operands;
     if (!query || !query.trim()) fail(`${command} requires a query`);
@@ -2351,6 +2368,37 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         noExtraArgs(extra, "inbox move");
         const targetFolder = rawFolder === "." ? "" : rawFolder;
         return InboxMoveInput.parse({ item, targetFolder });
+      }),
+    },
+  },
+  "member-apps": {
+    summary:
+      "List the apps you can open in this workspace, review Member apps, and share or copy your Personal apps.",
+    notes: [
+      "Members allow a Member app in their browser. Agents can list, review, share, and copy apps, but never allow one.",
+    ],
+    verbs: {
+      share: declaredWrite("memberAppShare", (input) => {
+        const [personalApp, ...extra] = input.operands;
+        noExtraArgs(extra, "member-apps share");
+        const slug = lastValue(input, "--slug");
+        return MemberAppShareInput.parse({ personalApp, ...(slug === undefined ? {} : { slug }) });
+      }),
+      fork: declaredWrite("memberAppFork", ({ operands }) => {
+        const [publicationId, personalApp, ...extra] = operands;
+        noExtraArgs(extra, "member-apps fork");
+        return MemberAppForkInput.parse({ publicationId, personalApp });
+      }),
+      withdraw: declaredWrite("memberAppWithdraw", ({ operands }) => {
+        const [publicationId, ...extra] = operands;
+        noExtraArgs(extra, "member-apps withdraw");
+        return MemberAppWithdrawInput.parse({ publicationId });
+      }),
+      sharing: declaredWrite("memberAppSharing", ({ operands }) => {
+        const [value, ...extra] = operands;
+        if (value !== "on" && value !== "off") fail("member-apps sharing takes on or off");
+        noExtraArgs(extra, "member-apps sharing");
+        return MemberAppSharingInput.parse({ membersCanShare: value === "on" });
       }),
     },
   },

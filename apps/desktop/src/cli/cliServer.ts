@@ -518,6 +518,11 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   members?(
     request: import("@dohc/cli/members").AgentMembersRequest,
   ): Promise<import("@dohc/cli/members").MembersResult>;
+  memberApps?: {
+    [Verb in "share" | "fork" | "withdraw" | "sharing"]: (
+      input: never,
+    ) => Promise<Record<string, unknown>>;
+  };
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(
@@ -2526,6 +2531,8 @@ const HAND_WRITTEN_SHARE_RULES: {
   planUndoAgentRun: "owner",
   inboxList: "owner",
   workspaceSearch: "owner",
+  memberAppsList: "anywhere",
+  memberAppInspect: "anywhere",
   linksEdges: "anywhere",
   linksIn: "anywhere",
   linksResolve: "anywhere",
@@ -3149,6 +3156,21 @@ async function dataCollectionTable(
 
 type DeclaredWriteRequest = Extract<CliRequest, { verb: DeclaredWriteVerb }>;
 
+// The relay decides each Member app change by the signed-in account's role.
+async function memberAppWrite<Result extends Record<string, unknown>>(
+  context: CliWorkspaceContext,
+  action: keyof NonNullable<CliWorkspaceContext["memberApps"]>,
+  input: unknown,
+): Promise<({ ok: true } & Result) | { ok: false; reason: string }> {
+  if (!context.memberApps)
+    return { ok: false, reason: "Workspace apps are unavailable in this workspace." };
+  try {
+    return { ok: true, ...((await context.memberApps[action](input as never)) as Result) };
+  } catch (error) {
+    return pathFreeFailure(error, "dohc could not change workspace apps.");
+  }
+}
+
 function isDeclaredWriteRequest(request: CliRequest): request is DeclaredWriteRequest {
   return isDeclaredWriteVerb(request.verb);
 }
@@ -3309,6 +3331,10 @@ const DECLARED_WRITERS: {
       return pathFreeFailure(error, "dohc could not move this Inbox item.");
     }
   },
+  memberAppShare: (request, context) => memberAppWrite(context, "share", request.args),
+  memberAppFork: (request, context) => memberAppWrite(context, "fork", request.args),
+  memberAppWithdraw: (request, context) => memberAppWrite(context, "withdraw", request.args),
+  memberAppSharing: (request, context) => memberAppWrite(context, "sharing", request.args),
   liveResume: async (request, context, options) => {
     const live = context.liveDocuments;
     if (!live || context.readOnly) return liveDocumentsUnavailable();

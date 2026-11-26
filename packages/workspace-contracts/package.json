@@ -72,6 +72,7 @@
     "./workspace-secrets": "./src/workspaceSecrets.ts",
     "./http-step-approvals": "./src/httpStepApprovals.ts",
     "./inbox": "./src/inbox.ts",
+    "./member-apps": "./src/memberApps.ts",
     "./inbox-declarations": "./src/inboxDeclarations.ts",
     "./inbox-write-declarations": "./src/inboxWriteDeclarations.ts",
     "./incoming-webhooks": "./src/incomingWebhooks.ts"

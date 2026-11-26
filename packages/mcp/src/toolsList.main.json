@@ -2573,6 +2573,33 @@
       }
     },
     {
+      "name": "dohc_fork_member_app",
+      "description": "Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "publicationId",
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_held_note_change",
       "description": "Review, drop, or undo a held note change. Only a local agent in the owner's workspace may use this. Review names the authors and returns a token. Drop requires that token, saves the waiting text in History, and returns an Undo token. Undo restores the waiting text as held. Neither action rewrites the file or grants conversion consent. Refusals: held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
       "inputSchema": {
@@ -2775,6 +2802,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inspect_member_app",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -3161,6 +3209,24 @@
         },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_member_apps",
+      "description": "List the apps you can open in this workspace: official apps its owner published (kind workspace), then apps members shared (kind member). Continue with nextCursor until it is null; a page can be empty and still have a next page. url opens the app in a browser. consent says whether the person you work for allowed a Member app: none, current, or changed (allowed an earlier version). Only that person can allow a Member app, in their browser. membersCanShare, on the first page, says whether members may share apps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "pattern": "^(w[0-9a-f]{64}|m([0-9a-f]{64})?)$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -5411,6 +5477,26 @@
       }
     },
     {
+      "name": "dohc_set_member_app_sharing",
+      "description": "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "membersCanShare": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "membersCanShare"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_set_record_fields",
       "description": "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
       "inputSchema": {
@@ -5437,6 +5523,32 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_share_member_app",
+      "description": "Share a Personal app (a folder in the Personal app folder) with the members of a workspace you joined, or update the one you shared under the same slug. Members review and allow it in their browser before it runs. It can do only what both its author and each viewer can do.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,64}$"
+          }
+        },
+        "required": [
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -5738,6 +5850,27 @@
         },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_withdraw_member_app",
+      "description": "Stop sharing a Member app. Authors withdraw their own; the workspace owner and admins can withdraw any member's app. Members can no longer open it. The author can share it again. Ask the person you work for before you withdraw someone else's app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -6156,6 +6289,33 @@
       }
     },
     {
+      "name": "dohc_fork_member_app",
+      "description": "Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "publicationId",
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_inspect_buttons",
       "description": "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
       "inputSchema": {
@@ -6177,6 +6337,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inspect_member_app",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -6419,6 +6600,24 @@
         "properties": {},
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_member_apps",
+      "description": "List the apps you can open in this workspace: official apps its owner published (kind workspace), then apps members shared (kind member). Continue with nextCursor until it is null; a page can be empty and still have a next page. url opens the app in a browser. consent says whether the person you work for allowed a Member app: none, current, or changed (allowed an earlier version). Only that person can allow a Member app, in their browser. membersCanShare, on the first page, says whether members may share apps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "pattern": "^(w[0-9a-f]{64}|m([0-9a-f]{64})?)$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -8028,6 +8227,52 @@
       }
     },
     {
+      "name": "dohc_set_member_app_sharing",
+      "description": "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "membersCanShare": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "membersCanShare"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_share_member_app",
+      "description": "Share a Personal app (a folder in the Personal app folder) with the members of a workspace you joined, or update the one you shared under the same slug. Members review and allow it in their browser before it runs. It can do only what both its author and each viewer can do.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,64}$"
+          }
+        },
+        "required": [
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_test_app",
       "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
       "inputSchema": {
@@ -8044,6 +8289,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_withdraw_member_app",
+      "description": "Stop sharing a Member app. Authors withdraw their own; the workspace owner and admins can withdraw any member's app. Members can no longer open it. The author can share it again. Ask the person you work for before you withdraw someone else's app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -8420,6 +8686,33 @@
       }
     },
     {
+      "name": "dohc_fork_member_app",
+      "description": "Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "publicationId",
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_inspect_buttons",
       "description": "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
       "inputSchema": {
@@ -8441,6 +8734,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inspect_member_app",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -8683,6 +8997,24 @@
         "properties": {},
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_member_apps",
+      "description": "List the apps you can open in this workspace: official apps its owner published (kind workspace), then apps members shared (kind member). Continue with nextCursor until it is null; a page can be empty and still have a next page. url opens the app in a browser. consent says whether the person you work for allowed a Member app: none, current, or changed (allowed an earlier version). Only that person can allow a Member app, in their browser. membersCanShare, on the first page, says whether members may share apps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "pattern": "^(w[0-9a-f]{64}|m([0-9a-f]{64})?)$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -10390,6 +10722,52 @@
       }
     },
     {
+      "name": "dohc_set_member_app_sharing",
+      "description": "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "membersCanShare": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "membersCanShare"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_share_member_app",
+      "description": "Share a Personal app (a folder in the Personal app folder) with the members of a workspace you joined, or update the one you shared under the same slug. Members review and allow it in their browser before it runs. It can do only what both its author and each viewer can do.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,64}$"
+          }
+        },
+        "required": [
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_start_file_chat",
       "description": "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat. To comment on a passage of a Markdown file, start `body` with a Markdown quote of the passage (`> the passage`), then a blank line, then the comment: the file's editor highlights that passage and opens the comment from it.",
       "inputSchema": {
@@ -10540,6 +10918,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_withdraw_member_app",
+      "description": "Stop sharing a Member app. Authors withdraw their own; the workspace owner and admins can withdraw any member's app. Members can no longer open it. The author can share it again. Ask the person you work for before you withdraw someone else's app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -11064,6 +11463,33 @@
       }
     },
     {
+      "name": "dohc_fork_member_app",
+      "description": "Copy a Member app's source into a new folder in the Personal app folder, to read or change it. The copy is a Personal app that only you use until you approve or share it. Refuses a folder that exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "publicationId",
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_inspect_buttons",
       "description": "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
       "inputSchema": {
@@ -11085,6 +11511,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inspect_member_app",
+      "description": "Show what a Member app can do before anyone allows it: its author, each Collection with the access and actions it uses (readOnly false changes data), and its source files. dohc_fork_member_app copies the source into a Personal app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -11327,6 +11774,24 @@
         "properties": {},
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_member_apps",
+      "description": "List the apps you can open in this workspace: official apps its owner published (kind workspace), then apps members shared (kind member). Continue with nextCursor until it is null; a page can be empty and still have a next page. url opens the app in a browser. consent says whether the person you work for allowed a Member app: none, current, or changed (allowed an earlier version). Only that person can allow a Member app, in their browser. membersCanShare, on the first page, says whether members may share apps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "pattern": "^(w[0-9a-f]{64}|m([0-9a-f]{64})?)$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -13034,6 +13499,26 @@
       }
     },
     {
+      "name": "dohc_set_member_app_sharing",
+      "description": "Turn on or off whether members of a workspace can share apps with each other. Only its owner and admins can change it. Apps already shared stay shared. Ask the person you work for first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "membersCanShare": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "membersCanShare"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_set_record_fields",
       "description": "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
       "inputSchema": {
@@ -13060,6 +13545,32 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_share_member_app",
+      "description": "Share a Personal app (a folder in the Personal app folder) with the members of a workspace you joined, or update the one you shared under the same slug. Members review and allow it in their browser before it runs. It can do only what both its author and each viewer can do.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "personalApp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,64}$"
+          }
+        },
+        "required": [
+          "personalApp"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -13263,6 +13774,27 @@
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_withdraw_member_app",
+      "description": "Stop sharing a Member app. Authors withdraw their own; the workspace owner and admins can withdraw any member's app. Members can no longer open it. The author can share it again. Ask the person you work for before you withdraw someone else's app.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "publicationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"

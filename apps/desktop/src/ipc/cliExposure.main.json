@@ -59,6 +59,12 @@
     "liveKeptEdits",
     "liveResume",
     "liveStop",
+    "memberAppFork",
+    "memberAppInspect",
+    "memberAppShare",
+    "memberAppSharing",
+    "memberAppWithdraw",
+    "memberAppsList",
     "members",
     "moment",
     "moments",
@@ -163,6 +169,12 @@
     "liveKeptEdits",
     "liveResume",
     "liveStop",
+    "memberAppFork",
+    "memberAppInspect",
+    "memberAppShare",
+    "memberAppSharing",
+    "memberAppWithdraw",
+    "memberAppsList",
     "members",
     "moment",
     "moments",
@@ -197,6 +209,7 @@
     "links",
     "notices",
     "inbox",
+    "member-apps",
     "sync",
     "access",
     "share",
@@ -221,6 +234,12 @@
     "inbox archive",
     "inbox move",
     "inbox list",
+    "member-apps share",
+    "member-apps fork",
+    "member-apps withdraw",
+    "member-apps sharing",
+    "member-apps list",
+    "member-apps inspect",
     "sync stop",
     "access refresh",
     "access object",
@@ -364,71 +383,75 @@
       "commands": [
         {
           "group": "links",
-          "block": "  links        Read and resolve document links.\n               edges, in, resolve\n"
+          "block": "  links         Read and resolve document links.\n                edges, in, resolve\n"
         },
         {
           "group": "notices",
-          "block": "  notices      Read this workspace's Notices.\n               list\n"
+          "block": "  notices       Read this workspace's Notices.\n                list\n"
         },
         {
           "group": "inbox",
-          "block": "  inbox        Capture notes and links into the workspace Inbox and triage them.\n               add, archive, move, list\n"
+          "block": "  inbox         Capture notes and links into the workspace Inbox and triage\n                them.\n                add, archive, move, list\n"
+        },
+        {
+          "group": "member-apps",
+          "block": "  member-apps   List the apps you can open in this workspace, review Member\n                apps, and share or copy your Personal apps.\n                share, fork, withdraw, sharing, list, inspect\n"
         },
         {
           "group": "sync",
-          "block": "  sync         Stop syncing this workspace on this computer.\n               stop\n"
+          "block": "  sync          Stop syncing this workspace on this computer.\n                stop\n"
         },
         {
           "group": "access",
-          "block": "  access       Read observed grants and request fresh Sharing inventories.\n               refresh, object, sharing\n"
+          "block": "  access        Read observed grants and request fresh Sharing inventories.\n                refresh, object, sharing\n"
         },
         {
           "group": "share",
-          "block": "  share        Read copy details, and list and disconnect a link's agents.\n               copy, agents, disconnect\n"
+          "block": "  share         Read copy details, and list and disconnect a link's agents.\n                copy, agents, disconnect\n"
         },
         {
           "group": "members",
-          "block": "  members      List, invite, and remove the workspace's members, set what they\n               can do, and manage the invite link.\n               list, invite, remove, level, admin, member, let-back-in, link,\n               group, folder, remove-folder-marker, end\n"
+          "block": "  members       List, invite, and remove the workspace's members, set what they\n                can do, and manage the invite link.\n                list, invite, remove, level, admin, member, let-back-in, link,\n                group, folder, remove-folder-marker, end\n"
         },
         {
           "group": "document",
-          "block": "  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files. List, stop, and resume live documents,\n               and recover edits the server refused.\n               read, held, held-change, edit, create, set-fields, chats,\n               comment, kept-edits, keep-outside-change, save-recovery-copy,\n               retry-kept-edits, stop-again, live, stop, resume, outside-changes\n"
+          "block": "  document      Read, edit, and create live Markdown documents. List and start\n                chats on tracked files. List, stop, and resume live documents,\n                and recover edits the server refused.\n                read, held, held-change, edit, create, set-fields, chats,\n                comment, kept-edits, keep-outside-change, save-recovery-copy,\n                retry-kept-edits, stop-again, live, stop, resume,\n                outside-changes\n"
         },
         {
           "group": "chat",
-          "block": "  chat         Read and post in Groups and threads.\n               groups, link, create-group, threads, watch, inbox, show, post,\n               reply, retry, react, delete, grep, export, links, file-mentions\n"
+          "block": "  chat          Read and post in Groups and threads.\n                groups, link, create-group, threads, watch, inbox, show, post,\n                reply, retry, react, delete, grep, export, links, file-mentions\n"
         },
         {
           "group": "dataset",
-          "block": "  dataset      Create, change, and use transactional Collections.\n               list, describe, types, sql, trace, history, historyRevision,\n               prepareHistoryRestore, permissions, setGrant, setDefaults,\n               removeGrant, lifecycle, archive, restore, deletePreview, delete,\n               pendingAttempts, reconcileAttempt, cancelAttempt, cancelInvoke,\n               export, prepareRecovery, claimRecovery, discardRecovery, upload,\n               file, createForm, prepareRelationChoices, create, prepare,\n               approve, discard, prepareMigration, askToApply,\n               migrationPreviewPage, prepareSchemaChange, approveMigration,\n               discardMigration, invoke\n"
+          "block": "  dataset       Create, change, and use transactional Collections.\n                list, describe, types, sql, trace, history, historyRevision,\n                prepareHistoryRestore, permissions, setGrant, setDefaults,\n                removeGrant, lifecycle, archive, restore, deletePreview, delete,\n                pendingAttempts, reconcileAttempt, cancelAttempt, cancelInvoke,\n                export, prepareRecovery, claimRecovery, discardRecovery, upload,\n                file, createForm, prepareRelationChoices, create, prepare,\n                approve, discard, prepareMigration, askToApply,\n                migrationPreviewPage, prepareSchemaChange, approveMigration,\n                discardMigration, invoke\n"
         },
         {
           "group": "app",
-          "block": "  app          Approve, open, and share apps.\n               verifyFrontend, createLink, personalFolder, listLocal,\n               checkLocal, prepareLocal, stage, listStaged, approveStaged,\n               discardStaged, launchLocal, list, prepare, approve, cancel,\n               withdraw, revokeCollection, reviewReactivation, responses,\n               undo-responses\n"
+          "block": "  app           Approve, open, and share apps.\n                verifyFrontend, createLink, personalFolder, listLocal,\n                checkLocal, prepareLocal, stage, listStaged, approveStaged,\n                discardStaged, launchLocal, list, prepare, approve, cancel,\n                withdraw, revokeCollection, reviewReactivation, responses,\n                undo-responses\n"
         },
         {
           "group": "file",
-          "block": "  file         Change workspace files.\n               duplicate\n"
+          "block": "  file          Change workspace files.\n                duplicate\n"
         },
         {
           "group": "history",
-          "block": "  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show, undo-agent-run, agent-run-plan\n"
+          "block": "  history       Read History changes and undo deletes, moves, and renames.\n                operation, undo, list, show, undo-agent-run, agent-run-plan\n"
         },
         {
           "group": "version",
-          "block": "  version      Read and change the workspace's versions and their open\n               conflicts.\n               list, compare, conflicts, create, switch, merge, resolve\n"
+          "block": "  version       Read and change the workspace's versions and their open\n                conflicts.\n                list, compare, conflicts, create, switch, merge, resolve\n"
         },
         {
           "group": "automation",
-          "block": "  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"
+          "block": "  automation    Press Button fields, read an automation's runs, and try a failed\n                run again.\n                list, switch, buttons, runs, run, retry, press\n"
         },
         {
           "group": "account",
-          "block": "  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"
+          "block": "  account       Review and delete the server account the dohc app is connected\n                to.\n                deletePreview, delete\n"
         },
         {
           "group": "workspace",
-          "block": "  workspace    Search pages, Collections, records, and chats across this\n               workspace.\n               search\n"
+          "block": "  workspace     Search pages, Collections, records, and chats across this\n                workspace.\n                search\n"
         }
       ],
       "suffix": "\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
@@ -593,6 +616,13 @@
     "inbox list": "Usage: dohc inbox list [options]\n\nList items waiting in the workspace Inbox.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --status <<New|Filed|Archived>>   Filter items by status.\n  --limit <<n>>                     Show at most this many items (default 50,\n                                    max 100).\n  --as-agent                        Post and read chat as an agent.\n  --agent-id <id>                   Work as this agent you run, by its id in\n                                    Settings › Agents. Implies --as-agent.\n  --workspace <id>                  Work in this workspace, by its id, instead\n                                    of the one this folder is in. Relative paths\n                                    then start at the workspace's folder.\n  --json                            Print the result as JSON.\n  --help                            Show help. -h does the same.\n",
     "inbox add": "Usage: dohc inbox add [body] [options]\n\nCapture a note or link into the workspace Inbox.\n\nCreates Inbox/ lazily on first capture.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --title <<text>>                          Title for the Inbox item.\n  --url <<https://...>>                     Optional http or https link to\n                                            capture.\n  --kind <<note|file|image|link|webhook>>   Item kind (defaults to link when\n                                            --url is set, otherwise note).\n  --as-agent                                Post and read chat as an agent.\n  --agent-id <id>                           Work as this agent you run, by its\n                                            id in Settings › Agents. Implies\n                                            --as-agent.\n  --workspace <id>                          Work in this workspace, by its id,\n                                            instead of the one this folder is\n                                            in. Relative paths then start at the\n                                            workspace's folder.\n  --json                                    Print the result as JSON.\n  --help                                    Show help. -h does the same.\n",
     "inbox archive": "Usage: dohc inbox archive <path> [options]\n\nMark an Inbox item as Archived.\n\nUpdates Status to Archived through the item's live document session.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
-    "inbox move": "Usage: dohc inbox move <path> <folder> [options]\n\nMove an Inbox item (and any linked Inbox attachments) into an owned folder.\n\nRewrites workspace links and returns History operation id(s) for Undo.\nUse \"\" or \".\" as <folder> to move into the workspace root.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n"
+    "inbox move": "Usage: dohc inbox move <path> <folder> [options]\n\nMove an Inbox item (and any linked Inbox attachments) into an owned folder.\n\nRewrites workspace links and returns History operation id(s) for Undo.\nUse \"\" or \".\" as <folder> to move into the workspace root.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "member-apps": "Usage: dohc member-apps <verb> [arguments] [options]\n\nList the apps you can open in this workspace, review Member apps, and share or copy your Personal apps.\n\nVerbs:\n  share      Share a Personal app with the workspace's members, or update it.\n  fork       Copy a Member app's source into a new Personal app folder.\n  withdraw   Stop sharing a Member app with the workspace.\n  sharing    Turn members' app sharing on or off.\n  list       List the workspace's official apps, then the apps members shared.\n  inspect    Show a Member app's author, Collection access, and source files.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc member-apps <verb> --help to see its arguments and options.\n",
+    "member-apps list": "Usage: dohc member-apps list [options]\n\nList the workspace's official apps, then the apps members shared.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --agent-id <id>     Work as this agent you run, by its id in Settings ›\n                      Agents. Implies --as-agent.\n  --workspace <id>    Work in this workspace, by its id, instead of the one this\n                      folder is in. Relative paths then start at the workspace's\n                      folder.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
+    "member-apps inspect": "Usage: dohc member-apps inspect <app-id> [options]\n\nShow a Member app's author, Collection access, and source files.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "member-apps share": "Usage: dohc member-apps share <app-folder> [options]\n\nShare a Personal app with the workspace's members, or update it.\n\nSharing again under the same name updates the app. Members allow it again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --slug <<name>>    Name the app keeps in the workspace (default: the folder\n                     name).\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "member-apps fork": "Usage: dohc member-apps fork <app-id> <new-folder> [options]\n\nCopy a Member app's source into a new Personal app folder.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "member-apps withdraw": "Usage: dohc member-apps withdraw <app-id> [options]\n\nStop sharing a Member app with the workspace.\n\nAuthors withdraw their own apps. The owner and admins can withdraw any. Sharing\nit again brings it back.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "member-apps sharing": "Usage: dohc member-apps sharing <on|off> [options]\n\nTurn members' app sharing on or off.\n\nOnly the owner and admins can change it. Apps already shared stay shared.\n\nRun dohc inside a workspace folder while the dohc app is open.\nMembers allow a Member app in their browser. Agents can list, review, share, and\ncopy apps, but never allow one.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n"
   }
 }
