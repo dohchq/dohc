@@ -105,7 +105,11 @@ function harness() {
     withAdapter: async (_workspace, work) => work({} as never),
     compile: vi.fn(),
   });
-  vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
+  vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+    candidate,
+    files: [],
+    likelySecrets: [],
+  });
   const prepare = async () => {
     const result = await handler(
       { action: "prepareLocal", workspaceId: "w", appRoot: "app" },
@@ -204,7 +208,11 @@ describe("local app publication review", () => {
   it("prepares and approves an app that reaches no workspace data, with no capabilities", async () => {
     const h = harness(),
       unconnected = { ...candidate, capabilities: [] };
-    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: unconnected, files: [] });
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+      candidate: unconnected,
+      files: [],
+      likelySecrets: [],
+    });
     const review = await h.prepare();
     expect(review).toMatchObject({
       kind: "prepared",
@@ -375,6 +383,7 @@ describe("local app publication review", () => {
     vi.mocked(prepareLocalAppPublication).mockResolvedValue({
       candidate: { ...candidate, capabilities: [collection] },
       files: [],
+      likelySecrets: [],
     });
     const review = await h.prepare();
     expect(review).toMatchObject({ local: true, capabilities: [collection] });

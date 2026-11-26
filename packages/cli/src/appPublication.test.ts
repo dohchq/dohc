@@ -19,11 +19,27 @@ const prepared = {
   versionId: "main",
   sourceRevision: "c".repeat(64),
   sourcePaths: ["app/main.js", "responses/collection.yaml"],
+  likelySecrets: [],
   capabilities: [capability],
   externalNetwork: true,
 };
 
 describe("owner publication review contract", () => {
+  it("carries the files that hold a likely secret token, by path and prefix only", () => {
+    const found = [{ path: "app/main.js", prefix: "ghp_" }];
+    expect(OwnerAppPublicationResult.parse({ ...prepared, likelySecrets: found })).toMatchObject({
+      likelySecrets: found,
+    });
+    expect(() =>
+      OwnerAppPublicationResult.parse({
+        ...prepared,
+        likelySecrets: [{ path: "app/main.js", prefix: "ghp_", token: "ghp_x" }],
+      }),
+    ).toThrow();
+    const { likelySecrets: _, ...missing } = prepared;
+    expect(() => OwnerAppPublicationResult.parse(missing)).toThrow();
+  });
+
   it("retains independent dataset binding metadata in preparation and local listings", () => {
     const datasetCapability = {
       kind: "dataset",

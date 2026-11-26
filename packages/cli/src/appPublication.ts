@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { parseAppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { SECRET_PREFIXES } from "@dohc/security-contract/secret-prefix";
 import {
   APP_EXTERNAL_MAX_OPERATIONS,
   parseAppExternalOperation,
@@ -605,6 +606,11 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
         ])
         .optional(),
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
+      likelySecrets: z
+        .array(
+          z.object({ path: z.string().min(1).max(1024), prefix: z.enum(SECRET_PREFIXES) }).strict(),
+        )
+        .max(512),
       capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
       external: externalOperations,
       externalNetwork: z.literal(true),

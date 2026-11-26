@@ -426,6 +426,18 @@ describe("app without app.publish.json", () => {
     expect(files.map((file) => file.path)).toEqual(["bundle.js", "page.json"]);
   });
 
+  it("lists each source file that holds a likely secret token by path and prefix, never the token", async () => {
+    const h = harness();
+    const token = `ghp_${"a".repeat(30)}`;
+    page(h, {
+      "app/index.html": '<!doctype html><h1>Trip</h1><script src="app.js"></script>',
+      "app/app.js": `fetch("https://api.github.com", { headers: { authorization: "${token}" } });`,
+    });
+    const { likelySecrets } = await h.prepare();
+    expect(likelySecrets).toEqual([{ path: "app/app.js", prefix: "ghp_" }]);
+    expect(JSON.stringify(likelySecrets)).not.toContain(token);
+  });
+
   it("names the missing page before capturing anything", async () => {
     const h = harness();
     page(h, { "app/style.css": "h1 { color: red }" });

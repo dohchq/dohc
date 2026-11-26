@@ -503,6 +503,7 @@ export function createLocalOwnerAppPublicationHandler<
         versionId: candidate.versionId,
         sourceRevision: candidate.sourceRevision,
         sourcePaths: candidate.inputs.map((file) => file.path),
+        likelySecrets: prepared.likelySecrets,
         capabilities: shown,
         ...(candidate.external ? { external: candidate.external } : {}),
         externalNetwork: true,

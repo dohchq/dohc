@@ -34,6 +34,7 @@ import {
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import { likelySecretPrefix, type SecretPrefix } from "@dohc/security-contract/secret-prefix";
 import { posix } from "node:path";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
@@ -355,16 +356,24 @@ function staticDeclaration(
   };
 }
 
+/** A source file that holds a likely secret token, by path and the token's prefix. */
+export interface AppSourceSecret {
+  path: string;
+  prefix: SecretPrefix;
+}
+
+interface PreparedAppSources {
+  candidate: AppPublicationCandidate;
+  files: ClosedAppBuild["files"];
+  likelySecrets: AppSourceSecret[];
+}
+
 /** Source capture grants no publication authority. The relay repeats the grant check at commit. A null grant prepares the app for the workspace's members, from main. */
 export async function prepareOwnerAppPublication(
   input: OwnerPublicationSelection,
   grant: OwnerPublicationGrant | null,
   dependencies: AppPublicationPreparationDependencies,
-): Promise<{
-  candidate: AppPublicationCandidate;
-  files: ClosedAppBuild["files"];
-  generation?: number;
-}> {
+): Promise<PreparedAppSources & { generation?: number }> {
   if (!grant) return prepareAppSources(input, "main", localAllowed, dependencies);
   const selector = grant.selector;
   if (
@@ -399,7 +408,7 @@ export async function prepareOwnerAppPublication(
 export async function prepareLocalAppPublication(
   input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
   dependencies: AppPublicationPreparationDependencies,
-): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+): Promise<PreparedAppSources> {
   return prepareAppSources(input, "main", localAllowed, dependencies, true);
 }
 
@@ -627,7 +636,7 @@ async function prepareAppSources(
   allowed: (path: string) => boolean,
   dependencies: AppPublicationPreparationDependencies,
   requireManifest = false,
-): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+): Promise<PreparedAppSources> {
   const { adapter, signal, assertCurrent } = dependencies;
   const { declared, schemaPath, metadata } = await selectAppSources(
     input,
@@ -646,6 +655,11 @@ async function prepareAppSources(
     );
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
+  const decoder = new TextDecoder();
+  const likelySecrets = selected.files.flatMap((file) => {
+    const prefix = likelySecretPrefix(decoder.decode(file.bytes));
+    return prefix ? [{ path: file.path, prefix }] : [];
+  });
   const capabilities: AppPublicationCandidate["capabilities"] = [];
   const datasetBindings: ReadonlyArray<{ alias?: string; reference: AppDatasetReference }> =
     declared.datasets ?? (declared.dataset ? [{ reference: declared.dataset }] : []);
@@ -767,5 +781,6 @@ async function prepareAppSources(
   return {
     candidate,
     files: built.files.map((file) => ({ ...file, bytes: Uint8Array.from(file.bytes) })),
+    likelySecrets,
   };
 }

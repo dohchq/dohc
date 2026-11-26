@@ -66,6 +66,7 @@ it("opens the folder, reviews an app's access, approves it, and opens it in the 
           versionId: "main",
           sourceRevision: hash("d"),
           sourcePaths: ["trip/main.ts"],
+          likelySecrets: [],
           capabilities: [capability],
           externalNetwork: true,
           local: true,
