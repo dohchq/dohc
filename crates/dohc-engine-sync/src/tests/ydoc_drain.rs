@@ -2627,3 +2627,53 @@ fn an_edit_of_an_archived_format_two_lineage_is_refused_and_kept_every_way_in() 
         assert_eq!(archive_and_files(&engine), before, "{way:?}");
     }
 }
+
+#[test]
+fn a_parked_duplicate_of_a_format_two_edit_is_refused_and_kept_when_drained() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (base, edit) = format_two_base_and_edit();
+    let claim = engine.put_binary_blob(&base).unwrap();
+    let typed = engine.put_binary_blob(&edit).unwrap();
+    let payload = |blob: &str, base: bool| json!({"versionId":"main","objectId":"note-two","path":"two.md","contentKind":"richdoc","updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":base});
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "note-two").unwrap();
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        for (seq, blob, base) in [(0, &claim, true), (1, &typed, false)] {
+            let applied = apply_ydoc_envelope(
+                &mut engine,
+                &mut Default::default(),
+                &envelope("base-peer", seq, "ydoc.update", payload(blob, base)),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(matches!(applied.primary, ApplyDisposition::Applied(_)));
+        }
+    });
+    let mut duplicate = envelope("dup-peer", 0, "ydoc.update", payload(&typed, false));
+    duplicate.relay_seq = Some(120);
+    crate::apply_envelope_with(&mut engine, &duplicate, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &claim, 120, None)
+    })
+    .expect("park the duplicate");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    assert_eq!(refused_rows(&drained), [("dup-peer", 0, NEWER_BODY_FORMAT)]);
+    let (kept, queued): (Option<String>, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT update_sha256 FROM replication_refused_ydoc_blobs
+                          WHERE origin_id='dup-peer' AND origin_seq=0),
+                        (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((kept, queued), (Some(typed), 0));
+}

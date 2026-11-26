@@ -7675,6 +7675,124 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_resolution_with_no_successor_lets_the_pull_go_on() {
+        use yrs::{Map as _, ReadTxn as _, Text as _, Transact as _};
+        let (_scratch, mut store, key, built) =
+            receiver_fixture_shaped(false, ContentKind::Plaintext, |successor| successor);
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("retire the claimed lineage");
+        let raw = yrs::Doc::new();
+        raw.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META)
+            .insert(&mut raw.transact_mut(), "schemaVersion", 2.0);
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_PLAINTEXT)
+            .insert(&mut raw.transact_mut(), 0, "current text");
+        let note = raw
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let seeded = dohc_engine_storage::hex_sha256(b"current text");
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &note,
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some("doc.md"),
+                        content_kind: ContentKind::Plaintext,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    require_empty_lineage: true,
+                    is_seed: true,
+                    seed_source_sha256: Some(&seeded),
+                    ..Default::default()
+                },
+                &NoFaults,
+                12,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+        })
+        .expect("seed a format-2 note");
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("carrier");
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value);
+        envelope.recorded_at_ms = 21;
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the pull goes on");
+        match outcome.primary {
+            crate::ApplyDisposition::Refused(refusal) => {
+                assert_eq!(refusal.reason.message(), NEWER_BODY_FORMAT)
+            }
+            other => panic!("the resolution was not refused as newer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_edit_parked_before_its_format_two_successor_is_kept_with_it() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Text, Transact};
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        let raw = yrs::Doc::with_client_id(11);
+        let successor_bytes = store
+            .get_binary_blob(&successor)
+            .expect("read successor")
+            .expect("successor blob");
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
+            .expect("load successor");
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
+            .insert(&mut raw.transact_mut(), 0, "z");
+        let edit = store
+            .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
+            .expect("edit blob");
+        let mut parked = imported_envelope(
+            0,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false}),
+        );
+        parked.origin_id = "editor".to_owned();
+        parked.relay_seq = Some(1);
+        crate::apply_envelope_with(&mut store, &parked, &NoFaults, |tx, op| {
+            crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &successor, 1, None)
+        })
+        .expect("park the edit");
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let (refused, kept, queued): (Option<String>, Option<String>, i64) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT reason_message FROM replication_pending_refusals \
+                              WHERE origin_id='editor' AND origin_seq=0), \
+                            (SELECT update_sha256 FROM replication_refused_ydoc_blobs \
+                              WHERE origin_id='editor' AND origin_seq=0), \
+                            (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("parked edit state");
+        assert_eq!(
+            (refused.as_deref(), kept, queued),
+            (Some(NEWER_BODY_FORMAT), Some(edit), 0)
+        );
+    }
+
+    #[test]
     fn a_successor_that_splits_an_emoji_is_refused_and_the_pull_goes_on() {
         let (_scratch, mut store, key, built) = split_successor_fixture();
         refuses_the_successor(&mut store, &key, built.value, NOT_REPRESENTABLE);

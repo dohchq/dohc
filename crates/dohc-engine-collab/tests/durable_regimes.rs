@@ -3559,6 +3559,26 @@ fn a_format_two_note_on_an_engine_with_the_switch_off_refuses_every_edit_as_newe
         deduped.as_ref().err().map(CollabError::code) == Some("ydoc-note-uses-a-newer-body-format"),
         "{deduped:?}"
     );
+    let duplicate = apply_remote_update(
+        &mut ts.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &RemoteUpdate {
+            origin_id: "elsewhere".to_owned(),
+            origin_seq: 1,
+            bytes: held.clone(),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_100,
+    )
+    .map(drop);
+    assert!(
+        duplicate.as_ref().err().map(CollabError::code)
+            == Some("ydoc-note-uses-a-newer-body-format"),
+        "{duplicate:?}"
+    );
     let local = record_local_update(
         &mut ts.store,
         &mut WriterDocCache::new(),
