@@ -393,7 +393,7 @@ body`,
       signal(),
     );
     expect(f.host.apps.list("trip", "feature")).toMatchObject([
-      { publicationId: preview.publicationId, active: true, readOnlyPreview: true },
+      { publicationId: preview.publicationId, active: true, versionId: "feature" },
     ]);
     expect(
       await f.host.apps.request(preview.publicationId, "list", {
@@ -817,7 +817,6 @@ body`,
           approved: true,
           active: true,
           versionId: "main",
-          readOnlyPreview: false,
         },
         expect.objectContaining({
           publicationId: f.published.publicationId,

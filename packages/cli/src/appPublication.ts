@@ -61,7 +61,6 @@ const localPublication = {
   approved: z.boolean(),
   active: z.boolean(),
   versionId: id,
-  readOnlyPreview: z.boolean(),
 };
 const LocalPublication = z.union([
   z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),

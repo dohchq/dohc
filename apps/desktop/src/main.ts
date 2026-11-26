@@ -3909,6 +3909,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
+        beforeVersionSwitch: () =>
+          sitePreviews.stopWorkspace({
+            workspaceId: workspace.workspaceId,
+            attachmentId: workspace.attachmentId,
+          }),
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);

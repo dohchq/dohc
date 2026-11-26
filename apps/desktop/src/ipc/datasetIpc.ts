@@ -250,6 +250,13 @@ export function createDatasetHandler<
             });
             if ((active?.id ?? "main") !== "main") throw new Error(MAIN_ONLY_SCHEMA_CHANGES);
           };
+          const requireMain = async () => {
+            await dependencies.withAdapter(operation.workspace, async (adapter) => {
+              await onMain(adapter);
+              return {};
+            });
+            current();
+          };
           let input: ResolvedDatasetRequest;
           if ("datasetPath" in request) {
             if (capturesFirst) {
@@ -749,6 +756,11 @@ export function createDatasetHandler<
                 ...DatasetMigrationPreviewPage.parse(page),
               };
             }
+            if (input.action === "approveMigration") {
+              await requireMain();
+              if (migrations.get(input.preparationId) !== pending)
+                throw new Error("This Collection review expired. Prepare the change again.");
+            }
             // Consume before any authority read or SQL, including an uncertain remote reply.
             pending.clear();
             if (input.action === "discardMigration") {
@@ -897,6 +909,7 @@ export function createDatasetHandler<
               throw new Error(
                 "Saved Collection rules are unavailable. Update the host and try again.",
               );
+            await requireMain();
             const approved = await data.approvedArtifacts(input.datasetId);
             current();
             if (
@@ -1213,6 +1226,7 @@ export function createDatasetHandler<
             return { kind: "discarded" as const };
           }
           if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
+            await requireMain();
             const approved = await data.approvedArtifacts(input.datasetId);
             current();
             if (!approved.active)
@@ -1343,6 +1357,7 @@ export function createDatasetHandler<
           }
           const host = await localHost();
           if (input.action === "approve") {
+            await requireMain();
             const revision = await host.approve({
               ...input,
               approvalAgent,
@@ -1351,11 +1366,7 @@ export function createDatasetHandler<
             current();
             return { kind: "approved" as const, revision };
           }
-          if (input.action === "create")
-            await dependencies.withAdapter(operation.workspace, async (adapter) => {
-              await onMain(adapter);
-              return {};
-            });
+          if (input.action === "create") await requireMain();
           let descriptorPath: string;
           let expectedRevision: string | undefined;
           if (input.action === "create") {

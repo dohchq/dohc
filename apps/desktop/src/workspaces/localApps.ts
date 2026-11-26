@@ -101,7 +101,6 @@ export function createLocalApps(
               ? collection.describe(value)
               : unconnected.describe(value)),
           versionId,
-          readOnlyPreview: versionId !== "main",
         })),
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {

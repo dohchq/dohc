@@ -389,9 +389,7 @@ export function createPersonalApps(options: {
     backend,
     has: (publicationId: string) => store.has(publicationId),
     list: (appRoot: string) =>
-      store
-        .list(appRoot)
-        .map((row) => ({ ...apps.describe(row), versionId: "main", readOnlyPreview: false })),
+      store.list(appRoot).map((row) => ({ ...apps.describe(row), versionId: "main" })),
     activate: apps.activate,
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, apps.withdrawBinding);

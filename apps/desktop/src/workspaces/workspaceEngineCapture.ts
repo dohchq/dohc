@@ -1030,6 +1030,7 @@ export interface WorkspaceEngineCaptureOptions {
   discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
+  beforeVersionSwitch?: () => Promise<void>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
   onTypingCheckpointRecovered?: (path: string) => void;
@@ -9036,6 +9037,7 @@ export function createWorkspaceEngineCapture(
         });
         // Create-and-switch: the fork is content-identical to the disk, so no
         // materialization is needed.
+        await options.beforeVersionSwitch?.();
         await engine.setActiveVersion({ workspaceId, versionId: version.id });
         return versionsSnapshot(engine);
       });
@@ -9050,6 +9052,7 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await listTextFileMetadata(engine, versionId);
+        await options.beforeVersionSwitch?.();
         // A live Y.Doc session pins its old versionId+
         // path. Materializing another version into the same folder while it
         // stays live would let a later settle write a stale projection into the

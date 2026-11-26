@@ -221,7 +221,7 @@ it("previews a non-Main version's app through the owner's reads, never approving
     await f.prepareApp("feature"),
     new AbortController().signal,
   );
-  expect(f.host.apps.list("app", "feature")).toMatchObject([{ readOnlyPreview: true }]);
+  expect(f.host.apps.list("app", "feature")).toMatchObject([{ versionId: "feature" }]);
   expect(
     await f.host.apps.request(preview.publicationId, "invoke", {
       authorityRevision: preview.authorityRevision,

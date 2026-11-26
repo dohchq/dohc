@@ -52,7 +52,7 @@ describe("owner publication review contract", () => {
       active: true,
       datasetCapability,
     };
-    const local = { ...publication, approved: true, versionId: "main", readOnlyPreview: false };
+    const local = { ...publication, approved: true, versionId: "main" };
     expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual(
       { kind: "localListed", publications: [local] },
     );
@@ -161,7 +161,6 @@ describe("owner publication review contract", () => {
       approved: false,
       active: false,
       versionId: "feature",
-      readOnlyPreview: true,
       collectionCapability: capability,
       pendingCreates: 2,
     };

@@ -51,7 +51,7 @@ function harness(
     sharedView?: boolean;
     activeWorkspaceId?: string;
     trusted?: boolean;
-    activeVersionId?: string;
+    activeVersionId?: string | (() => Promise<string>);
   } = {},
 ) {
   const workspace: TestWorkspace = {
@@ -88,8 +88,10 @@ function harness(
   const assertMayRunAppCode = vi.fn(async (_workspace: TestWorkspace) => {
     if (!(input.trusted ?? true)) throw new WorkspaceRestrictedError();
   });
+  const activeVersion = input.activeVersionId;
   const dependencies: StartSitePreviewDependencies<TestEvent, TestSender, TestWorkspace> = {
-    activeVersionId: async () => input.activeVersionId ?? "main",
+    activeVersionId:
+      typeof activeVersion === "function" ? activeVersion : async () => activeVersion ?? "main",
     authority: {
       requireTrustedSender(event) {
         if (!event.trusted) throw new Error("Untrusted renderer.");
@@ -156,6 +158,105 @@ describe("start site preview IPC", () => {
     const site = { workspaceId: "workspace-1", siteRoot: "site" };
     expect(test.lifecycle.status({ ...site, versionId: "feature" }).running).toBe(true);
     expect(test.lifecycle.status({ ...site, versionId: "main" }).running).toBe(false);
+    await test.lifecycle.stopAll();
+  });
+
+  it.each([undefined, "main"] as const)(
+    "cancels startup when the holder releases while version lookup is pending (versionId=%s)",
+    async (explicitVersionId) => {
+      let resolveVersion!: (value: string) => void;
+      const versionLookup = new Promise<string>((resolve) => {
+        resolveVersion = resolve;
+      });
+      const test = harness({ activeVersionId: () => versionLookup });
+      const starting = test.handler(test.event, {
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        mode: "static",
+        holderId: "tab",
+        restart: false,
+        ...(explicitVersionId ? { versionId: explicitVersionId } : {}),
+      });
+      await test.lifecycle.release({
+        getActiveWorkspaceId: () => "workspace-1",
+        holderId: "tab",
+        workspaceId: "workspace-1",
+        versionId: "main",
+        siteRoot: "site",
+      });
+      resolveVersion("main");
+      await expect(starting).rejects.toThrow(/cancelled/i);
+      expect(test.execute).not.toHaveBeenCalled();
+      expect(
+        test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+          .running,
+      ).toBe(false);
+      await test.lifecycle.stopAll();
+    },
+  );
+
+  it("refuses registration if the active version switches during discovery or execution", async () => {
+    let activeVersion = "main";
+    let finishDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      finishDiscovery = resolve;
+    });
+    const test = harness({ activeVersionId: async () => activeVersion });
+    test.get.mockImplementationOnce(async () => {
+      await discoveryGate;
+      return site();
+    });
+    const duringDiscovery = test.handler(test.event, {
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    });
+    await vi.waitFor(() => expect(test.get).toHaveBeenCalledTimes(1));
+    activeVersion = "feature";
+    finishDiscovery();
+    await expect(duringDiscovery).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.execute).not.toHaveBeenCalled();
+    expect(
+      test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
+
+    activeVersion = "main";
+    let finishExecute!: () => void;
+    const executeGate = new Promise<void>((resolve) => {
+      finishExecute = resolve;
+    });
+    test.execute.mockImplementationOnce(async (executionInput) => {
+      await executeGate;
+      return {
+        handle: test.handle,
+        result: { siteRoot: executionInput.site.root, mode: executionInput.mode, logs: [] },
+      };
+    });
+    const duringExecute = test.handler(test.event, {
+      workspaceId: "workspace-1",
+      versionId: "main",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    });
+    await vi.waitFor(() => expect(test.execute).toHaveBeenCalledTimes(1));
+    activeVersion = "feature";
+    finishExecute();
+    await expect(duringExecute).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.handle.stop).toHaveBeenCalledTimes(1);
+    expect(
+      test.lifecycle.status({ workspaceId: "workspace-1", versionId: "main", siteRoot: "site" })
+        .running,
+    ).toBe(false);
     await test.lifecycle.stopAll();
   });
 

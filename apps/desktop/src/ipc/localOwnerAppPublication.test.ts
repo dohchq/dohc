@@ -92,7 +92,6 @@ function harness(active: string | null = null) {
           approved: true,
           active: true,
           versionId: "main",
-          readOnlyPreview: false,
         },
       ]),
     },
@@ -308,7 +307,6 @@ describe("local app publication review", () => {
           approved: true,
           active: true,
           versionId: "main",
-          readOnlyPreview: false,
         },
       ],
     });

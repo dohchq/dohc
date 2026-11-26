@@ -940,7 +940,6 @@ describe("owner app publication", () => {
       approved: true,
       active: true,
       versionId: "main",
-      readOnlyPreview: false,
     };
     const collectionRow = {
       publicationId: "d".repeat(64),
@@ -952,7 +951,6 @@ describe("owner app publication", () => {
       collectionCapability: approvedCollection,
       pendingCreates: 0,
       versionId: "main",
-      readOnlyPreview: false,
     };
     const checked: Extract<OwnerAppPublicationResult, { kind: "localChecked" }> = {
       kind: "localChecked",
@@ -1648,7 +1646,6 @@ it("shows every bound Collection and its alias in the local review dialog for a 
             approved: true,
             active: true,
             versionId: "main",
-            readOnlyPreview: false,
           },
         ],
       };

@@ -75,6 +75,14 @@ type StoppingPreview = {
 
 type PreviewRecord = RunningPreview | ExitedPreview | StoppingPreview;
 
+type PendingVersionLookup = {
+  workspaceId: string;
+  siteRoot: string;
+  holderId: string;
+  senderId: number;
+  cancelled: boolean;
+};
+
 type PendingStart = {
   sequence: number;
   senderId: number | null;
@@ -157,6 +165,7 @@ export function createSitePreviewLifecycle<
   // restart can tell surfaces what still runs.
   const lastStarted = new Map<string, HeldPreview<T>>();
   const activePreviews = new Map<string, PreviewRecord>();
+  const pendingLookups = new Set<PendingVersionLookup>();
   const pendingStarts = new Set<PendingStart>();
   const pendingBySender = new Map<number, Set<PendingStart>>();
   const pendingBySite = new Map<string, Set<PendingStart>>();
@@ -392,6 +401,7 @@ export function createSitePreviewLifecycle<
     // Runs once preparation passed, before the start replaces anything.
     // Answering false stops the start.
     onPrepared?: () => boolean;
+    verifyCurrent?: () => Promise<void>;
   }): Promise<StartedPreview<T>> {
     if (retired) throw new Error(START_CANCELLED_MESSAGE);
     const site = siteOf(startInput);
@@ -431,10 +441,11 @@ export function createSitePreviewLifecycle<
           }
           throw error;
         }
-        if (!isCurrent()) {
-          await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
-            retainAndStop(site, execution.handle),
-          );
+        try {
+          if (!isCurrent()) throw new Error(START_CANCELLED_MESSAGE);
+          await startInput.verifyCurrent?.();
+        } catch (error) {
+          await failAfterCleanup(error, () => retainAndStop(site, execution.handle));
         }
 
         await install(site, execution.handle);
@@ -486,16 +497,48 @@ export function createSitePreviewLifecycle<
     holderId: string;
     senderId: number;
     workspaceId: string;
-    versionId: string;
+    versionId: string | (() => Promise<string>);
     siteRoot: string;
     mode: string;
     restart: boolean;
     isCurrent: () => boolean;
+    verifyCurrent?: () => Promise<void>;
     prepare: (
       isCurrent: () => boolean,
     ) => Promise<(signal: AbortSignal) => Promise<SitePreviewExecution<T>>>;
   }): Promise<HeldPreview<T> | ReplacedStart> {
-    const key = previewKey(acquireInput);
+    if (typeof acquireInput.versionId === "function") {
+      if (retired || !acquireInput.isCurrent()) {
+        return Promise.reject(new Error(START_CANCELLED_MESSAGE));
+      }
+      const resolveVersion = acquireInput.versionId;
+      const lookup: PendingVersionLookup = {
+        workspaceId: acquireInput.workspaceId,
+        siteRoot: acquireInput.siteRoot,
+        holderId: acquireInput.holderId,
+        senderId: acquireInput.senderId,
+        cancelled: false,
+      };
+      pendingLookups.add(lookup);
+      return (async () => {
+        let resolved: string;
+        try {
+          resolved = await resolveVersion();
+        } finally {
+          pendingLookups.delete(lookup);
+        }
+        if (lookup.cancelled || retired || !acquireInput.isCurrent()) {
+          throw new Error(START_CANCELLED_MESSAGE);
+        }
+        return acquire({ ...acquireInput, versionId: resolved });
+      })();
+    }
+    const site = siteOf({
+      workspaceId: acquireInput.workspaceId,
+      versionId: acquireInput.versionId,
+      siteRoot: acquireInput.siteRoot,
+    });
+    const key = previewKey(site);
     const holder: PreviewHolder = {
       senderId: acquireInput.senderId,
       isCurrent: acquireInput.isCurrent,
@@ -520,14 +563,15 @@ export function createSitePreviewLifecycle<
     const cancel = new AbortController();
     const started = start({
       senderId: null,
-      ...siteOf(acquireInput),
+      ...site,
       isCurrent: () => [...holders.values()].some((each) => each.isCurrent()),
       cancelled: cancel.signal,
       prepare: acquireInput.prepare,
       onPrepared: () => takeOver(key, hold),
+      ...(acquireInput.verifyCurrent ? { verifyCurrent: acquireInput.verifyCurrent } : {}),
     });
     const hold: PreviewHold<T> = {
-      ...siteOf(acquireInput),
+      ...site,
       generation,
       mode: acquireInput.mode,
       holders,
@@ -642,6 +686,12 @@ export function createSitePreviewLifecycle<
     return true;
   }
 
+  function cancelPendingLookups(matches: (lookup: PendingVersionLookup) => boolean): void {
+    for (const lookup of pendingLookups) {
+      if (matches(lookup)) lookup.cancelled = true;
+    }
+  }
+
   /**
    * One surface stops showing the app's preview. The preview stops when no
    * surface shows it any more.
@@ -653,6 +703,12 @@ export function createSitePreviewLifecycle<
     versionId: string;
     siteRoot: string;
   }): Promise<void> {
+    cancelPendingLookups(
+      (lookup) =>
+        lookup.workspaceId === releaseInput.workspaceId &&
+        lookup.siteRoot === releaseInput.siteRoot &&
+        lookup.holderId === releaseInput.holderId,
+    );
     const key = previewKey(releaseInput);
     const hadHold = holds.has(key);
     const emptied = letGo(key, ([holderId]) => holderId === releaseInput.holderId);
@@ -735,6 +791,7 @@ export function createSitePreviewLifecycle<
   // A window that went away shows nothing any more: its surfaces let go, and
   // a preview, or a start, only it showed stops.
   function cancelSender(senderId: number): void {
+    cancelPendingLookups((lookup) => lookup.senderId === senderId);
     abortPending(pendingBySender.get(senderId) ?? []);
     for (const key of new Set([...holds.keys(), ...preparing.keys()])) {
       if (!letGo(key, ([, holder]) => holder.senderId === senderId)) continue;
@@ -751,6 +808,7 @@ export function createSitePreviewLifecycle<
     workspaceId: string,
     options: { rejectOnFailure?: boolean } = {},
   ): Promise<void> {
+    cancelPendingLookups((lookup) => lookup.workspaceId === workspaceId);
     dropHolds(workspaceId);
     const pending = abortPending(
       [...pendingStarts].filter((start) => start.workspaceId === workspaceId),
@@ -797,6 +855,7 @@ export function createSitePreviewLifecycle<
   function stopAll(): Promise<void> {
     if (stopAllPromise) return stopAllPromise;
     retired = true;
+    cancelPendingLookups(() => true);
     dropHolds();
     const pending = abortPending(pendingStarts);
     const draining = pending.filter((start) => start.phase !== "preparing");

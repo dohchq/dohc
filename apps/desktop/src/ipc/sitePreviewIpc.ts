@@ -1,9 +1,10 @@
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { OwnedSiteCatalog } from "../workspaces/ownedSiteCatalog";
 import { requireExactSiteRoot, type SitePackageInfo } from "../workspaces/sitePackage";
-import type {
-  SitePreviewExecution,
-  createSitePreviewLifecycle,
+import {
+  START_CANCELLED_MESSAGE,
+  type SitePreviewExecution,
+  type createSitePreviewLifecycle,
 } from "../workspaces/sitePreviewLifecycle";
 import {
   previewRunsAppCode,
@@ -90,22 +91,36 @@ export function createStartSitePreviewHandler<
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
-        const versionId = await dependencies.activeVersionId(workspace);
-        if (payload.versionId !== undefined && payload.versionId !== versionId)
-          throw new Error("Switch to this version in Versions to preview its apps.");
+        const assertVersionActive = async (expected: string) => {
+          if ((await dependencies.activeVersionId(workspace)) !== expected) {
+            throw new Error("Switch to this version in Versions to preview its apps.");
+          }
+        };
+        let resolvedVersionId = payload.versionId;
         return StartSitePreviewAnswer.parse(
           await dependencies.lifecycle.acquire({
             holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
-            versionId,
+            versionId:
+              payload.versionId ??
+              (async () => {
+                resolvedVersionId = await dependencies.activeVersionId(workspace);
+                return resolvedVersionId;
+              }),
             siteRoot: payload.siteRoot,
             mode: payload.mode,
             restart: payload.restart,
             isCurrent,
+            verifyCurrent: async () => {
+              if (resolvedVersionId !== undefined) await assertVersionActive(resolvedVersionId);
+            },
             // The start's own check, not this window's: a start another
             // window also holds outlives this one.
             prepare: async (startIsCurrent) => {
+              const versionId = resolvedVersionId!;
+              await assertVersionActive(versionId);
+              if (!startIsCurrent()) throw new Error(START_CANCELLED_MESSAGE);
               const sharedView = dependencies.isSharedView(workspace.workspaceId);
               assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
               const site = requireExactSiteRoot(
@@ -116,8 +131,10 @@ export function createStartSitePreviewHandler<
               if (previewRunsAppCode(site, payload.mode)) {
                 await dependencies.assertMayRunAppCode(workspace);
               }
-              return (signal) =>
-                dependencies.execute({
+              await assertVersionActive(versionId);
+              return async (signal) => {
+                await assertVersionActive(versionId);
+                return dependencies.execute({
                   workspaceId: workspace.workspaceId,
                   workspaceRoot: workspace.rootPath,
                   site,
@@ -126,6 +143,7 @@ export function createStartSitePreviewHandler<
                   signal,
                   sharedView,
                 });
+              };
             },
           }),
         );

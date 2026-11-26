@@ -2466,7 +2466,7 @@ Optional versionId names a version from Versions. It defaults to the active vers
 - `appRoot`: `string`. Required.
 - `versionId`: `string`
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, readOnlyPreview, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, readOnlyPreview, datasetCapabilities } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, readOnlyPreview, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, readOnlyPreview })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, datasetCapabilities } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, versionId })[] }`.
 
 #### `dohc app checkLocal`
 

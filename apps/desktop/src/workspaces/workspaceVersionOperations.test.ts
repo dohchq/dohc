@@ -655,6 +655,41 @@ describe("switchVersion", () => {
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(draftLogoBytes);
     await engine.stop();
   });
+
+  it("stops previews via beforeVersionSwitch before switching or creating versions", async () => {
+    const root = await createTestScratch("dohc-version-ops-");
+    await write(root, "plan.md", "v1\n");
+    const events: string[] = [];
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: Symbol("test"),
+      rustEngineSessions: mockDaemonSessions({
+        rootPath: root,
+        workspaceId: WORKSPACE_ID,
+        loopback,
+        requests,
+      }),
+      beforeVersionSwitch: async () => {
+        events.push(`before:${requests.filter((r) => r.method === "versions.setActive").length}`);
+      },
+    });
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    expect(events).toEqual(["before:0"]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
+    events.length = 0;
+    await expect(engine.switchVersion("unknown-version")).rejects.toThrow();
+    expect(events).toEqual([]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(1);
+    await engine.switchVersion("main");
+    expect(events).toEqual(["before:1"]);
+    expect(requests.filter((r) => r.method === "versions.setActive")).toHaveLength(2);
+    await engine.stop();
+  });
 });
 
 describe("mergeVersionIntoMain", () => {

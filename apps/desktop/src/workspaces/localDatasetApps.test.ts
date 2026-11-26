@@ -192,28 +192,42 @@ async function fixture(
 describe("local approved dataset apps", () => {
   it("holds a non-Main version's app as a read-only preview beside Main's approval", async () => {
     const f = await fixture();
-    const app = await f.prepareApp("app", undefined, undefined, "feature");
+    expect(
+      await f.host.apps.request(f.published.publicationId, "invoke", f.invocation()),
+    ).toMatchObject({ replayed: false });
+    const app = await f.prepareApp("app", [id(6), id(7)], undefined, "feature");
     const preview = await f.host.apps.activate(app, new AbortController().signal);
     expect(preview.publicationId).not.toBe(f.published.publicationId);
     expect(f.host.apps.list("app", "main")).toMatchObject([
-      { publicationId: f.published.publicationId, active: true, readOnlyPreview: false },
+      { publicationId: f.published.publicationId, active: true, versionId: "main" },
     ]);
     expect(f.host.apps.list("app", "feature")).toMatchObject([
       {
         publicationId: preview.publicationId,
         active: true,
         versionId: "feature",
-        readOnlyPreview: true,
       },
     ]);
-    const write = { ...f.invocation(), authorityRevision: preview.authorityRevision };
+    expect(
+      await f.host.apps.request(preview.publicationId, "invoke", {
+        authorityRevision: preview.authorityRevision,
+        operation: "list",
+        idempotencyKey: "read-one",
+        input: {},
+      }),
+    ).toMatchObject({
+      result: {
+        rows: [expect.objectContaining({ values: expect.objectContaining({ [id(4)]: "Alex" }) })],
+      },
+    });
+    const write = {
+      ...f.invocation("Blake", "submit-two"),
+      authorityRevision: preview.authorityRevision,
+    };
     for (const action of ["invoke", "attempt", "upload"] as const)
       await expect(f.host.apps.request(preview.publicationId, action, write)).rejects.toThrow(
         "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
       );
-    expect(
-      await f.host.apps.request(f.published.publicationId, "invoke", f.invocation()),
-    ).toMatchObject({ replayed: false });
     await f.host.apps.withdraw(preview.publicationId, preview.authorityRevision);
     expect(f.host.apps.list("app", "feature")).toMatchObject([{ active: false }]);
     expect(() => f.host.apps.browserPublication(preview.publicationId)).toThrow(/approval changed/);

@@ -7,6 +7,7 @@ import {
 } from "../workspaces/datasetSourceCreation";
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
@@ -1128,8 +1129,19 @@ it("refuses shared-view deletion before reaching owner data", async () => {
 });
 
 it("refuses Collection schema and rule changes away from Main", async () => {
-  for (const action of ["prepare", "prepareMigration"] as const) {
-    const f = fixture();
+  const message =
+    "Collection schema and rule changes can only be approved on Main. Merge this version into Main first.";
+  for (const action of [
+    "prepare",
+    "prepareMigration",
+    "prepareSchemaChange",
+    "prepareRelationChoices",
+    "prepareHistoryRestore",
+  ] as const) {
+    const f = fixture({
+      historyRevision: vi.fn(),
+      approvedArtifacts: vi.fn(),
+    } as unknown as OwnerDatasetData);
     const active = vi
       .spyOn(VersionedLiveAdapter.prototype, "getActiveVersion")
       .mockResolvedValue({ id: "feature" } as Awaited<
@@ -1138,16 +1150,141 @@ it("refuses Collection schema and rule changes away from Main", async () => {
     const request =
       action === "prepare"
         ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
-        : {
-            workspaceId: "workspace",
-            action,
-            datasetPath: "data/dataset.json",
-            migrationPath: "data/change.sql",
-          };
-    await expect(f.handler("window", request)).rejects.toThrow(
-      "Collection schema and rule changes can only be approved on Main. Merge this version into Main first.",
-    );
+        : action === "prepareMigration"
+          ? {
+              workspaceId: "workspace",
+              action,
+              datasetPath: "data/dataset.json",
+              migrationPath: "data/change.sql",
+            }
+          : action === "prepareSchemaChange"
+            ? {
+                workspaceId: "workspace",
+                action,
+                datasetPath: "data/dataset.json",
+                revision: 1,
+                revisionSha256: f.revision.revisionSha256,
+                change: { kind: "renameCollection", name: "Renamed" },
+              }
+            : action === "prepareRelationChoices"
+              ? {
+                  workspaceId: "workspace",
+                  action,
+                  datasetPath: "data/dataset.json",
+                  revision: 1,
+                  revisionSha256: f.revision.revisionSha256,
+                  tableId: "00000000-0000-4000-8000-000000000002",
+                  fieldId: "00000000-0000-4000-8000-000000000004",
+                  labelFieldId: "00000000-0000-4000-8000-000000000004",
+                }
+              : {
+                  workspaceId: "workspace",
+                  action,
+                  datasetPath: "data/dataset.json",
+                  revision: 1,
+                  revisionSha256: f.revision.revisionSha256,
+                  targetRevisionSha256: "b".repeat(64),
+                  changedRevisionSha256: "c".repeat(64),
+                };
+    await expect(f.handler("window", request)).rejects.toThrow(message);
     expect(active).toHaveBeenCalled();
+    expect(f.createSources).not.toHaveBeenCalled();
+    active.mockRestore();
+  }
+});
+
+it("refuses approve and approveMigration after switching away from Main without consuming the review", async () => {
+  const message =
+    "Collection schema and rule changes can only be approved on Main. Merge this version into Main first.";
+  let currentVersion = "main";
+  const active = vi
+    .spyOn(VersionedLiveAdapter.prototype, "getActiveVersion")
+    .mockImplementation(
+      async () =>
+        ({ id: currentVersion }) as Awaited<ReturnType<VersionedLiveAdapter["getActiveVersion"]>>,
+    );
+  const root = await createTestScratch("dohc-dataset-ipc-version-");
+  await openedLocalState({ workspaceId: "workspace", rootPath: root });
+  const localHost = await createLocalDatasetHost({
+    workspaceId: "workspace",
+    workspaceRoot: root,
+    localPersonId: () => "person-local",
+    holder: {
+      here: () => ({ installId: "install-here", label: "Studio" }),
+      required: () => false,
+    },
+  });
+  try {
+    const f = fixture(undefined, undefined, undefined, async () => localHost);
+    const schema = generateDatasetSchema(f.revision.definition);
+    const operations = generateDatasetOperations(f.revision.definition);
+    f.sources.set("data/schema.sql", schema);
+    f.sources.set("data/operations.js", operations);
+
+    const prepared = await f.handler("window", {
+      action: "prepare",
+      workspaceId: "workspace",
+      descriptorPath: "data/dataset.json",
+    });
+    expect(prepared.kind).toBe("prepared");
+    if (prepared.kind !== "prepared") throw new Error("expected prepared");
+
+    currentVersion = "feature";
+    await expect(
+      f.handler("window", {
+        action: "approve",
+        workspaceId: "workspace",
+        preparationId: prepared.preparationId,
+        revisionSha256: prepared.revision.revisionSha256,
+      }),
+    ).rejects.toThrow(message);
+
+    currentVersion = "main";
+    await expect(
+      f.handler("window", {
+        action: "approve",
+        workspaceId: "workspace",
+        preparationId: prepared.preparationId,
+        revisionSha256: prepared.revision.revisionSha256,
+      }),
+    ).resolves.toMatchObject({ kind: "approved" });
+
+    const renamed = { ...f.revision.definition, name: "Renamed Responses" };
+    f.sources.set("data/dataset.json", JSON.stringify(renamed));
+    f.sources.set("data/schema.sql", generateDatasetSchema(renamed));
+    f.sources.set("data/operations.js", generateDatasetOperations(renamed));
+
+    const migration = await f.handler("window", {
+      action: "prepareMigration",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+    });
+    expect(migration.kind).toBe("migration-prepared");
+    if (migration.kind !== "migration-prepared") throw new Error("expected migration-prepared");
+
+    currentVersion = "feature";
+    await expect(
+      f.handler("window", {
+        action: "approveMigration",
+        workspaceId: "workspace",
+        preparationId: migration.preparationId,
+        revisionSha256: migration.revision.revisionSha256,
+        approvalDigest: migration.approvalDigest,
+      }),
+    ).rejects.toThrow(message);
+
+    currentVersion = "main";
+    await expect(
+      f.handler("window", {
+        action: "approveMigration",
+        workspaceId: "workspace",
+        preparationId: migration.preparationId,
+        revisionSha256: migration.revision.revisionSha256,
+        approvalDigest: migration.approvalDigest,
+      }),
+    ).resolves.toMatchObject({ kind: "migrated" });
+  } finally {
+    await localHost.close();
     active.mockRestore();
   }
 });
