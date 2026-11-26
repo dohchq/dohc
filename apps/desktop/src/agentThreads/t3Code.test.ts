@@ -654,6 +654,74 @@ describe("T3 Code's thread tools", () => {
     });
   });
 
+  it("takes a private box that waits in the running work as waiting on the person", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    let activeRunId: string | null = "run-2";
+    let items: Array<{ type: string; status: string; runId: string | null }> = [];
+    let pending = 0;
+    t3.tools.t3_thread_read = () => ({
+      recentRuns: [],
+      thread: {
+        title: "d3",
+        activeRunId,
+        pendingRequestCount: pending,
+        archived: false,
+        settled: false,
+      },
+      items,
+    });
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q-1"] });
+    const box = (status: string, runId: string | null) => ({
+      type: "secret_request",
+      status,
+      runId,
+    });
+
+    // T3 Code counts no request for the box: only its activity shows it.
+    items = [
+      { type: "command_execution", status: "completed", runId: "run-2" },
+      box("waiting", "run-2"),
+    ];
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      working: true,
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    // dohc reads the newest activity, not the oldest.
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_read")?.args).toMatchObject({
+      view: "activity",
+      beforePosition: Number.MAX_SAFE_INTEGER,
+    });
+
+    // A box beside a question: an answer here would leave the thread waiting on the box.
+    pending = 1;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    pending = 0;
+
+    // A box that was filled or closed, or that belongs to earlier work, waits on no one.
+    for (const shown of [
+      [box("completed", "run-2")],
+      [box("cancelled", "run-2")],
+      [box("waiting", "run-1")],
+    ]) {
+      items = shown;
+      await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+        waitingOnPerson: false,
+      });
+    }
+    // Nothing is going in the thread, so nothing waits on a box.
+    items = [box("waiting", null)];
+    activeRunId = null;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      working: false,
+      waitingOnPerson: false,
+    });
+  });
+
   it("reads a thread's question box as the person is to see it", async () => {
     const t3 = await fakeT3Code();
     const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
