@@ -3247,8 +3247,12 @@ function registerReservedPhysicalWorkspace(
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
   removeSecrets: async (workspaceId) => {
-    await localWorkspaceSecrets().clearWorkspace(workspaceId);
-    await localHttpApprovals().clearWorkspace(workspaceId);
+    const [secrets, approvals] = await Promise.allSettled([
+      localWorkspaceSecrets().clearWorkspace(workspaceId),
+      localHttpApprovals().clearWorkspace(workspaceId),
+    ]);
+    if (secrets.status === "rejected") throw secrets.reason;
+    if (approvals.status === "rejected") throw approvals.reason;
   },
   findWorkspace,
   removeWorkspace: (workspaceId) => {

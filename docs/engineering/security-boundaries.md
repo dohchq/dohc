@@ -479,8 +479,8 @@ checking a webhook link again after it looks up the link's address.
 An HTTP step runs only while nobody but the owner can edit its Collection, its
 automations file, or code it runs. A workspace member counts only when their access
 reaches Edit on one of those paths: members at the default Comment level or at View don't
-hold the step. A pending member invite at Edit holds it, because the invite becomes Edit
-access as soon as someone claims it. See the
+hold the step. A pending member invite counts the same way, by its invited level and the
+folder rules, because it becomes that access as soon as someone claims it. See the
 [outbound webhook route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
 
 Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
