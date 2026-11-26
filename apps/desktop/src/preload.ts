@@ -60,6 +60,7 @@ import {
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
+  connectServerOperations,
   SitePreviewReplacedEvent,
   updateDownloadOperations,
   DesktopUserSettingsResult,
@@ -202,6 +203,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(updateDownloadOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
+  ...operationBridge(connectServerOperations, invoke),
   ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
@@ -294,6 +296,11 @@ const bridge: DohcDesktopBridge = {
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
   onShareHandoffStatus: (listener) =>
     onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
+  onConnectServerRequest: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on(CHANNELS.connectServerRequest, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.connectServerRequest, handler);
+  },
   ...operationBridge(workspaceSyncOperations, invoke),
   cloudEnableSync: (payload) => ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),

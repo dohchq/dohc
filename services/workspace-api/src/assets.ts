@@ -191,7 +191,8 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 .actions { display: flex; gap: 0.5rem; }
 
 #verified a,
-#after a {
+#after a,
+.button-link {
   display: inline-flex;
   width: 100%;
   justify-content: center;
@@ -207,7 +208,8 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 }
 
 #verified a:hover,
-#after a:hover {
+#after a:hover,
+.button-link:hover {
   color: var(--bg);
   opacity: 0.9;
 }
@@ -263,6 +265,33 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 .meta {
   color: var(--ink);
   word-break: break-all;
+}
+
+.server-address {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.375rem 0.375rem 0.375rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.server-address span {
+  flex: 1;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  word-break: break-all;
+  user-select: all;
+}
+
+.server-address button { width: auto; padding: 0.3125rem 0.625rem; }
+
+.open-dohc { display: none !important; }
+@media (hover: hover) and (pointer: fine) {
+  .open-dohc { display: inline-flex !important; margin-bottom: 1.25rem; }
 }
 
 dl { margin: 0 0 1rem; }
@@ -511,6 +540,21 @@ if (page === "device") {
       "Device not connected",
     ),
   );
+}
+
+if (page === "device-prompt") {
+  const copy = byId("copy-server");
+  const address = byId("server-address");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(address.textContent);
+      setStatus("done", "Copied the server address.");
+    } catch {
+      // No clipboard outside a secure page: select it for the person to copy.
+      getSelection().selectAllChildren(address);
+      setStatus("working", "Selected the address. Copy it with your keyboard.");
+    }
+  });
 }
 
 if (page === "device-phone") {

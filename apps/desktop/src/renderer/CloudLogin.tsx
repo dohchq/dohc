@@ -471,7 +471,7 @@ export function CloudLogin(
               </button>
             </div>
           </form>
-          {props.embedded ? null : (
+          {props.embedded || props.initialServerUrl ? null : (
             <div data-testid="cloud-drive" className="mt-4 border-t border-line pt-3">
               <p className="m-0 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
                 dohc Drive

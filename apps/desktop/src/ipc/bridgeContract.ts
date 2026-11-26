@@ -9409,6 +9409,17 @@ export const systemPrivacySettingsOperations = {
   },
 } as const satisfies OperationTable;
 
+export const connectServerOperations = {
+  takeConnectServerRequest: {
+    capabilityId: "cloud.connect.link.take",
+    scope: "device",
+    channel: "desktop:take-connect-server-request",
+    payload: z.void(),
+    result: z.string().nullable(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 // The server account this computer is connected to. Main sends both requests
 // with its own session; the window never sees the session.
 export const serverAccountOperations = {
@@ -9464,6 +9475,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
+    OperationBridge<typeof connectServerOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof memberOperations>,
     OperationBridge<typeof directMessageOperations>,
@@ -9589,6 +9601,7 @@ export interface DohcDesktopBridge
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   onShareHandoffStatus(listener: (status: ShareHandoffStatus) => void): () => void;
+  onConnectServerRequest(listener: () => void): () => void;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
   cloudJoinWorkspace(payload: CloudJoinWorkspacePayload): Promise<CloudJoinWorkspaceResult>;
   // Collection automations, for the ⚡ panel.

@@ -185,6 +185,7 @@
   "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:retry-server-account-disconnect": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-share-handoff-status": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:take-connect-server-request": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:accept-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:retry-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:dismiss-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

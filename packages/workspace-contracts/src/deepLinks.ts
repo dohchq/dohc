@@ -1,15 +1,19 @@
 import { canonicalRelayUrl } from "./relayValues";
 import { isWorkReference, workLinkServerOrigin, type WorkLink } from "./workLinks";
 
-// Public OS URL contract. Two hosts are public:
+// Public OS URL contract. Three hosts are public:
 // dohc://open/<43-character base64url code>?relay=<encoded canonical relay URL>.
 // dohc://l/<43-character work reference>?server=<encoded server origin>.
-// Share-web gives these URLs to users. Keep the grammar independent of tab IDs.
+// dohc://connect?server=<encoded server origin>.
+// Share-web and the account pages give these URLs to users. Keep the grammar
+// independent of tab IDs.
 export const DOHC_DEEP_LINK_SCHEME = "dohc";
 const SHARE_HANDOFF_URL_PATTERN =
   /^([A-Za-z]+):\/\/([A-Za-z]+)\/([A-Za-z0-9_-]{43})\?relay=([^&#]+)$/u;
 const WORK_LINK_HANDOFF_URL_PATTERN =
   /^([A-Za-z]+):\/\/([A-Za-z]+)\/([A-Za-z0-9_-]{43})\?server=([^&#]+)$/u;
+// Some launchers add a slash after the host, so one is accepted.
+const CONNECT_SERVER_URL_PATTERN = /^([A-Za-z]+):\/\/([A-Za-z]+)\/?\?server=([^&#]+)$/u;
 
 declare const shareHandoffCodeBrand: unique symbol;
 type ShareHandoffCode = string & { readonly [shareHandoffCodeBrand]: true };
@@ -89,6 +93,41 @@ export function buildWorkLinkHandoffUrl(link: WorkLink): string {
   const url = `${DOHC_DEEP_LINK_SCHEME}://l/${link.reference}?server=${encodeURIComponent(link.server)}`;
   if (parseWorkLinkHandoffUrl(url) === null) {
     throw new Error("invalid work link server");
+  }
+  return url;
+}
+
+/**
+ * The server a connect link asks dohc to fill in. It only names an address:
+ * the desktop still checks it and waits for the person to connect.
+ */
+export function parseConnectServerUrl(rawArgument: string): string | null {
+  const match = CONNECT_SERVER_URL_PATTERN.exec(rawArgument);
+  if (
+    match?.[0] !== rawArgument ||
+    match[1]?.toLowerCase() !== DOHC_DEEP_LINK_SCHEME ||
+    match[2]?.toLowerCase() !== "connect" ||
+    match[3] === undefined
+  ) {
+    return null;
+  }
+  let decodedServer: string;
+  try {
+    decodedServer = decodeURIComponent(match[3]);
+  } catch {
+    return null;
+  }
+  const server = workLinkServerOrigin(decodedServer);
+  if (server === null || server !== decodedServer || encodeURIComponent(server) !== match[3]) {
+    return null;
+  }
+  return server;
+}
+
+export function buildConnectServerUrl(serverOrigin: string): string {
+  const url = `${DOHC_DEEP_LINK_SCHEME}://connect?server=${encodeURIComponent(serverOrigin)}`;
+  if (parseConnectServerUrl(url) === null) {
+    throw new Error("invalid connect server origin");
   }
   return url;
 }

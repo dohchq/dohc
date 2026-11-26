@@ -196,7 +196,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
           );
         }
         case "/device":
-          return devicePageFor(options.auth, request, url);
+          return devicePageFor(options.auth, request, url, options.descriptor.authUrl);
         case "/account": {
           const session = await options.auth.api.getSession({ headers: request.headers });
           if (!session) return redirect("/account/sign-in?next=%2Faccount");
@@ -229,9 +229,14 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
 // GET /api/auth/device binds the code to their session before the browser may
 // approve it. The page never sees a device code or a token, only the short
 // user code the person is already reading off their device.
-async function devicePageFor(auth: AuthGateway, request: Request, url: URL): Promise<Response> {
+async function devicePageFor(
+  auth: AuthGateway,
+  request: Request,
+  url: URL,
+  serverUrl: string,
+): Promise<Response> {
   const userCode = (url.searchParams.get("user_code") ?? "").trim();
-  if (!userCode) return page(devicePage({ kind: "prompt" }));
+  if (!userCode) return page(devicePage({ kind: "prompt", serverUrl }));
 
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session) {

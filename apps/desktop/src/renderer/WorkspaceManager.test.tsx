@@ -445,6 +445,76 @@ describe("workspace manager", () => {
     );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
+
+  it("fills in a connect link's server, waits for Connect server, and keeps an open dialog's address", async () => {
+    const user = userEvent.setup();
+    const shown = vi.fn();
+    bridge.cloudLoginStart.mockResolvedValueOnce({
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://drive.example/device?user_code=ABCD-EFGH",
+    });
+    const view = (connectServerUrl: string | null) => (
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+        connectServerUrl={connectServerUrl}
+        onConnectServerShown={shown}
+      />
+    );
+    const { rerender } = render(view("https://drive.example"));
+    await locationReads("/home/sam/dohc/Personal");
+
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).value).toBe(
+        "https://drive.example",
+      ),
+    );
+    expect(shown).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("cloud-drive")).toBeNull();
+    expect(bridge.cloudLoginStart).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("cloud-connect-start"));
+    expect(await screen.findByTestId("cloud-user-code")).toBeTruthy();
+    expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://drive.example" });
+
+    rerender(view(null));
+    rerender(view("https://other.example"));
+    expect(shown).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD-EFGH");
+  });
+
+  it("holds a connect link while Join a synced workspace is open, then fills it in", async () => {
+    const user = userEvent.setup();
+    const shown = vi.fn();
+    const view = (connectServerUrl: string | null) => (
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+        connectServerUrl={connectServerUrl}
+        onConnectServerShown={shown}
+      />
+    );
+    const { rerender } = render(view(null));
+    await locationReads("/home/sam/dohc/Personal");
+    await user.click(screen.getByTestId("first-run-join-synced"));
+    expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
+
+    rerender(view("https://drive.example"));
+    expect(shown).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("cloud-server-url")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).value).toBe(
+        "https://drive.example",
+      ),
+    );
+    expect(shown).toHaveBeenCalledOnce();
+  });
 });
 
 describe("workspace manager with registered workspaces", () => {

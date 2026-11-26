@@ -336,6 +336,8 @@ describe("a workspace switch while a delete is pending", () => {
       takeWorkspacePathOpenFailures: vi.fn(async () => []),
       readOldWindowState: vi.fn(async () => null),
       onOldWindowStateChanged: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
       onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {

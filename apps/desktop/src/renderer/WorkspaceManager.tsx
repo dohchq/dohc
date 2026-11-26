@@ -16,7 +16,9 @@ import type { NoticeTarget } from "../notices/noticeTarget";
 import type { PrivacySettings } from "../settings/userSettings";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { CloudLogin } from "./CloudLogin";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
+import { Overlay } from "./Overlay";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -240,8 +242,11 @@ export function WorkspaceManager(props: {
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
+  connectServerUrl?: string | null;
+  onConnectServerShown?: () => void;
 }) {
   const [joining, setJoining] = useState(false);
+  const [connectingTo, setConnectingTo] = useState<string | null>(null);
   const [openingShare, setOpeningShare] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [pendingPrivacy, setPendingPrivacy] = useState<Partial<PrivacySettings>>({});
@@ -430,6 +435,14 @@ export function WorkspaceManager(props: {
     setJoining(false);
     setOpeningShare(false);
   }, [handoffStatus.status]);
+
+  const { connectServerUrl, onConnectServerShown } = props;
+  const routeConnects = joining || openingShare || handoffStatus.status !== "idle";
+  useEffect(() => {
+    if (!connectServerUrl || routeConnects) return;
+    onConnectServerShown?.();
+    setConnectingTo((open) => open ?? connectServerUrl);
+  }, [connectServerUrl, onConnectServerShown, routeConnects]);
 
   const currentWorkspace = props.current;
   const openCurrentRef = useRef<() => void>(() => undefined);
@@ -755,6 +768,18 @@ export function WorkspaceManager(props: {
           </div>
         </div>
       </div>
+      {connectingTo !== null ? (
+        <Overlay onClose={() => setConnectingTo(null)}>
+          <CloudLogin
+            initialServerUrl={connectingTo}
+            onClose={() => setConnectingTo(null)}
+            onConnected={() => setConnectingTo(null)}
+            onConnectionError={connectionNotices.reporter((serverUrl) =>
+              setConnectingTo(serverUrl ?? ""),
+            )}
+          />
+        </Overlay>
+      ) : null}
       {removing ? (
         <RemoveFromListDialog
           workspace={removing.workspace}

@@ -96,6 +96,7 @@
   "chat.threads.list",
   "chat.unread.list",
   "chat.wakes.retry",
+  "cloud.connect.link.take",
   "collection.copies.left.read",
   "collection.copies.left.remove",
   "collection.query",

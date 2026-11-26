@@ -385,6 +385,26 @@ export function DesktopRoot() {
     };
   }, []);
 
+  const [connectServerUrl, setConnectServerUrl] = useState<string | null>(null);
+  const connectServerShown = useCallback(() => setConnectServerUrl(null), []);
+  useEffect(() => {
+    if (isManagerWindow) return;
+    let active = true;
+    const take = () =>
+      void bridge()
+        .takeConnectServerRequest()
+        .then((serverUrl) => {
+          if (active && serverUrl !== null) setConnectServerUrl(serverUrl);
+        })
+        .catch(() => undefined);
+    const unsubscribe = bridge().onConnectServerRequest(take);
+    take();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [isManagerWindow]);
+
   useEffect(() => {
     const request = ++registryRequest.current;
     void bridge()
@@ -586,6 +606,8 @@ export function DesktopRoot() {
               handoffStatus={shareHandoffStatus}
               onDismissShareHandoff={dismissShareHandoff}
               onShareHandoffOpened={dismissShareHandoff}
+              connectServerUrl={connectServerUrl}
+              onConnectServerShown={connectServerShown}
               onForgot={refreshWorkspaceRegistry}
               onOpenWorkspace={(next) => {
                 setWorkspaces((known) =>
@@ -614,6 +636,8 @@ export function DesktopRoot() {
               handoffStatus={shareHandoffStatus}
               onDismissShareHandoff={dismissShareHandoff}
               onShareHandoffOpened={dismissShareHandoff}
+              connectServerUrl={connectServerUrl}
+              onConnectServerShown={connectServerShown}
               refreshWorkspaceRegistry={refreshWorkspaceRegistry}
               onManageWorkspaces={() => bridge().openWorkspaceManager()}
               sentNotices={sentNotices}

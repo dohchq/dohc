@@ -219,6 +219,7 @@ export const CHANNELS = {
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
   shareHandoffStatus: "desktop:share-handoff-status",
+  connectServerRequest: "desktop:connect-server-request",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   publishOwnerApp: "desktop:publish-owner-app",
