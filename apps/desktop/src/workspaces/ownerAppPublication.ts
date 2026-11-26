@@ -1,3 +1,8 @@
+import {
+  parseAppExternalDeclaration,
+  sortAppExternalOperations,
+  type AppExternalOperation,
+} from "@dohc/security-contract/app-external";
 import { resolveDatasetAddress } from "./datasetAddress";
 import { assertSourcePathsNotDeferred } from "./datasetSourceCapture";
 import { isPortableNamePath } from "@dohc/workspace-contracts/names";
@@ -177,6 +182,7 @@ export function parseAppPublicationDeclaration(
         "collection",
         "dataset",
         "datasets",
+        "external",
       ].includes(key),
   );
   if (unknownKey !== undefined) {
@@ -292,6 +298,16 @@ export function parseAppPublicationDeclaration(
       reference: parseAppDatasetReference(reference),
     }));
   }
+  let external: AppExternalOperation[] | undefined;
+  if (Object.hasOwn(row, "external")) {
+    try {
+      external = sortAppExternalOperations(parseAppExternalDeclaration(row.external));
+    } catch (error) {
+      throw new Error(
+        `${manifestPath} external: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   return {
     entryPath,
     inputs,
@@ -299,6 +315,7 @@ export function parseAppPublicationDeclaration(
     collection,
     dataset,
     datasets,
+    external,
   };
 }
 
@@ -329,6 +346,7 @@ function staticDeclaration(
     collection: undefined,
     dataset: undefined,
     datasets: undefined,
+    external: undefined,
   };
 }
 
@@ -613,6 +631,14 @@ async function prepareAppSources(
     dependencies,
     requireManifest,
   );
+  if (declared.external && dependencies.resolveDatasetCapability)
+    throw new Error(
+      "Personal apps can't call outside services. Only the workspace's owner can approve that.",
+    );
+  if (declared.external && !requireManifest)
+    throw new Error(
+      "Apps that call outside services run only on this computer for now. Approve it here instead of publishing.",
+    );
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
   const capabilities: AppPublicationCandidate["capabilities"] = [];
@@ -729,6 +755,7 @@ async function prepareAppSources(
       dependencies: built.dependencyLock.map((file) => file.path),
       files: built.files.map(({ bytes: _, ...file }) => file),
       capabilities,
+      ...(declared.external ? { external: declared.external } : {}),
     },
     APP_PUBLICATION_LIMITS,
   );

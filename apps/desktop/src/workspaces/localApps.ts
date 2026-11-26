@@ -1,5 +1,7 @@
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import type { LocalAppExternalCall } from "./localAppExternal";
 import type { LocalAppLaunchBackend } from "./localAppLaunch";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { createLocalCollectionApps } from "./localCollectionApps";
@@ -15,6 +17,7 @@ export function createLocalApps(
   unconnected: ReturnType<typeof createLocalUnconnectedApps>,
   onPublicationChanged?: () => void,
   localBudget?: () => boolean,
+  callExternal?: LocalAppExternalCall,
 ) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
@@ -48,6 +51,18 @@ export function createLocalApps(
       return reached === "dataset"
         ? dataset.request(publicationId, action, input, signal, activated)
         : collection.request(publicationId, action, input, signal, activated);
+    },
+    external: async (publicationId, input, signal) => {
+      kind(publicationId, input.authorityRevision);
+      const operation = store
+        .row(publicationId, input.authorityRevision)
+        .candidate.external?.find((value) => value.name === input.operation);
+      if (!operation || !callExternal)
+        throw new AppBackendRuntimeError({
+          code: "external_not_approved",
+          message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,
+        });
+      return callExternal(operation, input.input, signal);
     },
     readBrowserFile: async (publicationId, input, signal) => {
       if (kind(publicationId) !== "dataset")
@@ -91,15 +106,14 @@ export function createLocalApps(
       return value?.kind === "dataset" ? value : null;
     },
     list: (appRoot: string) =>
-      store
-        .list(appRoot)
-        .map((value) =>
-          value.kind === "dataset"
-            ? dataset.describe(value)
-            : value.kind === "collection"
-              ? collection.describe(value)
-              : unconnected.describe(value),
-        ),
+      store.list(appRoot).map((value) => ({
+        ...(value.kind === "dataset"
+          ? dataset.describe(value)
+          : value.kind === "collection"
+            ? collection.describe(value)
+            : unconnected.describe(value)),
+        ...(value.candidate.external ? { external: value.candidate.external } : {}),
+      })),
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, displace);

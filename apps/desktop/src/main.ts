@@ -167,7 +167,10 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
-import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
+import {
+  createLocalOwnerAppPublicationHandler,
+  localOwnerCliCaller,
+} from "./ipc/localOwnerAppPublication";
 import { verifyLocalAppFrontend } from "./workspaces/appFrontendVerifier";
 import { runAppFrontendBrowserVerification } from "./window/appFrontendVerifyBrowser";
 import {
@@ -474,6 +477,11 @@ import {
   createLocalHttpApprovalStore,
   type LocalHttpApprovalStore,
 } from "./workspaces/localHttpApprovalStore";
+import {
+  createLocalAppExternal,
+  loopbackAppExternalTransport,
+  type LocalAppExternalCall,
+} from "./workspaces/localAppExternal";
 import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
 import { readBoundedJson } from "@dohc/service-http";
 import { MAX_HTTP_RESPONSE_BYTES } from "@dohc/workspace-contracts/automations";
@@ -6729,6 +6737,26 @@ async function approveWorkspaceHttpStep(
   }
 }
 
+function localAppExternalFor(workspaceId: string): LocalAppExternalCall {
+  const origin =
+    process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged
+      ? process.env.DOHC_TEST_APP_EXTERNAL_ORIGIN
+      : undefined;
+  return createLocalAppExternal({
+    workspaceId,
+    secrets: localWorkspaceSecrets(),
+    unavailable: () => {
+      const entry = findWorkspace(workspaceId);
+      if (entry === null || entry.shareView !== undefined)
+        return "Apps can call outside services only in your own workspaces.";
+      if (entry.remote !== undefined || entry.pausedRemote !== undefined)
+        return "Apps in synced workspaces can't call outside services yet.";
+      return null;
+    },
+    ...(origin ? { transport: loopbackAppExternalTransport(origin) } : {}),
+  });
+}
+
 function workspaceHttpWebhookExecutorFor(workspaceId: string): AutomationHttpWebhookExecutor {
   const localExecutor = createLocalOutboundWebhookExecutor({
     workspaceId,
@@ -7925,6 +7953,7 @@ const localDatasetHostFor = async (
           if (entry) sendCollectionsUpFor({ ...entry, attachmentId: attachment.attachmentId });
         },
         trashItem: (path) => shell.trashItem(path),
+        callExternal: localAppExternalFor(workspace.workspaceId),
         runtime: {
           launch: createDesktopAppRuntimeLauncher(utilityProcess, true),
           entryPath: join(runtimePath, "child.mjs"),
@@ -11806,7 +11835,7 @@ function registerIpcHandlers(): void {
     personalPublication,
     resolveDatasetRevision,
     resolveDatasetArtifacts,
-    callerKey: (workspaceId) => `local-owner-cli:${workspaceId}`,
+    callerKey: localOwnerCliCaller,
     withWorkspaceOperation: (_caller, workspaceId, work) =>
       workspaceAuthorities.withOperation(workspaceId, work),
   });

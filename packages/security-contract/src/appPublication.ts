@@ -2,6 +2,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+import { parseAppExternalOperations, type AppExternalOperation } from "./appExternal";
 import {
   APP_DATASET_MAX_BINDINGS,
   parseAppDatasetCapability,
@@ -9,6 +10,7 @@ import {
 } from "./dataset";
 export { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+export type { AppExternalOperation } from "./appExternal";
 export {
   parseAppCollectionCreateRequest,
   parseAppCollectionReadQuery,
@@ -63,16 +65,20 @@ export interface AppPublicationCandidate {
   dependencies: string[];
   files: Array<AppPublicationFile & { contentType: string }>;
   capabilities: Array<AppCollectionCapability | AppDatasetCapability>;
+  external?: AppExternalOperation[];
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-function object(value: unknown, keys: string[]): Record<string, unknown> {
+function object(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join() !== [...keys].sort().join()
+    Object.keys(value)
+      .filter((key) => !optional.includes(key))
+      .sort()
+      .join() !== [...keys].sort().join()
   )
     throw new Error("Invalid publication record.");
   return value as Record<string, unknown>;
@@ -116,22 +122,26 @@ export function parseAppPublicationCandidate(
   ) {
     throw new Error("Invalid publication limits.");
   }
-  const row = object(value, [
-    "versionId",
-    "appRoot",
-    "entryPath",
-    "packageMap",
-    "sourceRevision",
-    "sourceDigest",
-    "dependencyLockDigest",
-    "bundleDigest",
-    "buildDigest",
-    "compilerIdentity",
-    "inputs",
-    "dependencies",
-    "files",
-    "capabilities",
-  ]);
+  const row = object(
+    value,
+    [
+      "versionId",
+      "appRoot",
+      "entryPath",
+      "packageMap",
+      "sourceRevision",
+      "sourceDigest",
+      "dependencyLockDigest",
+      "bundleDigest",
+      "buildDigest",
+      "compilerIdentity",
+      "inputs",
+      "dependencies",
+      "files",
+      "capabilities",
+    ],
+    ["external"],
+  );
   if (
     !Array.isArray(row.inputs) ||
     row.inputs.length < 1 ||
@@ -261,6 +271,7 @@ export function parseAppPublicationCandidate(
     dependencies,
     files,
     capabilities,
+    ...(row.external === undefined ? {} : { external: parseAppExternalOperations(row.external) }),
   };
   if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes)
     throw new Error("Publication metadata bound exceeded.");

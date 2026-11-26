@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { parseAppCollectionCapability } from "@dohc/security-contract/app-publication";
 import {
+  APP_EXTERNAL_MAX_OPERATIONS,
+  parseAppExternalOperation,
+} from "@dohc/security-contract/app-external";
+import {
   APP_DATASET_MAX_BINDINGS,
   parseAppDatasetCapability,
 } from "@dohc/security-contract/dataset";
@@ -43,6 +47,14 @@ const OwnerAppCapability = z.unknown().transform((value, context) => {
     return z.NEVER;
   }
 });
+const OwnerAppExternalOperation = z.unknown().transform((value, context) => {
+  try {
+    return parseAppExternalOperation(value);
+  } catch {
+    context.addIssue({ code: "custom", message: "Invalid external operation." });
+    return z.NEVER;
+  }
+});
 const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
   try {
     return parseAppDatasetCapability(value);
@@ -51,6 +63,11 @@ const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
     return z.NEVER;
   }
 });
+const externalOperations = z
+  .array(OwnerAppExternalOperation)
+  .min(1)
+  .max(APP_EXTERNAL_MAX_OPERATIONS)
+  .optional();
 // approved: this device's authority still names the app. active: it can run now. pendingCreates: responses not yet confirmed saved or refused.
 // A row with neither capability is an app that reaches no workspace data.
 const localPublication = {
@@ -60,6 +77,7 @@ const localPublication = {
   sourceRevision: hash,
   approved: z.boolean(),
   active: z.boolean(),
+  external: externalOperations,
 };
 const LocalPublication = z.union([
   z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
@@ -192,6 +210,7 @@ const APP_VERIFY_BROKER_OP = z.enum([
   "backend.attempt",
   "backend.upload",
   "backend.file",
+  "backend.external",
   "collection.list",
   "collection.create",
   "host.copy",
@@ -587,6 +606,7 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
         .optional(),
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
       capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
+      external: externalOperations,
       externalNetwork: z.literal(true),
       local: z.literal(true).optional(),
     })

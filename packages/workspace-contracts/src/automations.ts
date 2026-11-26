@@ -9,6 +9,11 @@ import {
   type Document as YamlDocument,
 } from "js-yaml";
 import { hasPreferredNameControlCharacters } from "./chatIdentityValues";
+import {
+  HTTP_HEADER_NAME_PATTERN,
+  HTTP_HEADER_VALUE_PATTERN,
+  isForbiddenHttpHeader,
+} from "./httpHeaders";
 import { RECORD_ID_FRONTMATTER_KEY } from "./collection";
 import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 import { WORKSPACE_SECRET_NAME_PATTERN, validateSecretHttpUrl } from "./workspaceSecrets";
@@ -186,31 +191,7 @@ export const MAX_HTTP_TOTAL_HEADER_BYTES = 8_192;
 export const MAX_HTTP_BODY_BYTES = 64 * 1024;
 export const MAX_HTTP_RESPONSE_BYTES = 192 * 1024;
 export const AUTOMATION_HTTP_USER_AGENT = "dohc-automation/1";
-export const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/u;
-export const HTTP_HEADER_VALUE_PATTERN = /^[\x20-\x7e]*$/u;
-const FORBIDDEN_HTTP_HEADERS: ReadonlySet<string> = new Set([
-  "host",
-  "connection",
-  "content-length",
-  "transfer-encoding",
-  "cookie",
-  "accept-encoding",
-  "te",
-  "upgrade",
-  "keep-alive",
-  "trailer",
-  "user-agent",
-]);
-
-export function isForbiddenHttpHeader(name: string): boolean {
-  const lower = name.toLowerCase();
-  return (
-    FORBIDDEN_HTTP_HEADERS.has(lower) ||
-    RESERVED_KEYS.has(lower) ||
-    lower.startsWith("proxy-") ||
-    lower.startsWith("x-dohc-")
-  );
-}
+export { HTTP_HEADER_NAME_PATTERN, HTTP_HEADER_VALUE_PATTERN, isForbiddenHttpHeader };
 // Keys that JSON objects reserve. The dataset host refuses an input key or
 // an operation name part that is one, so the file refuses it first.
 const RESERVED_KEYS: ReadonlySet<string> = new Set(["__proto__", "prototype", "constructor"]);

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
-import { createLocalOwnerAppPublicationHandler } from "./localOwnerAppPublication";
+import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
+import {
+  createLocalOwnerAppPublicationHandler,
+  localOwnerCliCaller,
+} from "./localOwnerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -235,6 +239,27 @@ describe("local app publication review", () => {
       null,
     );
   });
+  it("shows an app's outside calls for review here, and refuses them to the CLI", async () => {
+    const h = harness(),
+      [usage] = parseAppExternalDeclaration({
+        usage: {
+          method: "GET",
+          url: "https://api.example.com/usage",
+          secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
+        },
+      }),
+      calling = { ...candidate, capabilities: [], external: [usage!] };
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: calling, files: [] });
+    await expect(h.prepare()).resolves.toMatchObject({ external: [usage] });
+    await expect(
+      h.handler(
+        { action: "prepareLocal", workspaceId: "w", appRoot: "app" },
+        localOwnerCliCaller("w"),
+        h.operation,
+      ),
+    ).rejects.toThrow("Approve it in the dohc window");
+  });
+
   it("lists local apps without share identities and allows cancellation", async () => {
     const h = harness();
     expect(

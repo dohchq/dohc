@@ -15,6 +15,7 @@
     "./dataset-operations": "./src/datasetOperations.ts",
     "./dataset": "./src/dataset.ts",
     "./app-publication": "./src/appPublication.ts",
+    "./app-external": "./src/appExternal.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",
     "./visibility-policy": "./src/visibilityPolicy.ts",

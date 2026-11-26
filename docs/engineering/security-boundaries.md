@@ -536,6 +536,37 @@ refused when the file is read. See the [executor fetch tests](../../packages/aut
 [local executor tests](../../apps/desktop/src/workspaces/localOutboundWebhookExecutor.test.ts),
 and [relay route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
 
+## Apps call outside services only as declared
+
+An app can send a request that carries a workspace secret only as an operation in its
+`app.publish.json` `external` map. The owner's approval binds each operation's method
+(GET or POST), HTTPS host, path, query, fixed headers, body template, typed inputs,
+secret name and header, response limit, and access. The app sends only an operation name
+and typed inputs. Inputs fill whole path segments, query values, or body values, never a
+host, header, or part of a text. A path input can't hold `/`, `.`, or `..`. Changing any
+declared field changes the candidate digest, so it needs a new approval. Until then, the
+app keeps the approved operations.
+
+The host runs the operation. The secret never enters the bundle, the app frame, or the
+renderer. The host reads the secret right before it sends, after the address passes the
+outbound HTTPS checks above. The secret must be an `http-header` secret whose allowed
+hosts include the operation's host. The host refuses an answer that repeats the secret
+in raw, JSON-escaped, URL-encoded, or decoded form. It also refuses an answer that is not
+JSON or is over the operation's limit (at most 512 KiB). Each call has a 10-second
+timeout. The app gets `{ status, data }` and can send that data elsewhere. Approval says
+so.
+
+Only the owner approves outside calls, and only in the desktop window. The CLI and MCP
+doors, staged approval, and Personal apps refuse them, because an agent could otherwise
+approve an app that spends a secret. The desktop runs approved operations for local-only
+workspaces, at most 8 at a time per workspace. Synced workspaces and published apps refuse
+them until the relay runs them with its own secret vault. Publishing never copies a local
+secret to the server.
+
+See the [declaration tests](../../packages/security-contract/src/appExternal.test.ts),
+[declared HTTPS tests](../../packages/service-http/src/declaredHttps.test.ts), and
+[desktop executor tests](../../apps/desktop/src/workspaces/localAppExternal.test.ts).
+
 ## Incoming webhooks
 
 Incoming webhooks accept unauthenticated HTTPS `POST` deliveries at `/sync/hooks/:token`

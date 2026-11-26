@@ -794,6 +794,10 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       );
       deps.assertCurrent();
       input.signal.throwIfAborted();
+      if (preparedApp.candidate.external)
+        throw new Error(
+          "This app calls outside services with a workspace secret, so it can't be staged. Approve it in the dohc window.",
+        );
       const compiledManifest = preparedApp.candidate.inputs.find(
         (entry) => entry.path === manifestPath,
       );
