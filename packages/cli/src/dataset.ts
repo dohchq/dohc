@@ -169,7 +169,7 @@ const DatasetDataGrant = z
   })
   .strict();
 /** The actions each workspace level holds in a Collection by default, chosen under one revision of its rules. */
-export const DatasetWorkspaceDefaults = z
+const DatasetWorkspaceDefaults = z
   .object({
     view: z.array(identity).max(128),
     comment: z.array(identity).max(128),
