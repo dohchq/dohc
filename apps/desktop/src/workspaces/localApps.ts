@@ -1,7 +1,7 @@
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import type { LocalAppExternalCall } from "./localAppExternal";
+import type { LocalAppExternal } from "./localAppExternal";
 import type { LocalAppLaunchBackend } from "./localAppLaunch";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { createLocalCollectionApps } from "./localCollectionApps";
@@ -17,7 +17,7 @@ export function createLocalApps(
   unconnected: ReturnType<typeof createLocalUnconnectedApps>,
   onPublicationChanged?: () => void,
   localBudget?: () => boolean,
-  callExternal?: LocalAppExternalCall,
+  external?: LocalAppExternal,
 ) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
@@ -57,12 +57,14 @@ export function createLocalApps(
       const operation = store
         .row(publicationId, input.authorityRevision)
         .candidate.external?.find((value) => value.name === input.operation);
-      if (!operation || !callExternal)
+      if (!operation || !external)
         throw new AppBackendRuntimeError({
           code: "external_not_approved",
           message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,
         });
-      return callExternal(operation, input.input, signal);
+      return external.call(operation, input.input, signal, () =>
+        kind(publicationId, input.authorityRevision),
+      );
     },
     readBrowserFile: async (publicationId, input, signal) => {
       if (kind(publicationId) !== "dataset")
@@ -85,6 +87,10 @@ export function createLocalApps(
     ...backend,
     async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent?: ApprovalAgent | null) {
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
+      const blocked = candidate.external
+        ? (external?.unavailable() ?? "Apps can call outside services only in your own workspaces.")
+        : null;
+      if (blocked) throw new Error(blocked);
       // Replacing a Collection app first settles the responses it admitted.
       await collection.settleRoot(candidate.appRoot);
       const declared = candidate.capabilities[0];

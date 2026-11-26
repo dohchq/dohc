@@ -139,6 +139,9 @@ function makeThrottledBroker(
     attempt: async () => {
       throw new Error("unused");
     },
+    external: async () => {
+      throw new Error("unused");
+    },
     close: () => undefined,
     dataset: () => client,
   };

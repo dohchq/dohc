@@ -1479,6 +1479,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       } catch {
         throw badRequest("Invalid app approval.");
       }
+      if (candidate.external)
+        throw badRequest(
+          "Apps that call outside services run only on the owner's computer for now.",
+        );
       if (
         candidate.capabilities.length !== 1 ||
         candidate.capabilities[0]!.kind !== "dataset" ||
@@ -2347,6 +2351,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         } catch {
           throw badRequest("Invalid app approval.");
         }
+        if (candidate.external)
+          throw badRequest(
+            "Apps that call outside services run only on the owner's computer for now.",
+          );
         if (
           candidate.capabilities.length === 0 ||
           candidate.capabilities.some((cap) => cap.kind !== "dataset")

@@ -71,7 +71,7 @@ const call = (
     unavailable: () => null,
     transport: transport().value,
     ...options,
-  })(operation!, input, new AbortController().signal);
+  }).call(operation!, input, new AbortController().signal, () => {});
 
 describe("local app outside calls", () => {
   it("sends the declared request with the secret in its header", async () => {
@@ -104,6 +104,23 @@ describe("local app outside calls", () => {
     expect(t.sent).toHaveLength(0);
   });
 
+  it("refuses before sending when the approval ends while the secret is read", async () => {
+    const t = transport();
+    const run = createLocalAppExternal({
+      workspaceId: "ws",
+      secrets: secrets({}).store,
+      unavailable: () => null,
+      transport: t.value,
+    });
+    const ended = () => {
+      throw new Error("This app's approval changed.");
+    };
+    await expect(
+      run.call(operation!, { project: 7 }, new AbortController().signal, ended),
+    ).rejects.toThrow("approval changed");
+    expect(t.sent).toHaveLength(0);
+  });
+
   it("refuses input outside the declaration as the app's refusal", async () => {
     await expect(call({}, { project: "7/../admin" })).rejects.toMatchObject({
       refusal: { code: "external_input" },
@@ -121,13 +138,15 @@ describe("local app outside calls", () => {
     });
     const signal = new AbortController().signal;
     const running = Array.from({ length: LOCAL_APP_EXTERNAL_IN_FLIGHT }, () =>
-      run(operation!, { project: 1 }, signal),
+      run.call(operation!, { project: 1 }, signal, () => {}),
     );
-    await expect(run(operation!, { project: 1 }, signal)).rejects.toMatchObject({
+    await expect(run.call(operation!, { project: 1 }, signal, () => {})).rejects.toMatchObject({
       refusal: { code: "external_busy" },
     });
     open();
     await Promise.all(running);
-    await expect(run(operation!, { project: 1 }, signal)).resolves.toMatchObject({ status: 200 });
+    await expect(run.call(operation!, { project: 1 }, signal, () => {})).resolves.toMatchObject({
+      status: 200,
+    });
   });
 });

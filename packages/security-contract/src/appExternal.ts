@@ -322,7 +322,7 @@ export function parseAppExternalOperation(value: unknown): AppExternalOperation 
     fail(`${what} body is over ${APP_EXTERNAL_MAX_BODY_TEMPLATE_BYTES} bytes.`);
 
   for (const slot of used)
-    if (!params[slot]) fail(`${what} uses {{${slot}}} but doesn't declare it.`);
+    if (!Object.hasOwn(params, slot)) fail(`${what} uses {{${slot}}} but doesn't declare it.`);
   for (const param of Object.keys(params))
     if (!used.has(param)) fail(`${what} declares input "${param}" but never uses it.`);
 

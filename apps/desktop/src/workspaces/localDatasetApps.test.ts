@@ -1,10 +1,12 @@
+import { parseAppExternalDeclaration } from "@dohc/security-contract/app-external";
+import type { LocalAppExternal } from "./localAppExternal";
 import { createHash } from "node:crypto";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -107,7 +109,11 @@ const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files
 async function fixture(
   agentRun?: () => LocalDatasetAgent | null,
   holder: CollectionsHolderCheck = unguardedCollections,
-  { customRead = true, schema = "" } = {},
+  {
+    customRead = true,
+    schema = "",
+    external,
+  }: { customRead?: boolean; schema?: string; external?: LocalAppExternal } = {},
 ) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-"));
   roots.push(workspaceRoot);
@@ -122,6 +128,7 @@ async function fixture(
     capacityBytes: 1024 * 1024,
     compile: compileFixture,
     ...(agentRun ? { agentRun } : {}),
+    ...(external ? { external } : {}),
   });
   hosts.push(host);
   const generated = generateDatasetSources(definition);
@@ -601,6 +608,29 @@ describe("local approved dataset apps", () => {
     const disclosure = f.host.apps.readBrowserFile(admin.publicationId, request);
     await f.host.apps.withdraw(admin.publicationId, admin.authorityRevision);
     await expect(disclosure).rejects.toThrow();
+  });
+
+  it("refuses to approve outside calls where this computer can't make them", async () => {
+    const f = await fixture(undefined, unguardedCollections, {
+      external: {
+        unavailable: () => "Apps in synced workspaces can't call outside services yet.",
+        call: vi.fn(),
+      },
+    });
+    const withCalls = structuredClone(f.app);
+    withCalls.candidate.external = parseAppExternalDeclaration({
+      events: {
+        method: "GET",
+        url: "https://us.posthog.com/api/events/",
+        secret: { name: "POSTHOG_KEY", header: "Authorization" },
+      },
+    });
+    await expect(f.host.apps.activate(withCalls, new AbortController().signal)).rejects.toThrow(
+      "synced workspaces",
+    );
+    expect(f.host.apps.browserPublication(f.published.publicationId).authorityRevision).toBe(
+      f.published.authorityRevision,
+    );
   });
 
   it("rejects altered capabilities and bundle bytes before replacing a working app", async () => {

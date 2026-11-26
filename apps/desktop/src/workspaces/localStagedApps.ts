@@ -397,7 +397,8 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       )
         return null;
       parsed.stageId = stageId;
-      parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS);
+      if (parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS).external)
+        return null;
       if (
         sha256(JSON.stringify(parsed.app.candidate)) !== parsed.app.candidateDigest ||
         computeReviewDigest({

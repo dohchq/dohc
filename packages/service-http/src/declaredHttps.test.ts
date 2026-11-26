@@ -82,9 +82,13 @@ describe("sendDeclaredHttps", () => {
 
   it.each([
     [{ contentType: "text/html", body: "<html>" }, "unexpected_content_type"],
+    [{ contentType: `text/${SECRET}`, body: "<html>" }, "unexpected_content_type"],
     [{ contentType: "application/problem+json", body: "{" }, "invalid_json"],
   ])("refuses an answer that isn't JSON: %j", async (answer, code) => {
-    await expect(send(transport(answer).value)).rejects.toMatchObject({ code });
+    await expect(send(transport(answer).value)).rejects.toMatchObject({
+      code,
+      message: expect.not.stringContaining(SECRET),
+    });
   });
 
   it("names the operation's own limit, and scrubs transport errors", async () => {

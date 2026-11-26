@@ -128,7 +128,7 @@ export async function sendDeclaredHttps(options: {
   if (type !== "application/json" && !/^application\/[a-z0-9.+-]+\+json$/u.test(type))
     throw new DeclaredHttpsError(
       "unexpected_content_type",
-      `The service answered HTTP ${response.status} with ${type || "no content type"}, not JSON.`,
+      `The service answered HTTP ${response.status} without JSON.`,
     );
   let data: unknown;
   try {

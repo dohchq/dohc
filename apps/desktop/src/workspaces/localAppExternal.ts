@@ -16,11 +16,17 @@ import type { LocalWorkspaceSecretStore } from "./localWorkspaceSecretStore";
 
 export const LOCAL_APP_EXTERNAL_IN_FLIGHT = 8;
 
-export type LocalAppExternalCall = (
-  operation: AppExternalOperation,
-  input: unknown,
-  signal: AbortSignal,
-) => Promise<{ status: number; data: unknown }>;
+export interface LocalAppExternal {
+  /** Why this workspace can't use secrets kept on this computer now, or null. */
+  unavailable(): string | null;
+  /** `current` throws once the app's approval is gone. It runs again right before the request is sent. */
+  call(
+    operation: AppExternalOperation,
+    input: unknown,
+    signal: AbortSignal,
+    current: () => void,
+  ): Promise<{ status: number; data: unknown }>;
+}
 
 const refuse = (code: string, message: string) => new AppBackendRuntimeError({ code, message });
 
@@ -28,12 +34,11 @@ const refuse = (code: string, message: string) => new AppBackendRuntimeError({ c
 export function createLocalAppExternal(options: {
   workspaceId: string;
   secrets: LocalWorkspaceSecretStore;
-  /** Why this workspace can't use secrets kept on this computer now, or null. */
   unavailable(): string | null;
   transport?: DeclaredHttpsTransport;
-}): LocalAppExternalCall {
+}): LocalAppExternal {
   let inFlight = 0;
-  return async (operation, input, signal) => {
+  const call: LocalAppExternal["call"] = async (operation, input, signal, current) => {
     let request;
     try {
       request = renderAppExternalRequest(operation, input);
@@ -56,8 +61,6 @@ export function createLocalAppExternal(options: {
         signal,
         ...(options.transport ? { transport: options.transport } : {}),
         secret: async () => {
-          const blocked = options.unavailable();
-          if (blocked) throw refuse("external_unavailable", blocked);
           const name = operation.secret.name;
           if (!options.secrets.canKeep())
             throw refuse(
@@ -77,6 +80,9 @@ export function createLocalAppExternal(options: {
               "external_secret",
               `Secret ${name} isn't allowed for ${operation.host}. Add that website to it in Settings > Secrets.`,
             );
+          const blocked = options.unavailable();
+          if (blocked) throw refuse("external_unavailable", blocked);
+          current();
           signal.throwIfAborted();
           return {
             header: operation.secret.header,
@@ -92,6 +98,7 @@ export function createLocalAppExternal(options: {
       inFlight--;
     }
   };
+  return { unavailable: options.unavailable, call };
 }
 
 /** Sends to a loopback fixture in desktop tests, after the same host check. Never used in a packaged app. */

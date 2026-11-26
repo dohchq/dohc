@@ -480,7 +480,7 @@ import {
 import {
   createLocalAppExternal,
   loopbackAppExternalTransport,
-  type LocalAppExternalCall,
+  type LocalAppExternal,
 } from "./workspaces/localAppExternal";
 import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
 import { readBoundedJson } from "@dohc/service-http";
@@ -6737,7 +6737,7 @@ async function approveWorkspaceHttpStep(
   }
 }
 
-function localAppExternalFor(workspaceId: string): LocalAppExternalCall {
+function localAppExternalFor(workspaceId: string): LocalAppExternal {
   const origin =
     process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged
       ? process.env.DOHC_TEST_APP_EXTERNAL_ORIGIN
@@ -7953,7 +7953,7 @@ const localDatasetHostFor = async (
           if (entry) sendCollectionsUpFor({ ...entry, attachmentId: attachment.attachmentId });
         },
         trashItem: (path) => shell.trashItem(path),
-        callExternal: localAppExternalFor(workspace.workspaceId),
+        external: localAppExternalFor(workspace.workspaceId),
         runtime: {
           launch: createDesktopAppRuntimeLauncher(utilityProcess, true),
           entryPath: join(runtimePath, "child.mjs"),

@@ -333,7 +333,14 @@ function ExternalRows({
         : JSON.stringify(before) !== JSON.stringify(operation)
           ? "Changed"
           : null;
-  const path = operation.path.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, "{$1}");
+  const slots = (text: string) => text.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, "{$1}");
+  const query = Object.entries(operation.query)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  const details = [
+    ...Object.entries(operation.headers).map(([key, value]) => `${key}: ${value}`),
+    ...(operation.body === null ? [] : [JSON.stringify(operation.body, null, 2)]),
+  ];
   return (
     <div
       data-testid="app-access-external"
@@ -358,7 +365,13 @@ function ExternalRows({
           Sends
         </dt>
         <dd className="m-0 min-w-0 break-all font-mono text-[12px] text-ink">
-          {operation.method} {path}
+          {operation.method} {slots(operation.path)}
+          {query ? `?${slots(query)}` : ""}
+          {details.length ? (
+            <pre className="m-0 mt-1 whitespace-pre-wrap text-[11px] text-muted">
+              {slots(details.join("\n"))}
+            </pre>
+          ) : null}
         </dd>
         <dt className="flex items-center gap-2 self-start text-muted">
           <KeyRound size={12} aria-hidden />
