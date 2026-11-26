@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -148,7 +148,11 @@ describe("createMemberAppsActions", () => {
     signal: new AbortController().signal,
     assertCurrent: () => undefined,
   };
-  const actionsAnswering = (answer: (path: string, init: RequestInit) => Response) => {
+  type Capture = (paths: readonly string[]) => Promise<void>;
+  const actionsAnswering = (
+    answer: (path: string, init: RequestInit) => Response,
+    failCapture?: Capture,
+  ) => {
     const sent: Array<{ path: string; body: unknown }> = [];
     const remote = async (_workspace: unknown, options?: { allowPaused: boolean }) => {
       if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
@@ -173,6 +177,7 @@ describe("createMemberAppsActions", () => {
       },
       withVersionLock: (_operation, work) => work(versionId),
       capture: async (_operation, paths) => {
+        if (failCapture) return failCapture(paths);
         captured.push([...paths]);
       },
     });
@@ -183,7 +188,7 @@ describe("createMemberAppsActions", () => {
     versionId = "main";
   });
 
-  const shared = (files: ReturnType<typeof file>[], served = files) =>
+  const shared = (files: ReturnType<typeof file>[], served = files, failCapture?: Capture) =>
     actionsAnswering((path) => {
       if (path.endsWith("/backend/summary"))
         return Response.json({
@@ -201,7 +206,7 @@ describe("createMemberAppsActions", () => {
       return blob
         ? new Response(blob.bytes, { headers: { "content-type": "application/octet-stream" } })
         : Response.json({ error: "missing" }, { status: 404 });
-    });
+    }, failCapture);
   const publicationId = "a".repeat(64);
   const ownedAt = (rootPath: string) => ({
     ...operation,
@@ -302,6 +307,38 @@ describe("createMemberAppsActions", () => {
       ).rejects.toThrow("already has apps/trip");
       expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("kept");
       expect(captured).toEqual([]);
+    });
+
+    it("refuses a folder reached through a link, and writes nothing", async () => {
+      const root = await personalFolder();
+      await mkdir(join(root, "docs"));
+      await symlink(join(root, "docs"), join(root, "apps"), "junction");
+      const { actions, captured } = shared([file("trip/index.html", "x")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("goes through a link");
+      expect(await readdir(join(root, "docs"))).toEqual([]);
+      expect(captured).toEqual([]);
+    });
+
+    it("refuses files whose names differ only by case, before writing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/Logo.svg", "a"), file("trip/logo.svg", "b")]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("differ only by case");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("names the copy when History can't record it", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/index.html", "x")], undefined, async () => {
+        throw new Error("dohc could not capture these files. Reopen the workspace.");
+      });
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("copied the app into apps/trip, but History hasn't recorded it yet.");
+      expect(await readFile(join(root, "apps", "trip", "index.html"), "utf8")).toBe("x");
     });
   });
 

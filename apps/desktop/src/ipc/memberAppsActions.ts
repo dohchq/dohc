@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
@@ -86,6 +86,11 @@ export function promotedAppFiles(folder: string, files: ReadonlyArray<SourceFile
   if (!isShareablePath(folder))
     throw new Error(`${folder} is not a folder dohc can promote an app into. Choose another.`);
   const placed = placeAppSource(folder, files);
+  const names = new Set(placed.map((file) => file.path.normalize("NFC").toLowerCase()));
+  if (names.size !== placed.length)
+    throw new Error(
+      "This app has files whose names differ only by case, which this computer can't keep apart.",
+    );
   const manifest = placed.find((file) => file.rest === MANIFEST);
   if (manifest) {
     const declared = parseAppPublicationDeclaration(manifest.bytes, folder, {
@@ -107,6 +112,16 @@ export async function writePromotedApp(
   folder: string,
   files: ReadonlyArray<{ path: string; bytes: Uint8Array }>,
 ): Promise<void> {
+  let at = rootPath;
+  for (const segment of folder.split("/")) {
+    at = join(at, segment);
+    const entry = await lstat(at).catch(() => null);
+    if (!entry) break;
+    if (entry.isSymbolicLink() || !entry.isDirectory())
+      throw new Error(
+        `${folder} goes through a link or a file, so dohc can't promote an app there. Choose another folder.`,
+      );
+  }
   const parent = posix.dirname(folder);
   if (parent !== ".") await createFolder(rootPath, parent);
   try {
@@ -446,10 +461,16 @@ export function createMemberAppsActions<
           if (versionId !== "main") throw new Error("Switch to Main to promote an app.");
           operation.assertCurrent();
           await writePromotedApp(operation.workspace.rootPath, input.folder, files);
-          await dependencies.capture(
-            operation,
-            files.map((file) => file.path),
-          );
+          await dependencies
+            .capture(
+              operation,
+              files.map((file) => file.path),
+            )
+            .catch((error: unknown) => {
+              throw new Error(
+                `dohc copied the app into ${input.folder}, but History hasn't recorded it yet. ${error instanceof Error ? error.message : ""}`.trim(),
+              );
+            });
         });
         return { folder: input.folder };
       });
