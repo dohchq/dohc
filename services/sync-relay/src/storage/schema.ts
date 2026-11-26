@@ -38,7 +38,7 @@ import {
 } from "./automationWorkspaces";
 import { initializeAccountWorkspaceSchema } from "./accountWorkspaces";
 import { initializeOperationRecordSchema } from "./operationRecords";
-import { initializeChatWakeSchema } from "./chatWakes";
+import { initializeChatAgentListSchema, initializeChatWakeSchema } from "./chatWakes";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import { initializeAccessRuleSchema } from "./accessRules";
 import { initializeAccountEmails } from "./accountEmails";
@@ -1689,6 +1689,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeAccountWorkspaceSchema(db);
   initializeOperationRecordSchema(db);
   initializeChatWakeSchema(db);
+  initializeChatAgentListSchema(db);
   initializePushSchema(db);
   initializePushDeliveries(db);
   initializePushDeviceSchema(db);

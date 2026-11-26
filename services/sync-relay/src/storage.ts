@@ -1296,6 +1296,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return chatWakeStorage.enabledChatRunners(this, input);
   }
 
+  declaredAgentNames(input: { accountId: string; workspaceId: string }) {
+    return chatWakeStorage.declaredAgentNames(this, input);
+  }
+
   chatWakeHead(accountId: string) {
     return chatWakeStorage.chatWakeHead(this, accountId);
   }

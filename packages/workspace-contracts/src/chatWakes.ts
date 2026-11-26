@@ -98,6 +98,13 @@ export interface ChatRunnerDeclaration {
   installId: string;
   computerLabel: string;
   runners: Array<{ agentId: string; displayName: string; enabled: boolean }>;
+  /**
+   * The computer's other agents, which dohc doesn't start, so that with `runners` the relay holds every agent it has
+   * and the phone can name and archive agent chats as this computer does. Null when the computer can't send its list,
+   * which keeps the phone from archiving any agent's chat; absent in a withdrawal. An older relay refuses the field,
+   * and the computer then declares without it.
+   */
+  agents?: Array<{ agentId: string; displayName: string }> | null;
 }
 
 export const ChatRunnersReply = z.strictObject({
