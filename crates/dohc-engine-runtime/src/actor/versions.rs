@@ -13,6 +13,7 @@ use dohc_engine_domain::{
     VersionedTextStore, list_secret_files_keyless,
 };
 use dohc_engine_files::floor::path_collision_key;
+use dohc_engine_files::policy::names_env_template;
 use dohc_engine_files::{
     PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState, disk_spelling,
     may_share_entry, remove_empty_directory_target,
@@ -1018,14 +1019,20 @@ fn plan_secret_switch(
     secret_key: &mut Option<SecretDataKey>,
     holds: &PlacementHolds,
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
-    let target = list_secret_files_keyless(store, workspace_id, target_version_id)?;
+    let target: Vec<_> = list_secret_files_keyless(store, workspace_id, target_version_id)?
+        .into_iter()
+        .filter(|stat| !names_env_template(&stat.path))
+        .collect();
     let target_paths: HashSet<&str> = target.iter().map(|stat| stat.path.as_str()).collect();
     let mut target_case_paths = None;
     let target_holds: HashSet<&str> = target_paths
         .iter()
         .filter_map(|path| holds.get(path).map(|(path, _)| path))
         .collect();
-    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
+    let previous: Vec<_> = list_secret_files_keyless(store, workspace_id, previous_version_id)?
+        .into_iter()
+        .filter(|stat| !names_env_template(&stat.path))
+        .collect();
     let spelling_aliases = case_alias_targets(
         previous.iter().map(|stat| stat.path.as_str()),
         &target_paths,

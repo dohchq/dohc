@@ -157,7 +157,9 @@ pub fn classify_engine_file_path(path: &str) -> PathFloor {
             }
         })
         .collect();
-    if crate::policy::segments_are_secret(&normalized_segments) {
+    if crate::policy::segments_are_secret(&normalized_segments)
+        && !crate::policy::names_env_template(&normalized)
+    {
         return PathFloor::Secret;
     }
     PathFloor::Tracked
@@ -801,6 +803,10 @@ mod tests {
             "environments.md",
             "notes/envelope.md",
             "backup/env.bak",
+            ".env.example",
+            "config/.env.sample ",
+            "apps/web/.ENV.Template.",
+            ".env.example.local",
         ] {
             assert_eq!(
                 classify_engine_file_path(path) == PathFloor::Secret,
