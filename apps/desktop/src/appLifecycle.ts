@@ -74,8 +74,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   workLinks: {
     open(link: WorkLink): Promise<void>;
   };
-  // A dohc://connect link: hold its server for the window that shows it, and
-  // once dohc is running, show that window and tell it.
   connectServer: {
     hold(serverUrl: string): void;
     deliver(): Promise<void>;

@@ -9409,10 +9409,7 @@ export const systemPrivacySettingsOperations = {
   },
 } as const satisfies OperationTable;
 
-// The server account this computer is connected to. Main sends both requests
-// with its own session; the window never sees the session.
-// The server a dohc://connect link named. Only the window the link brought
-// forward gets it, once; any other window reads null.
+// Only the window a dohc://connect link brought forward gets its server, once.
 export const connectServerOperations = {
   takeConnectServerRequest: {
     capabilityId: "cloud.connect.link.take",
@@ -9424,6 +9421,8 @@ export const connectServerOperations = {
   },
 } as const satisfies OperationTable;
 
+// The server account this computer is connected to. Main sends both requests
+// with its own session; the window never sees the session.
 export const serverAccountOperations = {
   previewServerAccountDeletion: {
     capabilityId: "account.delete.preview",

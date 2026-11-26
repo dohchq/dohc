@@ -385,9 +385,7 @@ export function DesktopRoot() {
     };
   }, []);
 
-  // A dohc://connect link's server waits here until the shell or the
-  // manager shows it, so a switch between them cannot lose it. Main gives it
-  // only to the window the link brought forward.
+  // Held here so a switch between the shell and the manager cannot lose it.
   const [connectServerUrl, setConnectServerUrl] = useState<string | null>(null);
   const connectServerShown = useCallback(() => setConnectServerUrl(null), []);
   useEffect(() => {
