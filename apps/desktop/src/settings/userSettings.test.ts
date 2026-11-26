@@ -470,7 +470,7 @@ describe("desktop user settings model", () => {
       [
         "agent-b",
         { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, whileBusy: "wait" },
-        "`whileBusy` must be line or steer.",
+        "`whileBusy` must be line, own-chat, or steer.",
       ],
       [
         "agent-b",

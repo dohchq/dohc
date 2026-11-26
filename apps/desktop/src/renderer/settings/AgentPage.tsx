@@ -248,6 +248,7 @@ type PageError = (message: string, cause?: unknown, retry?: () => Promise<void>)
 
 const WHILE_BUSY = [
   { value: "line", label: "Wait in line" },
+  { value: "own-chat", label: "Right away in its own chat" },
   { value: "steer", label: "Go right away" },
 ] as const;
 const ACCESS_READ_FAILED = "dohc could not check whether T3 Code allows it.";
@@ -548,7 +549,7 @@ function ThreadAgentBoxes(props: {
   const allowed = state !== undefined && state.canKeep && t3CodeAllowed(state);
   // dohc knows the mode only when the person allowed it here, not on T3 Code's page.
   const mode = state?.access ? t3CodeModeName(state.access) : null;
-  const whileBusy = agent.whileBusy ?? "line";
+  const whileBusy = agent.whileBusy ?? "own-chat";
   return (
     <>
       <div data-testid="agent-thread" className={`${BOX} mt-5`}>
@@ -678,11 +679,13 @@ function ThreadAgentBoxes(props: {
           label={
             <>
               While it works
-              {whileBusy === "steer" ? (
+              {whileBusy === "line" ? null : (
                 <span className="mt-1 block text-[12px] text-muted">
-                  Only your own messages go right away. Other people's wait in line.
+                  {whileBusy === "steer"
+                    ? "Only your own messages go right away. Other people's wait in line."
+                    : "Your messages in its own chat go right away. Messages elsewhere wait in line."}
                 </span>
-              ) : null}
+              )}
             </>
           }
         >
