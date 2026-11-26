@@ -289,6 +289,23 @@ describe("account pages", () => {
     expect(open).not.toContain("data-sign-up");
   });
 
+  it("tells a new account its link is on the way without asking to send another", async () => {
+    for (const closedSignUp of [true, false]) {
+      const body = await (
+        await router({ closedSignUp })(get("/account/verify-email?next=%2Fjoin&sent=1"))
+      ).text();
+      expect(body).toContain("<h1>Check your email</h1>");
+      expect(body).toContain(
+        closedSignUp
+          ? "dohc sent you a link to choose your password."
+          : "dohc sent you a link to verify your email.",
+      );
+      expect(body).toContain("Then open your invite link again to join the workspace.");
+      expect(body).toContain('<form id="form" hidden>');
+      expect(body).toContain('<a href="/account/verify-email?next=%2Fjoin">Send a new link</a>');
+    }
+  });
+
   it("tells a person signing up from an invite link to open it again after confirming", async () => {
     for (const closedSignUp of [true, false]) {
       const body = await (

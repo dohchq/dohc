@@ -38,6 +38,9 @@ test("a new account verifies email, approves desktop, denies another device, and
   await page.getByLabel(/^password$/i).fill(password);
   await page.getByRole("button", { name: /create account|sign up/i }).click();
   await expect(page).toHaveURL(/\/account\/verify-email\?next=/);
+  // The link is already on its way. Offering a form here sent a second one.
+  await expect(page.getByRole("heading", { name: "Check your email" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send a new link" })).toBeHidden();
   await expect.poll(() => server.mail.messages.length).toBe(1);
   const verification = mailLinks(server.mail.messages[0]!).find((link) =>
     link.includes("verify-email"),
