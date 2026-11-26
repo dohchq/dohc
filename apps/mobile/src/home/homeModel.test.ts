@@ -90,17 +90,19 @@ describe("Home's rows", () => {
 describe("Home's apps", () => {
   const C = "c".repeat(64);
   const D = "d".repeat(64);
+  const E = "e".repeat(64);
 
-  it("show one row per app, the owner's phone version over its link versions", () => {
+  it("show the owner's phone version over its link versions, keeping approved ones to revoke", () => {
     const groups = appGroups([
       version(A, true),
+      version(E, false),
       version(B, false, "events/signup", true),
       version(C, true, "trip"),
       memberVersion(D),
     ]);
     const ids = groups.map(({ key, versions }) => [key, versions.map((app) => app.publicationId)]);
     expect(ids).toEqual([
-      ["events/signup", [B]],
+      ["events/signup", [B, A]],
       ["trip", [C]],
       [`member:${D}`, [D]],
     ]);

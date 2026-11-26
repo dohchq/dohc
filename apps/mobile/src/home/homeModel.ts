@@ -57,7 +57,7 @@ export function appGroups(apps: readonly PhoneApp[]) {
     const owner = all.filter((app) => app.owner);
     return {
       key,
-      versions: owner.length ? owner : all,
+      versions: owner.length ? [...owner, ...all.filter((app) => !app.owner && app.approved)] : all,
       approvedBefore: all.some((app) => app.approved),
     };
   });
