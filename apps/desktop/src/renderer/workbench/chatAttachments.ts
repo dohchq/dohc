@@ -49,12 +49,19 @@ export async function addChatFiles(
     left += imported.skipped;
     stoppedAt = imported.stop?.file;
   }
+  let failure: unknown;
   for (const file of pasted) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const name = generateAssetFilename(file.name, file.type, bytes);
-    const relativePath = folder === "" ? name : `${folder}/${name}`;
-    await api.writeWorkspaceAsset({ workspaceId, relativePath, bytes });
-    paths.push(relativePath);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const name = generateAssetFilename(file.name, file.type, bytes);
+      const relativePath = folder === "" ? name : `${folder}/${name}`;
+      await api.writeWorkspaceAsset({ workspaceId, relativePath, bytes });
+      paths.push(relativePath);
+    } catch (error) {
+      failure ??= error;
+      left += 1;
+    }
   }
+  if (failure !== undefined && paths.length === 0) throw failure;
   return { paths, left, ...(stoppedAt ? { stoppedAt } : {}) };
 }

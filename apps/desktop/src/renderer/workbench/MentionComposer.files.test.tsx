@@ -140,6 +140,28 @@ describe("MentionComposer files", () => {
     expect(onAddFiles).toHaveBeenCalledWith(expect.any(Function), undefined);
   });
 
+  it("links nothing from a retry that ends after the message was sent", async () => {
+    const onSend = vi.fn();
+    let retryLink: Parameters<AddMessageFiles>[0] | null = null;
+    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
+      retryLink = link;
+    });
+    render(<Harness onAddFiles={onAddFiles} onSend={onSend} />);
+    const composer = screen.getByTestId<HTMLTextAreaElement>("chats-composer");
+    await userEvent.type(composer, "hi");
+    await act(async () => {
+      fireEvent.paste(composer, { clipboardData: transfer([picture]) });
+    });
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    act(() => {
+      retryLink!(["team/late.png"]);
+    });
+
+    expect(composer.value).toBe("hi");
+  });
+
   it("links nothing into another chat's box", async () => {
     const saving = deferred();
     const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {

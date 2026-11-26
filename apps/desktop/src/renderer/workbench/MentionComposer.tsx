@@ -291,6 +291,10 @@ export function MentionComposer(props: {
   const addRequest = useRef(0);
   const latest = useRef(props);
   latest.current = props;
+  const sendNow = useCallback(() => {
+    addRequest.current += 1;
+    latest.current.onSend();
+  }, []);
   const currentFileLoader = useRef(props.loadFileHeadings);
   currentFileLoader.current = props.loadFileHeadings;
   // When we complete a mention we must reposition the caret after React commits
@@ -675,7 +679,7 @@ export function MentionComposer(props: {
       // Matches the shared ChatComposer contract.
       if (isSendKey(event)) {
         event.preventDefault();
-        if (adding === 0) props.onSend();
+        if (adding === 0) sendNow();
         return;
       }
       if (event.key === "Escape" && props.onEscape) {
@@ -685,6 +689,7 @@ export function MentionComposer(props: {
     },
     [
       adding,
+      sendNow,
       catalogQuery,
       catalogRows,
       chooseFile,
@@ -886,7 +891,7 @@ export function MentionComposer(props: {
       }}
       onSubmit={(event) => {
         event.preventDefault();
-        if (adding === 0) props.onSend();
+        if (adding === 0) sendNow();
       }}
       onDragEnter={acceptFileDrag}
       onDragOver={acceptFileDrag}

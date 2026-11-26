@@ -52,6 +52,22 @@ describe("addChatFiles", () => {
     expect(added).toEqual({ paths: [], left: 2 });
   });
 
+  it("keeps the saved files when a later picture fails, and fails when none saved", async () => {
+    const first = new File([bytes(4)], "a.png", { type: "image/png" });
+    const second = new File([bytes(5)], "b.png", { type: "image/png" });
+    const api = fakeBridge(new Map());
+    api.writeWorkspaceAsset
+      .mockImplementationOnce(async () => {})
+      .mockRejectedValueOnce(new Error("disk full"));
+
+    const added = await addChatFiles(api, "ws", "team", [first, second]);
+    expect(added.paths).toHaveLength(1);
+    expect(added.left).toBe(1);
+
+    api.writeWorkspaceAsset.mockRejectedValueOnce(new Error("disk full"));
+    await expect(addChatFiles(api, "ws", "team", [first])).rejects.toThrow("disk full");
+  });
+
   it("asks the import picker when no files are given", async () => {
     const api = fakeBridge(new Map());
     expect(await addChatFiles(api, "ws", "team")).toEqual({
