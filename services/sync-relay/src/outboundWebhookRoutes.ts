@@ -127,6 +127,7 @@ function memberMayEdit(
   grant: ActiveWorkspaceShareGrantRow,
   sourcePaths: readonly string[],
 ): boolean {
+  if (grant.pendingMemberInvite) return false;
   const userId = grant.principalKind === "user" ? grant.principalUserId : null;
   if (userId === null || !isShareAccessValue(grant.access)) return true;
   if (storage.workspaceRoleOf(workspaceId, userId)?.role !== "member") return true;

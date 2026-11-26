@@ -189,6 +189,7 @@ test("builds, holds, approves on relay, checks share impact, and preserves outbo
     await panel.getByRole("button", { name: "New API key", exact: true }).click();
     const editor = page.getByTestId("workspace-secret-editor-dialog");
     await expect(editor.getByTestId("workspace-secret-hosts-input")).toHaveValue("api.resend.com");
+    await expect(editor.getByRole("radio", { name: "Webhook link" })).toBeDisabled();
     await editor.getByTestId("workspace-secret-name-input").fill("RESEND_API_KEY");
     await editor.getByTestId("workspace-secret-value-input").fill(headerSecretValue);
     await shoot(page, editor, "secrets-add-from-builder");

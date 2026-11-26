@@ -2202,21 +2202,27 @@ export class CollectionAutomations {
     return this.everyAutomation().length > 0;
   }
 
-  /** The automations whose webhook steps name each workspace secret, or null until this executor has opened. */
+  /**
+   * The automations whose webhook steps name each workspace secret, including
+   * ones that can't run now, or null until this executor has opened.
+   */
   secretUses(): Map<string, Array<{ collectionPath: string; automationName: string }>> | null {
     if (this.state !== "open") return null;
     const uses = new Map<string, Array<{ collectionPath: string; automationName: string }>>();
-    for (const { collectionPath, automation } of this.everyAutomation()) {
-      const names = new Set(
-        stepsInOrder(automation).flatMap(({ step }) =>
-          step.kind === "http" ? httpStepSecretNames(step) : [],
-        ),
-      );
-      for (const name of names) {
-        uses.set(name, [
-          ...(uses.get(name) ?? []),
-          { collectionPath, automationName: automation.name },
-        ]);
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      for (const entry of indexed.file.entries) {
+        if (entry.status !== "valid") continue;
+        const names = new Set(
+          stepsInOrder(entry.automation).flatMap(({ step }) =>
+            step.kind === "http" ? httpStepSecretNames(step) : [],
+          ),
+        );
+        for (const name of names) {
+          const list = uses.get(name) ?? [];
+          list.push({ collectionPath, automationName: entry.automation.name });
+          uses.set(name, list);
+        }
       }
     }
     return uses;

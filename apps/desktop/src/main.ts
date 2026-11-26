@@ -3244,20 +3244,12 @@ function registerReservedPhysicalWorkspace(
   return binding;
 }
 
-async function deleteLocalWorkspaceSecrets(workspaceId: string): Promise<void> {
-  await localWorkspaceSecrets().clearWorkspace(workspaceId);
-  await localHttpApprovals().clearWorkspace(workspaceId);
-}
-
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
-  retireBinding: (binding, retirement) =>
-    workspaceAuthorities.retireBinding(binding, {
-      ...retirement,
-      finalize: async () => {
-        await retirement.finalize?.();
-        await deleteLocalWorkspaceSecrets(binding.workspaceId);
-      },
-    }),
+  retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
+  removeSecrets: async (workspaceId) => {
+    await localWorkspaceSecrets().clearWorkspace(workspaceId);
+    await localHttpApprovals().clearWorkspace(workspaceId);
+  },
   findWorkspace,
   removeWorkspace: (workspaceId) => {
     removeWorkspace(workspaceId);
@@ -3324,7 +3316,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   register: registerReservedPhysicalWorkspace,
   // Notices then offers the typing the failed join kept.
   remove: async (binding, cleanup) => {
-    await removePhysicalWorkspace(binding, cleanup, undefined, { keepDrafts: true });
+    await removePhysicalWorkspace(binding, cleanup, undefined, { keepLocalData: true });
     notifyNoticesChanged();
   },
   release: (reservation, cleanup) => workspaceAuthorities.releaseReservation(reservation, cleanup),

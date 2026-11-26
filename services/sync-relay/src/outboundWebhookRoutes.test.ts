@@ -489,6 +489,14 @@ describe("outbound webhook relay routes (Model E1)", () => {
     };
     const memberId = members.people.find((person) => person.email === "member@dohc.test")?.memberId;
     expect(memberId).toBeDefined();
+    const pendingInvite = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/members/invites`,
+        jsonBody({ email: "no-account-yet@example.com", workspaceName: "Community" }),
+      ),
+    );
+    expect(pendingInvite.status, await pendingInvite.clone().text()).toBe(200);
     const setMemberLevel = async (level: "view" | "edit") =>
       expect(
         (await handler(request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level }))))

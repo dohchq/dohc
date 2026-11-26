@@ -40,7 +40,7 @@ type EditorMode =
   | { kind: "add"; draft?: SecretDraft }
   | { kind: "replace"; secret: WorkspaceSecretSummary };
 
-export const secretUsageLabel = (usage: WorkspaceSecretUsage) =>
+const secretUsageLabel = (usage: WorkspaceSecretUsage) =>
   usage === "http-header" ? "API key" : "Webhook link";
 
 function SecretUses(props: { uses: readonly WorkspaceSecretUse[] | undefined }) {
@@ -275,7 +275,7 @@ export function SecretEditorDialog(props: {
               label="Secret use"
               testId="workspace-secret-usage"
               value={usage}
-              disabled={saving}
+              disabled={saving || draft !== undefined}
               options={[
                 { value: "http-header", label: secretUsageLabel("http-header") },
                 { value: "http-url", label: secretUsageLabel("http-url") },
