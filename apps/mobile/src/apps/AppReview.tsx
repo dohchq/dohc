@@ -114,7 +114,7 @@ function Review({
   };
   const launch = (app: AppReview) => {
     const opening = apps.open({ ...app, name }, leaving.signal);
-    router.push("/app-run");
+    if (!leaving.signal.aborted && apps.isLive()) router.push("/app-run");
     return opening;
   };
   const approve = () =>
