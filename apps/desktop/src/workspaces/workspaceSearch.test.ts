@@ -92,15 +92,22 @@ describe("buildRipgrepArgs", () => {
 
 describe("toSearchEntries secret floor backstop", () => {
   it("drops matches on secret-classified paths even if globs were out-voted", () => {
-    for (const path of [".env", "config/prod.env", "apps/site/.ENV", "secrets%2eenv"]) {
+    for (const path of [
+      ".env",
+      "config/prod.env",
+      "apps/site/.ENV",
+      "secrets%2eenv",
+      ".env.local",
+      "config/.ENV.Production",
+    ]) {
       const data = parseRipgrepLine(matchEvent({ path, lineText: "API_KEY=super-secret\n" }));
       expect(data, path).not.toBeNull();
       expect(toSearchEntries(data ?? {}), path).toEqual([]);
     }
-    const ordinary = parseRipgrepLine(
-      matchEvent({ path: "environment.md", lineText: "hello needle world\n" }),
-    );
-    expect(toSearchEntries(ordinary ?? {})).toHaveLength(1);
+    for (const path of ["environment.md", ".env.example", "config/.ENV.Template", ".env.sample"]) {
+      const ordinary = parseRipgrepLine(matchEvent({ path, lineText: "hello needle world\n" }));
+      expect(toSearchEntries(ordinary ?? {}), path).toHaveLength(1);
+    }
   });
 });
 

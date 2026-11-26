@@ -7,6 +7,8 @@ import {
 } from "@dohc/workspace-core";
 import type { EngineFilePathClassification } from "@dohc/workspace-contracts/engine";
 
+const ENV_TEMPLATE_NAMES = new Set([".env.example", ".env.template", ".env.sample"]);
+
 export function classifyEngineFilePath(path: string): EngineFilePathClassification {
   const normalized = validateUserWritePath(path);
   if (!normalized.ok || hasIgnoredSegment(path)) return { kind: "ignored" };
@@ -17,7 +19,10 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
   if (segments.some((segment) => segment.toLowerCase() === ".env")) {
     return { kind: "secret" };
   }
-  if (basename.endsWith(".env") || basename.startsWith(".env.")) {
+  if (
+    basename.endsWith(".env") ||
+    (basename.startsWith(".env.") && !ENV_TEMPLATE_NAMES.has(basename))
+  ) {
     return { kind: "secret" };
   }
   return { kind: "tracked" };

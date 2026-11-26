@@ -399,6 +399,21 @@ Every read rechecks current authority and uses bounded history scans.
 See [share reads](../../services/sync-relay/src/shareReadQueries.ts) and the
 [named recipient tests](../../services/sync-relay/src/namedShareHistory.test.ts).
 
+## Protected `.env` files
+
+`.env`, `.env.local`, `.env.production` and every other `.env.*` name, any `*.env` file,
+and everything under a `.env/` folder are protected files. The engine stores them only
+encrypted with `.dohc/engine/secret.key`, and they never reach shares, app publication,
+or agents through dohc. Search never indexes them. The desktop text search can read some
+of them in the main process, but it drops their matches before results reach the window.
+The templates `.env.example`, `.env.template` and `.env.sample` are ordinary files, so a
+project can share its settings without values. The Rust floor
+(`crates/dohc-engine-files/src/policy.rs`) and the TypeScript floor
+(`packages/security-contract/src/enginePathFloor.ts`) decide this the same way, which the
+shared fixtures test. Older builds kept templates as protected files. An engine migration
+deletes those encrypted rows once and leaves the file on disk and its ordinary history
+alone. Sync still skips template operations that older peers send.
+
 ## Workspace secrets and outbound HTTPS
 
 Workspace automation secrets are separate from `.env` secret files. They stay write-only
