@@ -2,7 +2,7 @@ import type { DatasetApproval } from "@dohc/cli/dataset";
 import { SecondaryButton } from "../ui/controls";
 
 function approver(approvedBy: NonNullable<DatasetApproval["approvedBy"]>) {
-  if (approvedBy.name === null) return "a former Admin";
+  if (approvedBy.name === null) return approvedBy.former ? "a former Admin" : "an Admin";
   return `${approvedBy.name} · ${approvedBy.former ? "former Admin" : "Admin"}`;
 }
 
@@ -41,8 +41,9 @@ export function ConfirmApprovalNotice({
     >
       <span className="min-w-0 flex-1">
         {name
-          ? `These rules keep running, approved by ${name}, who is no longer an Admin.`
-          : "These rules keep running, approved by a former Admin."}
+          ? `${name} approved these rules and is no longer an Admin.`
+          : "A former Admin approved these rules."}{" "}
+        They keep running. Confirm to approve them as yourself.
       </span>
       <SecondaryButton
         size="row"

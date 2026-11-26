@@ -923,7 +923,6 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     };
     const migrations = createLocalDatasetMigrations({
       workspaceId,
-      sourceWorkspaceId: workspaceId,
       assertCurrent,
       approvedArtifacts: (datasetId) => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       prepareMigrationCandidate: (input) => host.prepareMigration(owner, input),

@@ -114,7 +114,7 @@ it("sends an Admin's Collection access requests to the owner's workspace, not th
   );
 });
 
-it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them", async () => {
+it("reads who approved a Collection's rules on the owner's workspace, and says when the server shows an Admin nothing", async () => {
   const approval = {
     revisionSha256: "a".repeat(64),
     approvedBy: { role: "admin", name: "Ada", former: false, approvedAtMs: 1 },
@@ -131,9 +131,8 @@ it("sends an Admin's Collection rules to the owner's workspace, and says when th
     role: "admin",
   };
   const datasetId = "00000000-0000-4000-8000-000000000001";
-  const governed = createNamedDatasetData({ ...deps, shareView: joined }).governance();
-  expect(governed.workspaceId).toBe("owner-workspace");
-  expect(await governed.data.approval(datasetId)).toEqual(approval);
+  const governed = createNamedDatasetData({ ...deps, shareView: joined });
+  expect(await governed.approval(datasetId)).toEqual(approval);
   expect(deps.relayJson).toHaveBeenCalledWith(
     deps.credentials,
     `/sync/owner-workspace/datasets/${datasetId}/approval`,
@@ -142,11 +141,11 @@ it("sends an Admin's Collection rules to the owner's workspace, and says when th
   deps.relayJson.mockRejectedValueOnce(
     markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" }),
   );
-  await expect(governed.data.approval(datasetId)).rejects.toThrow(
-    "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.",
+  await expect(governed.approval(datasetId)).rejects.toThrow(
+    "The server didn't show you who approved this Collection's rules. You may no longer be an Admin, or the Owner keeps this Collection on their computer.",
   );
   for (const shareView of [marker, { ...joined, role: "member" }])
-    expect(() => createNamedDatasetData({ ...deps, shareView }).governance()).toThrow(
-      "Open the original workspace to manage this Collection.",
-    );
+    await expect(
+      createNamedDatasetData({ ...deps, shareView }).approval(datasetId),
+    ).rejects.toThrow("Open the original workspace to manage this Collection.");
 });

@@ -1291,435 +1291,6 @@
                     "minLength": 1,
                     "maxLength": 128
                   },
-                  "action": {
-                    "type": "string",
-                    "const": "create"
-                  },
-                  "definition": {}
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "definition"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "revision": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareSchemaChange"
-                  },
-                  "change": {
-                    "oneOf": [
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameCollection"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameTable"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "changeField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "type": {
-                            "type": "string",
-                            "enum": [
-                              "text",
-                              "number",
-                              "checkbox",
-                              "date",
-                              "select",
-                              "multi-select",
-                              "url",
-                              "attachment",
-                              "relation"
-                            ]
-                          },
-                          "required": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "type",
-                          "required"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addButton"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "field": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 128
-                              },
-                              "type": {
-                                "type": "string",
-                                "enum": [
-                                  "text",
-                                  "number",
-                                  "checkbox",
-                                  "date",
-                                  "select",
-                                  "multi-select",
-                                  "url",
-                                  "attachment"
-                                ]
-                              },
-                              "required": {
-                                "type": "boolean"
-                              },
-                              "unique": {
-                                "type": "boolean"
-                              },
-                              "default": {},
-                              "options": {
-                                "minItems": 1,
-                                "maxItems": 100,
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "minLength": 1,
-                                  "maxLength": 128
-                                }
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "type",
-                              "required",
-                              "unique"
-                            ],
-                            "additionalProperties": false
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "field"
-                        ],
-                        "additionalProperties": false
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "revision",
-                  "revisionSha256",
-                  "action",
-                  "change"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareMigration"
-                  },
-                  "migrationPath": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "action"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "migrationPreviewPage"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "after": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "approveMigration"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "approvalDigest": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "changeSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$",
-                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId",
-                  "revisionSha256",
-                  "approvalDigest"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "discardMigration"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
@@ -2103,6 +1674,27 @@
                   },
                   "action": {
                     "type": "string",
+                    "const": "create"
+                  },
+                  "definition": {}
+                },
+                "required": [
+                  "workspaceId",
+                  "action",
+                  "definition"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
                     "const": "prepare"
                   },
                   "descriptorPath": {
@@ -2198,13 +1790,13 @@
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
                     "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
                   },
-                  "action": {
-                    "type": "string",
-                    "const": "confirmApproval"
-                  },
                   "revisionSha256": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "confirmApproval"
                   }
                 },
                 "required": [
@@ -2327,6 +1919,50 @@
                   },
                   "action": {
                     "type": "string",
+                    "const": "prepareMigration"
+                  },
+                  "migrationPath": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "datasetPath",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "datasetPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                  },
+                  "expectedDatasetId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                  },
+                  "action": {
+                    "type": "string",
                     "const": "askToApply"
                   },
                   "migrationPath": {
@@ -2351,6 +1987,370 @@
                   "workspaceId",
                   "datasetPath",
                   "action"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "migrationPreviewPage"
+                  },
+                  "preparationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "after": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "action",
+                  "preparationId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "datasetPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                  },
+                  "expectedDatasetId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "revisionSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "prepareSchemaChange"
+                  },
+                  "change": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "renameCollection"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "renameTable"
+                          },
+                          "tableId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "tableId",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "renameField"
+                          },
+                          "tableId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "fieldId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "tableId",
+                          "fieldId",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "changeField"
+                          },
+                          "tableId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "fieldId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "number",
+                              "checkbox",
+                              "date",
+                              "select",
+                              "multi-select",
+                              "url",
+                              "attachment",
+                              "relation"
+                            ]
+                          },
+                          "required": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "tableId",
+                          "fieldId",
+                          "type",
+                          "required"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "addButton"
+                          },
+                          "tableId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "tableId",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "addField"
+                          },
+                          "tableId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "field": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "number",
+                                  "checkbox",
+                                  "date",
+                                  "select",
+                                  "multi-select",
+                                  "url",
+                                  "attachment"
+                                ]
+                              },
+                              "required": {
+                                "type": "boolean"
+                              },
+                              "unique": {
+                                "type": "boolean"
+                              },
+                              "default": {},
+                              "options": {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                }
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "type",
+                              "required",
+                              "unique"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "tableId",
+                          "field"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "datasetPath",
+                  "revision",
+                  "revisionSha256",
+                  "action",
+                  "change"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "approveMigration"
+                  },
+                  "agentLabel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "preparationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "revisionSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "approvalDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "changeSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "action",
+                  "preparationId",
+                  "revisionSha256",
+                  "approvalDigest"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "discardMigration"
+                  },
+                  "preparationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "action",
+                  "preparationId"
                 ],
                 "additionalProperties": false
               },
@@ -6220,7 +6220,7 @@
     },
     {
       "name": "dohc_collection_access",
-      "description": "As an Admin of a workspace you joined, manage a Collection's access and rules on the workspace's server. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. create makes a new Collection from a dataset.json definition and approves it as you. prepareSchemaChange and prepareMigration prepare a rules change for review, migrationPreviewPage reads more of the records it changes, and approveMigration or discardMigration ends the review. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin, and a Collection kept on the Owner's computer. Ask the person you work for before you narrow anyone's access or approve a rules change.",
+      "description": "As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6458,435 +6458,6 @@
                   "datasetPath",
                   "action",
                   "principalKey"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "create"
-                  },
-                  "definition": {}
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "definition"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "revision": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareSchemaChange"
-                  },
-                  "change": {
-                    "oneOf": [
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameCollection"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameTable"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "changeField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "type": {
-                            "type": "string",
-                            "enum": [
-                              "text",
-                              "number",
-                              "checkbox",
-                              "date",
-                              "select",
-                              "multi-select",
-                              "url",
-                              "attachment",
-                              "relation"
-                            ]
-                          },
-                          "required": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "type",
-                          "required"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addButton"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "field": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 128
-                              },
-                              "type": {
-                                "type": "string",
-                                "enum": [
-                                  "text",
-                                  "number",
-                                  "checkbox",
-                                  "date",
-                                  "select",
-                                  "multi-select",
-                                  "url",
-                                  "attachment"
-                                ]
-                              },
-                              "required": {
-                                "type": "boolean"
-                              },
-                              "unique": {
-                                "type": "boolean"
-                              },
-                              "default": {},
-                              "options": {
-                                "minItems": 1,
-                                "maxItems": 100,
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "minLength": 1,
-                                  "maxLength": 128
-                                }
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "type",
-                              "required",
-                              "unique"
-                            ],
-                            "additionalProperties": false
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "field"
-                        ],
-                        "additionalProperties": false
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "revision",
-                  "revisionSha256",
-                  "action",
-                  "change"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareMigration"
-                  },
-                  "migrationPath": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "action"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "migrationPreviewPage"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "after": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "approveMigration"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "approvalDigest": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "changeSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$",
-                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId",
-                  "revisionSha256",
-                  "approvalDigest"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "discardMigration"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
                 ],
                 "additionalProperties": false
               },
@@ -9127,7 +8698,7 @@
     },
     {
       "name": "dohc_collection_access",
-      "description": "As an Admin of a workspace you joined, manage a Collection's access and rules on the workspace's server. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. create makes a new Collection from a dataset.json definition and approves it as you. prepareSchemaChange and prepareMigration prepare a rules change for review, migrationPreviewPage reads more of the records it changes, and approveMigration or discardMigration ends the review. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin, and a Collection kept on the Owner's computer. Ask the person you work for before you narrow anyone's access or approve a rules change.",
+      "description": "As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -9365,435 +8936,6 @@
                   "datasetPath",
                   "action",
                   "principalKey"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "create"
-                  },
-                  "definition": {}
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "definition"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "revision": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareSchemaChange"
-                  },
-                  "change": {
-                    "oneOf": [
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameCollection"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameTable"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "changeField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "type": {
-                            "type": "string",
-                            "enum": [
-                              "text",
-                              "number",
-                              "checkbox",
-                              "date",
-                              "select",
-                              "multi-select",
-                              "url",
-                              "attachment",
-                              "relation"
-                            ]
-                          },
-                          "required": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "type",
-                          "required"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addButton"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "field": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 128
-                              },
-                              "type": {
-                                "type": "string",
-                                "enum": [
-                                  "text",
-                                  "number",
-                                  "checkbox",
-                                  "date",
-                                  "select",
-                                  "multi-select",
-                                  "url",
-                                  "attachment"
-                                ]
-                              },
-                              "required": {
-                                "type": "boolean"
-                              },
-                              "unique": {
-                                "type": "boolean"
-                              },
-                              "default": {},
-                              "options": {
-                                "minItems": 1,
-                                "maxItems": 100,
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "minLength": 1,
-                                  "maxLength": 128
-                                }
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "type",
-                              "required",
-                              "unique"
-                            ],
-                            "additionalProperties": false
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "field"
-                        ],
-                        "additionalProperties": false
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "revision",
-                  "revisionSha256",
-                  "action",
-                  "change"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareMigration"
-                  },
-                  "migrationPath": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "action"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "migrationPreviewPage"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "after": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "approveMigration"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "approvalDigest": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "changeSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$",
-                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId",
-                  "revisionSha256",
-                  "approvalDigest"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "discardMigration"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
                 ],
                 "additionalProperties": false
               },
@@ -12266,7 +11408,7 @@
     },
     {
       "name": "dohc_collection_access",
-      "description": "As an Admin of a workspace you joined, manage a Collection's access and rules on the workspace's server. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. create makes a new Collection from a dataset.json definition and approves it as you. prepareSchemaChange and prepareMigration prepare a rules change for review, migrationPreviewPage reads more of the records it changes, and approveMigration or discardMigration ends the review. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin, and a Collection kept on the Owner's computer. Ask the person you work for before you narrow anyone's access or approve a rules change.",
+      "description": "As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -12504,435 +11646,6 @@
                   "datasetPath",
                   "action",
                   "principalKey"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "create"
-                  },
-                  "definition": {}
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "definition"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "revision": {
-                    "type": "integer",
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareSchemaChange"
-                  },
-                  "change": {
-                    "oneOf": [
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameCollection"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameTable"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "renameField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "changeField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "fieldId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "type": {
-                            "type": "string",
-                            "enum": [
-                              "text",
-                              "number",
-                              "checkbox",
-                              "date",
-                              "select",
-                              "multi-select",
-                              "url",
-                              "attachment",
-                              "relation"
-                            ]
-                          },
-                          "required": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "fieldId",
-                          "type",
-                          "required"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addButton"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "name": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "name"
-                        ],
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "const": "addField"
-                          },
-                          "tableId": {
-                            "type": "string",
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "field": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 128
-                              },
-                              "type": {
-                                "type": "string",
-                                "enum": [
-                                  "text",
-                                  "number",
-                                  "checkbox",
-                                  "date",
-                                  "select",
-                                  "multi-select",
-                                  "url",
-                                  "attachment"
-                                ]
-                              },
-                              "required": {
-                                "type": "boolean"
-                              },
-                              "unique": {
-                                "type": "boolean"
-                              },
-                              "default": {},
-                              "options": {
-                                "minItems": 1,
-                                "maxItems": 100,
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "minLength": 1,
-                                  "maxLength": 128
-                                }
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "type",
-                              "required",
-                              "unique"
-                            ],
-                            "additionalProperties": false
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "tableId",
-                          "field"
-                        ],
-                        "additionalProperties": false
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "revision",
-                  "revisionSha256",
-                  "action",
-                  "change"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "datasetPath": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
-                  },
-                  "expectedDatasetId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "prepareMigration"
-                  },
-                  "migrationPath": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "datasetPath",
-                  "action"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "migrationPreviewPage"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "after": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "approveMigration"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "approvalDigest": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "changeSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$",
-                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId",
-                  "revisionSha256",
-                  "approvalDigest"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "action": {
-                    "type": "string",
-                    "const": "discardMigration"
-                  },
-                  "preparationId": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "action",
-                  "preparationId"
                 ],
                 "additionalProperties": false
               },

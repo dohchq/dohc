@@ -18,11 +18,7 @@ import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
-import {
-  describeApprovedDataset,
-  type DatasetDefinition,
-  type DatasetRevision,
-} from "@dohc/security-contract/dataset";
+import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateDatasetSchema } from "../workspaces/datasetGenerator";
@@ -808,9 +804,9 @@ it("allows named Collection data actions without opening a local owner store or 
     invoke: vi.fn(),
     upload: vi.fn(),
     file: vi.fn(),
-    governance() {
+    approval: vi.fn(async () => {
       throw datasetOwnerOnlyError();
-    },
+    }),
   };
   const f = fixture(undefined, named as unknown as NamedDatasetData);
   f.workspace.shareView = { shareId: "shared" };
@@ -1969,12 +1965,7 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
   };
   const selection = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
   const owner = fixture(undefined, undefined, undefined, undefined, undefined, {
-    governanceForWorkspace: async () =>
-      ({ workspaceId: "workspace", data: governed }) as unknown as Awaited<
-        ReturnType<
-          NonNullable<Parameters<typeof createDatasetHandler>[0]["governanceForWorkspace"]>
-        >
-      >,
+    governanceForWorkspace: async () => governed,
   });
   expect(await owner.handler("window", { ...selection, action: "approval" })).toEqual({
     kind: "approval",
@@ -2007,7 +1998,7 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
   const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
     throw new Error("Unexpected local store.");
   });
-  const named = { governance: () => ({ workspaceId: "owner-workspace", data: governed }) };
+  const named = { approval: governed.approval };
   const admin = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
   admin.workspace.shareView = { shareId: "s" };
   expect(await admin.handler("window", { ...selection, action: "approval" })).toEqual({
@@ -2022,35 +2013,6 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
     }),
   ).rejects.toThrow("Open the original workspace to manage this Collection.");
   expect(governed.confirmApproval).toHaveBeenCalledTimes(1);
-  expect(localHost).not.toHaveBeenCalled();
-});
-
-it("creates an Admin's Collection on the joined workspace's server from the sources it writes", async () => {
-  const activate = vi.fn(async ({ revision }: { revision: DatasetRevision }) => revision);
-  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
-    throw new Error("Unexpected local store.");
-  });
-  const named = { governance: () => ({ workspaceId: "owner-workspace", data: { activate } }) };
-  const f = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
-  f.workspace.shareView = { shareId: "s" };
-  const definition = {
-    ...f.revision.definition,
-    datasetId: "00000000-0000-4000-8000-000000000042",
-    name: "Guests",
-    schemaPath: "guests/schema.sql",
-    operationsPath: "guests/operations.js",
-  };
-  const result = await f.handler("cli", { workspaceId: "workspace", action: "create", definition });
-  expect(result).toMatchObject({
-    kind: "approved",
-    revision: { datasetId: definition.datasetId, revision: 1 },
-  });
-  const [[{ schemaSql, operationSource }]] = activate.mock.calls as unknown as [
-    [{ schemaSql: string; operationSource: string }],
-  ];
-  expect(f.sources.get("guests/schema.sql")).toBe(schemaSql);
-  expect(f.sources.get("guests/operations.js")).toBe(operationSource);
-  expect(f.sources.has("guests/dataset.json")).toBe(true);
   expect(localHost).not.toHaveBeenCalled();
 });
 

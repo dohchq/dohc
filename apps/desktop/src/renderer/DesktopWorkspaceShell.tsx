@@ -9680,13 +9680,7 @@ function WorkspaceShell(props: {
                                                           onOpenScheduleSettings={() =>
                                                             openSettings("advanced")
                                                           }
-                                                          role={
-                                                            !shareView
-                                                              ? "owner"
-                                                              : membershipRole === "admin"
-                                                                ? "admin"
-                                                                : "member"
-                                                          }
+                                                          owner={!shareView}
                                                           onLifecycleChanged={() => {
                                                             void refreshDatasets().catch((error) =>
                                                               reportShellError(
@@ -10583,7 +10577,7 @@ function WorkspaceShell(props: {
                         {newCollectionFolder !== null && (!shareView || shareViewWritable) ? (
                           <NewCollectionDialog
                             workspaceId={props.workspace.workspaceId}
-                            documentsOnly={!!shareView && membershipRole !== "admin"}
+                            documentsOnly={!!shareView}
                             {...(newCollectionFolder !== ""
                               ? { initialFolder: newCollectionFolder }
                               : {})}

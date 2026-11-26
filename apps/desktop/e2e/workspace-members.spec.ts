@@ -1568,7 +1568,8 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     };
     const approved = await asKai("artifacts");
     const definition = structuredClone(approved.revision.definition);
-    definition.tables[0].fields[0].name = "Guest";
+    definition.tables[0].fields.find((field: { name: string }) => field.name === "Name").name =
+      "Guest";
     const candidate = await asKai("prepare-migration", {
       revision: describeDatasetRevision({
         definition,
@@ -1605,6 +1606,8 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
       );
     }).toPass({ timeout: 120_000, intervals: [2_000] });
     await expect(opened.getByTestId("collection-confirm-approval")).toHaveCount(0);
+    const guest = () => opened.getByRole("columnheader").filter({ hasText: "Guest" });
+    await expect(guest()).toBeVisible();
     await themed(page, "rules-approved-by-admin", async () => {
       const region = await openCollection(page, "Registrations");
       await expect(region.getByTestId("collection-approved-by")).toBeVisible();
@@ -1618,11 +1621,14 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
       timeout: 30_000,
     });
     await expect(opened.getByTestId("collection-approved-by")).toHaveCount(0);
+    await expect(guest()).toBeVisible();
     await themed(page, "rules-confirm-approval", async () => {
       const region = await openCollection(page, "Registrations");
       await expect(region.getByTestId("collection-confirm-approval")).toBeVisible();
+      await expect(region.getByRole("columnheader").filter({ hasText: "Guest" })).toBeVisible();
       return region;
     });
+    await expect(guest()).toBeVisible();
     await opened.getByRole("button", { name: "Confirm approval", exact: true }).focus();
     await page.keyboard.press("Enter");
     await expect(opened.getByTestId("collection-confirm-approval")).toHaveCount(0, {

@@ -58,8 +58,7 @@ import { display, parsePage, type TransactionalRow } from "./transactionalCollec
 import { CollectionApprovedBy, ConfirmApprovalNotice } from "./collections/CollectionApproval";
 
 export interface ConnectedTransactionalCollectionProps {
-  /** An Admin also changes the Collection's rules. A member uses its records. */
-  role?: "owner" | "admin" | "member";
+  owner?: boolean;
   workspaceId: string;
   datasetPath: string;
   tableId: string;
@@ -117,10 +116,8 @@ function ScopedCollection({
   onOpenRecordChange,
   initialRecordPanelWidth,
   onRecordPanelWidthChange,
-  role = "owner",
+  owner = true,
 }: ConnectedTransactionalCollectionProps) {
-  const owner = role === "owner",
-    governs = role !== "member";
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
@@ -423,10 +420,10 @@ function ScopedCollection({
   );
   const approvalIdentity = `collection-approval:${datasetPath}`;
   const approval = useWorkspaceQuery(useWorkspaceSession(), {
-    key: `${datasetPath}\0${datasetId}\0${role}`,
+    key: `${datasetPath}\0${datasetId}`,
     manual: true,
     load: async (): Promise<DatasetApproval | null> => {
-      if (!governs || !datasetId) return null;
+      if (!owner || !datasetId) return null;
       const result = await bridge().dataset({
         workspaceId,
         datasetPath,
@@ -440,7 +437,17 @@ function ScopedCollection({
   useEffect(() => {
     void rereadApproval();
   }, [dataset, rereadApproval]);
-  const toConfirm = owner && approval.value?.needsOwnerConfirmation ? approval.value : null;
+  const approvalRead = approval.error ? null : approval.value;
+  const shownApproval =
+    approvalRead && approvalRead.revisionSha256 === dataset?.revisionSha256 ? approvalRead : null;
+  const refreshedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!approvalRead || !dataset || approvalRead.revisionSha256 === dataset.revisionSha256) return;
+    if (refreshedFor.current === approvalRead.revisionSha256) return;
+    refreshedFor.current = approvalRead.revisionSha256;
+    void refresh();
+  }, [approvalRead, dataset, refresh]);
+  const toConfirm = shownApproval?.needsOwnerConfirmation ? shownApproval : null;
   const [confirming, setConfirming] = useState(false);
   const confirmApproval = async (confirmed: DatasetApproval) => {
     setConfirming(true);
@@ -460,7 +467,7 @@ function ScopedCollection({
         "dohc could not confirm this approval.",
         error,
         () => {
-          void confirmApproval(confirmed);
+          void refresh();
         },
         approvalIdentity,
       );
@@ -569,7 +576,7 @@ function ScopedCollection({
     onNotice: (message, undo) => onNotice?.(message, undo),
     onOpenFile,
     onOpenScheduleSettings,
-    onOpenFields: governs
+    onOpenFields: owner
       ? () => {
           setViewingHistory(false);
           setEditingFields(true);
@@ -785,8 +792,8 @@ function ScopedCollection({
           onOpenSource={() => onOpenFile(datasetPath)}
           copy={copy}
           rulesStatus={
-            !toConfirm && approval.value?.approvedBy?.role === "admin" ? (
-              <CollectionApprovedBy approvedBy={approval.value.approvedBy} />
+            !toConfirm && shownApproval?.approvedBy?.role === "admin" ? (
+              <CollectionApprovedBy approvedBy={shownApproval.approvedBy} />
             ) : undefined
           }
           rulesNotice={
@@ -806,8 +813,8 @@ function ScopedCollection({
           onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
           onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
           onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
-          onReviewSchema={governs && !copy?.offline ? () => setEditingFields(true) : undefined}
-          onAddDateField={governs && !copy?.offline ? () => setEditingFields("date") : undefined}
+          onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+          onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
           onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
           onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
           onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}

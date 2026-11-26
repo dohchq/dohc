@@ -350,7 +350,7 @@ describe("a dataset table's saved views", () => {
   const renderPage = (owner: boolean, onError = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        role={owner ? "owner" : "member"}
+        owner={owner}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1537,7 +1537,7 @@ it.each([
     backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline } });
     render(
       <ConnectedTransactionalCollection
-        role={owner ? "owner" : "member"}
+        owner={owner}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1747,7 +1747,7 @@ it.each([
   });
   render(
     <ConnectedTransactionalCollection
-      role={owner ? "owner" : "member"}
+      owner={owner}
       workspaceId="workspace-a"
       datasetPath="data/dataset.json"
       tableId={id(2)}
@@ -2959,16 +2959,15 @@ describe("relation label resolution through connected resolver", () => {
 });
 
 describe("who approved a Collection's rules", () => {
-  const approval = (approvedBy: object | null, needsOwnerConfirmation = false) => ({
-    kind: "approval",
-    revisionSha256: dataset.revisionSha256,
-    approvedBy,
-    needsOwnerConfirmation,
-  });
-  const renderPage = (role: "owner" | "admin" | "member", onError = vi.fn()) =>
+  const approval = (
+    approvedBy: object | null,
+    needsOwnerConfirmation = false,
+    revisionSha256 = dataset.revisionSha256,
+  ) => ({ kind: "approval", revisionSha256, approvedBy, needsOwnerConfirmation });
+  const renderPage = (owner: boolean, onError = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        role={role}
+        owner={owner}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -2978,76 +2977,103 @@ describe("who approved a Collection's rules", () => {
         onOpenScheduleSettings={vi.fn()}
       />,
     );
-  const answer = (approved: ReturnType<typeof approval>, confirmed?: ReturnType<typeof approval>) =>
-    backend.dataset.mockImplementation(async (input: { action: string }) =>
-      input.action === "approval"
-        ? approved
-        : input.action === "confirmApproval"
-          ? confirmed
-          : { kind: "description", dataset },
-    );
+  const answer = (
+    approved: ReturnType<typeof approval> | (() => never),
+    confirmed?: ReturnType<typeof approval> | (() => never),
+    described: DatasetDescription = dataset,
+  ) =>
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      const result =
+        input.action === "approval"
+          ? approved
+          : input.action === "confirmApproval"
+            ? confirmed
+            : { kind: "description", dataset: { ...described } };
+      return typeof result === "function" ? result() : result;
+    });
+  const formerAda = { role: "admin", name: "Ada", former: true, approvedAtMs: 1 };
 
   it.each([
     [{ role: "admin", name: "Ada", former: false, approvedAtMs: 1 }, "Approved by Ada · Admin"],
-    [
-      { role: "admin", name: "Ada", former: true, approvedAtMs: 1 },
-      "Approved by Ada · former Admin",
-    ],
+    [formerAda, "Approved by Ada · former Admin"],
+    [{ role: "admin", name: null, former: false, approvedAtMs: 1 }, "Approved by an Admin"],
     [{ role: "admin", name: null, former: true, approvedAtMs: 1 }, "Approved by a former Admin"],
   ])("names an Admin who approved them beside the Collection's status", async (by, line) => {
     answer(approval(by));
-    renderPage("admin");
+    renderPage(true);
     expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(line);
     expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
   });
 
-  it("says nothing when the Owner approved them, and asks nothing for a member", async () => {
+  it("says nothing when the Owner approved them, and reads nothing for a member", async () => {
     answer(approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 1 }));
-    renderPage("owner");
+    renderPage(true);
     await waitFor(() =>
       expect(backend.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "approval" })),
     );
     expect(screen.queryByTestId("collection-approved-by")).toBeNull();
     cleanup();
     backend.dataset.mockClear();
-    renderPage("member");
+    renderPage(false);
     await screen.findByLabelText("Collection view state");
     expect(backend.dataset).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: "approval" }),
     );
   });
 
-  it("reads who approved the rules again when an open Collection refreshes", async () => {
-    const current = approval({ role: "admin", name: "Ada", former: false, approvedAtMs: 1 });
-    answer(current);
-    renderPage("owner");
-    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(
-      "Approved by Ada · Admin",
-    );
-    backend.dataset.mockImplementation(async (input: { action: string }) =>
-      input.action === "approval"
-        ? approval({ role: "admin", name: "Ada", former: true, approvedAtMs: 1 }, true)
-        : { kind: "description", dataset: { ...dataset } },
-    );
+  it("stops naming who approved them when reading that again fails", async () => {
+    answer(approval({ role: "admin", name: "Ada", former: false, approvedAtMs: 1 }));
+    renderPage(true);
+    await screen.findByTestId("collection-approved-by");
+    answer(() => {
+      throw Error("offline");
+    });
     fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
-    expect((await screen.findByTestId("collection-confirm-approval")).textContent).toContain(
-      "approved by Ada, who is no longer an Admin.",
+    await waitFor(() => expect(screen.queryByTestId("collection-approved-by")).toBeNull());
+  });
+
+  it("shows the rules the Owner confirms: a newer approval refreshes the Collection first", async () => {
+    const renamed = structuredClone({ ...dataset, revision: 2, revisionSha256: "b".repeat(64) });
+    renamed.tables[0]!.fields[0]!.name = "Guest";
+    const newer = approval(formerAda, true, renamed.revisionSha256);
+    let described = 0;
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      if (input.action === "approval") return newer;
+      described++;
+      return { kind: "description", dataset: described === 1 ? dataset : renamed };
+    });
+    renderPage(true);
+    await waitFor(() => expect(described).toBe(2));
+    expect(await screen.findByTestId("collection-confirm-approval")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Collection view state").getAttribute("data-fields")?.split(",")[0],
+    ).toBe("Guest");
+  });
+
+  it("names no approver and offers no confirmation for rules the page isn't showing", async () => {
+    answer(approval(formerAda, true, "b".repeat(64)));
+    renderPage(true);
+    await waitFor(() =>
+      expect(
+        backend.dataset.mock.calls.filter(([input]) => input.action === "describe"),
+      ).toHaveLength(2),
     );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
     expect(screen.queryByTestId("collection-approved-by")).toBeNull();
   });
 
-  it("lets the Owner confirm rules a former Admin approved, and offers it again when that fails", async () => {
-    const former = approval({ role: "admin", name: "Ada", former: true, approvedAtMs: 1 }, true);
+  it("lets the Owner confirm rules a former Admin approved, and refreshes the Collection when that fails", async () => {
+    const former = approval(formerAda, true);
     const confirmed = approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 2 });
-    answer(former, confirmed);
-    const onError = vi.fn();
-    renderPage("owner", onError);
-    const notice = await screen.findByTestId("collection-confirm-approval");
-    expect(notice.textContent).toContain("approved by Ada, who is no longer an Admin.");
-    backend.dataset.mockImplementation(async (input: { action: string }) => {
-      if (input.action === "confirmApproval") throw Error("offline");
-      return input.action === "approval" ? former : { kind: "description", dataset };
+    answer(former, () => {
+      throw Error("conflict");
     });
+    const onError = vi.fn();
+    renderPage(true, onError);
+    const notice = await screen.findByTestId("collection-confirm-approval");
+    expect(notice.textContent).toBe(
+      "Ada approved these rules and is no longer an Admin. They keep running. Confirm to approve them as yourself.Confirm approval",
+    );
     fireEvent.click(within(notice).getByRole("button", { name: "Confirm approval" }));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const [words, , retry, identity] = onError.mock.calls[0]! as [
@@ -3058,8 +3084,21 @@ describe("who approved a Collection's rules", () => {
     ];
     expect(words).toBe("dohc could not confirm this approval.");
     expect(identity).toBe("collection-approval:data/dataset.json");
+    backend.dataset.mockClear();
+    answer(former, confirmed);
+    act(() => retry());
+    await waitFor(() =>
+      expect(backend.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "describe" })),
+    );
+    expect(backend.dataset).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "confirmApproval" }),
+    );
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
     answer(confirmed, confirmed);
-    retry();
     await waitFor(() => expect(screen.queryByTestId("collection-confirm-approval")).toBeNull());
     expect(backend.dataset).toHaveBeenCalledWith(
       expect.objectContaining({
