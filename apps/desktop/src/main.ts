@@ -596,6 +596,7 @@ import {
   workspaceSyncPauseStatus,
   type WorkspaceSyncPause,
 } from "@dohc/workspace-contracts/workspace-sync";
+import { isSharedWithMePath } from "@dohc/workspace-contracts/workspace-paths";
 import { syncPauseFor } from "./workspaces/syncPauseFor";
 import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
 import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
@@ -921,7 +922,8 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import { readFolderAppWorkspaceSources } from "./workspaces/folderAppWorkspaceSources";
 import { createFolderAppDetection } from "./workspaces/folderAppDetection";
-import { createOwnedSiteCatalog, listOwnedSiteRoots } from "./workspaces/ownedSiteCatalog";
+import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
+import { listSiteRoots } from "./workspaces/sitePackage";
 import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
 import { resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
@@ -4481,10 +4483,12 @@ async function withEngineAdapter<T>(
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
 const workspaceConnections = createWorkspaceGraphConnections<RegistryEntry>({
   withAdapter: withEngineAdapter,
-  apps: (workspace) =>
-    withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
-      listOwnedSiteRoots(operation.workspace.rootPath, ownedWorkspaceReadsFor(operation.workspace)),
-    ),
+  apps: async ({ rootPath }) =>
+    listSiteRoots(rootPath, {
+      files: (await workspaceFilesWorker.list(rootPath)).files.filter(
+        (file) => !isSharedWithMePath(file.path),
+      ),
+    }),
   approvals: (workspace) => readLocalAppApprovals(workspace.rootPath),
   groups: async (workspace) =>
     (await linkedChatStoreFor(workspace).listChannels({ workspaceId: workspace.workspaceId })).map(

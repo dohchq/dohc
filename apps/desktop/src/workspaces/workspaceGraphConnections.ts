@@ -111,7 +111,10 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       deps.approvals(workspace),
       deps.groups(workspace),
     ]);
-    const signature = createHash("sha256").update(JSON.stringify([versionId, approvals, groups]));
+    const mountsCovered = !workspace.shareMounts?.length;
+    const signature = createHash("sha256").update(
+      JSON.stringify([versionId, approvals, groups, mountsCovered]),
+    );
     const collectionFolders = new Set(
       files
         .filter((file) => posix.basename(file.path) === "collection.yaml")
@@ -305,23 +308,20 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       });
       const approval = approvals.find((entry) => entry.appRoot === app.root);
       const manifest = manifests[index];
-      const requested =
-        approval && approval.manifestSha256 === shas.get(join(app.root, "app.publish.json"))
-          ? []
-          : [
-              ...(manifest?.collection ? [`collection:${manifest.collection.collectionPath}`] : []),
-              ...(manifest?.dataset ? [`dataset:${manifest.dataset.datasetPath}`] : []),
-              ...(manifest?.datasets ?? []).map(
-                (entry) => `dataset:${entry.reference.datasetPath}`,
-              ),
-            ].filter((target) => nodes.has(target));
-      for (const target of approval?.targets ?? []) {
-        const node = target.startsWith("dataset-id:")
+      const unchanged = approval?.manifestSha256 === shas.get(join(app.root, "app.publish.json"));
+      const approved = (approval?.targets ?? []).map((target) =>
+        target.startsWith("dataset-id:")
           ? datasetIds.get(target.slice("dataset-id:".length))
-          : target;
+          : target,
+      );
+      const requested = [
+        ...(manifest?.collection ? [`collection:${manifest.collection.collectionPath}`] : []),
+        ...(manifest?.dataset ? [`dataset:${manifest.dataset.datasetPath}`] : []),
+        ...(manifest?.datasets ?? []).map((entry) => `dataset:${entry.reference.datasetPath}`),
+      ].filter((target) => nodes.has(target) && !(unchanged && approved.includes(target)));
+      for (const node of approved)
         if (node && nodes.has(node) && !requested.includes(node))
           edge({ source: id, target: node, kind: "app-uses-data", approval: "approved" });
-      }
       for (const target of requested)
         edge({ source: id, target, kind: "app-uses-data", approval: "requested" });
     });
@@ -331,13 +331,10 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       nodes: [...nodes.values()]
         .map((node) => ({ ...node, title: cutText(node.title, 200) }))
         .sort((a, b) => byText(a.id, b.id)),
-      edges: [...edges]
-        .sort(([a], [b]) => byText(a, b))
-        .map(([, value]) => value)
-        .filter((value) => nodes.has(value.target) || value.kind === "automation-runs-file"),
+      edges: [...edges].sort(([a], [b]) => byText(a, b)).map(([, value]) => value),
       records: records.sort((a, b) => byText(a.collection, b.collection)),
       complete,
-      mountsCovered: !workspace.shareMounts?.length,
+      mountsCovered,
     });
     cache.set(workspaceId, { key, value });
     return value;

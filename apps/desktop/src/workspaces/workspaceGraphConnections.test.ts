@@ -250,6 +250,31 @@ it("shows every Dataset an app was approved for, until its manifest changes", as
   ]);
 });
 
+it("marks a manifest's Dataset requested when another Dataset took the approved one's place", async () => {
+  const files: Record<string, string> = {
+    ...FILES,
+    "Ledger/dataset.json": dataset(30, "Ledger", "New ledger"),
+    "Moved/dataset.json": dataset(10, "Moved", "Ledger"),
+  };
+  const { reader, entry, approvals } = workspace(files);
+  approvals.splice(0, 1, {
+    appRoot: "apps/board",
+    targets: [`dataset-id:${uuid(10)}`],
+    manifestSha256: createHash("sha256")
+      .update(files["apps/board/app.publish.json"]!)
+      .digest("hex"),
+  });
+  const result = await reader.connections(entry);
+  expect(
+    result.edges
+      .filter((edge) => edge.kind === "app-uses-data")
+      .map((edge) => [edge.target, edge.approval]),
+  ).toEqual([
+    ["dataset:Ledger/dataset.json", "requested"],
+    ["dataset:Moved/dataset.json", "approved"],
+  ]);
+});
+
 it("cuts a long title so the answer stays valid", async () => {
   const { reader, entry, adapter } = workspace(FILES);
   adapter.getCollection.mockResolvedValue({
@@ -296,6 +321,13 @@ it("reuses the answer until a structural file, a record, or an approval changes"
   approvals.splice(0);
   await reader.connections(entry);
   expect(adapter.listCollections).toHaveBeenCalledTimes(4);
+});
+
+it("reports mounted shares as uncovered once one is added", async () => {
+  const { reader, entry } = workspace(FILES);
+  expect((await reader.connections(entry)).mountsCovered).toBe(true);
+  const mounted = { ...entry, shareMounts: [{}] } as unknown as RegistryEntry;
+  expect((await reader.connections(mounted)).mountsCovered).toBe(false);
 });
 
 it("cuts an answer over 64 KiB to whole nodes and reports it incomplete", () => {
