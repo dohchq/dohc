@@ -110,6 +110,10 @@ async function computerWithApp(latencyMs = 0) {
       workspaceRoot,
       compile: createDatasetFixtureCompiler(),
       collectionsServer: () => server,
+      external: {
+        unavailable: () => null,
+        call: () => Promise.reject(new Error("Sent from this computer.")),
+      },
     });
     cleanups.push(() => host.close());
     return host;
@@ -744,6 +748,43 @@ it("tags 404 not_found responses on workspace local-apps withdrawals so retries 
     caught = error;
   }
   expect(isDatasetServerNotFound(caught)).toBe(true);
+});
+
+it("withdraws an app's outside calls on the server when a version that uses a Collection replaces it", async () => {
+  const f = await computerWithApp();
+  const manifest = f.files.get("app/app.publish.json")!;
+  const { dataset: _, ...unconnected } = JSON.parse(manifest) as Record<string, unknown>;
+  f.files.set(
+    "app/app.publish.json",
+    JSON.stringify({
+      ...unconnected,
+      external: {
+        events: {
+          method: "GET",
+          url: "https://us.posthog.com/api/events/",
+          secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+        },
+      },
+    }),
+  );
+  const outside = await f.host.apps.activate(await f.prepareApp(), new AbortController().signal);
+  await expect(
+    f.host.apps.external!(
+      outside.publicationId,
+      { authorityRevision: outside.authorityRevision, operation: "events", input: {} },
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({ refusal: { code: "external_unavailable" } });
+  const onServer = () =>
+    f.relay.storage.db
+      .prepare(
+        "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+      )
+      .get(outside.publicationId)?.candidate;
+  expect(onServer()).toContain("us.posthog.com");
+  f.files.set("app/app.publish.json", manifest);
+  await f.host.apps.activate(await f.prepareApp(), new AbortController().signal);
+  await expect.poll(onServer).toBe("");
 });
 
 it("sends a synced workspace's outside call through its server, which adds the secret, and withdraws the app there too", async () => {

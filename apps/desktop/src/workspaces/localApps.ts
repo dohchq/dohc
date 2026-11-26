@@ -33,7 +33,8 @@ export function createLocalApps(
   };
   // Ending or replacing a Dataset app's authority ends its binding in the same commit.
   const displace = (displaced: LocalAppRow | undefined, commit: () => void) =>
-    displaced?.kind === "dataset" || (displaced?.candidate.external && onServer?.())
+    displaced?.kind === "dataset" ||
+    (displaced?.kind === "unconnected" && displaced.candidate.external && onServer?.())
       ? dataset.withdrawBinding(displaced, commit)
       : commit();
   const backend: LocalAppLaunchBackend = {

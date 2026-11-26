@@ -1180,7 +1180,8 @@ function PublicationDialog(
       ? (approval.external ?? null)
       : (localCandidate?.external ?? null);
   const approving = busy === "approve" || candidateState === "loading";
-  const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
+  const canApprove =
+    !!localCandidate && candidateState === "idle" && synced !== null && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
   // the server does not publish apps here, or the sync status reports the server unreachable. Any other failure keeps
   // the label with one line and Try again, which stays while it reloads. Publishing on a link never needs approval here.

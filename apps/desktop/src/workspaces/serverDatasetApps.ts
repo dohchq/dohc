@@ -434,9 +434,11 @@ export function createServerDatasetApps(options: {
             agent,
           },
           signal,
-          (existing, _displaced, commit) => {
+          (existing, displaced, commit) => {
             commit();
             if (existing && existing.publicationId !== publicationId) withdraw(existing);
+            if (displaced?.kind === "unconnected" && displaced.candidate.external)
+              withdraw(displaced);
           },
         );
       });

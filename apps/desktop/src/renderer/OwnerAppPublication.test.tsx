@@ -1080,6 +1080,18 @@ describe("owner app publication", () => {
       ).slice(1);
     const dialog = () => screen.queryByTestId("app-publication-dialog");
 
+    it("waits to approve until it knows whether the workspace syncs", async () => {
+      let status!: (value: CloudStatusResult) => void;
+      api.cloudStatus.mockReturnValue(new Promise((resolve) => (status = resolve)));
+      api.publishOwnerApp.mockImplementation(local());
+      renderLocal();
+      await openLocal();
+      await waitFor(() => expect(actions("prepareLocal")).toHaveLength(1));
+      await expect(ready()).rejects.toThrow();
+      status({ connected: true, workspaceSynced: true });
+      await ready();
+    });
+
     it("asks for a first approval, shows what the app reaches, and approves and opens it", async () => {
       const onLocalChange = vi.fn();
       api.publishOwnerApp.mockImplementation(local());
