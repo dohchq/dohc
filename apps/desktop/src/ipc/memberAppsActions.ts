@@ -4,6 +4,8 @@ import { dirname, join, posix } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import {
   MEMBER_APP_SOURCE_MAX_BYTES,
   MemberAppInspectResult,
@@ -24,6 +26,7 @@ type AppsOperation<Workspace> = {
 };
 type Remote<Credentials> = Promise<{ credentials: Credentials; credentialGeneration: number }>;
 
+const mebibytes = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const PERSONAL_ONLY = "Open a workspace you joined to share or copy Member apps.";
 const RATE_LIMITED_TRIES = 8;
@@ -86,11 +89,27 @@ export function promotedAppFiles(folder: string, files: ReadonlyArray<SourceFile
   if (!isShareablePath(folder))
     throw new Error(`${folder} is not a folder dohc can promote an app into. Choose another.`);
   const placed = placeAppSource(folder, files);
-  const names = new Set(placed.map((file) => file.path.normalize("NFC").toLowerCase()));
-  if (names.size !== placed.length)
-    throw new Error(
-      "This app has files whose names differ only by case, which this computer can't keep apart.",
-    );
+  const seen = new Map<string, boolean>();
+  for (const file of placed) {
+    if (file.bytes.byteLength > MAX_VERSIONED_BINARY_FILE_BYTES)
+      throw new Error(
+        `${file.rest} is ${mebibytes(file.bytes.byteLength)} MiB. dohc promotes files up to 5 MiB.`,
+      );
+    if (!validateUserMaterializePath(file.path, { platform: process.platform }).ok)
+      throw new Error(
+        `${file.rest} has a name this computer can't save, so dohc can't promote this app.`,
+      );
+    const parts = file.path.normalize("NFC").toLowerCase().split("/");
+    parts.forEach((_, index) => {
+      const key = parts.slice(0, index + 1).join("/");
+      const isFile = index === parts.length - 1;
+      if (seen.has(key) && (isFile || seen.get(key)))
+        throw new Error(
+          "This app has names that differ only by case, which this computer can't keep apart.",
+        );
+      seen.set(key, isFile);
+    });
+  }
   const manifest = placed.find((file) => file.rest === MANIFEST);
   if (manifest) {
     const declared = parseAppPublicationDeclaration(manifest.bytes, folder, {

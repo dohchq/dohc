@@ -276,8 +276,10 @@ of a synced workspace they own. Promote copies the source into a new workspace
 folder and publishes nothing. The desktop downloads every file and checks its
 digest before it writes any of them. It refuses an app that declares outside
 calls or reads files outside its folder, a folder that isn't shareable, such as
-`.env` or anything under `.dohc`, a folder reached through a link, and a folder
-that already exists. It writes under the version lock, creates each file
+`.env` or anything under `.dohc`, a folder reached through a link, a folder
+that already exists, and files the workspace can't keep: over 5 MiB, or with
+names that clash by case or that the computer can't save. It checks all of this
+before it writes anything. It writes under the version lock, creates each file
 exclusively and never deletes what it wrote. Opening the copy doesn't start a
 preview that runs its code. The copy runs for no one until the Owner publishes
 it through the same Review app as any official app, which shows what it can

@@ -330,6 +330,39 @@ describe("createMemberAppsActions", () => {
       expect(await readdir(root)).toEqual([]);
     });
 
+    it("refuses a file and a folder whose names differ only by case, before writing", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([
+        file("trip/assets.js", "a"),
+        file("trip/Assets.js/logo.svg", "b"),
+      ]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("differ only by case");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it("refuses a file larger than History keeps, naming its size", async () => {
+      const root = await personalFolder();
+      const { actions } = shared([file("trip/photo.txt", "x".repeat(6 * 1024 * 1024))]);
+      await expect(
+        actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+      ).rejects.toThrow("photo.txt is 6.0 MiB. dohc promotes files up to 5 MiB.");
+      expect(await readdir(root)).toEqual([]);
+    });
+
+    it.runIf(process.platform === "win32")(
+      "refuses a name Windows can't save, before writing",
+      async () => {
+        const root = await personalFolder();
+        const { actions } = shared([file("trip/index.html", "x"), file("trip/nul.md", "y")]);
+        await expect(
+          actions.promote(ownedAt(root), { publicationId, folder: "apps/trip" }),
+        ).rejects.toThrow("nul.md");
+        expect(await readdir(root)).toEqual([]);
+      },
+    );
+
     it("names the copy when History can't record it", async () => {
       const root = await personalFolder();
       const { actions } = shared([file("trip/index.html", "x")], undefined, async () => {
