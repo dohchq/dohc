@@ -164,7 +164,11 @@ import { publishAboutConversation, type AboutConversationEntry } from "./aboutCo
 import { ShareRowMark } from "./shareRowMark";
 import { nextInvitationList, type InvitationLists } from "./invitationOutcome";
 import type { PresenceTransport } from "../collab/presenceChannel";
-import type { ActorPresentation, PresenceScopeInput } from "../../ipc/bridgeContract";
+import {
+  CHAT_FILE_REFERENCES_MAX,
+  type ActorPresentation,
+  type PresenceScopeInput,
+} from "../../ipc/bridgeContract";
 import {
   CHAT_AGENT_PRESENCE_TOPIC,
   resolveAgentPresenceActivity,
@@ -2816,7 +2820,11 @@ export function ChatsView(props: {
     const add: AddMessageFiles = async (link, files) => {
       try {
         const added = await addChatFiles(bridge(), workspaceId, channelFolder, files);
-        link(added.paths);
+        const unlinked = link(added.paths);
+        if (unlinked > 0)
+          reportError.current(
+            `A message links at most ${CHAT_FILE_REFERENCES_MAX} files. dohc saved ${unlinked} more in ${channelFolder === "" ? "the workspace folder" : channelFolder} without linking them.`,
+          );
         if (added.stoppedAt) reportError.current(`dohc could not add ${added.stoppedAt}.`);
         else if (added.left > 0)
           reportError.current(

@@ -24,6 +24,7 @@ import {
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  extractChatFileReferences,
   formatChatFileReferenceToken,
   matchMentionCandidates,
   type MentionCandidate,
@@ -34,7 +35,11 @@ import {
   type AgentAddressedOffer,
   type AgentRosterPick,
 } from "../offers/agentAddressed";
-import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import {
+  CHAT_FILE_REFERENCES_MAX,
+  type ActorPresentation,
+  type WorkspaceHeadingRecord,
+} from "../../ipc/bridgeContract";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation } from "./actorPresentation";
@@ -82,7 +87,7 @@ export interface MentionComposerHandle {
 }
 
 export type AddMessageFiles = (
-  link: (paths: readonly string[]) => void,
+  link: (paths: readonly string[]) => number,
   files?: readonly File[],
 ) => Promise<void>;
 
@@ -670,7 +675,7 @@ export function MentionComposer(props: {
       // Matches the shared ChatComposer contract.
       if (isSendKey(event)) {
         event.preventDefault();
-        props.onSend();
+        if (adding === 0) props.onSend();
         return;
       }
       if (event.key === "Escape" && props.onEscape) {
@@ -679,6 +684,7 @@ export function MentionComposer(props: {
       }
     },
     [
+      adding,
       catalogQuery,
       catalogRows,
       chooseFile,
@@ -733,20 +739,27 @@ export function MentionComposer(props: {
     openMenuFromCaret();
   };
 
-  useEffect(() => {
-    addRequest.current += 1;
-    setAdding(0);
-  }, [props.composerId, props.onAddFiles]);
+  useEffect(
+    () => () => {
+      addRequest.current += 1;
+      setAdding(0);
+    },
+    [props.composerId, props.onAddFiles],
+  );
 
   const linkFiles = (request: number) => (paths: readonly string[]) => {
-    if (request !== addRequest.current || paths.length === 0) return;
+    if (request !== addRequest.current) return 0;
     const { value, onChange } = latest.current;
+    const room = CHAT_FILE_REFERENCES_MAX - extractChatFileReferences(value).length;
+    const linked = paths.slice(0, Math.max(0, room));
+    if (linked.length === 0) return paths.length;
     const at = Math.min(textareaRef.current?.selectionEnd ?? value.length, value.length);
     const before = value.slice(0, at);
-    const links = paths.map((path) => formatChatFileReferenceToken({ path })).join(" ");
+    const links = linked.map((path) => formatChatFileReferenceToken({ path })).join(" ");
     const text = `${before === "" || /\s$/u.test(before) ? "" : " "}${links} `;
     pendingCaret.current = at + text.length;
     onChange(`${before}${text}${value.slice(at)}`);
+    return paths.length - linked.length;
   };
 
   const addFiles = (files?: readonly File[]) => {
@@ -870,7 +883,7 @@ export function MentionComposer(props: {
       data-dropping={dropping || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        props.onSend();
+        if (adding === 0) props.onSend();
       }}
       onDragEnter={acceptFileDrag}
       onDragOver={acceptFileDrag}
@@ -1236,11 +1249,8 @@ export function MentionComposer(props: {
                 data-testid={`${props.testIdPrefix}-add-files`}
                 aria-label="Add files"
                 title="Add files"
-                tabIndex={-1}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  addFiles();
-                }}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => addFiles()}
                 className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
               >
                 <Paperclip size={14} strokeWidth={1.9} aria-hidden />

@@ -5,10 +5,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { MentionComposer, type AddMessageFiles } from "./MentionComposer";
 
-function Harness(props: { onAddFiles?: AddMessageFiles; composerId?: string }) {
-  const [value, setValue] = useState("");
+function Harness(props: {
+  onAddFiles?: AddMessageFiles;
+  composerId?: string;
+  initial?: string;
+  composerKey?: string;
+  onSend?: () => void;
+}) {
+  const [value, setValue] = useState(props.initial ?? "");
   return (
     <MentionComposer
+      key={props.composerKey}
       testIdPrefix="chats"
       composerId={props.composerId ?? "chats-composer"}
       value={value}
@@ -18,7 +25,7 @@ function Harness(props: { onAddFiles?: AddMessageFiles; composerId?: string }) {
       candidates={[]}
       onAddFiles={props.onAddFiles}
       onChange={setValue}
-      onSend={() => {}}
+      onSend={props.onSend ?? (() => {})}
     />
   );
 }
@@ -49,12 +56,13 @@ afterEach(() => {
 
 describe("MentionComposer files", () => {
   it("links pasted files where the caret is, and holds Send while they save", async () => {
+    const onSend = vi.fn();
     const saving = deferred();
     const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
       await saving.promise;
       link(["team/image-1.png", "team/My notes.pdf"]);
     });
-    render(<Harness onAddFiles={onAddFiles} />);
+    render(<Harness onAddFiles={onAddFiles} onSend={onSend} />);
     const composer = screen.getByTestId<HTMLTextAreaElement>("chats-composer");
     await userEvent.type(composer, "look at this");
 
@@ -63,6 +71,9 @@ describe("MentionComposer files", () => {
     expect(onAddFiles).toHaveBeenCalledWith(expect.any(Function), [picture]);
     expect(screen.getByTestId("chats-adding-files")).toBeTruthy();
     expect(screen.getByTestId<HTMLButtonElement>("chats-send").disabled).toBe(true);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    fireEvent.submit(composer.closest("form")!);
+    expect(onSend).not.toHaveBeenCalled();
     await act(async () => {
       saving.resolve();
       await saving.promise;
@@ -82,7 +93,9 @@ describe("MentionComposer files", () => {
   });
 
   it("links dropped files", async () => {
-    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => link(["clip.mp4"]));
+    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
+      link(["clip.mp4"]);
+    });
     render(<Harness onAddFiles={onAddFiles} />);
     const composer = screen.getByTestId<HTMLTextAreaElement>("chats-composer");
     const form = composer.closest("form")!;
@@ -104,7 +117,9 @@ describe("MentionComposer files", () => {
     expect(screen.queryByTestId("chats-add")).toBeNull();
     unmount();
 
-    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => link(["notes.txt"]));
+    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
+      link(["notes.txt"]);
+    });
     render(<Harness onAddFiles={onAddFiles} />);
     await userEvent.click(screen.getByTestId("chats-add"));
     await userEvent.click(await screen.findByTestId("chats-add-files"));
@@ -132,5 +147,44 @@ describe("MentionComposer files", () => {
 
     expect(screen.getByTestId<HTMLTextAreaElement>("chats-composer").value).toBe("");
     expect(screen.queryByTestId("chats-adding-files")).toBeNull();
+  });
+
+  it("links nothing after its box is replaced by another thread's", async () => {
+    const saving = deferred();
+    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
+      await saving.promise;
+      link(["team/image-1.png"]);
+    });
+    const { rerender } = render(<Harness composerKey="thread-a" onAddFiles={onAddFiles} />);
+    fireEvent.paste(screen.getByTestId("chats-composer"), {
+      clipboardData: transfer([picture]),
+    });
+
+    rerender(<Harness composerKey="thread-b" onAddFiles={onAddFiles} />);
+    await act(async () => {
+      saving.resolve();
+      await saving.promise;
+    });
+
+    expect(screen.getByTestId<HTMLTextAreaElement>("chats-composer").value).toBe("");
+  });
+
+  it("links at most 20 files in a message and says how many it left out", async () => {
+    let unlinked = -1;
+    const onAddFiles = vi.fn<AddMessageFiles>(async (link) => {
+      unlinked = link(["c.png", "d.png", "e.png"]);
+    });
+    const initial = Array.from({ length: 18 }, (_, index) => `@[f${index}.md]`).join(" ");
+    render(<Harness onAddFiles={onAddFiles} initial={`${initial} `} />);
+    await act(async () => {
+      fireEvent.paste(screen.getByTestId("chats-composer"), {
+        clipboardData: transfer([picture]),
+      });
+    });
+
+    const value = screen.getByTestId<HTMLTextAreaElement>("chats-composer").value;
+    expect(value).toContain("@[c.png] @[d.png] ");
+    expect(value).not.toContain("e.png");
+    expect(unlinked).toBe(1);
   });
 });
