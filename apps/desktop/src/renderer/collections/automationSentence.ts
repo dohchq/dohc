@@ -166,20 +166,83 @@ export function stepParts(step: AutomationStep): SentencePart[] {
       return [text("run code")];
     case "run-file":
       return [text(`run ${step.file}`)];
-    case "http": {
-      let target: string;
-      if (step.url.kind === "secret") {
-        target = `secret ${step.url.secret}`;
-      } else {
-        try {
-          target = new URL(step.url.url).hostname.toLowerCase();
-        } catch {
-          target = step.url.url;
-        }
-      }
-      return [text(`send a webhook to ${target}`)];
-    }
+    case "http":
+      return [
+        text(
+          `${httpVerb(step, false)} ${httpStepTarget(step)}${step.as === null ? "" : ` and save it as ${step.as}`}`,
+        ),
+      ];
   }
+}
+
+type HttpStep = Extract<AutomationStep, { kind: "http" }>;
+
+/** Where an http step sends: the website's host, or the secret that holds its URL. */
+export function httpStepTarget(step: HttpStep): string {
+  if (step.url.kind === "secret") return `secret ${step.url.secret}`;
+  return URL.parse(step.url.url)?.hostname.toLowerCase() ?? step.url.url;
+}
+
+function httpVerb(step: HttpStep, third: boolean): string {
+  const [send, fetch] = third ? ["sends", "fetches"] : ["send", "fetch"];
+  if (step.as !== null && step.method === "GET") return `${fetch} data from`;
+  if (step.method === "GET") return `${send} a GET request to`;
+  return step.as === null ? `${send} a webhook to` : `${send} a POST request to`;
+}
+
+function wordList(words: readonly string[]): string {
+  if (words.length <= 2) return words.join(" and ");
+  return `${words.slice(0, -1).join(", ")}, and ${words.at(-1)}`;
+}
+
+function everyStep(steps: readonly AutomationStep[]): AutomationStep[] {
+  return steps.flatMap((step) =>
+    step.kind === "if" ? [step, ...everyStep(step.do), ...everyStep(step.otherwise)] : [step],
+  );
+}
+
+/**
+ * What the http step at `ordinal` does, for the person who allows it: the
+ * website, the secrets it attaches, its body, and what later steps do with
+ * the answer it saves.
+ */
+export function httpAllowText(automation: Automation, ordinal: number): string | null {
+  const steps = everyStep(automation.do);
+  const step = steps[ordinal];
+  if (step?.kind !== "http") return null;
+  const secrets = step.secretHeaders.map(
+    (header) => `secret ${header.secret} in its ${header.name} header`,
+  );
+  const body =
+    step.body === null
+      ? null
+      : step.body.kind === "json"
+        ? `a JSON body with ${wordList(step.body.fields.map((field) => field.key))}`
+        : "a text body";
+  const sends = [...secrets, ...(body === null ? [] : [body])];
+  const sentence = `This step ${httpVerb(step, true)} ${httpStepTarget(step)}${sends.length === 0 ? "" : ` with ${wordList(sends)}`}`;
+  const undo = step.method === "GET" ? "" : " Sent requests cannot be undone.";
+  const allow = " Allow it before dohc sends requests there.";
+  if (step.as === null) return `${sentence}.${undo}${allow}`;
+  const name = new RegExp(`\\b${step.as}\\b`, "u");
+  const fields: string[] = [];
+  const code: string[] = [];
+  for (const later of steps.slice(ordinal + 1)) {
+    if (later.kind === "set" || later.kind === "add-record") {
+      for (const { field, value } of later.values) {
+        if (value.kind === "formula" && name.test(value.expression)) fields.push(field);
+      }
+    }
+    if (later.kind === "run" && name.test(later.code)) code.push("code");
+    if (later.kind === "run-file") code.push(later.file);
+  }
+  const uses = [
+    ...(fields.length > 0 ? [`write ${wordList(fields)} from it`] : []),
+    ...(code.length > 0 ? [`run ${wordList(code)} with it`] : []),
+  ];
+  const readers =
+    uses.length === 0 ? " No later step uses it yet." : ` Later steps ${uses.join(" and ")}.`;
+  return `${sentence}, and saves the answer as ${step.as}.${readers}${undo}${allow}`;
 }
 
 /** The whole automation: its trigger, its condition, and its first steps. */

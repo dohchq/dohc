@@ -23,6 +23,8 @@ export {
   isAllowedPublicHostname,
   isPublicInternetAddress,
   parseSafeOutboundHttpsUrl,
+  parseSafeOutboundJson,
+  readSafeOutboundHttps,
   resolveSafeAddresses,
   resolveSafeOutboundDestination,
   SafeOutboundError,
@@ -32,6 +34,7 @@ export {
   type SafeOutboundDestination,
   type SafeOutboundErrorCode,
   type SafeOutboundRequest,
+  type SafeOutboundResponse,
   type SafeOutboundUrlOptions,
 } from "./safeOutboundHttps";
 

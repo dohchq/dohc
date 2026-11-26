@@ -353,7 +353,7 @@ function changeText(change: AutomationRunChange): string {
     case "notice":
       return `sent a notice to ${lineSafe(change.name)} · ${change.noticeId}`;
     case "http-sent":
-      return `sent webhook to ${lineSafe(change.target)} (HTTP ${change.status}) · ${change.deliveryId}`;
+      return `${change.fetched ? "fetched data from" : change.method === "GET" ? "sent a GET request to" : "sent webhook to"} ${lineSafe(change.target)} (HTTP ${change.status}) · ${change.deliveryId}`;
   }
 }
 

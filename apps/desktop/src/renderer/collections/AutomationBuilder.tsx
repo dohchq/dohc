@@ -218,7 +218,8 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
     "Write the path inside its folder, with / between folders, and no .. or leading /.",
   "invalid-http-url":
     "Enter a public https:// URL on port 443 with no braces, credentials, or fragment, or choose a Secret URL.",
-  "invalid-http-method": "Webhook steps only support POST.",
+  "invalid-http-method": "Choose GET or POST.",
+  "http-get-with-body": "A GET request sends no body. Choose POST or remove the body.",
   "invalid-secret-name":
     "Secret names use 1 to 64 uppercase letters, digits, and underscores, starting with a letter.",
   "invalid-http-header-name":
@@ -1216,6 +1217,7 @@ function placeOf(
                   kind === "as" ||
                   kind === "records" ||
                   kind === "http" ||
+                  kind === "method" ||
                   kind === "headers" ||
                   kind === "secret-headers" ||
                   kind === "body"
@@ -1260,7 +1262,7 @@ function verdictOf(places: readonly number[], reach: Reach | null): string | nul
     if (verdict?.verdict === "stopped") return verdict.reason;
     if (verdict?.verdict === "held") {
       if (verdict.action === "send-http") {
-        return `This step sends a webhook to ${verdict.target}, and waits for you to allow it.`;
+        return `This step sends a request to ${verdict.target}, and waits for you to allow it.`;
       }
       const reached = automationReachCopy(verdict);
       return `This step can now ${reached}, and waits for someone who can edit this Collection to allow it.`;
@@ -2202,6 +2204,12 @@ export function AutomationBuilder(props: {
       } else if (step.url.kind === "secret" && step.url.secret.trim() === "") {
         problems.set(`step-${key}/http`, "Choose a webhook URL secret.");
       }
+      if (step.as !== null && !RESULT_NAME.test(step.as)) {
+        problems.set(
+          `step-${key}/as`,
+          "A result name starts with a letter or _, then uses only letters, digits, and _.",
+        );
+      }
       continue;
     }
     if (step.kind === "run" || step.kind === "run-file") {
@@ -3034,7 +3042,9 @@ export function AutomationBuilder(props: {
                                   ? "Wake your agent"
                                   : "Wake an agent"
                                 : step.kind === "http"
-                                  ? "Send a webhook"
+                                  ? step.as === null
+                                    ? "Send a webhook"
+                                    : "Fetch data"
                                   : `Step ${number}`}
           </span>
           <IconButton
@@ -3760,6 +3770,7 @@ export function AutomationBuilder(props: {
                 headers: [],
                 secretHeaders: [],
                 body: null,
+                as: null,
               })
             }
           >

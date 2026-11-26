@@ -610,7 +610,7 @@ it("pins HTTPS to the validated destination, bounds the response, and returns a 
     };
     req.end = (body) => {
       expect(body).toEqual(prepared.body);
-      const response = Object.assign(new EventEmitter(), { statusCode: 307 });
+      const response = Object.assign(new EventEmitter(), { statusCode: 307, headers: {} });
       callback(response);
       if (responseBytes) response.emit("data", Buffer.alloc(responseBytes));
       response.emit("end");

@@ -142,7 +142,8 @@ function writeText(write: RunWrite): ReactNode {
   if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
   if (write.kind === "dataset-action") return `Ran ${write.name}`;
-  if (write.kind === "http-sent") return `Sent webhook to ${write.target} (HTTP ${write.status})`;
+  if (write.kind === "http-sent")
+    return `${write.fetched ? "Fetched data from" : write.method === "GET" ? "Sent a GET request to" : "Sent webhook to"} ${write.target} (HTTP ${write.status})`;
   const record =
     "path" in write ? (
       recordName(write.path)
@@ -226,13 +227,19 @@ function runSummary(run: Run): string {
   ).length;
   const messages = run.writes.filter((write) => write.kind === "message").length;
   const notices = run.writes.filter((write) => write.kind === "notice").length;
-  const webhooks = run.writes.filter((write) => write.kind === "http-sent").length;
+  const webhooks = run.writes.filter(
+    (write) => write.kind === "http-sent" && write.fetched !== true,
+  ).length;
+  const fetches = run.writes.filter(
+    (write) => write.kind === "http-sent" && write.fetched === true,
+  ).length;
   const actions = run.writes.filter((write) => write.kind === "dataset-action").length;
   const parts = [
     ...(actions > 0 ? [`ran ${count(actions, "action", "actions")}`] : []),
     ...(notices > 0 ? [`sent ${count(notices, "notice", "notices")}`] : []),
     ...(messages > 0 ? [`sent ${count(messages, "message", "messages")}`] : []),
     ...(webhooks > 0 ? [`sent ${count(webhooks, "webhook", "webhooks")}`] : []),
+    ...(fetches > 0 ? [`fetched ${count(fetches, "response", "responses")}`] : []),
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
     ...(added > 0 ? [`added ${count(added, "record", "records")}`] : []),
   ];

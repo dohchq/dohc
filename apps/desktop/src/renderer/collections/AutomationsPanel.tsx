@@ -45,6 +45,7 @@ import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   automationSentence,
   collectionName,
+  httpAllowText,
   sentenceText,
   type Automation,
   type AutomationsFile,
@@ -308,7 +309,10 @@ function ReachStatus(props: {
                 : step.fileUnread
                   ? `A step can ${automationReachCopy(step)}. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.`
                   : step.action === "send-http"
-                    ? `This step sends a webhook to ${step.target}. Sent requests cannot be undone. Allow it before dohc sends requests there.`
+                    ? ((step.stepOrdinal === undefined
+                        ? null
+                        : httpAllowText(summary.automation, step.stepOrdinal)) ??
+                      `This step sends a request to ${step.target}. Sent requests cannot be undone. Allow it before dohc sends requests there.`)
                     : `A step can now ${automationReachCopy(step)}. It could not before.`}
             </p>
             <SecondaryButton

@@ -146,6 +146,7 @@ const Hold = z.object({
   collection: z.string(),
   target: z.string(),
   action: z.enum(["change", "find", "post", "notify", "wake", "read", "send-http"]),
+  stepOrdinal: z.number().int().nonnegative().optional(),
   recipient: z.string().optional(),
   stoppedFor: z.string().nullable(),
   fileUnread: z.boolean(),

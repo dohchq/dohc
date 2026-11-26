@@ -12,6 +12,7 @@ import {
   computeHttpStepApprovalDigest,
   sanitizeHttpFailureReason,
   workspaceSecretApprovalBinding,
+  scrubSecretsFromJson,
 } from "./httpStepApprovals";
 
 describe("http automation steps", () => {
@@ -118,7 +119,7 @@ automations:
 `,
       ],
       [
-        "GET method",
+        "DELETE method",
         `version: 1
 automations:
   - id: a
@@ -126,7 +127,7 @@ automations:
     when: record-added
     do:
       - http: https://hooks.example.com/events
-        method: GET
+        method: DELETE
 `,
       ],
       [
@@ -229,6 +230,7 @@ automations:
       headers: [{ name: "X-Event", value: { kind: "literal", value: "added" } }],
       secretHeaders: [{ name: "Authorization", secret: "HOOK_TOKEN", prefix: "Bearer " }],
       body: { kind: "text", template: "Added {record.Title}" },
+      as: null,
     };
 
     const base = computeHttpStepApprovalDigest({
@@ -413,5 +415,21 @@ automations:
     expect(scrubbed).not.toContain("SECRET");
     expect(scrubbed).not.toContain("sk_live_123456");
     expect(scrubbed).toContain("[redacted]");
+  });
+
+  it("scrubs secret values anywhere in a fetched JSON response and keeps its keys and other values", () => {
+    const scrubbed = scrubSecretsFromJson(
+      {
+        headers: { Authorization: "Bearer sk_live_123456" },
+        echoed: ["sk_live_123456", 3, true, null],
+        sk_live_123456: "kept key",
+      },
+      ["sk_live_123456"],
+    );
+    expect(scrubbed).toEqual({
+      headers: { Authorization: "Bearer [redacted]" },
+      echoed: ["[redacted]", 3, true, null],
+      sk_live_123456: "kept key",
+    });
   });
 });

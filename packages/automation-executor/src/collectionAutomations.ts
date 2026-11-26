@@ -656,6 +656,7 @@ export type CollectionAutomationStepReach =
       seq: number;
       target: string;
       action: CollectionAutomationHold["action"];
+      stepOrdinal?: number;
       fileUnread: CollectionAutomationHold["fileUnread"];
     };
 
@@ -797,6 +798,8 @@ export interface CollectionAutomationHold {
   /** A Collection, a Group, a direct message, or a webhook destination. */
   target: string;
   action: "change" | "find" | "post" | "notify" | "wake" | "read" | "send-http";
+  /** The place of the http step among all the automation's steps, for a send-http hold. */
+  stepOrdinal?: number;
   /** A person a formula named, or a Collection a code step named: the hold is theirs, not the step's. */
   recipient?: string;
   /** The editor whose reach stopped the step. */
@@ -3807,9 +3810,11 @@ export class CollectionAutomations {
           ) ??
             false);
         const repeatsWebhooks =
-          stepsInOrder(automation).some(({ step }) => step.kind === "http") ||
+          stepsInOrder(automation).some(
+            ({ step }) => step.kind === "http" && step.method !== "GET",
+          ) ||
           (earlier?.applied.some((effect) =>
-            effect.writes.some((write) => write.kind === "http-sent"),
+            effect.writes.some((write) => write.kind === "http-sent" && write.method !== "GET"),
           ) ??
             false);
         return {
@@ -8186,7 +8191,7 @@ const isGroupSubscription = (subscription: StoredSubscription): subscription is 
 
 function reachDestination(
   reach: ReachStep,
-): Pick<CollectionAutomationHold, "target" | "action"> | null {
+): Pick<CollectionAutomationHold, "target" | "action" | "stepOrdinal"> | null {
   return reach.kind === "post"
     ? { target: reach.group.name, action: "post" as const }
     : reach.kind === "read-group"
@@ -8196,7 +8201,7 @@ function reachDestination(
         : reach.kind === "personal"
           ? { target: "your agent", action: "wake" }
           : reach.kind === "http"
-            ? { target: reach.target, action: "send-http" as const }
+            ? { target: reach.target, action: "send-http" as const, stepOrdinal: reach.stepOrdinal }
             : "collection" in reach
               ? {
                   target: reach.collection.name,

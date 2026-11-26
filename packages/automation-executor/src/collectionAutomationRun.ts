@@ -160,10 +160,13 @@ export interface AutomationHttpWebhookExecutor {
     codeFileHashes: ReadonlyArray<{ file: string; sha256: string }>;
     secrets: readonly WorkspaceSecretSummary[];
     effect: Extract<PlannedEffect, { kind: "http" }>;
+    method: "POST" | "GET";
+    /** Read the JSON response the step saves with `as`, not only its status. */
+    readResponse: boolean;
     depth: number;
     signal: AbortSignal;
   }): Promise<
-    | { ok: true; status: number }
+    | { ok: true; status: number; response?: JsonValue }
     | {
         ok: false;
         status?: number;

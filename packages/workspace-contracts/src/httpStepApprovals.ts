@@ -78,6 +78,7 @@ export const OutboundWebhookDispatchResponse = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       status: z.number().int().min(200).max(299),
       deduplicated: z.boolean().optional(),
+      response: z.json().optional(),
     })
     .strict(),
   z
@@ -215,11 +216,43 @@ export function computeHttpStepApprovalDigest(input: {
  * before persisting or returning it.
  */
 export function sanitizeHttpFailureReason(reason: string, secrets: readonly string[]): string {
-  let scrubbed = reason;
+  return redactSecrets(reason, secrets).slice(0, 500);
+}
+
+function redactSecrets(text: string, secrets: readonly string[]): string {
+  let scrubbed = text;
   for (const secret of secrets) {
     if (secret.length > 0 && scrubbed.includes(secret)) {
       scrubbed = scrubbed.split(secret).join("[redacted]");
     }
   }
-  return scrubbed.slice(0, 500);
+  return scrubbed;
+}
+
+/** What to scrub for a secret destination URL: the URL, and its path parts and query values of 8 or more characters. */
+export function secretUrlScrubValues(rawUrl: string): string[] {
+  const url = URL.parse(rawUrl);
+  const parts = url === null ? [] : [...url.pathname.split("/"), ...url.searchParams.values()];
+  return [rawUrl, ...parts.filter((part) => part.length >= 8)];
+}
+
+export type HttpJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | HttpJsonValue[]
+  | { [key: string]: HttpJsonValue };
+
+/** Replaces every secret value found in a fetched JSON response. Keys stay as sent. */
+export function scrubSecretsFromJson(
+  value: HttpJsonValue,
+  secrets: readonly string[],
+): HttpJsonValue {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => scrubSecretsFromJson(item, secrets));
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, scrubSecretsFromJson(item, secrets)]),
+  );
 }

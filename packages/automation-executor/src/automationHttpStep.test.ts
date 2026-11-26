@@ -651,6 +651,185 @@ automations:
     }
   });
 
+  it("fetches JSON with GET, writes a field from it, keeps it out of history, and fetches again after an unrecorded GET", async () => {
+    const dir = await createTestScratch("dohc-http-fetch-");
+    const store = createAutomationRunStore(testStoreFolder(dir));
+    const evaluator = createAutomationFormulaEvaluator();
+    const yaml = `version: 1
+automations:
+  - id: pull-stats
+    name: Pull stats
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        secret-headers:
+          Authorization:
+            secret: STATS_KEY
+            prefix: 'Bearer '
+        as: stats
+      - set:
+          Count: '=stats.results[0].count'
+`;
+    const parsed = parseAutomationsFile(yaml);
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("bad yaml");
+    const automation = parsed.entries[0].automation;
+    const roster: Exclude<ReachRoster, { kind: "unknown" }> = {
+      kind: "owner",
+      ownerUserId: "owner",
+      grants: [],
+    };
+    const written: Array<Record<string, unknown>> = [];
+    let busyWrites = 0;
+    const execute = vi.fn(async (_input: { method: string; readResponse: boolean }) => ({
+      ok: true as const,
+      status: 200,
+      response: { results: [{ count: 42 }] },
+    }));
+    const deps: CollectionAutomationRunDependencies = {
+      makeDurable: async () => {},
+      isButtonField: async () => false,
+      withReads: async (work) =>
+        work({
+          getCollectionRecord: async () =>
+            ({
+              record: {
+                id: "rec-1",
+                path: "Tasks/one.md",
+                values: [{ field: "Count", value: null }],
+              },
+            }) as never,
+          queryCollectionRecords: async () => ({ records: [] }) as never,
+        }),
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async ({ fields }) => {
+            if (busyWrites > 0) {
+              busyWrites -= 1;
+              throw new AutomationRunWait("Engine busy.", "busy");
+            }
+            written.push(fields);
+            return { replaced: { Count: null }, kept: {} };
+          },
+          create: async () => ({ path: "Tasks/x.md", recordId: "x" }),
+        }),
+      collectionIdOf: (path) => (path === "Tasks" ? "Tasks" : null),
+      collectionPathOf: (id) => (id === "Tasks" ? "Tasks" : null),
+      targets: createAutomationTargets({
+        revisionOf: () => 0,
+        isCollection: (path) => path === "Tasks",
+        readText: async () => null,
+        readSchemaFields: async () => new Set(["Count"]),
+        withHost: async () => null,
+      }),
+      readCode: async () => null,
+      personName: (id) => id,
+      evaluator: evaluator.forWorkspace("ws-1"),
+      store,
+      nowMs: () => 1_000,
+      chat: { hasMessage: async () => false, directory: async () => null, write: async () => {} },
+      postNotice: async () => {},
+      readMessageBody: async () => null,
+      recipientVerdicts: async () => [],
+      isHttpStepApproved: async () => "approved",
+      httpWebhook: { execute },
+    };
+    const claim: AutomationClaim = {
+      claimId: "claim-fetch-1",
+      automationId: "collection:Tasks#pull-stats",
+      trigger: { historyId: 1 },
+      recordId: "rec-1",
+      collectionPath: "Tasks",
+      depth: 0,
+      change: {
+        kind: "added",
+        authorOriginId: null,
+        onBehalfOf: null,
+        actorKind: "human",
+        sharedAuthor: null,
+        liveCursor: null,
+        fields: [],
+        fieldsOmitted: 0,
+      },
+      state: "running",
+      attempts: 1,
+      run: 1,
+      createdAtMs: 1_000,
+      updatedAtMs: 1_000,
+    };
+    const run = (overrides: Partial<AutomationClaim>, runDeps = deps) =>
+      runCollectionAutomation(runDeps, {
+        claim: { ...claim, ...overrides },
+        automation,
+        collection: { path: "Tasks", name: "Tasks" },
+        roster,
+        signal: new AbortController().signal,
+        stopped: new AbortController().signal,
+      });
+
+    try {
+      busyWrites = 1;
+      expect(await run({})).toEqual({ kind: "wait", reason: "busy" });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0]?.[0]).toMatchObject({ method: "GET", readResponse: true });
+
+      expect(await run({ attempts: 2 })).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(written).toEqual([{ Count: 42 }]);
+
+      const [savedRun] = (await store.runsOf(claim.automationId, claim.claimId)).runs;
+      expect(savedRun?.applied[0]).not.toHaveProperty("response");
+      expect(savedRun?.applied[0]?.writes).toEqual([
+        {
+          kind: "http-sent",
+          target: "api.example.com",
+          status: 200,
+          deliveryId: expect.stringMatching(/^[0-9a-f]{64}$/),
+          method: "GET",
+          fetched: true,
+        },
+      ]);
+      expect(JSON.stringify(savedRun)).not.toContain("results");
+      const { undone } = await undoCollectionAutomationRuns(
+        {
+          withReads: deps.withReads,
+          withRecordWrites: deps.withRecordWrites,
+          trash: async () => {},
+          collectionPathOf: deps.collectionPathOf,
+        },
+        [savedRun!],
+        new AbortController().signal,
+      );
+      expect(undone.webhooksSent).toBeUndefined();
+
+      const interrupted = vi.fn(async () => ({
+        ok: false as const,
+        reason: "Waiting for a session.",
+        waitReason: "session" as const,
+      }));
+      expect(
+        await run(
+          { claimId: "claim-fetch-interrupted" },
+          { ...deps, httpWebhook: { execute: interrupted } },
+        ),
+      ).toEqual({ kind: "wait", reason: "session" });
+      expect(await run({ claimId: "claim-fetch-interrupted", attempts: 2 })).toEqual({
+        kind: "done",
+      });
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      const silent = vi.fn(async () => ({ ok: true as const, status: 204 }));
+      const noJson = await run(
+        { claimId: "claim-fetch-no-json" },
+        { ...deps, httpWebhook: { execute: silent } },
+      );
+      expect(noJson).toMatchObject({ kind: "failed" });
+      if (noJson.kind === "failed") expect(noJson.error).toContain("without the JSON");
+    } finally {
+      await evaluator.close();
+    }
+  });
+
   it("refuses stale or unreadable Allow without saving approval, refuses replacement Collections at the same path, and supports atomic server-side Allow", async () => {
     const dir = await createTestScratch("dohc-http-stale-allow-");
     const evaluator = createAutomationFormulaEvaluator();

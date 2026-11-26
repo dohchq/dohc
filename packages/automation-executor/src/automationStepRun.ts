@@ -121,7 +121,9 @@ export interface StepBackend {
     place: { index: number; ordinal: number; part: number; mode: EffectMode; recorded?: boolean },
     chat: ChatDirectory | null,
   ): Promise<
-    RunWrite[] | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
+    | RunWrite[]
+    | { writes: RunWrite[]; response: JsonValue }
+    | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
   >;
 }
 
@@ -304,6 +306,7 @@ export async function runSteps(
     };
   }
   run.finishedAtMs = dependencies.nowMs();
+  run.applied = run.applied.map(({ response: _response, ...applied }) => applied);
   await dependencies.store.save(run);
   dependencies.onRunEnded?.(run);
   if (dependencies.onUsageSuccess && outcome.kind === "done") {
@@ -589,6 +592,7 @@ async function walkSteps(
             ? "may-have-landed"
             : "resumed";
       let writes: RunWrite[];
+      let response: { response: JsonValue } | null = null;
       const writeStarted = dependencies.nowMs();
       try {
         dependencies.beforeEffect?.(run, effect);
@@ -605,10 +609,12 @@ async function walkSteps(
           }
           return applied.outcome;
         }
+        const appliedWrites = Array.isArray(applied) ? applied : applied.writes;
+        if (!Array.isArray(applied)) response = { response: applied.response };
         writes =
           receipt === null
-            ? applied
-            : [...receipt.writes.filter((write) => !engineWrite(write)), ...applied];
+            ? appliedWrites
+            : [...receipt.writes.filter((write) => !engineWrite(write)), ...appliedWrites];
       } catch (error) {
         if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
@@ -622,6 +628,7 @@ async function walkSteps(
         writes,
         writeMs: Math.max(0, dependencies.nowMs() - writeStarted),
         writeCount: 1,
+        ...response,
       };
       const appendStarted = dependencies.nowMs();
       if (recorded) {
@@ -744,6 +751,10 @@ async function walkSteps(
       } else if (entry.step.kind === "run" || entry.step.kind === "run-file") {
         if (output?.kind !== "code") return end(failed(UNREADABLE_RUN_ERROR));
         done.set(as, { kind: "code", value: output.value });
+      } else if (entry.step.kind === "http") {
+        const fetched = run.applied.find((applied) => applied.ordinal === ordinal);
+        if (fetched?.response === undefined) return end(failed(UNREADABLE_RUN_ERROR));
+        done.set(as, { kind: "code", value: fetched.response });
       }
     }
     return null;

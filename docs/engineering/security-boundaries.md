@@ -492,6 +492,35 @@ See the [outbound HTTPS tests](../../packages/service-http/src/safeOutboundHttps
 [relay secret route tests](../../services/sync-relay/src/workspaceSecretRoutes.test.ts),
 and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceSecretStore.test.ts).
 
+### Automation `http` steps
+
+An automation's `http` step sends `POST` (the default) or `GET` to a static HTTPS URL or an
+`http-url` secret, with optional `http-header` secrets. It runs only in a private Collection
+that no one else can edit. The owner must Allow it in Desktop. That approval is a digest of
+the Collection, the step's place, its URL target, method, header names, secret names and
+prefixes, the whole automation definition, and the hash of each code file it runs. Any edit
+to the automation or its code files holds the step until the owner allows it again. A
+synced workspace sends through the relay. The relay reads the method and the destination
+from the committed definition, never from the request, and checks the committed definition,
+the approval, and that the Collection is private again right before it sends.
+
+Without `as`, the step reads only the status, and the response cap is 64 KiB. With
+`as: name`, the step fetches data: it reads up to 192 KiB of uncompressed, strict UTF-8
+JSON (`application/json` or `application/*+json`, charset absent or `utf-8`, at most 64
+levels deep) from a 2xx response. Later steps read the answer in formulas and code, so it
+reaches records only through the normal write path, with its permissions, undo, and write
+caps. Before the answer reaches the run, every string in it is scrubbed of the attached
+secret header values, a secret URL, and that URL's path parts and query values of 8 or
+more characters. The answer lives in the run's private state only until the run ends. Run
+history, the CLI, and the renderer see only the target, method, and status.
+
+A `POST` is sent at most once per claim: the relay reserves its delivery id, and a run
+that stopped while sending fails instead of sending again. A `GET` skips that reservation,
+so a run that stopped mid-request fetches again when it resumes. A `GET` with a body is
+refused when the file is read. See the [executor fetch tests](../../packages/automation-executor/src/automationHttpStep.test.ts),
+[local executor tests](../../apps/desktop/src/workspaces/localOutboundWebhookExecutor.test.ts),
+and [relay route tests](../../services/sync-relay/src/outboundWebhookRoutes.test.ts).
+
 ## Incoming webhooks
 
 Incoming webhooks accept unauthenticated HTTPS `POST` deliveries at `/sync/hooks/:token`

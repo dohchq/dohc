@@ -17,6 +17,7 @@ describe("HttpStepEditor", () => {
       headers: [],
       secretHeaders: [],
       body: null,
+      as: null,
     };
     const onChange = vi.fn((next: HttpStep) => {
       current = next;
@@ -89,5 +90,43 @@ describe("HttpStepEditor", () => {
       kind: "json",
       fields: [{ key: "title", value: { kind: "formula", expression: "record.Title" } }],
     });
+  });
+
+  it("switches to GET, drops and hides the body, and names the saved answer", async () => {
+    const user = userEvent.setup();
+    let current: HttpStep = {
+      kind: "http",
+      url: { kind: "literal", url: "https://api.example.com/stats" },
+      method: "POST",
+      headers: [],
+      secretHeaders: [],
+      body: { kind: "text", template: "hi" },
+      as: null,
+    };
+    const onChange = vi.fn((next: HttpStep) => {
+      current = next;
+    });
+    const editor = () => (
+      <HttpStepEditor
+        number={1}
+        stepKey={1}
+        step={current}
+        secrets={[]}
+        secretsUnavailable={null}
+        problem={() => null}
+        onChange={onChange}
+      />
+    );
+    const { rerender } = render(editor());
+
+    await user.selectOptions(screen.getByLabelText("Step 1, method"), "GET");
+    expect(current).toMatchObject({ method: "GET", body: null });
+    rerender(editor());
+    expect(screen.queryByLabelText("Step 1, body type")).toBeNull();
+
+    await user.type(screen.getByLabelText("Step 1, save the answer as"), "s");
+    expect(current.as).toBe("s");
+    rerender(editor());
+    expect(screen.getByText("s.count")).toBeTruthy();
   });
 });

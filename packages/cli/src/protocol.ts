@@ -2614,6 +2614,8 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
       target: z.string(),
       status: z.number().int().min(100).max(599),
       deliveryId: z.string(),
+      method: z.literal("GET").optional(),
+      fetched: z.literal(true).optional(),
       unconfirmed: z.literal(true).optional(),
     })
     .strict(),

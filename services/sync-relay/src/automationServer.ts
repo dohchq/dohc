@@ -1260,7 +1260,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
             signal,
           });
           if (result.body.ok) {
-            return { ok: true, status: result.body.status };
+            const { status, response } = result.body;
+            return response === undefined ? { ok: true, status } : { ok: true, status, response };
           }
           return {
             ok: false,

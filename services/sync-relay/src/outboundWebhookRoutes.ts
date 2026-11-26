@@ -2,20 +2,25 @@ import { createHash } from "node:crypto";
 import {
   jsonResponse,
   parseSafeOutboundHttpsUrl,
+  parseSafeOutboundJson,
   readBoundedJson,
+  readSafeOutboundHttps,
   resolveSafeOutboundDestination,
   SafeOutboundError,
   sendSafeOutboundHttps,
   TokenBucketLimiter,
   type SafeOutboundDestination,
   type SafeOutboundRequest,
+  type SafeOutboundResponse,
 } from "@dohc/service-http";
+import { AUTOMATION_LIMITS } from "@dohc/app-backend-runtime/automation";
 import {
   AUTOMATION_HTTP_USER_AGENT,
   MAX_AUTOMATIONS_FILE_BYTES,
   MAX_HTTP_BODY_BYTES,
   MAX_HTTP_HEADERS,
   MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_RESPONSE_BYTES,
   MAX_HTTP_TOTAL_HEADER_BYTES,
   HTTP_HEADER_VALUE_PATTERN,
   httpStepTargetLabel,
@@ -29,6 +34,9 @@ import {
   computeHttpStepApprovalDigest,
   httpStepSecretNames,
   sanitizeHttpFailureReason,
+  scrubSecretsFromJson,
+  secretUrlScrubValues,
+  type HttpJsonValue,
   workspaceSecretApprovalBinding,
   type OutboundWebhookDispatchResponse,
 } from "@dohc/workspace-contracts/http-step-approvals";
@@ -176,11 +184,16 @@ export interface OutboundWebhookExecutionDependencies {
   readonly nowMs: () => number;
   readonly resolveDestination?: (rawUrl: string) => Promise<SafeOutboundDestination>;
   readonly sendRequest?: (request: SafeOutboundRequest, signal?: AbortSignal) => Promise<number>;
+  readonly readRequest?: (
+    request: SafeOutboundRequest,
+    signal?: AbortSignal,
+  ) => Promise<SafeOutboundResponse>;
 }
 
 function fixedSafeOutboundReason(
   error: unknown,
   secrets: readonly string[],
+  maxResponseBytes: number,
 ): {
   code: string;
   reason: string;
@@ -210,12 +223,22 @@ function fixedSafeOutboundReason(
       case "response_too_large":
         return {
           code: "response_too_large",
-          reason: "Webhook destination response exceeded the safety limit.",
+          reason: `Webhook destination response exceeded the ${maxResponseBytes / 1024} KiB limit.`,
         };
       case "response_interrupted":
         return {
           code: "response_interrupted",
           reason: "Webhook connection closed before a complete response arrived.",
+        };
+      case "unsupported_response":
+        return {
+          code: "unsupported_response",
+          reason: "Webhook destination did not answer with uncompressed UTF-8 JSON.",
+        };
+      case "invalid_json":
+        return {
+          code: "invalid_json",
+          reason: `Webhook destination answered with JSON that is invalid or nested more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`,
         };
       default:
         return {
@@ -431,6 +454,8 @@ export async function executeRelayOutboundWebhook(
   const initialStep = verifyCommittedStep();
   if (!initialStep.ok) return initialStep.failure;
   const { automation, httpStep, approvalDigest, sourcePaths } = initialStep;
+  const readResponse = httpStep.as !== null;
+  const maxResponseBytes = readResponse ? MAX_HTTP_RESPONSE_BYTES : OUTBOUND_MAX_RESPONSE_BYTES;
   if (!storage.hasWorkspaceHttpStepApproval(workspaceId, approvalDigest)) {
     return beforeSendFailure(
       403,
@@ -649,7 +674,7 @@ export async function executeRelayOutboundWebhook(
         );
       }
       rawUrl = unsealedUrl;
-      secretsToScrub.push(rawUrl);
+      secretsToScrub.push(...secretUrlScrubValues(rawUrl));
     }
 
     let destination: SafeOutboundDestination;
@@ -662,7 +687,7 @@ export async function executeRelayOutboundWebhook(
         parsedUrl.href,
       );
     } catch (error) {
-      const mapped = fixedSafeOutboundReason(error, secretsToScrub);
+      const mapped = fixedSafeOutboundReason(error, secretsToScrub, maxResponseBytes);
       return beforeSendFailure(200, mapped.code, mapped.reason, secretsToScrub);
     }
     if (httpStep.url.kind === "secret") {
@@ -797,6 +822,103 @@ export async function executeRelayOutboundWebhook(
       );
     }
 
+    const finalChecks = () => {
+      for (const loaded of loadedSecrets) {
+        const current = storage.readWorkspaceSecretForExecution(workspaceId, loaded.name);
+        if (
+          current === null ||
+          current.summary.generation !== loaded.generation ||
+          current.summary.createdAtMs !== loaded.createdAtMs
+        ) {
+          return beforeSendFailure(
+            409,
+            "secret_changed",
+            `Secret "${loaded.name}" changed while dohc was sending. Try again.`,
+            secretsToScrub,
+          );
+        }
+      }
+      const verified = verifyCommittedStep(secretsToScrub);
+      if (!verified.ok) return verified.failure;
+      if (!storage.hasWorkspaceHttpStepApproval(workspaceId, verified.approvalDigest)) {
+        return beforeSendFailure(
+          403,
+          "approval_required",
+          "This webhook step needs owner confirmation in dohc Desktop before sending.",
+          secretsToScrub,
+        );
+      }
+      if (
+        hasActiveNonOwnerEditGrantForPaths(storage, workspaceId, ownerUserId, verified.sourcePaths)
+      ) {
+        return beforeSendFailure(
+          403,
+          "reach_stopped",
+          "This Collection is not private.",
+          secretsToScrub,
+        );
+      }
+      return null;
+    };
+    const outboundRequest: SafeOutboundRequest = {
+      destination,
+      method: httpStep.method,
+      headers: outboundHeaders,
+      body: request.evaluatedBody !== null ? Buffer.from(request.evaluatedBody, "utf8") : undefined,
+      timeoutMs: OUTBOUND_TIMEOUT_MS,
+      maxHeaderSize: OUTBOUND_MAX_HEADER_SIZE,
+      maxResponseBytes,
+      rejectRedirects: true,
+    };
+    const readJson = async (): Promise<
+      { status: number; response?: HttpJsonValue } | { code: string; reason: string }
+    > => {
+      try {
+        if (!readResponse) {
+          return {
+            status: await (deps.sendRequest ?? sendSafeOutboundHttps)(outboundRequest, signal),
+          };
+        }
+        const read = await (deps.readRequest ?? readSafeOutboundHttps)(outboundRequest, signal);
+        if (read.status < 200 || read.status >= 300) return { status: read.status };
+        const parsed = parseSafeOutboundJson(read, AUTOMATION_LIMITS.resultDepth) as HttpJsonValue;
+        return { status: read.status, response: scrubSecretsFromJson(parsed, secretsToScrub) };
+      } catch (error) {
+        return fixedSafeOutboundReason(error, secretsToScrub, maxResponseBytes);
+      }
+    };
+
+    if (httpStep.method === "GET") {
+      if (
+        accountIsFenced(storage, ownerUserId) ||
+        workspaceIsDeleted(storage, workspaceId) ||
+        !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)
+      ) {
+        throw notFound();
+      }
+      const refusal = finalChecks();
+      if (refusal !== null) return refusal;
+      const fetched = await readJson();
+      if ("code" in fetched) {
+        return {
+          httpStatus: 200,
+          body: { ok: false, error: fetched.code, reason: fetched.reason },
+        };
+      }
+      if (fetched.status >= 200 && fetched.status < 300) {
+        return { httpStatus: 200, body: { ok: true, ...fetched } };
+      }
+      return {
+        httpStatus: 200,
+        body: {
+          ok: false,
+          error: "http_status_error",
+          status: fetched.status,
+          reason: `Webhook destination returned HTTP ${fetched.status}.`,
+        },
+      };
+    }
+
     let reservation;
     try {
       reservation = storage.reserveWorkspaceHttpDispatch({
@@ -804,49 +926,7 @@ export async function executeRelayOutboundWebhook(
         ownerUserId,
         deliveryId: request.deliveryId,
         nowMs: nowMs(),
-        beforeReserve: () => {
-          for (const loaded of loadedSecrets) {
-            const current = storage.readWorkspaceSecretForExecution(workspaceId, loaded.name);
-            if (
-              current === null ||
-              current.summary.generation !== loaded.generation ||
-              current.summary.createdAtMs !== loaded.createdAtMs
-            ) {
-              return beforeSendFailure(
-                409,
-                "secret_changed",
-                `Secret "${loaded.name}" changed while dohc was sending. Try again.`,
-                secretsToScrub,
-              );
-            }
-          }
-          const verified = verifyCommittedStep(secretsToScrub);
-          if (!verified.ok) return verified.failure;
-          if (!storage.hasWorkspaceHttpStepApproval(workspaceId, verified.approvalDigest)) {
-            return beforeSendFailure(
-              403,
-              "approval_required",
-              "This webhook step needs owner confirmation in dohc Desktop before sending.",
-              secretsToScrub,
-            );
-          }
-          if (
-            hasActiveNonOwnerEditGrantForPaths(
-              storage,
-              workspaceId,
-              ownerUserId,
-              verified.sourcePaths,
-            )
-          ) {
-            return beforeSendFailure(
-              403,
-              "reach_stopped",
-              "This Collection is not private.",
-              secretsToScrub,
-            );
-          }
-          return null;
-        },
+        beforeReserve: finalChecks,
       });
     } catch (error) {
       if (error instanceof SyncRelayQuotaExceededError) {
@@ -893,27 +973,9 @@ export async function executeRelayOutboundWebhook(
       };
     }
 
-    let status: number;
-    try {
-      status = await (deps.sendRequest ?? sendSafeOutboundHttps)(
-        {
-          destination,
-          method: "POST",
-          headers: outboundHeaders,
-          body:
-            request.evaluatedBody !== null ? Buffer.from(request.evaluatedBody, "utf8") : undefined,
-          timeoutMs: OUTBOUND_TIMEOUT_MS,
-          maxHeaderSize: OUTBOUND_MAX_HEADER_SIZE,
-          maxResponseBytes: OUTBOUND_MAX_RESPONSE_BYTES,
-          rejectRedirects: true,
-        },
-        signal,
-      );
-    } catch (error) {
-      const mapped = fixedSafeOutboundReason(error, secretsToScrub);
-      return finalizeFailure(mapped.code, mapped.reason);
-    }
-
+    const sent = await readJson();
+    if ("code" in sent) return finalizeFailure(sent.code, sent.reason);
+    const { status } = sent;
     if (status >= 200 && status < 300) {
       storage.finalizeWorkspaceHttpDispatch({
         workspaceId,
@@ -925,7 +987,7 @@ export async function executeRelayOutboundWebhook(
       });
       return {
         httpStatus: 200,
-        body: { ok: true, status },
+        body: { ok: true, ...sent },
       };
     }
     return finalizeFailure(

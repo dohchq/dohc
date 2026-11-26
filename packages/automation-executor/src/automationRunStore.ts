@@ -352,6 +352,8 @@ export const WriteSchema = z.union([
     target: z.string(),
     status: z.number().int(),
     deliveryId: z.string(),
+    method: z.literal("GET").optional(),
+    fetched: z.literal(true).optional(),
   }),
 ]);
 // Effect application time excludes the progress append. The count is per
@@ -361,6 +363,7 @@ const AppliedSchema = z.object({
   writes: z.array(WriteSchema),
   writeMs: z.number().nonnegative().optional(),
   writeCount: z.number().int().nonnegative().optional(),
+  response: JsonValueSchema.optional(),
 });
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.
