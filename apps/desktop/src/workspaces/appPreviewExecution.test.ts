@@ -673,7 +673,14 @@ describe("app preview execution", () => {
     const start = (senderId: number, holderId: string) =>
       handler(
         { sender: { id: senderId } },
-        { workspaceId: "workspace-a", siteRoot: "portal", mode: "build", holderId, restart: false },
+        {
+          workspaceId: "workspace-a",
+          versionId: "main",
+          siteRoot: "portal",
+          mode: "build",
+          holderId,
+          restart: false,
+        },
       );
     const asked = start(1, "tab");
     asked.catch(() => undefined);
