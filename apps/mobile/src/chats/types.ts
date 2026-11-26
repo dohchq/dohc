@@ -35,5 +35,7 @@ export interface PhoneWorkspace {
   readonly color: string;
   /** False for a server's workspace whose sync isn't set up yet, which the phone can't open. */
   readonly canOpen?: boolean;
+  /** The account's role in a server's workspace. A sample workspace has none. */
+  readonly role?: "owner" | "admin" | "member";
   readonly sections: readonly ChatSection[];
 }

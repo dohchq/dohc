@@ -30,12 +30,13 @@ export function useChatWakes(
 } {
   const { wakes, data } = useAccount();
   const workspaceId = data?.workspaceId ?? null;
+  const joined = data?.joined === true;
   const [held] = useState(screenWant);
   useEffect(() => {
-    if (!wakes || workspaceId === null || target === null || threads === null || !visible)
+    if (!wakes || workspaceId === null || joined || target === null || threads === null || !visible)
       held.release();
     else held.want(wakes, workspaceId, target, threads);
-  }, [held, wakes, workspaceId, target, threads, visible, content]);
+  }, [held, wakes, workspaceId, joined, target, threads, visible, content]);
   useEffect(() => () => held.release(), [held]);
   const view = useSyncExternalStore(wakes?.subscribe ?? noSubscribe, () =>
     wakes && workspaceId !== null && target !== null ? wakes.view(workspaceId, target) : null,

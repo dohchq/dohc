@@ -307,9 +307,9 @@ describe("a pending Sign out's row", () => {
 
 describe("a tapped alert", () => {
   const list = [
-    { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true },
-    { workspaceId: "ws-2", name: "Work", canOpen: true, showOnPhone: false },
-  ];
+    { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true, role: "owner" },
+    { workspaceId: "ws-2", name: "Work", canOpen: true, showOnPhone: false, role: "owner" },
+  ] as const;
   const data = { generation: 4, workspaceId: "ws-1", threadId: "t-1", messageId: "m-1" };
 
   it("opens its message only for this sign-in's binding and a workspace the phone shows", () => {

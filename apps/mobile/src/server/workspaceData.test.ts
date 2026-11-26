@@ -602,6 +602,27 @@ describe("the change feed", () => {
     expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
   });
 
+  it("stops showing an open view's value on replace before its read answers", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["hidden/a.md", "object-a"]), "0.5.2"));
+    const answer = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(1));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+    const reread = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => reread.promise);
+    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(2));
+    expect(data.state(views.files)).toMatchObject({ value: null, loading: true });
+    reread.resolve(ops(files(), "1.0.0"));
+    await vi.waitFor(() =>
+      expect(data.state(views.files)).toMatchObject({ value: [], loading: false }),
+    );
+  });
+
   it("drops a closed view's read that a change overtakes, and reads it again when it opens", async () => {
     const server = testServer();
     const cache = createReadCache();
@@ -821,6 +842,19 @@ describe("the read cache and the sign-in", () => {
 });
 
 describe("a workspace's read marks", () => {
+  it("sends none in a workspace the account joined", async () => {
+    const server = testServer();
+    const data = createWorkspaceData({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      joined: true,
+      cache: createReadCache(),
+    });
+    await data.markRead("thread-1", "message-1");
+    expect(count(server, "/sync/ws-a/ops/markRead")).toBe(0);
+    data.stop();
+  });
+
   it("sends a thread's mark at a message once, again after it fails, and none once the store stops", async () => {
     const server = testServer();
     const path = "/sync/ws-a/ops/markRead";

@@ -7,12 +7,19 @@ import { cacheScope, createReadCache, views } from "./workspaceData";
 import { createWorkspaceList, workspaceGap } from "./workspaceList";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
-const A: AccountWorkspace = { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true };
+const A: AccountWorkspace = {
+  workspaceId: "ws-a",
+  name: "Trip",
+  canOpen: true,
+  showOnPhone: true,
+  role: "owner",
+};
 const B: AccountWorkspace = {
   workspaceId: "ws-b",
   name: "Budget",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const listed = (...workspaces: AccountWorkspace[]): Answer => ({
   status: 200,
@@ -218,6 +225,26 @@ describe("hiding a workspace on this phone", () => {
 
     context.open.setShowOnPhone("ws-a", false);
     expect(context.open.state().currentWorkspaceId).toBe("ws-b");
+    expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
+  });
+});
+
+describe("a workspace the account joined", () => {
+  it("opens read-only after the account's own, and opens afresh, without its saved reads, when the role changes", async () => {
+    const joined: AccountWorkspace = { ...B, workspaceId: "ws-a", role: "member" };
+    const context = setup(listed(B, { ...A, role: "member" }), listed({ ...A, role: "owner" }));
+    context.server.on("GET", feedPath("ws-a"), held);
+    context.server.on("GET", feedPath("ws-b"), held);
+    await vi.waitFor(() => expect(context.open.state().currentWorkspaceId).toBe("ws-b"));
+    expect(context.open.state().data!.joined).toBe(false);
+    context.open.choose(joined.workspaceId);
+    const a = await readA(context);
+    expect(a.joined).toBe(true);
+
+    context.list.reload();
+    await vi.waitFor(() => expect(context.open.state().data).not.toBe(a));
+    expect(context.open.state()).toMatchObject({ currentWorkspaceId: "ws-a" });
+    expect(context.open.state().data!.joined).toBe(false);
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
   });
 });

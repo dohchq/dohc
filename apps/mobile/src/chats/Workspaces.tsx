@@ -104,6 +104,7 @@ function phoneWorkspace(workspace: AccountWorkspace): PhoneWorkspace {
     initial: [...name][0]?.toUpperCase() ?? "",
     color: workspaceMarkFills[hash % workspaceMarkFills.length]!,
     canOpen: workspace.canOpen,
+    role: workspace.role,
     sections: [],
   };
 }

@@ -15,6 +15,21 @@ export type WorkspaceList =
     }
   | { readonly status: "failed"; readonly problem: ServerProblemKind };
 
+/** Whether the account joined this workspace rather than owns it. A workspace the list doesn't name isn't joined. */
+export const isJoined = (workspaces: readonly AccountWorkspace[], workspaceId: string) =>
+  (workspaces.find((entry) => entry.workspaceId === workspaceId)?.role ?? "owner") !== "owner";
+
+/** The workspaces the account owns, then those it joined, each in the list's order. */
+export function workspaceGroups<Entry extends { readonly role?: AccountWorkspace["role"] }>(
+  workspaces: readonly Entry[],
+): { readonly own: readonly Entry[]; readonly shared: readonly Entry[] } {
+  const owned = (entry: Entry) => (entry.role ?? "owner") === "owner";
+  return {
+    own: workspaces.filter(owned),
+    shared: workspaces.filter((entry) => !owned(entry)),
+  };
+}
+
 /**
  * Why no workspace is open, once the list says: it could not load, the account has none, none that shows on the phone
  * is synced yet, or none shows. Null while the list loads, while the choice saved last is read, or once a workspace

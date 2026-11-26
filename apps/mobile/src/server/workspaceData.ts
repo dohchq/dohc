@@ -440,6 +440,8 @@ export function cachedList<T>(
 
 export interface WorkspaceData {
   readonly workspaceId: string;
+  /** The account joined this workspace rather than owns it, so the phone only reads it: it marks nothing read. */
+  readonly joined: boolean;
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
   readonly instance: number;
   state<T>(view: View<T>): ViewState<T>;
@@ -492,6 +494,7 @@ interface Entry {
 export function createWorkspaceData(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
+  readonly joined?: boolean;
   readonly cache: ReadCache;
   readonly holdMs?: number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -792,6 +795,8 @@ export function createWorkspaceData(options: {
       cache.drop(scope);
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
+          target.stale = false;
+          set(target, { value: null, loading: true, problem: null, failures: 0 });
           void read(target, "feed");
           continue;
         }
@@ -819,6 +824,7 @@ export function createWorkspaceData(options: {
 
   const store: WorkspaceData = {
     workspaceId,
+    joined: options.joined === true,
     instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
     subscribe(view, listener) {
@@ -887,7 +893,12 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
     markRead(threadId, messageId) {
-      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId)
+      if (
+        store.joined ||
+        !live() ||
+        sending.get(threadId) === messageId ||
+        marked.get(threadId) === messageId
+      )
         return Promise.resolve();
       sending.set(threadId, messageId);
       return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal)

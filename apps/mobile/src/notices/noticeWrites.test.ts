@@ -10,6 +10,7 @@ import {
   createNoticeTargets,
   isPost,
   noticeAction,
+  candidateOf,
   replyCandidate,
   targetKey,
   type TargetRead,
@@ -38,6 +39,7 @@ const trip: AccountWorkspace = {
   name: "Trip",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const listed = (
   workspaces: readonly AccountWorkspace[] = [trip],
@@ -147,6 +149,12 @@ describe("which Notice offers Reply", () => {
       expect(actionFor(mention, verified, { list })).toEqual({ kind: "elsewhere" });
       expect(replyCandidate(mention, list, true)).toBeNull();
     }
+  });
+
+  it("offers no reply or answer in a workspace the account joined, which the phone only reads", () => {
+    const list = listed([{ ...trip, role: "member" }]);
+    expect(replyCandidate(mention, list, true)).toBeNull();
+    expect(candidateOf(mention, list, true)).toBeNull();
   });
 
   it("keeps Open with Try again when the read failed, and plain Open when the thread is gone", () => {

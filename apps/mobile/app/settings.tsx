@@ -25,6 +25,8 @@ import { pageTimings, timingOwner } from "../src/pages/pageTimings";
 import { launchTimings, type LaunchStep } from "../src/startup";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
+import type { AccountWorkspace } from "../src/server/api";
+import { workspaceGroups } from "../src/server/workspaceList";
 import {
   changeAgent,
   endSession,
@@ -123,6 +125,7 @@ function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
   const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone, alerts } = useAccount();
+  const groups = workspaceGroups(workspaces.status === "ready" ? workspaces.workspaces : []);
   const server = serverName(signIn.origin);
   const router = useRouter();
   const outboxState = useOutboxState(outbox);
@@ -259,22 +262,30 @@ function SettingsScreen() {
             {workspaces.workspaces.length === 0 ? (
               <Empty text={accountWords.noWorkspaces(server)} />
             ) : null}
-            {workspaces.workspaces.map((workspace) => {
-              const name = workspaceName(workspace);
-              return (
-                <Row key={workspace.workspaceId} title={name}>
-                  <Switch
-                    value={workspace.showOnPhone}
-                    disabled={workspaces.pending.has(workspace.workspaceId)}
-                    onValueChange={(value) => setShowOnPhone(workspace.workspaceId, value)}
-                    accessibilityLabel={accountWords.showOnPhoneLabel(name)}
-                  />
-                </Row>
-              );
-            })}
+            {groups.own.map((workspace) => (
+              <ShowOnPhoneRow
+                key={workspace.workspaceId}
+                workspace={workspace}
+                pending={workspaces.pending.has(workspace.workspaceId)}
+                onChange={setShowOnPhone}
+              />
+            ))}
           </>
         ) : null}
       </Section>
+
+      {workspaces.status === "ready" && groups.shared.length > 0 ? (
+        <Section title={accountWords.sharedWithYou}>
+          {groups.shared.map((workspace) => (
+            <ShowOnPhoneRow
+              key={workspace.workspaceId}
+              workspace={workspace}
+              pending={workspaces.pending.has(workspace.workspaceId)}
+              onChange={setShowOnPhone}
+            />
+          ))}
+        </Section>
+      ) : null}
 
       {alerts ? <AlertsSection alerts={alerts} server={server} /> : null}
 
@@ -493,6 +504,31 @@ function Loaded<T>({
       ) : null}
       {children(load.value)}
     </>
+  );
+}
+
+function ShowOnPhoneRow({
+  workspace,
+  pending,
+  onChange,
+}: {
+  workspace: AccountWorkspace;
+  pending: boolean;
+  onChange(workspaceId: string, showOnPhone: boolean): void;
+}) {
+  const name = workspaceName(workspace);
+  return (
+    <Row
+      title={name}
+      detail={workspace.role === "owner" ? undefined : accountWords.roles[workspace.role]}
+    >
+      <Switch
+        value={workspace.showOnPhone}
+        disabled={pending}
+        onValueChange={(value) => onChange(workspace.workspaceId, value)}
+        accessibilityLabel={accountWords.showOnPhoneLabel(name)}
+      />
+    </Row>
   );
 }
 

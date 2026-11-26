@@ -27,6 +27,7 @@ const trip: AccountWorkspace = {
   name: "Trip",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const listed = (
   workspaces: readonly AccountWorkspace[],

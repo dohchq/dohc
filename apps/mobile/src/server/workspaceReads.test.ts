@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createServerClient } from "./client";
 import { testServer } from "./testServer";
 import {
+  earlierCursor,
+  isCursor,
+  laterCursor,
   markThreadRead,
   readChats,
   readStream,
@@ -470,5 +473,16 @@ describe("a stream's lanes", () => {
         problem: "invalid",
       });
     }
+  });
+});
+
+describe("a joined workspace's cursor", () => {
+  it("takes the mark of what the account reaches, and keeps it through earlier and later", () => {
+    const reach = "0123456789abcdef";
+    expect(isCursor(`0.5.2.${reach}`)).toBe(true);
+    expect(isCursor("0.5.2.NOTHEX0123456789")).toBe(false);
+    expect(earlierCursor(`0.5.2.${reach}`, `0.4.3.${reach}`)).toBe(`0.4.2.${reach}`);
+    expect(laterCursor(`0.5.2.${reach}`, `0.4.3.${reach}`)).toBe(`0.5.3.${reach}`);
+    expect(laterCursor("0.5.2", "0.4.3")).toBe("0.5.3");
   });
 });

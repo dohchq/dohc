@@ -1,19 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AccountWorkspace } from "./api";
+import { accountWorkspace, type AccountWorkspace } from "./api";
 import { createServerClient } from "./client";
 import { deferred, testServer, type Answer } from "./testServer";
-import { createWorkspaceList } from "./workspaceList";
+import { createWorkspaceList, isJoined, workspaceGroups } from "./workspaceList";
 
 const listed = (...workspaces: AccountWorkspace[]): Answer => ({
   status: 200,
   body: { ok: true, workspaces },
 });
-const A: AccountWorkspace = { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true };
+const A: AccountWorkspace = {
+  workspaceId: "ws-a",
+  name: "Trip",
+  canOpen: true,
+  showOnPhone: true,
+  role: "owner",
+};
 const B: AccountWorkspace = {
   workspaceId: "ws-b",
   name: "Budget",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const changed = (workspaceId: string, showOnPhone: boolean): Answer => ({
   status: 200,
@@ -152,5 +159,22 @@ describe("a read again", () => {
     list.reload();
     await vi.waitFor(() => expect(told).toHaveBeenCalledOnce());
     expect(list.state()).toMatchObject({ workspaces: [A, { ...B, name: "Costs" }] });
+  });
+});
+
+describe("the list's groups", () => {
+  it("puts the account's own workspaces first and those it joined after, and tells a joined one apart", () => {
+    const joined: AccountWorkspace = { ...B, workspaceId: "ws-c", role: "admin" };
+    expect(workspaceGroups([joined, A, B])).toEqual({ own: [A, B], shared: [joined] });
+    expect(isJoined([A, joined], "ws-c")).toBe(true);
+    expect(isJoined([A, joined], "ws-a")).toBe(false);
+    expect(isJoined([A], "ws-missing")).toBe(false);
+  });
+
+  it("takes a row only with a role it knows", () => {
+    expect(accountWorkspace({ ...A, role: "member" })).toEqual({ ...A, role: "member" });
+    const { role: _role, ...roleless } = A;
+    expect(accountWorkspace(roleless)).toBeNull();
+    expect(accountWorkspace({ ...A, role: "guest" })).toBeNull();
   });
 });

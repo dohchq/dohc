@@ -6,7 +6,7 @@ import {
   type WorkspaceData,
 } from "./workspaceData";
 import type { ChatMessage } from "./workspaceReads";
-import type { WorkspaceListStore } from "./workspaceList";
+import { isJoined, type WorkspaceListStore } from "./workspaceList";
 
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
@@ -50,10 +50,11 @@ export function createOpenWorkspace(options: {
   };
   let unsubscribe: (() => void) | null = null;
 
-  function open(workspaceId: string): WorkspaceData {
+  function open(workspaceId: string, joined: boolean): WorkspaceData {
     const data = createWorkspaceData({
       signIn,
       workspaceId,
+      joined,
       cache,
       onGone: () => {
         onGone?.(workspaceId);
@@ -68,11 +69,16 @@ export function createOpenWorkspace(options: {
     return data;
   }
 
+  const joinedNow = (workspaceId: string) => {
+    const listed = list.state();
+    return listed.status === "ready" && isJoined(listed.workspaces, workspaceId);
+  };
+
   /** Opens `workspaceId`, or none, in a new store, and stops the last one. */
   function show(workspaceId: string | null) {
     if (state.data) beforeSwitch?.(workspaceId);
     state.data?.stop();
-    const data = workspaceId === null ? null : open(workspaceId);
+    const data = workspaceId === null ? null : open(workspaceId, joinedNow(workspaceId));
     if (active) data?.resume();
     state = { currentWorkspaceId: workspaceId, data, choosing: false };
     for (const listener of listeners) listener();
@@ -95,7 +101,13 @@ export function createOpenWorkspace(options: {
             .map((entry) => entry.workspaceId)
         : [];
     const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
-    if (current !== state.currentWorkspaceId) show(current);
+    const roleChanged =
+      current !== null &&
+      current === state.currentWorkspaceId &&
+      state.data !== null &&
+      state.data.joined !== joinedNow(current);
+    if (roleChanged) cache.drop(cacheScope(signIn, current));
+    if (current !== state.currentWorkspaceId || roleChanged) show(current);
   }
 
   update();

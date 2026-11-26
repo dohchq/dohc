@@ -3,7 +3,7 @@ import { decisionOf } from "../conversation/decisionAnswers";
 import type { SignIn } from "../server/account";
 import type { NoticeRecord } from "../server/notices";
 import { readLane } from "../server/readLane";
-import type { WorkspaceList } from "../server/workspaceList";
+import { isJoined, type WorkspaceList } from "../server/workspaceList";
 import type {
   ChatGroup,
   ChatMessage,
@@ -32,6 +32,7 @@ export interface MessageTarget {
 function messageTarget(record: NoticeRecord, list: WorkspaceList): MessageTarget | null {
   const target = phoneTarget(record, list);
   if (target?.kind !== "thread" || target.messageId === null) return null;
+  if (list.status !== "ready" || isJoined(list.workspaces, target.workspaceId)) return null;
   return {
     workspaceId: target.workspaceId,
     threadId: target.threadId,
