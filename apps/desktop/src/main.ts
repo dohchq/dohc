@@ -3760,7 +3760,6 @@ function engineForWorkspace(
       if (applied) signalChatWrite(workspace.workspaceId);
       // A deferred wake's message or decision may have arrived. An empty pull brought nothing to wait for.
       void chatWakes.pulled({ applied, recovered });
-      phoneAppSender?.pulled(workspace.workspaceId, !!applied);
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       refreshShareLabels();
@@ -3773,6 +3772,7 @@ function engineForWorkspace(
           { workspaceId: workspace.workspaceId },
           (lease) => lease.state.relayedPresses,
         )?.start();
+      phoneAppSender?.pulled(workspace.workspaceId, !!applied);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );
@@ -12147,7 +12147,8 @@ function registerIpcHandlers(): void {
           signal,
           assertCurrent: () => signal.throwIfAborted(),
           compile: ownerPublicationDependencies.compile,
-          resolveDatasetRevision: (binding) => resolveDatasetRevision(workspace, binding, signal),
+          resolveDatasetRevision: async (binding) =>
+            (await resolveDatasetArtifacts(workspace, binding, signal)).revision,
           deferredWrites,
         }),
       );

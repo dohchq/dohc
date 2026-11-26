@@ -180,7 +180,10 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
       );
     const send = async (appRoot: string, revision: string) => {
       const { candidate, files } = await deps.prepare(workspace, appRoot, signal);
-      if (candidate.external || candidate.capabilities.some((value) => value.kind === "collection"))
+      if (
+        candidate.external ||
+        candidate.capabilities.some((value) => value.kind === "collection-create")
+      )
         throw new Error(PHONE_APP_REFUSED);
       const expected = published.get(appRoot)?.publicationId ?? null;
       if (
