@@ -4019,7 +4019,10 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   onWatcherBatch: (workspace, events) => {
     onWatcherBatch(workspace, events);
     withWorkspaceAttachment(workspace, () => folderAppDetection.settledEvents(workspace, events));
-    phoneAppSender?.filesChanged(workspace.workspaceId, events.map((event) => event.path));
+    phoneAppSender?.filesChanged(
+      workspace.workspaceId,
+      events.map((event) => event.path),
+    );
   },
   onObservationResync: async (workspace) => {
     await onObservationResync(workspace);
