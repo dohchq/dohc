@@ -54,9 +54,12 @@ export interface CliForThread {
 // What every shell reads as plain text inside double quotes: letters,
 // digits, spaces, and the marks below. It leaves out what ends the quotes in
 // some shell, as PowerShell's curly quotes do, what a shell expands there,
-// what cmd.exe splits a line at when Git Bash hands it a .cmd path unquoted,
-// and @, which makes cmd.exe drop the quotes of a command wrapped in cmd /c.
+// and what cmd.exe splits a line at when Git Bash hands it a .cmd path unquoted.
 const HELD_IN_QUOTES = /^[\p{L}\p{M}\p{N} /:._~+#'-]$/u;
+// cmd.exe drops the quotes of a command wrapped in cmd /c when they hold an @,
+// which splits a path at its space. A path with no space needs no quotes, so
+// an @ there is plain text. Older Windows installs put dohc in @dohcdesktop.
+const heldAt = (character: string, path: string) => character === "@" && !path.includes(" ");
 // On Windows a program that passes a command through the system's older text
 // encoding turns some modifier letters and combining marks into a quote, a
 // caret, or a backtick. They are the two blocks from U+02B0 to U+036F.
@@ -75,7 +78,9 @@ export function cliForThread(path: string, platform: NodeJS.Platform): CliForThr
   const windows = platform === "win32";
   const spelled = windows ? path.replaceAll("\\", "/") : path;
   const refused = Array.from(spelled).find(
-    (character) => !HELD_IN_QUOTES.test(character) || (windows && turnsOnWindows(character)),
+    (character) =>
+      !(HELD_IN_QUOTES.test(character) || heldAt(character, spelled)) ||
+      (windows && turnsOnWindows(character)),
   );
   if (refused !== undefined) return { program: null, refused, notes: [] };
   if (spelled === "") return { program: null, notes: [] };
