@@ -140,24 +140,6 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   );
 }
 
-function UnwrittenNotice({ why, onDismiss }: { why: BodySequenceUnwritten; onDismiss(): void }) {
-  return (
-    <div className="edit-notice" role="alert" data-testid="unwritten-notice">
-      <span className="tile">
-        <Icon name="info" />
-      </span>
-      <div>
-        <p>{why === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten}</p>
-        <div className="edit-notice-actions">
-          <button className="handoff-button secondary" onClick={onDismiss}>
-            {documentWords.dismiss}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** The page's unsaved words, read again as the note or the session changes. */
 function useUnsentText(session: NamedDocumentSession) {
   const [unsent, setUnsent] = useState(() => session.unsentText());
@@ -314,6 +296,7 @@ export function NamedDocumentEditor({
       unsubscribeToolbar();
       editorRef.current = null;
       editor.destroy();
+      setUnwritten(null);
     };
   }, [session, format]);
   const editable = namedLiveEditable(state);
@@ -381,7 +364,16 @@ export function NamedDocumentEditor({
         </button>
       )}
       <RemovedTextNotice session={session} />
-      {unwritten && <UnwrittenNotice why={unwritten} onDismiss={() => setUnwritten(null)} />}
+      {unwritten && (
+        <div className="edit-notice" role="alert" data-testid="unwritten-notice">
+          <p>
+            {unwritten === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten}
+          </p>
+          <button className="handoff-button secondary" onClick={() => setUnwritten(null)}>
+            {documentWords.dismiss}
+          </button>
+        </div>
+      )}
       {showToolbar && (
         <div className="editor-toolbar" role="toolbar" aria-label="Formatting">
           <button

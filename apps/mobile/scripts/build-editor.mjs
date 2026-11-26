@@ -15,7 +15,7 @@ const result = await build({
   minify: true,
   format: "iife",
   platform: "browser",
-  target: ["safari17", "chrome120"],
+  target: ["chrome109", "safari16.4"],
   write: false,
   logLevel: "warning",
 });

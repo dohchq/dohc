@@ -768,6 +768,38 @@ describe("named live browser provider", () => {
       });
       expect(getDohcYDocBodyFragment(value.doc).toString()).toContain("base draft");
     });
+    it("holds the note only once it has the whole of a state it took, and keeps holding it through a quarantine", async () => {
+      expect(provider().state().holds).toBe(false);
+      const host = document("base");
+      const before = Y.encodeStateAsUpdate(host);
+      ((getDohcYDocBodyFragment(host).get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(4, "!");
+      const torn = provider();
+      const partial = encodeLiveFrameSync(
+        { binding, hostVector: Y.encodeStateVector(host), missingStateUpdate: before },
+        limits().frames.receive,
+      );
+      expect(torn.seed(partial, 3)).toBe(false);
+      expect(torn.state()).toMatchObject({
+        status: "quarantined",
+        reason: "incomplete-sync",
+        holds: false,
+      });
+      const seeded = provider();
+      expect(seeded.seed(early(host), 3)).toBe(true);
+      expect(seeded.state()).toMatchObject({ status: "disconnected", holds: true });
+      const synced = provider(),
+        route = peer(synced);
+      await route.greet();
+      expect(synced.state().holds).toBe(false);
+      await route.initial(host);
+      expect(synced.state()).toMatchObject({ status: "live", holds: true });
+      await route.transfer("applied-update", Y.encodeStateAsUpdate(host), 1, "00".repeat(32));
+      expect(synced.state()).toMatchObject({
+        status: "quarantined",
+        reason: "digest-mismatch",
+        holds: true,
+      });
+    });
     it("refuses an early state once a route has the page's vector", async () => {
       const value = provider(),
         route = peer(value);

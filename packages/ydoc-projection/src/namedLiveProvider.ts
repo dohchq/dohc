@@ -644,13 +644,13 @@ export function createNamedLiveProvider(
         return false;
       binding = parsed;
       highestObservedCursor = throughJournalCursor;
-      seeded = true;
       Y.applyUpdate(doc, sync.missingStateUpdate, REMOTE);
       const appliedVector = Y.decodeStateVector(Y.encodeStateVector(doc));
       if ([...hostVector].some(([client, clock]) => (appliedVector.get(client) ?? 0) < clock)) {
         quarantine("incomplete-sync");
         return false;
       }
+      seeded = true;
       notify();
       return true;
     },

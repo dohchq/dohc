@@ -487,8 +487,8 @@ export function mountLiveBodyEditor(
   const schema = getDohcProseMirrorSchema();
   const thisEditor = Symbol("this editor's change");
   const sequence = readsBodySequence(input.doc);
-  const body = getDohcYDocBodyFragment(input.doc);
-  const history = sequence
+  const body = sequence ? null : getDohcYDocBodyFragment(input.doc);
+  const history = !body
     ? createBodySequenceHistory(input.doc)
     : new Y.UndoManager(body, {
         trackedOrigins: new Set([ySyncPluginKey, null]),
@@ -563,7 +563,7 @@ export function mountLiveBodyEditor(
     state: EditorState.create({
       schema,
       plugins: [
-        ...(sequence ? [] : [ySyncPlugin(body), yUndoPlugin({ undoManager: history })]),
+        ...(body ? [ySyncPlugin(body), yUndoPlugin({ undoManager: history })] : []),
         keymap({
           "Mod-z": historyKey(stepBack, false),
           "Mod-Shift-z": historyKey(stepForward, true),

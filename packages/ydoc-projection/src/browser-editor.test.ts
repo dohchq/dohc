@@ -632,6 +632,16 @@ describe("mountLiveBodyEditor on a note in format 2", () => {
     }
   });
 
+  it("adds no format-1 body to the note when it mounts", () => {
+    const ctx = sequenceNote("Item one");
+    try {
+      expect(ctx.textbox.textContent).toBe("Item one");
+      expect(ctx.doc.share.has("body")).toBe(false);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   it("writes typing, Enter and list toggles in a browser that has no toSorted or toReversed", () => {
     const missing = ["toSorted", "toReversed"] as const;
     const kept = missing.map((name) => Object.getOwnPropertyDescriptor(Array.prototype, name)!);

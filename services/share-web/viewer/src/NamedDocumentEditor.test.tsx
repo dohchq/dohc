@@ -403,14 +403,13 @@ it("edits a note in format 2 from the toolbar", async () => {
   expect(unwrittenNotice()).toBeNull();
 });
 
-it("says when someone else's change reached a note in format 2 first, keeps that change, and lets the person dismiss the notice", async () => {
+async function overtaken() {
   const live = session("Zero\n\nOne", {}, { bodySequence: true });
   live.doc.getText("sequence").delete(0, 1);
   const peer = new Y.Doc();
   Y.applyUpdate(peer, Y.encodeStateAsUpdate(live.doc));
   const seen = Y.encodeStateVector(peer);
-  const sequence = peer.getText("sequence");
-  sequence.insert(sequence.length, "!");
+  peer.getText("sequence").insert(peer.getText("sequence").length, "!");
   const fromPeer = Y.encodeStateAsUpdate(peer, seen);
   await act(async () =>
     root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
@@ -423,6 +422,19 @@ it("says when someone else's change reached a note in format 2 first, keeps that
   });
   await act(async () => pressEnter());
   expect(delivered).toBe(true);
+  return live;
+}
+
+it("drops the notice when the note changes format and the editor mounts again", async () => {
+  const live = await overtaken();
+  expect(unwrittenNotice()).not.toBeNull();
+  await act(async () => live.doc.getMap("meta").set("schemaVersion", 1));
+  expect(textbox()).not.toBeNull();
+  expect(unwrittenNotice()).toBeNull();
+});
+
+it("says when someone else's change reached a note in format 2 first, keeps that change, and lets the person dismiss the notice", async () => {
+  await overtaken();
   const notice = unwrittenNotice()!;
   expect(notice.getAttribute("role")).toBe("alert");
   expect(notice.textContent).toContain(
