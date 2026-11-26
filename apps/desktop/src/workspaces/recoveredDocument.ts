@@ -32,18 +32,10 @@ type NotInNote =
       name: string;
       value: unknown;
       now: unknown;
-      /** Set for an item inside a line, such as a formula, whose `block` is the line's text. */
       inline?: boolean;
-      /** The type the note reads the container as, when that type has no such setting. */
       shownAs?: string;
     }
-  | {
-      kind: "kind";
-      /** The text of the lines in the container, or null when none is left. */
-      block: string | null;
-      value: unknown;
-      now: unknown;
-    }
+  | { kind: "kind"; block: string | null; value: unknown; now: unknown }
   | { kind: "move"; block: string | null; nodeName: string }
   | { kind: "other" };
 
@@ -124,10 +116,14 @@ const same = (left: unknown, right: unknown) => equal(left ?? null, right ?? nul
  * kept. Such content is in the document but deleted, and no kept update
  * deleted it. Formatting a kept edit added is not listed.
  */
-function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
+function editsNotInNote(
+  doc: Y.Doc,
+  base: Uint8Array | undefined,
+  kept: readonly Uint8Array[],
+): NotInNote[] {
   const dropped = droppedEdits(doc, kept);
   const frontmatter = doc.getMap("frontmatter");
-  if (readsBodySequence(doc)) return sequenceEditsNotInNote(doc, frontmatter, dropped);
+  if (readsBodySequence(doc)) return sequenceEditsNotInNote(doc, base, frontmatter, dropped);
   const { lost, found } = dropped;
   const body = getDohcYDocBodyFragment(doc);
 
@@ -201,12 +197,9 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
 }
 
 type Dropped = {
-  /** Each item holding dropped kept content, with the offsets dropped. */
   lost: Map<Y.Item, Span[]>;
-  /** The kept items still in the document. */
   live: Y.Item[];
   keptDeletes: ReturnType<typeof Y.mergeDeleteSets>;
-  /** Whether an item is from a kept update. */
   isKept: (id: Y.ID) => boolean;
   found: NotInNote[];
 };
@@ -252,14 +245,12 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
   return { lost, live, keptDeletes, isKept, found };
 }
 
-/** A value set at the same moment was kept instead. */
 function fieldNotInNote(doc: Y.Doc, field: string, value: unknown): NotInNote[] {
   const fields = getDohcYDocFrontmatter(doc);
   const now = Object.hasOwn(fields, field) ? fields[field] : undefined;
   return same(value, now) ? [] : [{ kind: "field", field, value, now }];
 }
 
-/** Dropped text in document order, one quote per unbroken run. */
 class Quotes {
   private run = "";
 
@@ -287,29 +278,29 @@ class Quotes {
 
 type Stored = { readonly _map: Map<string, Y.Item> };
 
-/** The value last set under a key, whether or not it was deleted since. */
-function setLast(holder: Stored | undefined, key: string): unknown {
-  const item = holder?._map.get(key);
-  return item ? contentValue(item) : undefined;
+function valueAt(item: Y.Item, at: number): unknown {
+  const value: unknown = item.content.getContent()[at];
+  return value instanceof Y.AbstractType ? value.toJSON() : value;
 }
 
-/**
- * The kept edits a rebuilt format-2 note dropped, or that it holds where nothing shows them: a
- * setting of a container no line is in any more, or one the type the note reads it as has no use
- * for. A record the kept edits gave a container they made, with its starting value, is not listed.
- * Dropped text is quoted line by line. An item inside a line, or a block with no text such as a
- * rule, is counted, and an empty line is not.
- */
+function setLast(holder: Stored | undefined, key: string): unknown {
+  const item = holder?._map.get(key);
+  return item ? valueAt(item, item.length - 1) : undefined;
+}
+
 function sequenceEditsNotInNote(
   doc: Y.Doc,
+  base: Uint8Array | undefined,
   frontmatter: Y.Map<unknown>,
   { lost, live, keptDeletes, isKept, found }: Dropped,
 ): NotInNote[] {
   const schema = getDohcProseMirrorSchema();
   const sequence = doc.share.get(BODY_SEQUENCE_FIELD);
   const records = doc.share.get(BODY_CONTAINERS_FIELD);
+  const baseDeletes = Y.mergeDeleteSets(base ? [Y.decodeUpdate(base).ds] : []);
   const textOf = new Map<Y.Item, string>();
   const lineOf = new Map<Y.Item, Y.Item>();
+  const linesOf = new Map<unknown, Y.Item[]>();
   const emptied = new Set<unknown>();
   let line: Y.Item | null = null;
   for (let item = sequence?._start ?? null; item; item = item.right) {
@@ -317,25 +308,32 @@ function sequenceEditsNotInNote(
     if (content instanceof Y.ContentString) {
       if (line && !item.deleted) textOf.set(line, textOf.get(line)! + content.str);
     } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
-      if (content.type.nodeName !== BLOCK_ELEMENT) {
+      const element = content.type;
+      if (element.nodeName !== BLOCK_ELEMENT) {
         if (line) lineOf.set(item, line);
         continue;
       }
-      for (let path = content.type._map.get("path") ?? null; path; path = path.left)
-        if (path.deleted && !Y.isDeleted(keptDeletes, path.id))
-          for (const id of [contentValue(path)].flat()) emptied.add(id);
-      if (!item.deleted) textOf.set((line = item), "");
+      for (let path = element._map.get("path") ?? null; path; path = path.left)
+        for (let at = 0; path.deleted && at < path.length; at += 1) {
+          const id = Y.createID(path.id.client, path.id.clock + at);
+          if (!Y.isDeleted(keptDeletes, id) && !Y.isDeleted(baseDeletes, id))
+            for (const container of [valueAt(path, at)].flat()) emptied.add(container);
+        }
+      if (item.deleted) continue;
+      textOf.set((line = item), "");
+      for (const id of [storedValue(element, "path")].flat())
+        linesOf.set(id, [...(linesOf.get(id) ?? []), item]);
     }
   }
   const typeOf = new Map<string, string>();
-  const linesOf = new Map<string, Y.Item[]>();
-  for (const { item, path } of placedBoundaries(schema, doc))
-    for (const { id, type } of path) {
-      typeOf.set(id, type);
-      const lines = linesOf.get(id);
-      if (lines) lines.push(item);
-      else linesOf.set(id, [item]);
-    }
+  const leafOf = new Map<Y.Item, string>();
+  for (const { item, path, leaf } of placedBoundaries(schema, doc)) {
+    leafOf.set(item, leaf);
+    for (const { id, type } of path) typeOf.set(id, type);
+  }
+  const shows = (type: string, name: string) =>
+    Object.hasOwn(schema.nodes[type]?.spec.attrs ?? {}, name);
+  const lostValue = (item: Y.Item) => valueAt(item, lost.get(item)!.at(-1)![1] - 1);
   const textIn = (id: string) =>
     (linesOf.get(id) ?? [])
       .map((item) => textOf.get(item) ?? "")
@@ -351,8 +349,8 @@ function sequenceEditsNotInNote(
     const dot = key.indexOf(".");
     const id = dot < 0 ? key : key.slice(0, dot);
     const type = typeOf.get(id);
-    if (type === undefined && !dropped && !emptied.has(id)) return [];
-    const block = type === undefined ? null : textIn(id);
+    if (type === undefined && !dropped && !emptied.has(id) && !linesOf.has(id)) return [];
+    const block = linesOf.has(id) ? textIn(id) : null;
     if (dot < 0)
       return (
         dropped ? type !== undefined && same(value, type) : type !== undefined || keptMade(key)
@@ -365,7 +363,7 @@ function sequenceEditsNotInNote(
     if (keptMade(key) && same(value, startingRecords(schema, kind).get(name))) return [];
     if (type === undefined)
       return [{ kind: "attribute", block, nodeName: kind, name, value, now: undefined }];
-    if (!Object.hasOwn(schema.nodes[type]?.spec.attrs ?? {}, name))
+    if (!shows(type, name))
       return [
         { kind: "attribute", block, nodeName: type, name, value, now: undefined, shownAs: type },
       ];
@@ -375,10 +373,17 @@ function sequenceEditsNotInNote(
       : [];
   };
 
+  const retyped = (element: Y.XmlElement) => {
+    const now = element._item!.deleted ? undefined : storedValue(element, "type");
+    for (let type = element._map.get("type") ?? null; type; type = type.left)
+      if (lost.has(type) && !same(lostValue(type), now)) return true;
+    return false;
+  };
+
   const setting = (element: Y.XmlElement, name: string, value: unknown): NotInNote[] => {
     const at = element._item!;
-    if (lost.has(at)) return [];
     const boundary = element.nodeName === BLOCK_ELEMENT;
+    if (lost.has(at) || (boundary && name !== "type" && retyped(element))) return [];
     const type = boundary ? setLast(element, "type") : element.nodeName;
     const nodeName = typeof type === "string" ? type : "paragraph";
     if (at.deleted)
@@ -402,15 +407,35 @@ function sequenceEditsNotInNote(
   for (const item of lost.keys()) {
     const { parent, parentSub } = item;
     if (parentSub === null) continue;
-    const value = contentValue(item);
+    const value = lostValue(item);
     if (parent === frontmatter) found.push(...fieldNotInNote(doc, parentSub, value));
     else if (parent === records) found.push(...record(parentSub, value, true));
     else if (parent instanceof Y.XmlElement && parent._item?.parent === sequence)
       found.push(...setting(parent, parentSub, value));
   }
-  for (const item of live)
-    if (item.parent === records && item.parentSub !== null)
-      found.push(...record(item.parentSub, contentValue(item), false));
+  for (const item of live) {
+    const { parent, parentSub } = item;
+    const value = valueAt(item, item.length - 1);
+    if (parentSub === null) continue;
+    if (parent === records) found.push(...record(parentSub, value, false));
+    else if (
+      parent instanceof Y.XmlElement &&
+      !["type", "path"].includes(parentSub) &&
+      !retyped(parent)
+    ) {
+      const leaf = leafOf.get(parent._item!);
+      if (leaf !== undefined && !shows(leaf, parentSub))
+        found.push({
+          kind: "attribute",
+          block: textOf.get(parent._item!) ?? "",
+          nodeName: leaf,
+          name: parentSub,
+          value,
+          now: undefined,
+          shownAs: leaf,
+        });
+    }
+  }
 
   const quotes = new Quotes(found);
   for (let item = sequence?._start ?? null; item; item = item.right) {
@@ -429,7 +454,10 @@ function sequenceEditsNotInNote(
           : element.nodeName === "hardBreak"
       )
         quotes.breakLine();
-      else found.push({ kind: "other" });
+      else {
+        quotes.flush();
+        found.push({ kind: "other" });
+      }
     }
   }
   quotes.flush();
@@ -557,8 +585,9 @@ function notInNoteSection(edits: readonly NotInNote[]): string {
 
 /**
  * The document `accepted` then `kept` rebuild, with a closing list of the
- * kept edits it has no place for. Null when an update still waits on what it
- * depends on, which would leave its edit out.
+ * kept edits it has no place for. `accepted` starts with the base the kept
+ * edits were made on. Null when an update still waits on what it depends on,
+ * which would leave its edit out.
  */
 export function recoveredDocument(
   accepted: readonly Uint8Array[],
@@ -570,7 +599,7 @@ export function recoveredDocument(
     for (const update of [...accepted, ...kept]) Y.applyUpdate(doc, update);
     if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) return null;
     const markdown = yDocToMarkdown(doc);
-    const edits = editsNotInNote(doc, kept);
+    const edits = editsNotInNote(doc, accepted[0], kept);
     if (edits.length === 0) return { markdown, notInNote: 0 };
     const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
     const section = notInNoteSection(edits).trimEnd().replaceAll("\n", lineBreak);

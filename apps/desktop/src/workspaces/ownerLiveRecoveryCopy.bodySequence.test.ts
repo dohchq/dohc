@@ -35,11 +35,22 @@ type Step = (editor: Person) => void;
  * A kept edit made by a person at a format-2 editor (client 1), against a change by someone else
  * at another editor (client 2) that the server already accepted. With `seen`, the other editor had
  * the kept edit before making theirs, as when its delivery was applied but never acknowledged.
+ * `before` is an edit made to `note` before the queue started, by a third editor.
  */
-function conflict(mine: Step, theirs: Step, seen = false): OwnerYDocOutboxRecovery {
-  const start = markdownToYDoc(NOTE, { bodySequence: true });
-  const baseUpdate = Y.encodeStateAsUpdate(start);
+function conflict(
+  mine: Step,
+  theirs: Step,
+  seen = false,
+  { note = NOTE, before }: { note?: string; before?: Step } = {},
+): OwnerYDocOutboxRecovery {
+  const start = markdownToYDoc(note, { bodySequence: true });
+  let baseUpdate = Y.encodeStateAsUpdate(start);
   start.destroy();
+  if (before) {
+    const author = person(baseUpdate, 3);
+    before(author);
+    baseUpdate = Y.encodeStateAsUpdate(author.doc);
+  }
   const me = person(baseUpdate, 1);
   const other = person(baseUpdate, 2);
   mine(me);
@@ -127,6 +138,8 @@ const tick = (checked: boolean) => (editor: Person) =>
   markup(editor, named("taskItem", "tick me"), null, { checked });
 const level = (to: number) => (editor: Person) =>
   markup(editor, named("heading", "Plan"), null, { level: to });
+const heading = (to: number) => (editor: Person) =>
+  markup(editor, named("paragraph", "Start here."), "heading", { level: to });
 const tex = (to: string) => (editor: Person) =>
   markup(editor, named("mathInline"), null, { tex: to });
 const list =
@@ -143,6 +156,24 @@ const both =
   (editor: Person) => {
     for (const step of steps) step(editor);
   };
+
+function afterBottom(editor: Person) {
+  const end = find(editor, named("paragraph", "Bottom"));
+  editor.view.dispatch(
+    editor.view.state.tr.setSelection(
+      TextSelection.create(editor.view.state.doc, end.pos + end.node.nodeSize - 1),
+    ),
+  );
+  editor.press("Enter");
+}
+
+function removeAfterBottom(editor: Person) {
+  const end = find(editor, named("paragraph", "Bottom"));
+  const from = end.pos + end.node.nodeSize;
+  editor.view.dispatch(editor.view.state.tr.delete(from, editor.view.state.doc.content.size));
+}
+
+const LOOSE_TODO = NOTE.replace("- [ ] tick me\n\n", "- [ ] tick me\n\n  second\n\n");
 
 async function saved(recovery: OwnerYDocOutboxRecovery) {
   const root = await createTestScratch("dohc-live-recovery-");
@@ -284,26 +315,140 @@ it.each<[string, Step, Step, boolean, string, string, number]>([
   [
     "text and a rule, and not an empty line, that someone else removed after seeing them",
     (editor) => {
-      const end = find(editor, named("paragraph", "Bottom"));
-      editor.view.dispatch(
-        editor.view.state.tr.setSelection(
-          TextSelection.create(editor.view.state.doc, end.pos + end.node.nodeSize - 1),
-        ),
-      );
-      editor.press("Enter");
+      afterBottom(editor);
       editor.type("More words");
       editor.press("Enter");
       editor.put("horizontalRule");
     },
-    (editor) => {
-      const end = find(editor, named("paragraph", "Bottom"));
-      const from = end.pos + end.node.nodeSize;
-      editor.view.dispatch(editor.view.state.tr.delete(from, editor.view.state.doc.content.size));
-    },
+    removeAfterBottom,
     true,
     NOTE,
     "Text added to a part that was deleted:\n\n> More words\n\n1 more kept edit, such as an image, can't be shown as text.\n",
     2,
+  ],
+  [
+    "the last of two heading levels the kept edit set, against one someone else set",
+    both(level(2), level(4)),
+    level(3),
+    false,
+    NOTE.replace("# Plan", "### Plan"),
+    'Set level to 4 on "Plan". The note has 3.\n',
+    1,
+  ],
+  [
+    "the last of two first numbers the kept edit set, against one someone else set",
+    both(list("orderedList", { start: 5 }), list("orderedList", { start: 6 })),
+    list("orderedList", { start: 9 }),
+    false,
+    NOTE.replace("1. Pack\n2. Eat", "9. Pack\n10. Eat"),
+    'Set start to 6 on "Pack Eat". The note has 9.\n',
+    1,
+  ],
+  [
+    "a heading level on a line someone else made a code block",
+    level(2),
+    (editor) => markup(editor, named("heading", "Plan"), "codeBlock", {}),
+    false,
+    NOTE.replace("# Plan", "```\nPlan\n```"),
+    'Set level to 2 on "Plan". The note has it as a codeBlock.\n',
+    1,
+  ],
+  [
+    "a first number on a list someone else's record made unreadable as a list",
+    list("orderedList", { start: 5 }),
+    (editor) => {
+      const [id] = [...editor.containers.entries()].find(([, type]) => type === "orderedList")!;
+      editor.doc.transact(() => editor.containers.set(id, "table"));
+    },
+    false,
+    NOTE.replace("1. Pack\n2. Eat", "Pack\n\nEat"),
+    'Set start to 5 on "Pack Eat". The note has no value.\n',
+    1,
+  ],
+  [
+    "text on each side of a formula, quoted apart, that someone else removed after seeing it",
+    (editor) => {
+      afterBottom(editor);
+      editor.type("Before");
+      editor.put("mathInline", { tex: "x" });
+      editor.type("After");
+    },
+    removeAfterBottom,
+    true,
+    NOTE,
+    "Text added to a part that was deleted:\n\n> Before\n\nText added to a part that was deleted:\n\n> After\n\n1 more kept edit, such as an image, can't be shown as text.\n",
+    3,
+  ],
+  [
+    "a line taken out of a quote, which someone else deleted",
+    (editor) => command(editor, "one", lift),
+    (editor) => remove(editor, named("paragraph", "one")),
+    false,
+    NOTE.replace("> one\n>\n> two", "> two"),
+    "Moved a paragraph that was deleted.\n",
+    1,
+  ],
+  [
+    "a line made a heading, which someone else deleted",
+    (editor) => markup(editor, named("paragraph", "Start here."), "heading", { level: 2 }),
+    (editor) => remove(editor, named("paragraph", "Start here.")),
+    false,
+    NOTE.replace("Start here.\n\n", ""),
+    "Changed a part that was deleted to a heading.\n",
+    1,
+  ],
+  [
+    "a first number someone else replaced, on a list they then made bulleted",
+    list("orderedList", { start: 5 }),
+    both(list("orderedList", { start: 9 }), list("bulletList")),
+    false,
+    NOTE.replace("1. Pack\n2. Eat", "- Pack\n- Eat"),
+    'Set start to 5 on "Pack Eat". The note has it as a bulletList.\n',
+    1,
+  ],
+  [
+    "a line made a heading, and not its level, which someone else made a code block",
+    heading(2),
+    (editor) => markup(editor, named("paragraph", "Start here."), "codeBlock", {}),
+    false,
+    NOTE.replace("Start here.", "```\nStart here.\n```"),
+    'Changed "Start here." to a heading. The note has it as a codeBlock.\n',
+    1,
+  ],
+  [
+    "a heading level on a line someone else also made a heading",
+    heading(2),
+    heading(3),
+    false,
+    NOTE.replace("Start here.", "### Start here."),
+    'Set level to 2 on "Start here.". The note has 3.\n',
+    1,
+  ],
+  [
+    "a heading level, and not a line the kept edit made a heading,",
+    both(heading(2), level(2)),
+    level(3),
+    false,
+    NOTE.replace("# Plan", "### Plan").replace("Start here.", "## Start here."),
+    'Set level to 2 on "Plan". The note has 3.\n',
+    1,
+  ],
+  [
+    "a rule made from a new line, that someone else removed after seeing it",
+    (editor) => {
+      afterBottom(editor);
+      markup(
+        editor,
+        (node) => node.type.name === "paragraph" && node.content.size === 0,
+        "horizontalRule",
+        {},
+      );
+    },
+    removeAfterBottom,
+    true,
+    NOTE,
+    "1 more kept edit, such as an image, can't be shown as text.\n",
+    1,
   ],
 ])(
   "lists %s at the end of a format-2 note's readable copy",
@@ -313,3 +458,21 @@ it.each<[string, Step, Step, boolean, string, string, number]>([
     expect(copy.notInNote).toBe(count);
   },
 );
+
+it("lists nothing for a tick the kept edit itself took out of its list, after an older change to that list", async () => {
+  const copy = await saved(
+    conflict(
+      both(tick(true), (editor) => command(editor, "tick me", lift)),
+      level(3),
+      false,
+      {
+        note: LOOSE_TODO,
+        before: (editor) => remove(editor, named("paragraph", "second")),
+      },
+    ),
+  );
+  expect(copy.markdown).toBe(
+    NOTE.replace("# Plan", "### Plan").replace("- [ ] tick me", "tick me"),
+  );
+  expect(copy.notInNote).toBe(0);
+});
