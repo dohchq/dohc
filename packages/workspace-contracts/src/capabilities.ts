@@ -93,6 +93,10 @@ const MEMBERS_MCP_REASON =
 const LISTED_CAPABILITIES = {
   // withDeclarations adds the IPC rows and MCP tools of the operations declared with these.
   "links.edges": capability("Read a bounded page of file links.", { ipc: [], mcp: {} }),
+  "links.connections": capability("Read how Collections, apps, and automations connect.", {
+    ipc: [],
+    mcp: {},
+  }),
   "links.in": capability("Read documents that link to a file.", { ipc: [], mcp: {} }),
   "links.resolve": capability("Resolve links from one document.", { ipc: [], mcp: {} }),
   "inbox.list": capability("List items in the workspace Inbox Collection.", {

@@ -437,7 +437,8 @@
     "desktop:member-app-share",
     "desktop:member-app-fork",
     "desktop:member-app-withdraw",
-    "desktop:member-app-sharing"
+    "desktop:member-app-sharing",
+    "desktop:links-connections"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -522,6 +523,7 @@
     "desktop:member-app-share": "active-workspace",
     "desktop:member-app-fork": "active-workspace",
     "desktop:member-app-withdraw": "active-workspace",
-    "desktop:member-app-sharing": "active-workspace"
+    "desktop:member-app-sharing": "active-workspace",
+    "desktop:links-connections": "active-workspace"
   }
 }

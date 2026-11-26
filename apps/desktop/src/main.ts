@@ -4,6 +4,7 @@ import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { createWorkspaceGraphConnections } from "./workspaces/workspaceGraphConnections";
 import { createWorkspaceRetrievalReader } from "./workspaces/workspaceRetrieval";
 import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
@@ -178,6 +179,7 @@ import {
   createLocalDatasetHost,
   localDatasetStoreExists,
   localDatasetStoreId,
+  readLocalAppApprovals,
   reconcileExistingLocalCollectionApps,
   type LocalDatasetAgent,
   type LocalDatasetHost,
@@ -594,6 +596,7 @@ import {
   workspaceSyncPauseStatus,
   type WorkspaceSyncPause,
 } from "@dohc/workspace-contracts/workspace-sync";
+import { isSharedWithMePath } from "@dohc/workspace-contracts/workspace-paths";
 import { syncPauseFor } from "./workspaces/syncPauseFor";
 import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
 import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
@@ -920,6 +923,7 @@ import {
 import { readFolderAppWorkspaceSources } from "./workspaces/folderAppWorkspaceSources";
 import { createFolderAppDetection } from "./workspaces/folderAppDetection";
 import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
+import { listSiteRoots } from "./workspaces/sitePackage";
 import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
 import { resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
@@ -4477,6 +4481,20 @@ async function withEngineAdapter<T>(
 }
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
+const workspaceConnections = createWorkspaceGraphConnections<RegistryEntry>({
+  withAdapter: withEngineAdapter,
+  apps: async ({ rootPath }) =>
+    listSiteRoots(rootPath, {
+      files: (await workspaceFilesWorker.list(rootPath)).files.filter(
+        (file) => !isSharedWithMePath(file.path),
+      ),
+    }),
+  approvals: (workspace) => readLocalAppApprovals(workspace.rootPath),
+  groups: async (workspace) =>
+    (await linkedChatStoreFor(workspace).listChannels({ workspaceId: workspace.workspaceId })).map(
+      ({ id, kind, name, slug }) => ({ id, kind, name, slug }),
+    ),
+});
 const workspaceRetrieval = createWorkspaceRetrievalReader({
   withAdapter: withEngineAdapter,
   syncWorkspaceSharedChannels,
@@ -8476,6 +8494,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   reads: {
     chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
     chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
+    linksConnections: (workspace) => workspaceConnections.connections(workspace),
     linksEdges: (workspace, input) => workspaceLinks.edges(workspace, input),
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
@@ -10446,6 +10465,8 @@ function registerIpcHandlers(): void {
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
   });
   registerOperations(operationBoundary, linksOperations, {
+    linksConnections: (_input, { operation }) =>
+      workspaceConnections.connections(operation.workspace),
     linksEdges: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
       workspaceLinks.edges(operation.workspace, input),
     linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) =>

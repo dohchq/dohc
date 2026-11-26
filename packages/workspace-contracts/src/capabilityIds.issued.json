@@ -232,6 +232,7 @@
   "inbox.list",
   "inbox.move",
   "inbox.move.undo",
+  "links.connections",
   "links.edges",
   "links.in",
   "links.resolve",

@@ -21,7 +21,11 @@ import {
   type Envelope,
   type LocalCollectionEngine,
 } from "./localCollectionApps";
-import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
+import {
+  createLocalDatasetHost,
+  readLocalAppApprovals,
+  type LocalDatasetHost,
+} from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { unguardedCollections } from "../testing/collectionsHolder";
 
@@ -374,6 +378,7 @@ async function fixture(
     create,
     list,
     inspect,
+    sources,
   };
 }
 
@@ -661,6 +666,23 @@ body`,
     });
     const reopened = await f.open();
     expect(reopened.apps.list("trip", "main")[0]).toMatchObject({ active: true });
+  });
+
+  it("lists each app root's active approval read-only, following a move between kinds", async () => {
+    const f = await fixture();
+    const manifestSha256 = () =>
+      createHash("sha256").update(f.sources.get("trip/app.publish.json")!).digest("hex");
+    expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
+      { appRoot: "trip", targets: ["collection:trip/responses"], manifestSha256: manifestSha256() },
+    ]);
+    await f.host.apps.activate(await f.datasetApp(f.host), signal());
+    expect(await readLocalAppApprovals(f.workspaceRoot)).toEqual([
+      {
+        appRoot: "trip",
+        targets: [`dataset-id:${definition.datasetId}`],
+        manifestSha256: manifestSha256(),
+      },
+    ]);
   });
 
   it("moves a root between kinds only by explicit replacement, refusing each earlier session", async () => {

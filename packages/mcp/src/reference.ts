@@ -686,6 +686,8 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
   dohc_search_workspace:
     "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
+  dohc_links_connections:
+    "Connections are kept only in the original workspace. Shared profiles do not offer this read.",
   dohc_plan_agent_run_undo:
     "Only the original workspace plans an agent run undo. Shared profiles do not offer this read.",
   dohc_inbox_list:
@@ -742,6 +744,7 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_move_path",
       "dohc_delete_path",
       "dohc_link",
+      "dohc_links_connections",
       "dohc_links_edges",
       "dohc_links_in",
       "dohc_links_resolve",
