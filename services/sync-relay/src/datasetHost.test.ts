@@ -221,6 +221,7 @@ async function fixture(
     capabilities: AppPublicationCandidate["capabilities"],
     audience: "link" | "workspace" | "owner" = "link",
     external?: AppPublicationCandidate["external"],
+    expected?: string | null,
   ) {
     const previous = base.storage.readAppPublication({
       ...scope,
@@ -245,16 +246,19 @@ async function fixture(
       compiler: candidate.compilerIdentity,
       bundleDigest: candidate.bundleDigest,
     });
-    const current = base.storage.db
+    const head = base.storage.db
       .prepare(
-        "SELECT publication_id FROM sync_relay_app_publications WHERE audience='owner' AND owner_state='current'",
+        "SELECT publication_id FROM sync_relay_app_publications WHERE audience='owner' AND active=1 AND owner_state IN ('pending','current') ORDER BY owner_state='pending' DESC LIMIT 1",
       )
       .get();
     const result = base.storage.publishAppPublication({
       workspaceId: "w",
       ownerUserId: "owner",
       ...(audience === "owner"
-        ? { expectedCurrentPublicationId: current ? String(current.publication_id) : null }
+        ? {
+            expectedCurrentPublicationId:
+              expected !== undefined ? expected : head ? String(head.publication_id) : null,
+          }
         : audience === "workspace"
           ? { shareId: "members" }
           : { shareId: "s", grantId: "g", generation: 1 }),
@@ -2782,4 +2786,78 @@ it("opens an Owner Publication only on its owner's phone, makes a version curren
   await expect(run("appReview", { publicationId: app })).rejects.toMatchObject({
     code: "not_found",
   });
+});
+
+it("keeps staged owner versions in order, keeps a running launch on a version sent again, and withdraws pending versions with their app", async () => {
+  const f = await memberFixture();
+  const version = (operationIds: string[], expected?: string | null) =>
+    f.publishWith(
+      [
+        resolveAppDatasetCapability(
+          {
+            kind: "dataset",
+            datasetId: memberRevision.datasetId,
+            revision: 1,
+            revisionSha256: memberRevision.revisionSha256,
+            operationIds,
+          },
+          memberRevision,
+        ),
+      ],
+      "owner",
+      undefined,
+      expected,
+    );
+  const desktop: AppBackendAuth = {
+    kind: "named",
+    workspaceId: "w",
+    userId: "owner",
+    device: "desktop",
+  };
+  const bind = (publicationId: string) =>
+    f.host.bindPublication(desktop, { workspaceId: "w", publicationId });
+  const conflict = expect.objectContaining({ code: "conflict" });
+  const { run, open } = ownerPhone(f);
+  const catalog = async () =>
+    ((await run("apps", {})).apps as { publicationId: string }[]).map((row) => row.publicationId);
+  const a = version([id(5), id(6), id(7)]);
+  bind(a);
+  await run("appApprove", { publicationId: a, authorityRevision: 1 });
+  const launch = await open(a);
+  const b = version([id(5), id(6)]);
+  const staged = f.storage.listAppPublications({
+    workspaceId: "w",
+    ownerUserId: "owner",
+    limits,
+    audience: "owner",
+  }).publications;
+  expect(staged).toContainEqual(
+    expect.objectContaining({ publicationId: b, ownerState: "pending" }),
+  );
+  expect(() => version([id(5)], a)).toThrow(conflict);
+  const c = version([id(5)], b);
+  expect(() => version([id(5), id(6)], a)).toThrow(conflict);
+  bind(c);
+  expect(await catalog()).toContain(c);
+  expect(await catalog()).not.toContain(a);
+  expect(version([id(5), id(6), id(7)], c)).toBe(a);
+  const added = await f.host.invoke(launch, {
+    workspaceId: "w",
+    datasetId: memberRevision.datasetId,
+    revision: 1,
+    revisionSha256: memberRevision.revisionSha256,
+    operationId: id(5),
+    input: { name: "From the phone" },
+    idempotencyKey: "after-resend",
+    access: { kind: "app", appId: a },
+  });
+  expect(added.revision).toBeGreaterThan(0);
+  f.storage.withdrawAppPublication({
+    workspaceId: "w",
+    publicationId: c,
+    ownerUserId: "owner",
+    expectedAuthorityRevision: 1,
+  });
+  expect(() => bind(a)).toThrow(expect.objectContaining({ code: "not_found" }));
+  expect(await catalog()).not.toContain(a);
 });

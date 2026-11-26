@@ -1293,6 +1293,7 @@ it("replaces an owner's earlier version of an app, and deletes each once no laun
   expect(listed(f, "owner")).toEqual([first]);
   expect(rowExists(f, third)).toBe(false);
   f.storage.withdrawAppPublication({ ...ownRead(first), expectedAuthorityRevision: 1 });
+  expect(listed(f, "owner")).toEqual([]);
   expect(() =>
     f.storage.reactivateAppPublication({ ...ownRead(first), expectedAuthorityRevision: 2 }),
   ).toThrow(expect.objectContaining({ code: "not_found" }));
@@ -1402,4 +1403,29 @@ it("publishes to the owner's phones over HTTP only without outside calls or Coll
     }),
   ]);
   expect((await f.http("w/app-publications?audience=link")).status).toBe(400);
+});
+
+it("keeps an owner whose publishing is held from making an earlier version current again", () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  expect(phone(f, first, "a".repeat(32))("running")()).not.toBeNull();
+  const second = f.storage.publishAppPublication(ownRequest("2".repeat(64), 20, first));
+  f.storage.disableAppPublication({
+    publicationId: second.publicationId,
+    reason: "Malware",
+    nowMs: 30,
+  });
+  expect(() => f.storage.publishAppPublication(ownRequest("1".repeat(64), 40))).toThrow(
+    expect.objectContaining({ code: "conflict" }),
+  );
+  expect(f.storage.readAppPublication(ownRead(first)).ownerState).toBe("replaced");
+});
+
+it("refuses a grant whose publication is gone", () => {
+  const f = fixture();
+  const first = f.storage.publishAppPublication(ownRequest()).publicationId;
+  const orphan = phone(f, first, "a".repeat(32))("orphan");
+  f.raw.prepare("DELETE FROM sync_relay_app_publications WHERE publication_id=?").run(first);
+  expect(orphan()).toBeNull();
+  expect(phoneAppLaunch(f.storage, digest("launch-orphan"), 30)).toBeNull();
 });

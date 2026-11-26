@@ -217,7 +217,8 @@ export function redeemPhoneAppGrant(
       Number(row.expires_at_ms) <= input.nowMs ||
       row.workspace_id !== input.workspaceId ||
       row.publication_id !== input.publicationId ||
-      (publication?.owner_state ?? "current") !== "current"
+      !publication ||
+      (publication.owner_state ?? "current") !== "current"
     ) {
       db(storage)
         .prepare(`DELETE FROM ${PHONE_APP_LAUNCHES} WHERE token_hash = ?`)

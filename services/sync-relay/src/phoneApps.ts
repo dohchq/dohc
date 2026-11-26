@@ -139,8 +139,8 @@ export function createPhoneApps(options: {
   }
 
   // Active, not taken down, its share still current, not under a hidden path, and over one transactional
-  // Collection or nothing in the workspace. An Owner Publication reaches only a phone, once current, and once
-  // replaced only the launch still running it.
+  // Collection or nothing in the workspace. An Owner Publication reaches only a phone, and while not current only
+  // the launch still running it, which started while it was current and bound.
   function publication(
     userId: string,
     workspaceId: string,
@@ -165,8 +165,7 @@ export function createPhoneApps(options: {
       !row.active ||
       row.operatorTakedown ||
       hiddenFile(row.candidate.appRoot) ||
-      row.ownerState === "pending" ||
-      (row.ownerState === "replaced" && !running) ||
+      (row.ownerState !== undefined && row.ownerState !== "current" && !running) ||
       row.candidate.capabilities.some((capability) => capability.kind !== "dataset") ||
       !publicationLinkIsCurrent(storage as StorageContext, row.owner) ||
       !servable(userId, workspaceId, id, phone)

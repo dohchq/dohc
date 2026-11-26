@@ -391,23 +391,26 @@ export function publishAppPublication(
       putPublicationBlob(storage, owner.workspaceId, file.sha256, content, now);
     }
     const state = candidate.capabilities.length ? "pending" : "current";
-    let current: string | null = null;
+    let head: string | null = null;
     if (own) {
       reclaimOwnerPublications(storage, owner.workspaceId, now);
       const row = storage.db
         .prepare(`SELECT publication_id FROM sync_relay_app_publications WHERE workspace_id=? AND owner_user_id=?
-        AND audience='owner' AND app_root=? AND active=1 AND owner_state='current'`)
+        AND audience='owner' AND app_root=? AND active=1 AND owner_state IN ('pending','current')
+        ORDER BY owner_state='pending' DESC LIMIT 1`)
         .get(owner.workspaceId, owner.ownerUserId, candidate.appRoot);
-      current = row ? String(row.publication_id) : null;
-      if (current !== publicationId && current !== input.expectedCurrentPublicationId)
+      head = row ? String(row.publication_id) : null;
+      if (head !== publicationId && head !== input.expectedCurrentPublicationId)
         throw relayError("conflict", "Another version of this app reached your phones first.");
     }
     const existing = storage.db
       .prepare("SELECT active FROM sync_relay_app_publications WHERE publication_id=?")
       .get(publicationId);
     if (existing) {
-      if (own && existing.active === 1 && current !== publicationId)
+      if (own && existing.active === 1 && head !== publicationId) {
+        assertPublishingNotHeld(storage, owner.ownerUserId);
         placeOwnerPublication(storage, owner, candidate.appRoot, publicationId, state, now);
+      }
       return withOperatorTakedown(
         storage,
         stored(storage, { ...owner, publicationId, limits: input.limits }),
@@ -551,7 +554,7 @@ export interface ListAppPublicationsInput {
   limits: AppPublicationLimits;
   cursor?: string;
   appRoot?: string;
-  /** Owner Publications are left out unless asked for, alone or with the rest. */
+  /** Owner Publications are left out unless asked for, alone with their pending versions or with the rest. */
   audience?: "owner" | "all";
 }
 export type AppPublicationListRow = {
@@ -564,6 +567,7 @@ export type AppPublicationListRow = {
   grantId: string | null;
   active: boolean;
   linkCurrent: boolean;
+  ownerState?: OwnerPublicationState;
   collectionCapability: AppCollectionCapability | "unavailable" | null;
   datasetCapabilities: AppDatasetCapability[] | "unavailable";
 } & (
@@ -571,10 +575,11 @@ export type AppPublicationListRow = {
   | { manifestUnavailable: true }
 );
 
-const listedOwner = (owner: PublicationOwner) => ({
+const listedOwner = ({ owner, ownerState }: AppPublicationState) => ({
   audience: publicationAudience(owner),
   shareId: "shareId" in owner ? owner.shareId : null,
   grantId: "grantId" in owner ? owner.grantId : null,
+  ...(ownerState ? { ownerState } : {}),
 });
 
 export function publicationLinkIsCurrent(
@@ -596,8 +601,9 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
     const rows = storage.db
       .prepare(`SELECT p.publication_id,a.capability_json FROM sync_relay_app_publications p
       LEFT JOIN sync_relay_app_collection_approvals a ON a.publication_id=p.publication_id AND a.workspace_id=p.workspace_id AND a.active=1
-      WHERE p.workspace_id=? AND p.owner_user_id=? AND p.publication_id>? AND coalesce(p.owner_state,'current')='current'
-      AND (?=1 OR (p.audience='owner')=?) ORDER BY p.publication_id LIMIT 26`)
+      WHERE p.workspace_id=?1 AND p.owner_user_id=?2 AND p.publication_id>?3
+      AND (p.audience<>'owner' OR p.active=1 AND (p.owner_state='current' OR p.owner_state='pending' AND ?5=1))
+      AND (?4=1 OR (p.audience='owner')=?5) ORDER BY p.publication_id LIMIT 26`)
       .all(
         input.workspaceId,
         input.ownerUserId,
@@ -633,7 +639,7 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
             approvalProvenance: publication.approvalProvenance,
             authorityRevision: publication.authorityRevision,
             manifestUnavailable: false,
-            ...listedOwner(publication.owner),
+            ...listedOwner(publication),
             appRoot: publication.candidate.appRoot,
             sourceRevision: publication.candidate.sourceRevision,
             active: publication.active,
@@ -657,7 +663,7 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
             approvalProvenance: state.approvalProvenance,
             authorityRevision: state.authorityRevision,
             manifestUnavailable: true,
-            ...listedOwner(state.owner),
+            ...listedOwner(state),
             active: state.active,
             linkCurrent: publicationLinkIsCurrent(storage, state.owner),
             collectionCapability,
@@ -696,6 +702,11 @@ export function withdrawAppPublication(
         "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?",
       )
       .run(input.publicationId);
+    storage.db
+      .prepare(`UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1
+      WHERE audience='owner' AND owner_state='pending' AND active=1 AND workspace_id=? AND owner_user_id=?
+      AND app_root=(SELECT app_root FROM sync_relay_app_publications WHERE publication_id=?)`)
+      .run(input.workspaceId, input.ownerUserId, input.publicationId);
     return { ...current, active: false, authorityRevision: current.authorityRevision + 1 };
   });
 }
