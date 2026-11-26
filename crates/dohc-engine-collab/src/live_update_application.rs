@@ -5020,7 +5020,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_typing_a_collaborators_delete_removed_from_a_format_two_note() {
+    fn typing_a_collaborator_never_saw_survives_their_delete_in_a_format_two_note() {
         crate::ydoc::reading_body_sequence_here(|| {
             let fold = |doc: &Ydoc, file: &str| {
                 doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
@@ -5042,13 +5042,15 @@ mod tests {
             let typed = fold(&ana, "Hello world\n\nKeep\n");
             let own = fold(&ana, "Keep\n");
             let deleted = fold(&ben, "Keep\n");
+            let merged = Ydoc::wire();
+            for update in [&line, &typed, &deleted] {
+                merged.apply(update).unwrap();
+            }
+            let read = merged.project(ContentKind::Richdoc).unwrap().content;
+            assert!(read.contains("world") && read.contains("Keep"), "{read:?}");
+            assert!(!read.contains("Hello"), "{read:?}");
             let removals = removals_merging(&["typed", "deleted"], line, typed, own, deleted);
-            assert_eq!(removals.len(), 1, "{removals:?}");
-            assert_eq!(removals[0].0, " world");
-            assert!(removals[0]
-                .1
-                .as_deref()
-                .is_some_and(|author| author.contains("guest-2")));
+            assert_eq!(removals, vec![]);
         });
     }
 

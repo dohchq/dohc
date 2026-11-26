@@ -96,8 +96,6 @@ engine.
 `src/deleted_content.rs` adds `deleted_runs`. It reads the items a delete set
 names in a document that keeps deleted content: each run's text, embed or
 element with its attributes, the line it sat in and its place in the document.
-`DeletedRun::in_root` and `DeletedRun::element_before` find a format-2 note's
-letters under the `sequence` root and the `block` boundary that starts their line.
 Yjs reads these through item fields that are crate-private here. The engine
 uses it to quote text someone else's change removed unseen; tests live in
 `crates/yrs-interop/tests/deleted_content.rs`.

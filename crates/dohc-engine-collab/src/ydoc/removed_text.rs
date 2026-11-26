@@ -7,7 +7,7 @@
 //! So the removed text is the text this merge deleted that the change's own
 //! delete set does not list.
 
-use super::{body_sequence::BOUNDARY, Ydoc, ROOT_SEQUENCE};
+use super::Ydoc;
 use crate::replay_parity::MergeDeletions;
 use yrs::deleted_content::{deleted_runs, DeletedElement, DeletedRun, Places};
 use yrs::{Any, StateVector, Transact, ID};
@@ -60,7 +60,7 @@ impl Ydoc {
                 .filter(holds_text)
                 .map(|run| (shown(&run), run))
                 .filter(|(shown, _)| !shown.is_empty())
-                .map(|(shown, run)| (run.place(&mut places), line_of(&run), run, shown))
+                .map(|(shown, run)| (run.place(&mut places), run.line(), run, shown))
                 .collect();
         if pieces.is_empty() {
             return None;
@@ -91,19 +91,10 @@ fn holds_text(run: &DeletedRun<'_>) -> bool {
         return false;
     }
     if run.text().is_some() || run.embed().is_some() {
-        return run.in_xml_text() || (run.text().is_some() && run.in_root(ROOT_SEQUENCE));
+        return run.in_xml_text();
     }
     run.element()
         .is_some_and(|element| INLINE_NODES.contains(&element.name()))
-}
-
-/// The line a piece sat in. In a format-2 note that is the nearest boundary
-/// before it, so a deleted boundary still ends a line.
-fn line_of(run: &DeletedRun<'_>) -> Option<ID> {
-    match run.in_root(ROOT_SEQUENCE) {
-        true => run.element_before(BOUNDARY),
-        false => run.line(),
-    }
 }
 
 /// What the piece shows in the note. The note's Markdown writes a string embed

@@ -129,27 +129,6 @@ impl<'t> DeletedRun<'t> {
         line.item.map(|item| item.id)
     }
 
-    /// Whether the item is a child of the root named `name` itself.
-    pub fn in_root(&self, name: &str) -> bool {
-        self.parent()
-            .is_some_and(|parent| parent.item.is_none() && parent.name.as_deref() == Some(name))
-    }
-
-    /// The nearest element named `name` before the run among its siblings,
-    /// deleted or not.
-    pub fn element_before(&self, name: &str) -> Option<ID> {
-        let mut left = self.item.left;
-        while let Some(item) = left {
-            if let ItemContent::Type(branch) = &item.content {
-                if matches!(branch.type_ref(), TypeRef::XmlElement(tag) if tag.as_ref() == name) {
-                    return Some(item.id);
-                }
-            }
-            left = item.left;
-        }
-        None
-    }
-
     /// Where the run stood: each ancestor's offset among its siblings, then
     /// the run's own. Deleted siblings count, so runs sort the way they stood.
     pub fn place(&self, places: &mut Places) -> Vec<u32> {
