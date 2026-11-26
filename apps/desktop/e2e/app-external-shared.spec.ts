@@ -8,6 +8,7 @@ import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import {
   copyAppLink,
+  openAppLink,
   sharedDatasetViewerOrigin,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
@@ -213,7 +214,7 @@ test("@app-external-shared a share-link visitor runs the app's approved outside 
         bodies.push(await response.text());
       } catch {}
     });
-    await guest.goto(appUrl);
+    await openAppLink(guest, appUrl);
     const out = guest.frameLocator("iframe").locator("#out");
     await expect
       .poll(async () => Object.keys(JSON.parse((await out.textContent()) || "{}")).length, {

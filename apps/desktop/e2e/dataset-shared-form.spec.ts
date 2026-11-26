@@ -9,6 +9,7 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   sharedDatasetViewerOrigin,
   copyAppLink,
+  openAppLink,
   openAppFromFolderLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
@@ -229,7 +230,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
       table = dataset.tables[0]!;
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
-    await guest.goto(appUrl);
+    await openAppLink(guest, appUrl);
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
     await form.getByLabel("Name", { exact: false }).fill("Shared browser participant");

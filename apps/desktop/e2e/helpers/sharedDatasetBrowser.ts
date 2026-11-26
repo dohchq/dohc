@@ -37,6 +37,12 @@ export async function copyAppLink(testInfo: TestInfo, app: ElectronApplication, 
   return url;
 }
 
+/** Opens a copied app link the way a guest does: the link lands on the app, which opens on request. */
+export async function openAppLink(page: Page, url: string) {
+  await page.goto(url);
+  await page.getByRole("button", { name: "Open app", exact: true }).click();
+}
+
 export async function openAppFromFolderLink(page: Page) {
   const apps = page.getByRole("button", { name: "Apps", exact: true });
   await expect(apps).toHaveAttribute("aria-expanded", "false");

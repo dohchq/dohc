@@ -7,6 +7,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   sharedDatasetViewerOrigin,
   copyAppLink,
+  openAppLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -276,7 +277,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await publication.getByRole("button", { name: "Close", exact: true }).click();
       const guest = await shared!.browser.newPage();
       guest.on("pageerror", (error) => shared!.failures.push(error.message));
-      await guest.goto(appUrl);
+      await openAppLink(guest, appUrl);
       const heading = guest
         .frameLocator("iframe")
         .getByRole("heading", { name: "Trip poll", exact: true });
@@ -453,7 +454,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
 
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
-    await guest.goto(appUrl);
+    await openAppLink(guest, appUrl);
     const app = guest.frameLocator("iframe");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toBeVisible();
     await expect(app.getByRole("listitem")).toHaveText([
