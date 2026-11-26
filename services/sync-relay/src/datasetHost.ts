@@ -45,7 +45,11 @@ import {
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
-import { publicationIdOf, requireLinkAppPublication } from "./storage/publications";
+import {
+  publicationIdOf,
+  requireLinkAppPublication,
+  WHOLE_WORKSPACE,
+} from "./storage/publications";
 import {
   getWorkspaceMembership,
   workspaceMemberGrantId,
@@ -87,7 +91,6 @@ const ownerPrincipalKey = (workspaceId: string) =>
   hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
 // A moved folder can reach the server as a delete and a later write, and a deleted file can come straight back.
 const COLLECTION_MISSING_GRACE_MS = 120_000;
-const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
 export interface RelayDatasetHostOptions {
   storage: StorageContext;
   directory: string;
@@ -618,6 +621,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       ];
       let verified: AppDatasetCapability;
       try {
+        requireDatasetActiveForApproval(workspaceId, declared.datasetId);
         verified = capability(candidate, workspaceId, declared.datasetId);
       } catch (error) {
         if (error instanceof RelayError || error instanceof DatasetHostError) return null;
@@ -663,7 +667,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         publicationId
     )
       throw notFound();
-    const review = () => {
+    let reviewed:
+      | (NonNullable<ReturnType<typeof memberScope>> & {
+          consent: ReturnType<typeof memberAppConsent>;
+        })
+      | undefined;
+    const review = () => (reviewed ??= check());
+    const check = () => {
       const current = memberScope(
         workspaceId,
         publicationId,
@@ -2199,8 +2209,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           .prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id=?")
           .get(workspaceId);
         if (!workspaceOwner) throw notFound();
+        const shared = storage.db
+          .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=? AND active=1")
+          .get(publicationId);
         let written: ReturnType<typeof writeMemberApp> | undefined;
-        if (!operations.length) written = storage.tx(write);
+        if (!operations.length || shared) written = storage.tx(write);
         else
           host.setBindings(
             { kind: "named", workspaceId, userId: String(workspaceOwner.owner_user_id) },

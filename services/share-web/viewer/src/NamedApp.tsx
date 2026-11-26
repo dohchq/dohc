@@ -20,7 +20,7 @@ type Review = {
   }>;
   source: Array<{ path: string; sha256: string; byteLength: number }>;
 };
-const MAX_SOURCE_BYTES = 1024 * 1024;
+const MAX_SOURCE_BYTES = 256 * 1024;
 const CHANGED_AGAIN = "dohc could not save your choice. Review the app again, then try again.";
 const SOURCE_FAILED = "dohc could not load this file. Try again.";
 const CHECK_FAILED = "dohc could not check your account. Try again.";

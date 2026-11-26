@@ -114,7 +114,7 @@ const memberReview = (value: unknown) =>
       PUBLICATION.test(String(file.sha256)),
   );
 /** The most source text the review shows at once. */
-const MAX_SOURCE_BYTES = 1024 * 1024;
+const MAX_SOURCE_BYTES = 256 * 1024;
 interface Descriptor {
   publicationId: string;
   authorityRevision: number;

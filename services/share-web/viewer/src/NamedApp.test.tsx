@@ -346,7 +346,10 @@ it("asks a viewer to review a Member app's reach and source, then opens it once 
         ],
       },
     ],
-    source: [{ path: "app/index.ts", sha256: "e".repeat(64), byteLength: 12 }],
+    source: [
+      { path: "app/index.ts", sha256: "e".repeat(64), byteLength: 12 },
+      { path: "app/data.json", sha256: "f".repeat(64), byteLength: 300 * 1024 },
+    ],
   };
   const sent: Array<[string, unknown]> = [];
   vi.stubGlobal(
@@ -375,6 +378,7 @@ it("asks a viewer to review a Member app's reach and source, then opens it once 
   expect(container.textContent).not.toContain("Member access");
   expect(container.textContent).toContain("edit (changes data)");
   expect(button("Open app")).toBeUndefined();
+  expect(container.querySelectorAll(".member-review li button")).toHaveLength(1);
   await click("View");
   expect(container.querySelector(".member-review pre")?.textContent).toBe("export const x = 1;");
   await click("Allow and open");

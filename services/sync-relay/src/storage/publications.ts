@@ -132,7 +132,7 @@ export interface LinkAppPublicationAuthority {
   expiresAtMs: number;
 }
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
-const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
+export const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
 export function validateBuildIdentity(candidate: AppPublicationCandidate): void {
   const sourceDigest = digest("dohc-app-source-v2", {

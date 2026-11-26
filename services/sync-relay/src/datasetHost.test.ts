@@ -1779,6 +1779,23 @@ it("asks a viewer again for a new version, and only a person can allow it", asyn
   ]);
 });
 
+it("keeps a Member app's bindings when its publish is retried, and hides it once its Collection is archived", async () => {
+  const f = await memberAppFixture();
+  const app = f.publish();
+  const bindings = () =>
+    f.storage.db.prepare("SELECT token FROM dohc_dataset_bindings WHERE app_id=?").all(app);
+  const before = bindings();
+  expect(before).toHaveLength(1);
+  expect(f.publish()).toBe(app);
+  expect(bindings()).toEqual(before);
+  f.allow(ben, app);
+  f.host.archiveDataset(owner, scope);
+  expect(() => f.review(ben, app)).toThrow(expect.objectContaining({ code: "not_found" }));
+  expect(f.host.memberApps(owner, { workspaceId: "w" }).apps).toMatchObject([
+    { publicationId: app, reachable: false },
+  ]);
+});
+
 it("asks the author to review an app their agent published before it runs for them", async () => {
   const f = await memberAppFixture();
   const agent = { kind: "agent", label: "Helper", labelSource: "agent-declared" } as const;
