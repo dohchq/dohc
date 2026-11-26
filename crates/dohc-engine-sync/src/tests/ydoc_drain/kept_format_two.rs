@@ -476,20 +476,14 @@ fn a_stray_roots_base_refuses_its_whole_claim_in_one_step_and_the_next_note_repl
         let (_scratch, _path, mut engine) = open_store();
         let stray_key = keep(&mut engine, "object-two", "peer-a", 1, &stray);
         let good_key = keep(&mut engine, "object-three", "peer-b", 10, &good);
-        let later = reading_body_sequence_here(|| {
-            let later = op(
-                &mut engine,
-                "object-two",
-                ("peer-a", 3, 20),
-                &stray.later,
-                &stray.claim,
-            );
-            arrive(&mut engine, &later)
-        });
-        assert!(
-            matches!(&later, ApplyDisposition::Applied(result) if result.deferred),
-            "{later:?}"
+        let later = op(
+            &mut engine,
+            "object-two",
+            ("peer-a", 3, 20),
+            &stray.later,
+            &stray.claim,
         );
+        park(&mut engine, &stray_key, &later, &stray.claim);
         if crash_after {
             let crash = super::super::ordinary_pull_progress::CrashAt {
                 point: dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck,
@@ -547,11 +541,16 @@ fn kept_with_a_queued_edit(note: &Note) -> (ScratchDir, std::path::PathBuf, Engi
         &note.edits[1],
         &note.claim,
     );
-    assert!(matches!(
-        reading_body_sequence_here(|| arrive(&mut engine, &queued)),
-        ApplyDisposition::Applied(result) if result.deferred
-    ));
+    park(&mut engine, &key, &queued, &note.claim);
     (scratch, path, engine, key)
+}
+
+fn park(engine: &mut EngineStore, key: &DocKey, op: &ReplicationEnvelope, claim: &str) {
+    crate::apply_envelope_with(engine, op, &NoFaults, |tx, op| {
+        let relay = op.relay_seq.expect("a relay position");
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, key, op, claim, relay, None)
+    })
+    .expect("parked under a live session");
 }
 
 fn crash_at(
@@ -637,33 +636,66 @@ fn a_crash_at_each_replay_commit_converges_in_order_without_doubling() {
 
 #[test]
 fn the_same_note_arriving_first_from_another_origin_replays_without_doubling() {
-    let (_scratch, _path, mut engine) = open_store();
     let note = note();
-    let key = keep(&mut engine, "object-two", "peer-a", 1, &note);
-    reading_body_sequence_here(|| {
-        for (seq, bytes) in [(0, &note.base), (1, &note.edits[0])] {
-            let op = op(
-                &mut engine,
-                "object-two",
-                ("peer-c", seq, 10 + seq),
-                bytes,
-                &note.claim,
-            );
-            assert!(matches!(
-                arrive(&mut engine, &op),
-                ApplyDisposition::Applied(_)
-            ));
-        }
-    });
-    replay(&mut engine);
-    assert_eq!((count(&engine, KEPT), count(&engine, NOTICES)), (0, 0));
-    let (claim, text) = note_text(&engine, &key);
-    assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
-    assert_eq!(
-        (text.matches('y').count(), text.matches('z').count()),
-        (1, 1),
-        "{text}"
-    );
+    let run = |kept_first: bool| {
+        let (_scratch, _path, mut engine) = open_store();
+        let key = if kept_first {
+            keep(&mut engine, "object-two", "peer-a", 1, &note)
+        } else {
+            let key = reading_body_sequence_here(|| keep_reading(&mut engine, &note));
+            assert_eq!(count(&engine, KEPT), 0);
+            key
+        };
+        reading_body_sequence_here(|| {
+            for (seq, bytes) in [(0, &note.base), (1, &note.edits[0])] {
+                let op = op(
+                    &mut engine,
+                    "object-two",
+                    ("peer-c", seq, 10 + seq),
+                    bytes,
+                    &note.claim,
+                );
+                assert!(matches!(
+                    arrive(&mut engine, &op),
+                    ApplyDisposition::Applied(_)
+                ));
+            }
+        });
+        replay(&mut engine);
+        assert_eq!((count(&engine, KEPT), count(&engine, NOTICES)), (0, 0));
+        let (claim, text) = note_text(&engine, &key);
+        assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
+        assert_eq!(
+            (text.matches('y').count(), text.matches('z').count()),
+            (1, 1),
+            "{text}"
+        );
+        (
+            count(
+                &engine,
+                "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='object-two'",
+            ),
+            count(&engine, "SELECT COUNT(*) FROM moments"),
+        )
+    };
+    assert_eq!(run(true), run(false), "durable edits and History");
+}
+
+fn keep_reading(engine: &mut EngineStore, note: &Note) -> DocKey {
+    let key = seed_object(engine, "object-two");
+    let mut rows = vec![&note.base];
+    rows.extend(&note.edits);
+    for (seq, bytes) in (0..).zip(rows) {
+        let op = op(
+            engine,
+            "object-two",
+            ("peer-a", seq, 1 + seq),
+            bytes,
+            &note.claim,
+        );
+        assert!(matches!(arrive(engine, &op), ApplyDisposition::Applied(_)));
+    }
+    key
 }
 
 #[test]
@@ -849,21 +881,205 @@ fn a_kept_coordinate_replays_only_with_its_own_payload() {
     ));
 }
 
+fn archived_with_kept_edits() -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let (scratch, path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let key = DocKey::new("ws", "main", "archived-two").expect("doc key");
+    let payload = |blob: &str, claim: &str, base: bool| json!({"versionId":"main","objectId":"archived-two","path":"archived.md","contentKind":"richdoc","updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":base});
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let archived = engine
+        .put_binary_blob(&note.encode_full_state())
+        .expect("blob");
+    reading_body_sequence_here(|| {
+        let base = envelope(
+            "base-peer",
+            0,
+            "ydoc.update",
+            payload(&archived, &archived, true),
+        );
+        assert!(matches!(
+            arrive(&mut engine, &base),
+            ApplyDisposition::Applied(_)
+        ));
+        let vector = dohc_engine_storage::hex_sha256(&note.encode_state_vector());
+        engine
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_collab::archive_active_lineage_in_tx(
+                    tx,
+                    &key,
+                    &archived,
+                    &vector,
+                    Some(&dohc_engine_storage::hex_sha256(b"A note.\n")),
+                    2,
+                )
+            })
+            .expect("archive");
+    });
+    let replacement = dohc_engine_collab::Ydoc::wire();
+    replacement
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Head.\n")
+        .expect("replacement");
+    let replacement = engine
+        .put_binary_blob(&replacement.encode_full_state())
+        .expect("blob");
+    let head = envelope(
+        "replacement-peer",
+        0,
+        "ydoc.update",
+        payload(&replacement, &replacement, true),
+    );
+    assert!(matches!(
+        arrive(&mut engine, &head),
+        ApplyDisposition::Applied(_)
+    ));
+    for (seq, text) in [(0, "y"), (1, "z"), (2, "q")] {
+        let edit = crate::moment_apply_tests::format_two_sequence_edit(&note, 7 + seq as u64, text);
+        let edit = engine.put_binary_blob(&edit).expect("blob");
+        let mut op = envelope(
+            "late-peer",
+            seq,
+            "ydoc.update",
+            payload(&edit, &archived, false),
+        );
+        op.relay_seq = Some(110 + seq);
+        if seq < 2 {
+            assert_eq!(
+                refused_as(&arrive(&mut engine, &op)),
+                Some(NEWER_BODY_FORMAT)
+            );
+        } else {
+            let parked = apply_ydoc_envelope(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::ydoc_apply::AlwaysLive,
+            )
+            .expect("parked");
+            assert!(matches!(parked.primary, ApplyDisposition::Applied(result) if result.deferred));
+        }
+    }
+    (scratch, path, engine)
+}
+
 #[test]
-fn a_thousand_kept_format_two_ops_replay_in_one_open() {
-    let (_scratch, _path, mut engine) = open_store();
-    for i in 0..250 {
-        let mut note = note_saying(&format!("Note {i}.\n"));
-        note.edits.push(note.later.clone());
-        keep(
-            &mut engine,
-            &format!("bulk-{i}"),
-            &format!("peer-{i}"),
-            1 + 4 * i,
-            &note,
+fn edits_kept_for_an_archived_note_replay_in_relay_order() {
+    use std::sync::atomic::Ordering;
+    let point = dohc_engine_storage::FaultPoint::StorageBeforePersist;
+    let (_scratch, _path, mut engine) = archived_with_kept_edits();
+    let commits = crash_at(point, usize::MAX);
+    replay_with(&mut engine, &commits).expect("the replay goes on");
+    assert_eq!((count(&engine, KEPT), count(&engine, QUEUED)), (0, 0));
+    for nth in 0..commits.seen.load(Ordering::SeqCst) {
+        let (_scratch, _path, mut engine) = archived_with_kept_edits();
+        let crash = crash_at(point, nth);
+        let _ = replay_with(&mut engine, &crash);
+        assert!(crash.seen.load(Ordering::SeqCst) > nth, "#{nth}");
+        let later_left = count(
+            &engine,
+            "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE origin_id='late-peer' AND origin_seq=2",
+        );
+        let earlier_left = count(
+            &engine,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs \
+             WHERE origin_id='late-peer' AND origin_seq=1 AND replayed=0",
+        );
+        assert!(
+            later_left == 1 || earlier_left == 0,
+            "#{nth}: the edit at 112 applied before the one at 111"
         );
     }
-    assert_eq!(count(&engine, KEPT), 1_000);
-    assert_eq!(replay(&mut engine), 1_000);
-    assert_eq!((count(&engine, KEPT), count(&engine, NOTICES)), (0, 0));
+}
+
+fn held_note() -> Note {
+    use yrs::{Map, ReadTxn, Transact};
+    reading_body_sequence_here(|| {
+        let newer = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        let wire = yrs::Doc::new();
+        wire.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META)
+            .insert(
+                &mut wire.transact_mut(),
+                "dohcMarkdownSource",
+                "Source bytes have no complete witness",
+            );
+        newer
+            .apply(
+                &wire
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default()),
+            )
+            .expect("an unchecked witness");
+        let edits = vec![
+            crate::moment_apply_tests::format_two_sequence_edit(&newer, 7, "y"),
+            crate::moment_apply_tests::format_two_sequence_edit(&newer, 8, "z"),
+        ];
+        let later = crate::moment_apply_tests::format_two_sequence_edit(&newer, 13, "q");
+        let base = newer.encode_full_state();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        Note {
+            base,
+            edits,
+            later,
+            claim,
+        }
+    })
+}
+
+#[test]
+fn a_base_whose_file_write_is_held_keeps_its_notice_and_its_edits_still_replay() {
+    let (_scratch, _path, mut engine) = open_store();
+    let note = held_note();
+    let key = keep(&mut engine, "object-two", "peer-a", 1, &note);
+    assert_eq!(replay(&mut engine), 3);
+    assert_eq!(count(&engine, KEPT), 0);
+    assert_eq!(
+        notices(&engine),
+        all("markdown-write-held", "peer-a", &[0, 1, 2])
+    );
+    let (claim, text) = note_text(&engine, &key);
+    assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
+    assert!(text.contains('y') && text.contains('z'), "{text}");
+}
+
+#[test]
+fn a_base_collision_outside_the_replay_stays_a_storage_error() {
+    let (_scratch, _path, mut engine) = open_store();
+    let (older_base, older_claim, _local) = format_one_base();
+    seed_object(&mut engine, "object-two");
+    let first = op(
+        &mut engine,
+        "object-two",
+        ("peer-b", 0, 5),
+        &older_base,
+        &older_claim,
+    );
+    assert!(matches!(
+        arrive(&mut engine, &first),
+        ApplyDisposition::Applied(_)
+    ));
+    let other = dohc_engine_collab::Ydoc::wire();
+    other
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Another.\n")
+        .expect("format-1 note");
+    let other = other.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&other);
+    let second = op(&mut engine, "object-two", ("peer-c", 0, 5), &other, &claim);
+    let error = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &second,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect_err("the same relay position");
+    assert!(matches!(error, SyncError::Storage(_)), "{error:?}");
+}
+
+#[test]
+fn a_panic_inside_the_replay_leaves_the_thread_not_replaying() {
+    let unwound = std::panic::catch_unwind(|| {
+        let _: usize = crate::kept_replay::replaying(|| panic!("inside the replay"));
+    });
+    assert!(unwound.is_err());
+    assert!(!crate::kept_replay::replaying_now());
 }

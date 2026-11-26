@@ -7676,6 +7676,12 @@ mod tests {
 
     #[test]
     fn a_kept_format_two_successor_and_its_held_edit_stay_kept_when_the_engine_reads_format_two() {
+        for (reading, with_field) in [(false, true), (false, false), (true, true)] {
+            successor_and_its_edit_stay_kept(reading, with_field);
+        }
+    }
+
+    fn successor_and_its_edit_stay_kept(reading: bool, with_field: bool) {
         use yrs::updates::decoder::Decode;
         use yrs::{ReadTxn, Text, Transact};
         let (_scratch, mut store, key, built) = format_two_successor_fixture();
@@ -7698,20 +7704,30 @@ mod tests {
         let edit = store
             .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
             .expect("edit blob");
-        let mut next = imported_envelope(
-            1,
-            "ydoc.update",
-            json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false}),
-        );
+        let mut payload = json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false});
+        if !with_field {
+            payload
+                .as_object_mut()
+                .expect("payload")
+                .remove("isBaseState");
+        }
+        let mut next = imported_envelope(1, "ydoc.update", payload);
         next.relay_seq = Some(1);
-        crate::apply_replication_envelope(
-            &mut store,
-            &mut dohc_engine_collab::WriterDocCache::new(),
-            &next,
-            &NoFaults,
-            &crate::NoLiveLeases,
-        )
-        .expect("the edit is kept");
+        let arrive = |store: &mut EngineStore| {
+            crate::apply_replication_envelope(
+                store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &next,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+        };
+        let arrived = if reading {
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| arrive(&mut store))
+        } else {
+            arrive(&mut store)
+        };
+        arrived.expect("the edit is kept");
         let left = |store: &EngineStore| {
             store
                 .read_with(|conn| {
@@ -7726,7 +7742,7 @@ mod tests {
                 .expect("kept rows")
         };
         let kept = left(&store);
-        assert_eq!(kept.0, 2);
+        assert_eq!(kept.0, 2, "reading {reading}, isBaseState {with_field}");
         let state = (active_claim(&store, &key), divergence_state(&store));
         for _ in 0..2 {
             let replayed = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
@@ -7738,7 +7754,11 @@ mod tests {
             })
             .expect("the replay goes on");
             assert_eq!(replayed, 0);
-            assert_eq!(left(&store), kept);
+            assert_eq!(
+                left(&store),
+                kept,
+                "reading {reading}, isBaseState {with_field}"
+            );
             assert_eq!(
                 (active_claim(&store, &key), divergence_state(&store)),
                 state
