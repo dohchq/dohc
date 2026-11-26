@@ -29,6 +29,7 @@ import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
+import { memberAppState } from "../apps/reviewControls";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
@@ -188,7 +189,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
         appGroups(appsState.apps).map(([root, versions]) => {
           const name = appName(versions[0]!);
           if (versions.length === 1)
-            return <AppRow key={root} app={versions[0]!} name={name} label={name} depth={0} />;
+            return <AppRow key={root} app={versions[0]!} name={name} depth={0} />;
           return (
             <Fragment key={root}>
               <View style={[styles.row, styles.app]} accessible accessibilityRole="header">
@@ -198,13 +199,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
                 </Text>
               </View>
               {versions.map((app) => (
-                <AppRow
-                  key={app.publicationId}
-                  app={app}
-                  name={name}
-                  label={appWords.version(shortVersion(app))}
-                  depth={1}
-                />
+                <AppRow key={app.publicationId} app={app} name={name} depth={1} />
               ))}
             </Fragment>
           );
@@ -245,19 +240,36 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 }
 
-/** The apps by identity, their root folder, each with its published versions in the catalog's order. */
+/**
+ * The apps by identity, each with its published versions in the catalog's order: the owner's by root folder, and each
+ * Member app alone, as its one current version.
+ */
 function appGroups(apps: readonly PhoneApp[]) {
   const groups = new Map<string, PhoneApp[]>();
-  for (const app of apps) groups.set(app.appRoot, [...(groups.get(app.appRoot) ?? []), app]);
+  for (const app of apps) {
+    const key = app.member ? `member:${app.publicationId}` : app.appRoot;
+    groups.set(key, [...(groups.get(key) ?? []), app]);
+  }
   return [...groups];
 }
 
-/** One version of an app, which opens its review. Alone, it shows its app's name and its version beside it. */
-function AppRow(props: { app: PhoneApp; name: string; label: string; depth: number }) {
-  const { app, name, label, depth } = props;
+/**
+ * One version of an app, which opens its review. Alone, it shows its app's name and its version beside it; a Member
+ * app shows who made it and whether it waits for a review.
+ */
+function AppRow(props: { app: PhoneApp; name: string; depth: number }) {
+  const { app, name, depth } = props;
   const theme = useTheme();
   const router = useRouter();
   const version = appWords.version(shortVersion(app));
+  const label = depth === 0 ? name : version;
+  const state = memberAppState(app);
+  const made = app.member
+    ? app.member.author
+      ? appWords.sharedBy(app.member.author)
+      : appWords.sharedByMember
+    : null;
+  const detail = made ? (state ?? "") : depth === 0 ? version : "";
   return (
     <Pressable
       onPress={() => router.push({ pathname: "/app-review", params: { id: app.publicationId } })}
@@ -268,14 +280,31 @@ function AppRow(props: { app: PhoneApp; name: string; label: string; depth: numb
         pressed ? { backgroundColor: theme.panel2 } : null,
       ]}
       accessibilityRole="button"
-      accessibilityLabel={[name, version, ...(app.approved ? [appWords.approved] : [])].join(", ")}
+      accessibilityLabel={[
+        name,
+        ...(made ? [made] : [version]),
+        ...(state ? [state] : app.approved ? [appWords.approved] : []),
+      ].join(", ")}
     >
       {depth === 0 ? <AppWindow size={18} color={theme.ink} strokeWidth={1.9} /> : null}
-      <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
-        {label}
-      </Text>
-      <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>
-        {depth === 0 ? version : ""}
+      <View style={styles.names}>
+        <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+          {label}
+        </Text>
+        {made ? (
+          <Text style={[styles.made, { color: theme.subtle }]} numberOfLines={1}>
+            {made}
+          </Text>
+        ) : null}
+      </View>
+      <Text
+        style={[
+          made ? styles.state : styles.detail,
+          { color: state ? theme.accent : theme.subtle },
+        ]}
+        numberOfLines={made ? 2 : 1}
+      >
+        {detail}
       </Text>
       {app.approved ? <ShieldCheck size={16} color={theme.accent} strokeWidth={2} /> : null}
     </Pressable>
@@ -350,5 +379,8 @@ const styles = StyleSheet.create({
   chevron: { width: 16, alignItems: "center" },
   name: { flexShrink: 1, fontSize: 17 },
   detail: { flex: 1, fontSize: 15, textAlign: "right" },
+  names: { flex: 1, paddingVertical: 4 },
+  state: { maxWidth: "45%", fontSize: 15, textAlign: "right" },
+  made: { fontSize: 15 },
   app: { paddingLeft: 32 },
 });

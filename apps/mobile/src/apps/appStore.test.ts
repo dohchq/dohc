@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAccount } from "../server/account";
 import {
   A,
+  appServer,
   ACTION,
   answerLaunch,
   B,
@@ -24,7 +25,7 @@ const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
 
 function setup(options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolean } = {}) {
-  const server = testServer();
+  const server = appServer();
   const signIn = options.signIn ?? signedIn(server);
   const runner = createAppRunner();
   const apps = createWorkspaceApps({
@@ -90,6 +91,14 @@ describe("a launch", () => {
     }
   });
 
+  it("never touches the running app for a review already left, as a late Allow and open is", async () => {
+    const { apps, runner } = await running();
+    const left = new AbortController();
+    left.abort();
+    expect(await apps.open({ ...version(B, true), name: "other" }, left.signal)).toBe(false);
+    expect(runner.state()).toMatchObject({ publicationId: A });
+  });
+
   it("ends a launch that arrived as the review was left", async () => {
     const { server, runner, apps } = setup();
     answerLaunch(server);
@@ -131,7 +140,7 @@ describe("a launch", () => {
 describe("teardown", () => {
   it("ends the app before Sign out's delete, and at a 401", async () => {
     for (const end of ["sign-out", "401"] as const) {
-      const server = testServer();
+      const server = appServer();
       serveSessionEnd(server);
       const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
       const runner = createAppRunner();
@@ -229,7 +238,7 @@ describe("teardown", () => {
 
 describe("the catalog", () => {
   it("lands only the latest read, and nothing once its sign-in has ended", async () => {
-    const server = testServer();
+    const server = appServer();
     let current = true;
     const { apps } = setup({ signIn: signedIn(server, () => current) });
     const held = deferred<Answer>();

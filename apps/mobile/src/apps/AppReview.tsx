@@ -1,4 +1,5 @@
 import { appWords } from "@dohc/interface-words/apps";
+import { sharingWords } from "@dohc/interface-words/sharing";
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronRight, FileCode, ShieldCheck, ShieldQuestion } from "lucide-react-native";
@@ -17,9 +18,11 @@ import { HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
 import type { AppRunner, WorkspaceApps } from "./appStore";
 import { canOpenApps } from "./canOpenApps";
+import { reviewControls, reviewStatus } from "./reviewControls";
 
-// An app's review, from Home: its version, who published it, what it can reach, its declared source, and Approve, Open
-// and Revoke. Approve and Open need phone writes (canOpenApps.ts). Revoke shows on every phone, as
+// An app's review, from Home: its version, who published or made it, what it can reach, its declared source, and
+// Approve, Open and Revoke. A Member app lists only what both its author and the person can do, and Allow and open
+// allows exactly that. Approve, Allow and Open need phone writes (canOpenApps.ts). Revoke shows on every phone, as
 // an account-wide approval's way back. Answers land only while their request is the latest and their sign-in and
 // workspace are still open. Errors show in place, as on any screen outside the tabs.
 
@@ -109,11 +112,17 @@ function Review({
       }
     }
   };
-  const approve = () => act(appWords.approveFailed, (app) => apps.approve(app));
-  const open = () =>
-    act(appWords.openFailed, async (app) => {
-      if (await apps.open({ ...app, name }, leaving.signal)) router.push("/app-run");
-    });
+  const launch = async (app: AppReview) => {
+    if (await apps.open({ ...app, name }, leaving.signal)) router.push("/app-run");
+  };
+  const approve = () =>
+    review?.member
+      ? act(appWords.allowFailed, async (app) => {
+          await apps.approve(app);
+          if (canOpenApps) await launch(app);
+        })
+      : act(appWords.approveFailed, (app) => apps.approve(app));
+  const open = () => act(appWords.openFailed, launch);
   // This app's web process died while it ran: the runner's screen has left, and Try again opens it again. The runner
   // forgets it when its sign-in or workspace ends.
   const stopped = useSyncExternalStore(runner.subscribe, runner.stopped);
@@ -123,7 +132,7 @@ function Review({
     if (
       await confirm({
         title: appWords.revokeTitle(name),
-        message: appWords.revokeBody,
+        message: review?.member ? appWords.memberRevokeBody : appWords.revokeBody,
         confirm: appWords.revoke,
         destructive: true,
       })
@@ -145,6 +154,8 @@ function Review({
       </>
     );
   const Mark = review.approved ? ShieldCheck : ShieldQuestion;
+  const controls = reviewControls(review, { phoneWrites, canOpen: canOpenApps });
+  const { member } = review;
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -160,14 +171,13 @@ function Review({
       ) : null}
       <View style={styles.status}>
         <Mark size={20} color={review.approved ? theme.accent : theme.muted} strokeWidth={1.9} />
-        <Text style={[styles.body, { color: theme.ink }]}>
-          {review.approved
-            ? appWords.approvedOnPhones
-            : phoneWrites
-              ? appWords.approveToOpen
-              : appWords.notApproved}
-        </Text>
+        <Text style={[styles.body, { color: theme.ink }]}>{reviewStatus(review, phoneWrites)}</Text>
       </View>
+      {member ? (
+        <Text style={[styles.note, { color: theme.muted }]}>
+          {member.author ? appWords.sharedBy(member.author) : appWords.sharedByMember}
+        </Text>
+      ) : null}
       <Text style={[styles.note, { color: theme.muted }]}>
         {appWords.published(shortVersion(review), publishedOn(review.createdAtMs))}
       </Text>
@@ -181,13 +191,11 @@ function Review({
       {canOpenApps ? null : (
         <Text style={[styles.note, { color: theme.muted }]}>{appWords.cantOpenHere}</Text>
       )}
-      {review.approved && canOpenApps ? (
-        <Button label={appWords.open} onPress={open} disabled={busy} />
+      {controls.open ? <Button label={appWords.open} onPress={open} disabled={busy} /> : null}
+      {controls.approve ? (
+        <Button label={controls.approve} onPress={approve} disabled={busy} />
       ) : null}
-      {!review.approved && phoneWrites ? (
-        <Button label={appWords.approve} onPress={approve} disabled={busy} />
-      ) : null}
-      {review.approved ? (
+      {controls.revoke ? (
         <View style={styles.row}>
           <ActionPill label={appWords.revoke} onPress={revoke} busy={busy} />
         </View>
@@ -201,15 +209,29 @@ function Review({
       <Text style={[styles.heading, { color: theme.ink }]} accessibilityRole="header">
         {appWords.reach}
       </Text>
+      {member ? (
+        <Text style={[styles.note, { color: theme.muted }]}>{appWords.memberNote}</Text>
+      ) : null}
       {review.reach.length === 0 ? (
         <Text style={[styles.body, { color: theme.ink }]}>{appWords.reachesNothing}</Text>
       ) : null}
       {review.reach.map((collection) => (
-        <View key={collection.name} style={styles.group}>
-          <Text style={[styles.body, styles.strong, { color: theme.ink }]}>{collection.name}</Text>
+        <View key={collection.datasetId} style={styles.group}>
+          <Text style={[styles.body, styles.strong, { color: theme.ink }]}>
+            {collection.name}
+            {collection.alias ? (
+              <Text style={[styles.alias, { color: theme.muted }]}> {collection.alias}</Text>
+            ) : null}
+          </Text>
+          {collection.access ? (
+            <Text style={[styles.note, { color: theme.muted }]}>
+              {appWords.access(sharingWords.level[collection.access])}
+            </Text>
+          ) : null}
           {collection.operations.map((operation) => (
             <View key={operation.name} accessible>
-              <Text style={[styles.body, { color: theme.ink }]}>
+              <Text style={[styles.body, { color: theme.ink }]}>{operation.name}</Text>
+              <Text style={[styles.note, { color: theme.muted }]}>
                 {operation.readOnly ? appWords.readsRecords : appWords.changesRecords}
               </Text>
               {operation.fields.length > 0 ? (
@@ -301,6 +323,7 @@ const styles = StyleSheet.create({
   file: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 44 },
   path: { flex: 1, fontSize: 17 },
   code: { borderRadius: 8, padding: 12 },
+  alias: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 13 },
   mono: {
     fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
     fontSize: 13,

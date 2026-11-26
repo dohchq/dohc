@@ -78,7 +78,7 @@ export const memberAppScopeDigest = (publicationId: string, scope: MemberAppScop
 export function memberAppRow(storage: StorageContext, publicationId: string) {
   const row = storage.db
     .prepare(
-      `SELECT workspace_id,publisher_user_id,slug FROM ${MEMBER_APPS} WHERE publication_id=?`,
+      `SELECT workspace_id,publisher_user_id,slug,created_at_ms FROM ${MEMBER_APPS} WHERE publication_id=?`,
     )
     .get(publicationId);
   return row
@@ -86,6 +86,7 @@ export function memberAppRow(storage: StorageContext, publicationId: string) {
         workspaceId: String(row.workspace_id),
         publisherUserId: String(row.publisher_user_id),
         slug: String(row.slug),
+        createdAtMs: Number(row.created_at_ms),
       }
     : null;
 }
@@ -173,6 +174,9 @@ export function recordMemberAppConsent(
 }
 
 function retire(storage: StorageContext, publicationId: string): void {
+  storage.db
+    .prepare("DELETE FROM sync_relay_phone_app_approvals WHERE publication_id=?")
+    .run(publicationId);
   storage.db
     .prepare(
       "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=? AND active=1",

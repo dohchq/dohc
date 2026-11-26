@@ -3,10 +3,13 @@ import { ServerError } from "./client";
 import { appOperations } from "./phoneApps";
 import {
   A,
+  appServer,
   ACTION,
   answerLaunch,
   B,
   GRANT,
+  memberPage,
+  memberVersion,
   grantAnswer,
   HANDOFF,
   page,
@@ -14,20 +17,36 @@ import {
   TOKEN,
   version,
 } from "./testApps";
-import { testServer } from "./testServer";
 
 const signal = new AbortController().signal;
 function setup() {
-  const server = testServer();
+  const server = appServer();
   return { server, ops: appOperations(signedIn(server).client, "ws-1", signal) };
 }
 
 describe("the phone's app operations", () => {
-  it("lists every catalog page", async () => {
+  it("lists every catalog page, the owner's apps then the Member apps", async () => {
     const { server, ops } = setup();
+    const C = "c".repeat(64);
     server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)], A), page([version(B)]));
-    expect(await ops.list()).toEqual([version(A, true), version(B)]);
-    expect(server.calls.map((call) => call.body)).toEqual([{}, { cursor: A }]);
+    server.on("POST", "/sync/ws-1/ops/memberApps", memberPage([memberVersion(C, "changed")]));
+    expect(await ops.list()).toEqual([version(A, true), version(B), memberVersion(C, "changed")]);
+    expect(server.paths().map((path) => path.split("/").at(-1))).toEqual([
+      "apps",
+      "apps",
+      "memberApps",
+    ]);
+    expect(server.calls.map((call) => call.body)).toEqual([{}, { cursor: A }, {}]);
+    // A Member app with no name, author or allowing state is unreadable, and fails the whole read.
+    server.on("POST", "/sync/ws-1/ops/apps", page([]));
+    const listed = { ...version(C), member: undefined, name: "tracker", author: { name: "Ana" } };
+    for (const broken of [{ consent: "maybe" }, { consent: "none", author: "Ana" }, { name: "" }]) {
+      server.on("POST", "/sync/ws-1/ops/memberApps", {
+        status: 200,
+        body: { ok: true, result: { memberApps: [{ ...listed, ...broken }], nextCursor: null } },
+      });
+      await expect(ops.list()).rejects.toMatchObject({ problem: "invalid" });
+    }
   });
 
   it("fails a read it can't finish or use, never answering part of the catalog", async () => {
@@ -51,12 +70,18 @@ describe("the phone's app operations", () => {
     const { server, ops } = setup();
     const review = {
       ...version(A),
+      member: undefined,
+      author: null,
+      consent: null,
+      scopeDigest: null,
+      revocable: false,
       authorityRevision: 2,
       createdAtMs: 1_700_000_000_000,
       publishedByAgent: { kind: "agent", label: "Nova", labelSource: "agent-declared" },
       capabilities: [
         {
           kind: "dataset",
+          datasetId: "registrations-id",
           name: "Registrations",
           operations: [
             {
@@ -82,7 +107,10 @@ describe("the phone's app operations", () => {
       agent: { label: "Nova" },
       reach: [
         {
+          datasetId: "registrations-id",
           name: "Registrations",
+          alias: null,
+          access: null,
           operations: [
             { name: "registrations.list", readOnly: true, fields: ["Name"] },
             { name: "registrations.add", readOnly: false, fields: [] },
@@ -90,7 +118,28 @@ describe("the phone's app operations", () => {
         },
       ],
       sources: ["events/signup/index.ts"],
+      scopeDigest: null,
+      revocable: false,
     });
+    // An app over several Collections lists each by its ID, with the name it binds it under.
+    const bound = (datasetId: string, alias: string) => ({
+      ...review.capabilities[0]!,
+      datasetId,
+      alias,
+    });
+    server.on("POST", "/sync/ws-1/ops/appReview", {
+      status: 200,
+      body: {
+        ok: true,
+        result: { ...review, capabilities: [bound("a-id", "signups"), bound("b-id", "waitlist")] },
+      },
+    });
+    expect(
+      (await ops.review(A)).reach.map(({ datasetId, name, alias }) => [datasetId, name, alias]),
+    ).toEqual([
+      ["a-id", "Registrations", "signups"],
+      ["b-id", "Registrations", "waitlist"],
+    ]);
     // An app that requests nothing in the workspace reaches nothing there.
     server.on("POST", "/sync/ws-1/ops/appReview", {
       status: 200,
@@ -117,6 +166,64 @@ describe("the phone's app operations", () => {
     );
     expect(await ops.source(A, path)).toEqual({ available: true, text: "export {}" });
     expect(await ops.source(A, path)).toEqual({ available: false });
+  });
+
+  it("reads a Member app's review: who made it, the allowing, and each Collection at its level", async () => {
+    const { server, ops } = setup();
+    const digest = "d".repeat(64);
+    const review = {
+      ...version(A),
+      member: undefined,
+      appRoot: "app",
+      createdAtMs: 1_700_000_000_000,
+      publishedByAgent: null,
+      name: "tracker",
+      author: { name: "Ana (ana@dohc.test)" },
+      consent: "changed",
+      scopeDigest: digest,
+      revocable: true,
+      capabilities: [
+        {
+          kind: "dataset",
+          datasetId: "registrations-id",
+          name: "Registrations",
+          access: "view",
+          operations: [{ name: "read", readOnly: true }],
+        },
+      ],
+      sources: [{ path: "app/index.ts", byteLength: 3 }],
+      approval: null,
+    };
+    server.on("POST", "/sync/ws-1/ops/appReview", {
+      status: 200,
+      body: { ok: true, result: review },
+    });
+    expect(await ops.review(A)).toMatchObject({
+      approved: false,
+      member: { name: "tracker", author: "Ana (ana@dohc.test)", consent: "changed" },
+      scopeDigest: digest,
+      revocable: true,
+      reach: [{ name: "Registrations", access: "view" }],
+    });
+    // A Member app's review without the digest it pins can't be allowed, so it's never shown.
+    server.on("POST", "/sync/ws-1/ops/appReview", {
+      status: 200,
+      body: { ok: true, result: { ...review, scopeDigest: null } },
+    });
+    await expect(ops.review(A)).rejects.toMatchObject({ problem: "invalid" });
+    // Allowing sends the digest reviewed; approving the owner's own app sends none.
+    server.on("POST", "/sync/ws-1/ops/appApprove", {
+      status: 200,
+      body: { ok: true, result: { approvalId: "f".repeat(32) } },
+    });
+    await ops.approve({ publicationId: A, authorityRevision: 1, scopeDigest: digest });
+    await ops.approve({ publicationId: B, authorityRevision: 1, scopeDigest: null });
+    expect(
+      server.calls.filter((call) => call.path.endsWith("appApprove")).map((call) => call.body),
+    ).toEqual([
+      { publicationId: A, authorityRevision: 1, scopeDigest: digest },
+      { publicationId: B, authorityRevision: 1 },
+    ]);
   });
 
   it("names a changed app's refusal", async () => {

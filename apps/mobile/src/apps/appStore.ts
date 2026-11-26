@@ -144,7 +144,11 @@ export interface WorkspaceApps {
   check(): Promise<void>;
   /** Whether answers for this store still count: its sign-in is current and it hasn't stopped. */
   isLive(): boolean;
-  approve(app: Pick<PhoneApp, "publicationId" | "authorityRevision">): Promise<void>;
+  approve(
+    app: Pick<PhoneApp, "publicationId" | "authorityRevision"> & {
+      readonly scopeDigest?: string | null;
+    },
+  ): Promise<void>;
   revoke(publicationId: string): Promise<void>;
   /**
    * Opens the app in the runner, unless this build can't run apps. Resolves whether it showed. Once `leaving` aborts,
@@ -226,7 +230,7 @@ export function createWorkspaceApps(options: {
       if (isLive()) await refresh();
     },
     async open(app, leaving) {
-      if (!options.canOpen) return false;
+      if (!options.canOpen || leaving.aborted || !isLive()) return false;
       const both = new AbortController();
       const abort = () => both.abort();
       for (const source of [signal, leaving]) {

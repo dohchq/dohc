@@ -5,13 +5,31 @@ import { exchange, ServerError, statusProblem, type Fetch, type ServerClient } f
 // server's share-web, each answer checked before the phone uses it. The sign-in's token goes only to the relay;
 // share-web gets the one-use grant alone, with no token, cookie or Origin.
 
-/** One published version of an app. Approval holds only for this exact publication and revision. */
+/** Whether the person allowed what a Member app can do: not yet, still, or not since it came to reach more. */
+export type MemberConsent = "none" | "current" | "changed";
+
+/**
+ * A Member app: one a workspace member shared, which runs within both its author's reach and the viewer's, and opens
+ * only once the viewer allowed what it can do.
+ */
+export interface MemberApp {
+  readonly name: string;
+  readonly author: string | null;
+  readonly consent: MemberConsent;
+}
+
+/**
+ * One published version of an app. Approval holds only for this exact publication and revision, and for a Member app
+ * only while the person's allowing still covers what it can do.
+ */
 export interface PhoneApp {
   readonly publicationId: string;
   readonly authorityRevision: number;
   readonly appRoot: string;
   readonly sourceRevision: string;
   readonly approved: boolean;
+  /** Null for the owner's own published app. */
+  readonly member: MemberApp | null;
 }
 
 export interface AppOperation {
@@ -24,11 +42,19 @@ export interface AppReview extends PhoneApp {
   readonly createdAtMs: number;
   /** Null when no agent published it; an agent's label, or null when it gave none. */
   readonly agent: { readonly label: string | null } | null;
+  /** Each Collection it can use. A Member app lists only what both its author and the viewer can do, at their lower level. */
   readonly reach: readonly {
+    readonly datasetId: string;
     readonly name: string;
+    readonly alias: string | null;
+    readonly access: "view" | "comment" | "edit" | null;
     readonly operations: readonly AppOperation[];
   }[];
   readonly sources: readonly string[];
+  /** The exact operations reviewed, which allowing a Member app pins. Null for the owner's own app. */
+  readonly scopeDigest: string | null;
+  /** An approval or an allowing stands to revoke, even when the app needs another review. */
+  readonly revocable: boolean;
 }
 
 export type AppSource =
@@ -42,6 +68,8 @@ export interface AppLaunch {
 }
 
 type Version = Pick<PhoneApp, "publicationId" | "authorityRevision">;
+const ACCESS = ["view", "comment", "edit"] as const;
+const CONSENT: readonly MemberConsent[] = ["none", "current", "changed"];
 
 const PUBLICATION = /^[0-9a-f]{64}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
@@ -52,28 +80,40 @@ const isPublication = (value: unknown): value is string =>
 /** A catalog read gives up past this many pages, as failed: the server pages stored publications 25 at a time. */
 const CATALOG_PAGES = 200;
 
-/** An app's name: the last folder of its root. */
-export const appName = (app: { readonly appRoot: string }) =>
-  app.appRoot.split("/").filter(Boolean).at(-1) ?? app.appRoot;
+/** An app's name: a Member app's as its author shared it, otherwise the last folder of its root. */
+export const appName = (app: Pick<PhoneApp, "appRoot" | "member">) =>
+  app.member?.name ?? app.appRoot.split("/").filter(Boolean).at(-1) ?? app.appRoot;
 /** A version as a person tells it apart: its source revision's first characters. */
 export const shortVersion = (app: { readonly sourceRevision: string }) =>
   app.sourceRevision.slice(0, 7);
 
-const readApp = (item: unknown): PhoneApp | null =>
-  isFields(item) &&
-  isPublication(item.publicationId) &&
-  revision(item.authorityRevision) &&
-  text(item.appRoot) &&
-  text(item.sourceRevision, 128) &&
-  typeof item.approved === "boolean"
-    ? {
-        publicationId: item.publicationId,
-        authorityRevision: item.authorityRevision,
-        appRoot: item.appRoot,
-        sourceRevision: item.sourceRevision,
-        approved: item.approved,
-      }
-    : null;
+const readAuthor = (value: unknown): string | null | undefined =>
+  isFields(value) && (value.name === null || text(value.name, 320)) ? value.name : undefined;
+
+function readVersion(item: unknown, member: boolean): PhoneApp | null {
+  if (
+    !isFields(item) ||
+    !isPublication(item.publicationId) ||
+    !revision(item.authorityRevision) ||
+    !text(item.appRoot) ||
+    !text(item.sourceRevision, 128) ||
+    typeof item.approved !== "boolean"
+  )
+    return null;
+  const author = readAuthor(item.author);
+  const consent = CONSENT.find((value) => value === item.consent);
+  if (member && (!text(item.name, 64) || author === undefined || !consent)) return null;
+  return {
+    publicationId: item.publicationId,
+    authorityRevision: item.authorityRevision,
+    appRoot: item.appRoot,
+    sourceRevision: item.sourceRevision,
+    approved: item.approved,
+    member: member ? { name: item.name as string, author: author!, consent: consent! } : null,
+  };
+}
+const readApp = (item: unknown) => readVersion(item, false);
+const readMemberApp = (item: unknown) => readVersion(item, true);
 
 function readOperation(item: unknown): AppOperation | null {
   if (!isFields(item) || !text(item.name, 256) || typeof item.readOnly !== "boolean") return null;
@@ -94,9 +134,17 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
     !text(result.appRoot) ||
     !text(result.sourceRevision, 128) ||
     !revision(result.createdAtMs) ||
-    (result.approval !== null && !isFields(result.approval))
+    (result.approval !== null && !isFields(result.approval)) ||
+    typeof result.revocable !== "boolean"
   )
     return null;
+  const member =
+    result.author === null && result.consent === null && result.scopeDigest === null
+      ? null
+      : isPublication(result.scopeDigest)
+        ? readMemberApp({ ...result, approved: result.approval !== null })?.member
+        : undefined;
+  if (member === undefined) return null;
   const by = result.publishedByAgent;
   const agent =
     by === null
@@ -106,8 +154,23 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
         : undefined;
   const reach = each(result.capabilities, (item) => {
     const operations = isFields(item) ? each(item.operations, readOperation) : null;
-    return isFields(item) && item.kind === "dataset" && text(item.name, 256) && operations
-      ? { name: item.name, operations }
+    const access =
+      isFields(item) && item.access === undefined
+        ? null
+        : ACCESS.find((value) => isFields(item) && value === item.access);
+    return isFields(item) &&
+      item.kind === "dataset" &&
+      text(item.datasetId, 128) &&
+      text(item.name, 256) &&
+      operations &&
+      access !== undefined
+      ? {
+          datasetId: item.datasetId,
+          name: item.name,
+          alias: text(item.alias, 64) ? item.alias : null,
+          access,
+          operations,
+        }
       : null;
   });
   const sources = each(result.sources, (item) =>
@@ -120,10 +183,13 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
         appRoot: result.appRoot,
         sourceRevision: result.sourceRevision,
         approved: result.approval !== null,
+        member,
         createdAtMs: result.createdAtMs,
         agent,
         reach,
         sources,
+        scopeDigest: member ? (result.scopeDigest as string) : null,
+        revocable: result.revocable,
       }
     : null;
 }
@@ -156,8 +222,11 @@ export function appOperations(client: ServerClient, workspaceId: string, signal:
   });
 
   return {
-    /** Every app the phone can open. */
-    list: (): Promise<readonly PhoneApp[]> => all("apps", CATALOG_PAGES, readApp, isPublication),
+    /** Every app the phone can open: the owner's own, then the Member apps within reach. */
+    list: async (): Promise<readonly PhoneApp[]> => [
+      ...(await all("apps", CATALOG_PAGES, readApp, isPublication)),
+      ...(await all("memberApps", CATALOG_PAGES, readMemberApp, isPublication)),
+    ],
 
     review: (publicationId: string) =>
       run("appReview", { publicationId }, (result) => readReview(result, publicationId)),
@@ -172,10 +241,12 @@ export function appOperations(client: ServerClient, workspaceId: string, signal:
           : null;
       }),
 
-    /** A changed app refuses with code `conflict`. */
-    approve: (app: Version) =>
-      run("appApprove", version(app), (result) =>
-        isFields(result) && text(result.approvalId, 128) ? true : null,
+    /** A changed app refuses with code `conflict`. A Member app is allowed for exactly the reviewed `scopeDigest`. */
+    approve: (app: Version & { readonly scopeDigest?: string | null }) =>
+      run(
+        "appApprove",
+        { ...version(app), ...(app.scopeDigest ? { scopeDigest: app.scopeDigest } : {}) },
+        (result) => (isFields(result) && text(result.approvalId, 128) ? true : null),
       ),
 
     revoke: (publicationId: string) =>
