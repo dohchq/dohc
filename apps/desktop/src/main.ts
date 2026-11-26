@@ -74,6 +74,7 @@ import {
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import {
   addressDatasets,
+  datasetPathOf,
   invalidateDatasetAddresses,
   isDatasetDescriptor,
   unclaimedDatasetFolders,
@@ -12561,16 +12562,26 @@ function registerIpcHandlers(): void {
         operation.workspace,
         async (adapter) =>
           await Promise.all(
-            references.map(async (reference) =>
-              workReferenceView(
+            references.map(async (reference) => {
+              const resolution = await adapter.resolveWorkReference({
+                workspaceId,
                 reference,
-                await adapter.resolveWorkReference({
-                  workspaceId,
-                  reference,
-                  signal: operation.signal,
-                }),
-              ),
-            ),
+                signal: operation.signal,
+              });
+              // A data Collection opens at its dataset.json. One this
+              // workspace can't place shows, but opens nothing.
+              const datasetPath =
+                resolution?.status === "found" &&
+                resolution.target.kind === "transactionalCollection"
+                  ? await datasetPathOf(
+                      adapter,
+                      workspaceId,
+                      resolution.target.datasetId,
+                      operation.signal,
+                    ).catch(() => null)
+                  : null;
+              return workReferenceView(reference, resolution, datasetPath);
+            }),
           ),
       );
       if (views === null) throw new Error("The workspace engine is not running.");

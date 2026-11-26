@@ -56,9 +56,18 @@ describe("what a work link shows and opens", () => {
     expect(
       workReferenceView(REF, found({ kind: "file", ...versioned }, { path: "Trip/plan.md" })).open,
     ).toEqual({ to: "file", path: "Trip/plan.md" });
+    // An app link names its app.publish.json, and opens the app by its folder.
     expect(
-      workReferenceView(REF, found({ kind: "app", ...versioned }, { path: "apps/signup" })).kind,
-    ).toBe("app");
+      workReferenceView(
+        REF,
+        found({ kind: "app", ...versioned }, { path: "apps/signup/app.publish.json" }),
+      ),
+    ).toEqual({
+      reference: REF,
+      kind: "app",
+      label: "apps/signup",
+      open: { to: "app", path: "apps/signup" },
+    });
     expect(
       workReferenceView(
         REF,
@@ -83,13 +92,20 @@ describe("what a work link shows and opens", () => {
     });
   });
 
-  it("shows a table but opens nothing", () => {
-    expect(
-      workReferenceView(
-        REF,
-        found({ kind: "transactionalCollection", datasetId: "d", tableId: "t" }),
-      ),
-    ).toEqual({ reference: REF, kind: "data", label: "", open: null });
+  it("opens a data Collection at its dataset.json, and shows one it can't place", () => {
+    const table = found({ kind: "transactionalCollection", datasetId: "d", tableId: "t" });
+    expect(workReferenceView(REF, table, "Workout log/dataset.json")).toEqual({
+      reference: REF,
+      kind: "data",
+      label: "Workout log",
+      open: { to: "data", datasetPath: "Workout log/dataset.json", tableId: "t" },
+    });
+    expect(workReferenceView(REF, table)).toEqual({
+      reference: REF,
+      kind: "data",
+      label: "",
+      open: null,
+    });
   });
 
   it("reads unknown, deleted and pathless work as unavailable", () => {

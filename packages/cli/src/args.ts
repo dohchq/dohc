@@ -948,7 +948,11 @@ const CHAT_VERBS = {
       },
       { name: "--thread", value: "id", text: "Link a thread." },
       { name: "--message", value: "id", text: "Link a message." },
-      { name: "--path", value: "path", text: "Link a file, or a Collection by its folder." },
+      {
+        name: "--path",
+        value: "path",
+        text: "Link a file, or an app or a Collection by its folder.",
+      },
     ],
     notes: [
       "Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names.",

@@ -3,15 +3,19 @@ import type { WorkReferenceView } from "../ipc/bridgeContract";
 
 type WorkReferenceResolution = Awaited<ReturnType<VersionedLiveAdapter["resolveWorkReference"]>>;
 
+const folderOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+
 /**
  * What a chat message's work link shows and where it opens, from the
  * engine's resolution of its reference. Work this workspace does not hold, or
- * no longer holds, opens nothing. A transactional table or row has no place
- * to open yet.
+ * no longer holds, opens nothing. `datasetPath` is the dataset.json of a data
+ * Collection the link names, when this workspace has exactly one. A row has
+ * no place to open yet.
  */
 export function workReferenceView(
   reference: string,
   resolution: WorkReferenceResolution | null,
+  datasetPath: string | null = null,
 ): WorkReferenceView {
   const unavailable: WorkReferenceView = { reference, kind: null, label: "", open: null };
   if (resolution?.status !== "found" || resolution.state === "deleted") return unavailable;
@@ -34,8 +38,18 @@ export function workReferenceView(
       };
       return { reference, kind: target.kind, label: title ?? "", open };
     }
+    case "app": {
+      // An app link names a file that marks its folder as an app.
+      if (path === undefined) return unavailable;
+      const folder = folderOf(path);
+      return {
+        reference,
+        kind: "app",
+        label: folder,
+        open: folder ? { to: "app", path: folder } : null,
+      };
+    }
     case "file":
-    case "app":
     case "documentRecord":
     case "documentCollection": {
       if (path === undefined) return unavailable;
@@ -53,6 +67,14 @@ export function workReferenceView(
       };
     }
     case "transactionalCollection":
+      return datasetPath === null
+        ? { reference, kind: "data", label: "", open: null }
+        : {
+            reference,
+            kind: "data",
+            label: folderOf(datasetPath),
+            open: { to: "data", datasetPath, tableId: target.tableId },
+          };
     case "transactionalRecord":
       return { reference, kind: "data", label: "", open: null };
   }
