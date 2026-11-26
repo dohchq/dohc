@@ -4279,7 +4279,7 @@ it(
         path = "docs/queued.md";
       const note = await proof.ownerDocument(path, "Typed\n", {
         firstVersion: (doc) => {
-          doc.getMap("meta").set("schemaVersion", 2);
+          doc.getMap("meta").set("unknownSetting", true);
         },
       });
       await vi.waitFor(
@@ -4388,7 +4388,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
           path = "docs/refused.md";
         const note = await proof.ownerDocument(path, "Typed\n", {
           firstVersion: (doc) => {
-            doc.getMap("meta").set("schemaVersion", 2);
+            doc.getMap("meta").set("unknownSetting", true);
           },
         });
         const refusals = () =>
