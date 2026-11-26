@@ -14,7 +14,6 @@ import {
   readMarkdownSourceWitness,
   resolveMarkdownSource,
 } from "./artifact-markdown.js";
-import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import {
   bodySequenceChangeLimit,
   bodySequenceChangeRefusal,
@@ -23,7 +22,6 @@ import {
   type BodySequenceIntakeRules,
   type BodySequenceIntakeWork,
 } from "./bodySequenceIntake.js";
-import { holdsBodySequence } from "./bodySequenceYjs.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -49,6 +47,11 @@ import {
   WORKER_LIVE_VALIDATION_POLICY,
   withinLiveNoteCapacity,
 } from "./liveValidationPolicy.js";
+import {
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  holdsBodySequence,
+} from "./bodySequenceStore.js";
 
 const INPUT_FIELDS = ["document", "currentPath", "checkpoint"] as const;
 const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, "suffix", "candidate"] as const;

@@ -10,12 +10,7 @@ import {
   type Step,
 } from "@tiptap/pm/transform";
 import * as Y from "yjs";
-import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  startingRecords,
-} from "./bodySequenceGrammar.js";
+import { startingRecords } from "./bodySequenceGrammar.js";
 import {
   BODY_SEQUENCE_CHANGE_MAX_VALUES,
   bodySequenceChangeLimit,
@@ -39,7 +34,7 @@ import {
   LIVE_UPDATE_MAX_BYTES,
   WORKER_LIVE_VALIDATION_POLICY,
 } from "./liveValidationPolicy.js";
-import { storedValue, visitPieces } from "./bodySequenceYjs.js";
+import { visitPieces } from "./bodySequenceYjs.js";
 import {
   blockHolding,
   blockStartingAt,
@@ -57,6 +52,12 @@ import {
   type BodyReading,
   type SequenceElement,
 } from "./bodySequenceReading.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  storedValue,
+} from "./bodySequenceStore.js";
 
 export type BodyWriting = {
   sequence: Y.Text;

@@ -22,6 +22,14 @@ it("projects deletion snapshots and unrefined recovery copies to the witnessed f
   expect(await restoreRecoveryDraftText(unrefined)).toBe(source);
 });
 
+it("keeps a format-2 note's text in the readable half, and the whole note in the encoded half", async () => {
+  const doc = markdownToYDoc("# Plan\n\nPack **bags**\n\n- one\n", { bodySequence: true });
+  const unrefined = durableMarkdownFromSnapshot(doc, Y.encodeStateAsUpdate(doc));
+  expect(unrefined.slice(0, unrefined.indexOf("\n\n<!--"))).toBe("Plan\n\nPack bags\n\none");
+  expect(await restoreRecoveryDraftText(unrefined)).toBe(yDocToMarkdown(doc));
+  doc.destroy();
+});
+
 import { forgedSources } from "../../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts";
 it.each(forgedSources)("recovery keeps markup inert: %s", async (source) => {
   const doc = markdownToYDoc(source);

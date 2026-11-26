@@ -1,13 +1,9 @@
 import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
-import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  recordsOfContainer,
-} from "./bodySequenceGrammar.js";
+import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
+import { BLOCK_ELEMENT, BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const FIELD = BODY_SEQUENCE_FIELD;

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
@@ -148,6 +148,13 @@ function seededFrom(markdown: string, contentHash: string): Y.Doc {
 }
 
 describe("FileInspector when an open note changed outside dohc", () => {
+  beforeAll(async () => {
+    await Promise.all([
+      import("@dohc/ydoc-projection/body-sequence-editor"),
+      import("@dohc/ydoc-projection/body-sequence-tiptap"),
+    ]);
+  }, 30_000);
+
   beforeEach(() => {
     retryKeys.length = 0;
     engine.boundRetryKey = 0;
@@ -197,6 +204,50 @@ describe("FileInspector when an open note changed outside dohc", () => {
     });
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved");
     expect(retryKeys).toEqual([0, 1]);
+  });
+
+  const formatOne = (text: string) => markdownToYDoc(text);
+  const formatTwo = (text: string) => markdownToYDoc(text, { bodySequence: true });
+  it.each([
+    [
+      "asks before reloading a format-1 note again when its reload came back the same",
+      formatOne,
+      "# Plan\r\n\r\n- Pack\r\n",
+      false,
+    ],
+    [
+      "asks before reloading a format-2 note again when its reload came back the same",
+      formatTwo,
+      "# Plan\n\n- Pack\n",
+      false,
+    ],
+    [
+      "reloads a format-2 note by itself again when its reload came back different",
+      formatTwo,
+      "# Plan\n\n- Pack\n- Eat\n",
+      true,
+    ],
+  ])("%s", async (_name, note, reloaded, again) => {
+    engine.state = engineState(note("# Plan\n\n- Pack\n"), null);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"),
+    );
+    setEngine(engineState(note("# Plan\n\n- Pack\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    setEngine(engineState(note(reloaded), null));
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded"),
+    );
+    await act(() => vi.dynamicImportSettled());
+    setEngine(engineState(note(reloaded), "saved"));
+    if (again) {
+      await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
+      expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    } else {
+      expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
+      expect(retryKeys).toEqual([0, 1]);
+    }
   });
 
   it("does not reload by itself over an edit main has not confirmed", async () => {

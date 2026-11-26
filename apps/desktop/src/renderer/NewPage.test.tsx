@@ -14,7 +14,7 @@ function pageEditor() {
     caret: vi.fn(() => null),
     getMarkdown: vi.fn(() => ""),
     replaceMarkdown: vi.fn(),
-    insertTypedText: vi.fn(),
+    insertTypedText: vi.fn(() => true),
   };
   return { editor, setIdentity: vi.fn<PageEditor["setIdentity"]>() };
 }
@@ -109,6 +109,18 @@ it("hands the title, the body and its caret to the editor at once, and steps asi
   // A later editor of the same file is the file's own.
   page.editorReady(pageEditor());
   expect(live.editor.insertTypedText).toHaveBeenCalledTimes(1);
+});
+
+it("says the editor did not take a body it refused, so the draft is kept elsewhere", async () => {
+  const user = userEvent.setup();
+  const page = renderPage();
+  await user.keyboard("Lisbon{Enter}Day one");
+  page.fileExists();
+  const live = pageEditor();
+  vi.mocked(live.editor.insertTypedText).mockReturnValue(false);
+  page.editorReady(live);
+  expect(live.editor.insertTypedText).toHaveBeenCalledWith("Day one", "Day one".length);
+  expect(page.onHandedOff.mock.calls).toEqual([[false]]);
 });
 
 it("puts the caret at the start of an empty body", async () => {

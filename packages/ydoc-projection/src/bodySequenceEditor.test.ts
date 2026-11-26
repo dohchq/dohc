@@ -19,7 +19,6 @@ import {
   bodySequenceAnchorPosition,
   createBodySequenceHistory,
   isBodySequenceChange,
-  keepBodySequenceFormatting,
 } from "./bodySequenceEditor.js";
 import { boundaryAt, createBodyReader } from "./bodySequenceReading.js";
 import { deleteRange, setLineKind, splitLine, writeBody } from "./bodySequenceWriter.js";
@@ -77,6 +76,7 @@ import {
   textPlaces,
   SEEDS,
 } from "./bodySequenceEditorTestSupport.js";
+import { keepBodySequenceFormatting } from "./bodySequenceStore.js";
 
 afterEach(stopEveryone);
 

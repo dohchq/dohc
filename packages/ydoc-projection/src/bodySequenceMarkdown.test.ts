@@ -4,20 +4,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
-import {
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-  flattenBody,
-  recordsOfContainer,
-} from "./bodySequenceGrammar.js";
+import { flattenBody, recordsOfContainer } from "./bodySequenceGrammar.js";
 import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
-import {
-  BODY_SEQUENCE_SCHEMA_VERSION,
-  boundaryOf,
-  holdsBodySequence,
-  readBodySequence,
-  storedValue,
-} from "./bodySequenceYjs.js";
+import { boundaryOf, readBodySequence } from "./bodySequenceYjs.js";
 import { engineReadOfFrontmatter } from "./frontmatter-map.js";
 import {
   getDohcProseMirrorSchema,
@@ -46,6 +35,13 @@ import {
   type OrderedLiveUpdateCutUsage,
   readLiveUpdateAsTheCutDoes,
 } from "./orderedLiveUpdateCut.js";
+import {
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  BODY_SEQUENCE_SCHEMA_VERSION,
+  holdsBodySequence,
+  storedValue,
+} from "./bodySequenceStore.js";
 
 const schema = getDohcProseMirrorSchema();
 const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);

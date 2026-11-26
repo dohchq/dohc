@@ -14,12 +14,9 @@ import { fixTablesKey } from "@tiptap/pm/tables";
 import { ReplaceStep, StepMap } from "@tiptap/pm/transform";
 import * as Y from "yjs";
 import {
-  BLOCK_ELEMENT,
-  BODY_CONTAINERS_FIELD,
-  BODY_SEQUENCE_FIELD,
-} from "./bodySequenceGrammar.js";
-import {
   blockHolding,
+  blockStartingAt,
+  boundaryAt,
   createBodyReader,
   indexAt,
   positionAt,
@@ -32,6 +29,12 @@ import {
   type BodyReading,
   type Followed,
 } from "./bodySequenceReading.js";
+import {
+  keepBodySequenceFormatting,
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+} from "./bodySequenceStore.js";
 import { giveBoundaries, howToWrite, keepsPairs, writeTransaction } from "./bodySequenceWriting.js";
 
 export type BodySequenceOptions = {
@@ -146,35 +149,6 @@ export function createBodySequenceHistory(
   return history;
 }
 
-/**
- * Stops Yjs from deleting formatting items of a note's sequence on its own after a change from
- * elsewhere, until the returned function is called. Those deletes are in nobody's change, and
- * neither the server's checks nor the engine make them, so a page that made them would stop
- * reading as the stored note. The plugin does this for the sequence it binds. A host that holds a
- * note's document with no editor on it calls this itself.
- *
- * Yjs has no setting for this, and decides it for a whole transaction. Each text's observer call
- * sets a field of the transaction, and after the `afterTransaction` listeners Yjs cleans the
- * texts the transaction put items into or deleted items of. For a transaction from elsewhere
- * that did so to the sequence, a `beforeObserverCalls` listener makes that field read false,
- * whatever is set later: it gives the transaction a getter in the field's place. That costs
- * nothing for each event, and no listener that throws can undo it. When one throws before this
- * one runs, Yjs calls no observer and cleans nothing. Such a transaction also leaves alone the
- * formatting items of any other text it changes in the same document. Those items change nothing
- * that text reads as; they stay stored. Any other transaction is cleaned as Yjs cleans it.
- */
-export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
-  const doc = sequence.doc;
-  if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
-  const keep = (transaction: Y.Transaction) => {
-    const changed: ReadonlyMap<unknown, unknown> = transaction.changed;
-    if (transaction.local || !changed.has(sequence)) return;
-    Object.defineProperty(transaction, "_needFormattingCleanup", { get: () => false, set() {} });
-  };
-  doc.on("beforeObserverCalls", keep);
-  return () => doc.off("beforeObserverCalls", keep);
-}
-
 type Bound = { sequence: Y.Text; history: Y.UndoManager; reader: BodyReader };
 
 function boundOf(state: EditorState): Bound | null {
@@ -257,6 +231,44 @@ export function bodySequenceAnchorPosition(
   return positionAt(reading, place.index);
 }
 
+/**
+ * A mark on the leaf block that starts at `pos`, which stays with that block through everyone's
+ * changes: on its boundary, or for a block with no boundary of its own, on what holds its place.
+ * Null where no leaf block starts, for a block that holds nothing and has no boundary, and while
+ * `state`'s document is not what the sequence reads as.
+ */
+export function bodySequenceBlockAnchor(
+  state: EditorState,
+  pos: number,
+): Y.RelativePosition | null {
+  const bound = boundOf(state);
+  const reading = bound?.reader.reading();
+  if (!bound || !reading) return null;
+  if (reading.doc !== state.doc && !reading.doc.eq(state.doc)) return null;
+  const block = blockStartingAt(reading, pos);
+  if (block < 0) return null;
+  const boundary = boundaryAt(reading, block);
+  const index = boundary >= 0 ? boundary : whatFollowsStartOf(reading, pos + 1);
+  return index < 0 ? null : Y.createRelativePositionFromTypeIndex(bound.sequence, index, 0);
+}
+
+/**
+ * Where the block a `bodySequenceBlockAnchor` marks stands in the editor now, or null once its
+ * item is gone.
+ */
+export function bodySequenceBlockPosition(
+  state: EditorState,
+  anchor: Y.RelativePosition,
+): number | null {
+  const bound = boundOf(state);
+  const doc = bound?.sequence.doc;
+  if (!bound || !doc || !anchor.item || Y.getItem(doc.store, anchor.item).deleted) return null;
+  const place = Y.createAbsolutePositionFromRelativePosition(anchor, doc);
+  if (!place || place.type !== bound.sequence) return null;
+  const shown = positionOf(bound.reader.reading(), place.index);
+  return shown < 0 ? null : shown;
+}
+
 type Held = { index: number; after: boolean };
 type Place = (reading: BodyReading, found: readonly Followed[], doc: ProseMirrorNode) => Selection;
 
@@ -320,23 +332,23 @@ function holdSelection(
 /**
  * Binds an editor to a note's body sequence, in place of y-prosemirror's sync and undo plugins.
  *
- * The editor always shows what `readBodySequence` reads. A person's change is written to the
- * sequence step by step, each step by its own step map, and what the sequence then reads as is
- * shown again where it differs. One dispatch of the editor, with what other plugins append to
- * it, is one Yjs transaction and one update. The history follows it unless every editor
- * transaction in it is kept out (`addToHistory` false), so undoing a typed letter also takes back
- * what a plugin appended to that dispatch. When the dispatch edits a line that has no boundary of
- * its own, or needs such a line to have one, that boundary is written first, in a transaction and
- * an update of its own that the history does not follow. The change the history follows gives no
- * such line a boundary. To find the lines, a dispatch that reaches past one block next to such a
- * line is first written to a copy of the blocks around it, and to a copy of the whole note when
- * that one does not read as the editor's document. A dispatch that cannot be written step by
- * step is tried with the steps of a transaction that touch as one range, as the delete and the
- * split of Enter over a selection do. Nothing is written, and the editor shows the note again
- * with the selection as it was, when no copy comes to read as the editor's document, and when a
- * boundary the dispatch makes would still stand in front of what such a line held with that line
- * given none that lasts: a drop of dragged text that joins the line away and splits it off again.
- * `unwritten` is told of each dispatch that was not written.
+ * The editor always shows what `readBodySequence` reads, from the moment it mounts, with the caret
+ * at the note's start. A person's change is written to the sequence step by step, each step by its
+ * own step map, and what the sequence then reads as is shown again where it differs. One dispatch
+ * of the editor, with what other plugins append to it, is one Yjs transaction and one update. The
+ * history follows it unless every editor transaction in it is kept out (`addToHistory` false), so
+ * undoing a typed letter also takes back what a plugin appended to that dispatch. When the dispatch
+ * edits a line that has no boundary of its own, or needs such a line to have one, that boundary is
+ * written first, in a transaction and an update of its own that the history does not follow. The
+ * change the history follows gives no such line a boundary. To find the lines, a dispatch that
+ * reaches past one block next to such a line is first written to a copy of the blocks around it,
+ * and to a copy of the whole note when that one does not read as the editor's document. A dispatch
+ * that cannot be written step by step is tried with the steps of a transaction that touch as one
+ * range, as the delete and the split of Enter over a selection do. Nothing is written, and the
+ * editor shows the note again with the selection as it was, when no copy comes to read as the
+ * editor's document, and when a boundary the dispatch makes would still stand in front of what such
+ * a line held with that line given none that lasts: a drop of dragged text that joins the line away
+ * and splits it off again. `unwritten` is told of each dispatch that was not written.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
@@ -566,7 +578,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       doc.on("beforeTransaction", onStart);
       doc.on("afterTransaction", onTransaction);
       doc.on("afterAllTransactions", onSettled);
-      show();
+      show((transaction) => transaction.setSelection(Selection.atStart(transaction.doc)));
       write();
       return {
         update: write,
