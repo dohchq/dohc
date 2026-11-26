@@ -1059,16 +1059,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       member: loaded.member,
     };
   }
-  // A published app that calls outside services, for any caller it serves. Its Collections don't matter here.
+  // A published app that calls outside services, for a caller who can still open it.
   function externalPublication(auth: AppBackendAuth, publicationId: string) {
     current();
     const loaded = loadAppPublication(auth, publicationId);
     if (loaded.local || loaded.member || !loaded.candidate.external) throw notFound();
+    publication(auth, publicationId);
     return {
       workspaceId: loaded.workspaceId,
       authorityRevision: loaded.authorityRevision,
       external: loaded.candidate.external,
-      authority: loaded.resolveAuthority(),
+      caller: loaded.resolveAuthority().caller,
     };
   }
   // The app whose files a named caller may load: a dataset app, or a publication that requests nothing in the

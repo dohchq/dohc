@@ -30,7 +30,7 @@ export interface ServedExternalApp {
   workspaceId: string;
   authorityRevision: number;
   external: AppExternalOperation[];
-  authority: DatasetAuthority;
+  caller: DatasetAuthority["caller"];
 }
 
 const refuse = (code: string, message: string) => new AppBackendRuntimeError({ code, message });
@@ -52,7 +52,7 @@ export function createAppExternalCalls(options: {
     APP_EXTERNAL_LIMITS.link.perSecond,
     8_192,
   );
-  const inFlight = new Map<string, number>();
+  const inFlight = new Map<string, { all: number; visitors: number }>();
   return async (
     served: ServedExternalApp,
     raw: unknown,
@@ -60,8 +60,8 @@ export function createAppExternalCalls(options: {
     stillServed: () => Promise<void>,
     signal: AbortSignal,
   ): Promise<{ status: number; data: unknown }> => {
-    const { workspaceId, authority } = served;
-    const owner = authority.caller.kind === "owner";
+    const { workspaceId, caller } = served;
+    const owner = caller.kind === "owner";
     const body = raw as Record<string, unknown> | null;
     if (
       !body ||
@@ -89,8 +89,15 @@ export function createAppExternalCalls(options: {
         "external_unavailable",
         owner ? detail : "This app's outside service isn't available right now.",
       );
+    const running = inFlight.get(workspaceId) ?? { all: 0, visitors: 0 };
+    const visitorCap = APP_EXTERNAL_LIMITS.inFlight - APP_EXTERNAL_LIMITS.ownerReserved;
+    if (running.all >= APP_EXTERNAL_LIMITS.inFlight || (!owner && running.visitors >= visitorCap))
+      throw refuse(
+        "external_busy",
+        `This workspace already has ${running.all} outside calls running. It runs at most ${APP_EXTERNAL_LIMITS.inFlight} at once, and visitors can start ${visitorCap} of them. Try again when one finishes.`,
+      );
     const nowMs = options.nowMs();
-    if (authority.caller.kind === "link" && !links.has(authority.caller.grantId, nowMs))
+    if (caller.kind === "link" && !links.has(caller.grantId, nowMs))
       throw refuse(
         "external_rate_limited",
         `This share link reached its limit of ${APP_EXTERNAL_LIMITS.link.burst} outside calls in a row, then 1 every ${1 / APP_EXTERNAL_LIMITS.link.perSecond} seconds. Try again shortly.`,
@@ -100,15 +107,11 @@ export function createAppExternalCalls(options: {
         "external_rate_limited",
         `This workspace's apps reached their limit of ${APP_EXTERNAL_LIMITS.workspace.burst} outside calls in a row, then ${APP_EXTERNAL_LIMITS.workspace.perSecond} each second. Try again shortly.`,
       );
-    if (authority.caller.kind === "link") links.allow(authority.caller.grantId, nowMs);
-    const running = inFlight.get(workspaceId) ?? 0;
-    const cap = APP_EXTERNAL_LIMITS.inFlight - (owner ? 0 : APP_EXTERNAL_LIMITS.ownerReserved);
-    if (running >= cap)
-      throw refuse(
-        "external_busy",
-        `This workspace already has ${running} outside calls running, and ${cap} is the most ${owner ? "it can run" : "visitors can start"} at once. Try again when one finishes.`,
-      );
-    inFlight.set(workspaceId, running + 1);
+    if (caller.kind === "link") links.allow(caller.grantId, nowMs);
+    inFlight.set(workspaceId, {
+      all: running.all + 1,
+      visitors: running.visitors + (owner ? 0 : 1),
+    });
     try {
       return await sendDeclaredHttps({
         request,
@@ -118,6 +121,8 @@ export function createAppExternalCalls(options: {
         signal,
         ...(options.transport ? { transport: options.transport } : {}),
         secret: async () => {
+          await stillServed();
+          signal.throwIfAborted();
           const { name } = operation.secret;
           const ownerUserId = options.storage.workspaceOwner(workspaceId);
           if (!options.keyring || !ownerUserId)
@@ -155,17 +160,17 @@ export function createAppExternalCalls(options: {
             throw unavailable(
               `Secret ${name} can't be opened on this server. Replace it in Settings.`,
             );
-          await stillServed();
-          signal.throwIfAborted();
           return { header: operation.secret.header, prefix: operation.secret.prefix, value };
         },
       });
     } catch (error) {
-      if (error instanceof DeclaredHttpsError) throw refuse(error.code, error.message);
+      if (error instanceof DeclaredHttpsError)
+        throw owner ? refuse(error.code, error.message) : unavailable(error.message);
       throw error;
     } finally {
-      const left = (inFlight.get(workspaceId) ?? 1) - 1;
-      if (left) inFlight.set(workspaceId, left);
+      const left = inFlight.get(workspaceId)!;
+      if (left.all > 1)
+        inFlight.set(workspaceId, { all: left.all - 1, visitors: left.visitors - (owner ? 0 : 1) });
       else inFlight.delete(workspaceId);
     }
   };
