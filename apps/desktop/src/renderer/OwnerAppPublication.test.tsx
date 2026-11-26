@@ -1531,6 +1531,34 @@ describe("owner app publication", () => {
         );
       });
 
+      it("brings back a revision the owner unpublished through its stored review", async () => {
+        const stored = {
+          ...linkPublication(checked.sourceRevision),
+          shareId: row.shareId,
+          grantId: row.grantId,
+          active: false,
+          authorityRevision: 2,
+        };
+        publishBox({ links: [row], listed: () => [stored] });
+        renderLocal();
+        await openLocal();
+        const publish = await within(await screen.findByTestId("app-publish-link")).findByRole(
+          "button",
+          { name: "Publish" },
+        );
+        await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.setup().click(publish);
+        await screen.findByRole("heading", { name: "Republish this revision" });
+        expect(actions("prepare")).toEqual([]);
+        expect(actions("reviewReactivation")).toEqual([
+          {
+            action: "reviewReactivation",
+            workspaceId: "ws-trip",
+            publicationId: stored.publicationId,
+          },
+        ]);
+      });
+
       it("asks the same link request again when Try again follows a failed preparation", async () => {
         const reportError = vi.fn();
         let fail = true;

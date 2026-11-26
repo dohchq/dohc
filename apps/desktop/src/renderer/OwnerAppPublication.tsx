@@ -982,7 +982,7 @@ function PublicationDialog(
           )
         : undefined;
 
-  const reviewReactivation = async (publication: Publication) => {
+  const reviewReactivation = async (publication: Publication, replaces: Publication[] = []) => {
     if (
       busy ||
       responsesBusy ||
@@ -1014,7 +1014,7 @@ function PublicationDialog(
       const verified = verifiedPrepared(result);
       setPrepared(verified);
       setReactivating(true);
-      setSupersedes([]);
+      setSupersedes(replaces);
       setPreparedNote(null);
       setPreparedForMembers(publication.audience === "workspace");
       setPreparedLink(
@@ -1355,21 +1355,38 @@ function PublicationDialog(
     workspaceId: props.workspaceId,
     appRoot: props.appRoot,
   } as const;
+  // The relay keeps one record per revision, so the source it once published returns through its stored review.
+  const withdrawn = (members: boolean, grantId: string | null) =>
+    own.find(
+      (publication) =>
+        !publication.active &&
+        !publication.operatorTakedown &&
+        publication.linkCurrent &&
+        (publication.audience === "workspace") === members &&
+        (members || publication.grantId === grantId) &&
+        sourceRevision !== null &&
+        publication.sourceRevision === sourceRevision,
+    );
   const publishOnLink = (replaces: Publication[]) => {
     const old = replaces[0] ?? folderLink;
     if (!old?.shareId || !old.grantId)
       return void prepareWith(newAppLink(), `New view link to ${folderLabel}`, [], newLinkNote);
+    const stored = withdrawn(false, old.grantId);
+    if (stored) return void reviewReactivation(stored, replaces);
     void prepareWith(
       { ...base, shareId: old.shareId, grantId: old.grantId },
       `Link ${old.grantId.slice(0, 8)}`,
       replaces,
       replaces.length > 0
-        ? "People who have this link get the new version."
+        ? "People who open the link get the new version. App links copied before stop working, so copy the new one."
         : `Uses your existing view link to ${folderLabel}. Anyone who has it can open the app.`,
     );
   };
-  const publishForMembers = (replaces: Publication[]) =>
+  const publishForMembers = (replaces: Publication[]) => {
+    const stored = withdrawn(true, null);
+    if (stored) return void reviewReactivation(stored, replaces);
     void prepareWith({ ...base, audience: "workspace" }, MEMBERS_LABEL, replaces);
+  };
   const manage = () => {
     setError(null);
     setNotice(null);
@@ -1379,7 +1396,7 @@ function PublicationDialog(
     rows: OwnPublication[],
     audience: string,
     copyUrl: string | null,
-    publishChanges: () => void,
+    publishChanges: (() => void) | null,
   ) => (
     <>
       {copyUrl ? (
@@ -1393,8 +1410,8 @@ function PublicationDialog(
         />
       ) : null}
       {current(rows) ? null : (
-        <SecondaryButton size="row" disabled={rowBusy} onClick={publishChanges}>
-          Publish changes
+        <SecondaryButton size="row" disabled={rowBusy} onClick={publishChanges ?? manage}>
+          {publishChanges ? "Publish changes" : "Choose a link"}
         </SecondaryButton>
       )}
       <SecondaryButton
@@ -1434,9 +1451,19 @@ function PublicationDialog(
   const linkRowState = (): RowState => {
     const rows = live(false);
     const grants = new Set(rows.map((row) => row.grantId));
-    if (grants.size > 1)
+    const link = links.find(
+      (item) => item.shareId === rows[0]?.shareId && item.grantId === rows[0]?.grantId,
+    );
+    // The link this dialog just made is a Main view link before the list reloads with it.
+    const mainView =
+      createdLink?.grantId === rows[0]?.grantId ||
+      (link?.access === "view" && link.selector.versionId === null);
+    if (grants.size > 1 || (rows.length > 0 && !mainView))
       return {
-        status: { text: `Published on ${grants.size} links`, published: true },
+        status:
+          grants.size > 1
+            ? { text: `Published on ${grants.size} links`, published: true }
+            : publishedStatus(rows),
         actions: (
           <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
             Manage
@@ -1447,8 +1474,13 @@ function PublicationDialog(
       const shown = rows.find((row) => row.sourceRevision === sourceRevision) ?? rows[0]!;
       return {
         status: publishedStatus(rows),
-        actions: publishedActions(rows, "anyone with the link", publicationAppUrl(shown), () =>
-          publishOnLink(rows),
+        actions: publishedActions(
+          rows,
+          "anyone with the link",
+          publicationAppUrl(shown),
+          outsideFolder && link?.selector.paths.join() === props.appRoot
+            ? null
+            : () => publishOnLink(rows),
         ),
       };
     }
@@ -2241,7 +2273,7 @@ function PublicationDialog(
                   ) : null}
                 </>
               )}
-              {synced === false || folderLink ? null : (
+              {synced === false || props.version || folderLink ? null : (
                 <div className="flex items-center justify-between gap-3">
                   <p className="m-0 text-[12px] text-muted">
                     Make a view link to {folderLabel} and review the app on it.
