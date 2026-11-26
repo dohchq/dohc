@@ -108,6 +108,20 @@ describe("a format-2 note", () => {
     ["bold text", "Hello **world**.", "world", "friend", "Hello **friend**.\n"],
     ["text after an image", "See ![a](a.png) here.", " here", " there", "See ![a](a.png) there.\n"],
     ["text taken away", "Hello cruel world.", " cruel", "", "Hello world.\n"],
+    [
+      "text that ends where formatting starts",
+      "**bold** plain **tail**",
+      " plain ",
+      " other ",
+      "**bold** other **tail**\n",
+    ],
+    [
+      "a typed object replacement character, not an image",
+      "See \uFFFC here.\n\nSee ![a](a.png) here.",
+      "See \uFFFC here",
+      "Seen",
+      "Seen.\n\nSee ![a](a.png) here.\n",
+    ],
   ])("replaces %s and keeps its marks", (_, markdown, find, replacement, expected) => {
     expect(replaced(markdown, find, replacement)).toBe(expected);
   });
@@ -153,11 +167,18 @@ describe("a format-2 note", () => {
 
   it.each([
     ["a match across marks", "Hello **world**.", "Hello world", /formatting/],
-    ["a match across an image", "See ![a](a.png) here.", "See \uFFFC here", /formatting/],
-    ["an ambiguous match", "Hello **world**.\n\nHello world.", "world", /exactly once/],
+    ["an ambiguous match", "Hello **world**.\n\nHello world.", "Hello world", /exactly once/],
     ["a missing match", "Hello world.", "friend", /exactly once/],
     ["half a letter", "Smile \u{1F600} now.", "\uDE00", /surrogate/],
   ])("refuses %s without changing the note", (_, markdown, find, words) => {
     refused(markdown, find, "new", words);
+  });
+
+  it("refuses a match across an image as a format-1 note does", () => {
+    const markdown = "See ![a](a.png) here.";
+    const formatOne = markdownToYDoc(markdown);
+    expect(() => replace(formatOne, "See \uFFFC here", "new")).toThrow(/exactly once/);
+    formatOne.destroy();
+    refused(markdown, "See \uFFFC here", "new", /exactly once/);
   });
 });

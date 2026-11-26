@@ -89,7 +89,7 @@ function findRemovedText(
     .filter(({ shown }) => shown !== "");
   if (pieces.length === 0) return null;
   return {
-    text: inNoteOrder(pieces),
+    text: inNoteOrder(pieces, sequence),
     clients: new Set(pieces.map(({ piece }) => piece.item.id.client)),
   };
 }
@@ -169,13 +169,16 @@ export function findUnsentText(doc: Y.Doc, unsent: Uint8Array, deleted: DeletedT
       if (shown !== "") pieces.push({ piece, shown });
     }
   });
-  return { text: pieces.length ? inNoteOrder(pieces) : "", deletes };
+  return { text: pieces.length ? inNoteOrder(pieces, sequence) : "", deletes };
 }
 
 /** Pieces joined as the note shows them, a line break between lines. */
-function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string {
+function inNoteOrder(
+  pieces: readonly { piece: Piece; shown: string }[],
+  sequence: unknown,
+): string {
   const places = new Places();
-  const lineOf = lineFinder();
+  const lineOf = lineFinder(sequence);
   const sorted = pieces
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
     .sort((left, right) => compare(left.at, right.at));
@@ -234,7 +237,7 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
  * An item's line: a paragraph's element, or in a format-2 note the boundary before the item. It
  * remembers the line of each item it passes, so items of one long line cost one walk.
  */
-function lineFinder() {
+function lineFinder(sequence: unknown) {
   const lines = new Map<Y.Item, unknown>();
   const isBoundary = (item: Y.Item) =>
     !item.deleted &&
@@ -244,7 +247,7 @@ function lineFinder() {
   return (item: Y.Item): unknown => {
     const parent = item.parent as Y.AbstractType<unknown>;
     if (parent instanceof Y.XmlText) return parent._item!.parent;
-    if (!(parent instanceof Y.Text)) return parent;
+    if (parent !== sequence) return parent;
     const passed: Y.Item[] = [];
     let left: Y.Item | null = item;
     for (; left && !lines.has(left) && !isBoundary(left); left = left.left) passed.push(left);

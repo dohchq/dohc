@@ -65,7 +65,7 @@ interface Layout {
 
 /** The document in `state` as the Markdown an edit matches against. */
 export function documentMarkdown(state: Uint8Array): string {
-  return withDoc(state, (doc) => savedForm(layoutOf(doc)));
+  return withDoc(state, documentMarkdownOf);
 }
 
 /** The same, for a doc the caller owns. Takes the doc's empty shells out. */

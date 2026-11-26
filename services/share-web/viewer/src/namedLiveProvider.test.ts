@@ -1575,6 +1575,9 @@ describe("a format-2 note in the browser provider", () => {
     expect(host.submissions()).toHaveLength(2);
     expect(Y.decodeUpdate(sent.bytes).ds.clients.size).toBeGreaterThan(0);
     expect(liveEditRefusal(copy, sent.bytes)).toBeUndefined();
+    Y.applyUpdate(copy, sent.bytes);
+    expect(yDocToMarkdown(copy)).toContain("Opening");
+    expect(yDocToMarkdown(copy)).not.toContain("First");
     expect(yDocToMarkdown(doc)).toContain("First");
     expect(yDocToMarkdown(doc)).not.toContain("Opening");
     const verdict = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY)({

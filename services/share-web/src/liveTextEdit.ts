@@ -61,6 +61,14 @@ function replaceInSequence(doc: Y.Doc, find: string, replacement: string): void 
   if (LONE_HALF.test(find) || LONE_HALF.test(replacement))
     throw new Error("Neither text may hold half of a surrogate pair.");
   const schema = getDohcProseMirrorSchema();
+  const items = new Set<number>();
+  let next = 0;
+  for (const part of doc.getText(BODY_SEQUENCE_FIELD).toDelta() as { insert: unknown }[]) {
+    if (typeof part.insert !== "string") items.add(next);
+    next += typeof part.insert === "string" ? part.insert.length : 1;
+  }
+  const holdsItem = (index: number) =>
+    Array.from({ length: find.length }, (_, unit) => items.has(index + unit)).includes(true);
   const matches: { at: number; offset: number; index: number }[] = [];
   readBody(schema, doc).forEach((line, at) => {
     for (
@@ -68,7 +76,7 @@ function replaceInSequence(doc: Y.Doc, find: string, replacement: string): void 
       offset >= 0;
       offset = line.text.indexOf(find, offset + 1)
     )
-      matches.push({ at, offset, index: line.start + offset });
+      if (!holdsItem(line.start + offset)) matches.push({ at, offset, index: line.start + offset });
   });
   if (matches.length !== 1) throw new Error(NOT_ONCE);
   const { at, offset, index } = matches[0]!;
