@@ -195,7 +195,7 @@ fn a_released_format_two_note_takes_the_writers_ordinary_edits() {
         for (before, after) in [
             ("**ab**\n", "**a**\n\n**b**\n"),
             ("a\n", "> a\n"),
-            ("a\n\n---\n", "a\n\n$$\nx\n$$\n"),
+            ("a\n\n---\n", "a\n\n$$x$$\n"),
             ("- a\n", "- a\n- b\n"),
             ("- a\n- b\n", "- a\n  - b\n"),
             ("| h |\n| --- |\n| v |\n", "| h |\n| --- |\n| v |\n| w |\n"),
@@ -266,11 +266,10 @@ fn a_released_format_two_note_holds_a_hidden_formula() {
             inspect_update(&head(&[&base]), &deleting_only(&math)),
             Hold(HiddenContent)
         );
-        let typed_math = note("$$\nx\n$$\n");
         assert_eq!(
             edited(
-                &typed_math,
-                boundary_writing(0, vec![("type", Any::from("paragraph"))])
+                &base,
+                boundary_writing(1, vec![("type", Any::from("paragraph"))])
             ),
             Hold(HiddenContent)
         );
