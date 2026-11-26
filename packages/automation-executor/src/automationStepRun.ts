@@ -122,7 +122,11 @@ export interface StepBackend {
     chat: ChatDirectory | null,
   ): Promise<
     | RunWrite[]
-    | { writes: RunWrite[]; response: JsonValue }
+    | {
+        writes: RunWrite[];
+        response: JsonValue;
+        code: Array<{ file: string; sha256: string }>;
+      }
     | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
   >;
 }
@@ -416,6 +420,14 @@ async function walkSteps(
       if (typeof read !== "string") return { outcome: failed(read.problem) };
       source = read;
       codeFileSha256 = createHash("sha256").update(read).digest("hex");
+      const allowed = run.applied.flatMap((applied) => applied.code ?? []);
+      if (allowed.some((code) => code.file === step.file && code.sha256 !== codeFileSha256)) {
+        return {
+          outcome: failed(
+            `Code file "${step.file}" changed after you allowed this run's web request, so step ${ordinal + 1} did not run.`,
+          ),
+        };
+      }
     }
     enter("planMs");
     const names = namesUsed(step);
@@ -591,7 +603,7 @@ async function walkSteps(
             ? "may-have-landed"
             : "resumed";
       let writes: RunWrite[];
-      let response: { response: JsonValue } | null = null;
+      let fetched: Pick<StoredRun["applied"][number], "response" | "code"> | null = null;
       const writeStarted = dependencies.nowMs();
       try {
         dependencies.beforeEffect?.(run, effect);
@@ -609,7 +621,11 @@ async function walkSteps(
           return applied.outcome;
         }
         const appliedWrites = Array.isArray(applied) ? applied : applied.writes;
-        if (!Array.isArray(applied)) response = { response: applied.response };
+        if (!Array.isArray(applied))
+          fetched = {
+            response: applied.response,
+            ...(applied.code.length > 0 ? { code: applied.code } : {}),
+          };
         writes =
           receipt === null
             ? appliedWrites
@@ -627,7 +643,7 @@ async function walkSteps(
         writes,
         writeMs: Math.max(0, dependencies.nowMs() - writeStarted),
         writeCount: 1,
-        ...response,
+        ...fetched,
       };
       const appendStarted = dependencies.nowMs();
       if (recorded) {

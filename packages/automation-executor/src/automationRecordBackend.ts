@@ -1723,7 +1723,7 @@ export async function prepareRecordBackend(
             ),
           };
         }
-        return { writes: [httpSent], response: sent.response };
+        return { writes: [httpSent], response: sent.response, code: codeFileHashes };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
         if (current !== null && currentRoster !== null) {

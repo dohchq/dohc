@@ -221,13 +221,12 @@ export function sanitizeHttpFailureReason(reason: string, secrets: readonly stri
 }
 
 function redactSecrets(text: string, secrets: readonly string[]): string {
-  let scrubbed = text;
-  for (const secret of secrets) {
-    if (secret.length > 0 && scrubbed.includes(secret)) {
-      scrubbed = scrubbed.split(secret).join("[redacted]");
-    }
-  }
-  return scrubbed;
+  const found = secrets
+    .filter((secret) => secret.length > 0 && text.includes(secret))
+    .sort((left, right) => right.length - left.length);
+  if (found.length === 0) return text;
+  const pattern = found.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+  return text.replace(new RegExp(pattern, "gu"), "[redacted]");
 }
 
 /** What to scrub for a secret destination URL: the URL, and its path parts and query values of 8 or more characters. */
@@ -259,7 +258,7 @@ function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonVa
   }
   const entries: Array<[string, HttpJsonValue]> = [];
   for (const [key, item] of Object.entries(value)) {
-    if (redactSecrets(key, secrets) !== key) return null;
+    if (secrets.some((secret) => secret.length > 0 && key.includes(secret))) return null;
     const scrubbed = scrubJson(item, secrets);
     if (scrubbed === null && item !== null) return null;
     entries.push([key, scrubbed]);

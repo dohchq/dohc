@@ -861,6 +861,41 @@ automations:
       ).toEqual({ kind: "wait", reason: "stopped" });
       expect(await run({ claimId: "claim-fetch-paused", attempts: 2 })).toEqual({ kind: "done" });
       expect(execute).toHaveBeenCalledTimes(2);
+
+      const codeParsed = parseAutomationsFile(`version: 1
+automations:
+  - id: pull-code
+    name: Pull with code
+    when: record-added
+    do:
+      - http: https://api.example.com/stats
+        method: GET
+        as: stats
+      - run-file: rows.js
+`);
+      if (codeParsed.status !== "read" || codeParsed.entries[0]?.status !== "valid")
+        throw Error("bad yaml");
+      const sources = ["export default () => 1;", "export default () => 2;"];
+      const swapped = await runCollectionAutomation(
+        { ...deps, readCode: async () => ({ text: sources.shift() ?? "", truncated: false }) },
+        {
+          claim: {
+            ...claim,
+            claimId: "claim-fetch-code",
+            automationId: "collection:Tasks#pull-code",
+          },
+          automation: codeParsed.entries[0].automation,
+          collection: { path: "Tasks", name: "Tasks" },
+          roster,
+          signal: new AbortController().signal,
+          stopped: new AbortController().signal,
+        },
+      );
+      expect(swapped).toMatchObject({ kind: "failed" });
+      if (swapped.kind === "failed")
+        expect(swapped.error).toBe(
+          `Code file "rows.js" changed after you allowed this run's web request, so step 2 did not run.`,
+        );
     } finally {
       await evaluator.close();
     }

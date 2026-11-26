@@ -364,6 +364,7 @@ const AppliedSchema = z.object({
   writeMs: z.number().nonnegative().optional(),
   writeCount: z.number().int().nonnegative().optional(),
   response: JsonValueSchema.optional(),
+  code: z.array(z.object({ file: z.string(), sha256: z.string() })).optional(),
 });
 // A record the run created: the id its plan gave it, which finds it again on
 // a retry, and the id and path the engine gave it.

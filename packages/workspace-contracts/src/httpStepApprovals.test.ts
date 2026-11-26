@@ -453,5 +453,16 @@ automations:
       ok: false,
       reason: "The answer is 635 KiB as JSON, over the 192 KiB limit.",
     });
+    expect(scrubSecretsFromJson({ "[redacted]": 1 }, ["[redacted]"])).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("redacts each secret once, never inside a marker it already wrote", () => {
+    expect(scrubSecretsFromJson({ x: "red tape" }, ["d", "re"])).toEqual({
+      ok: true,
+      value: { x: "[redacted][redacted] tape" },
+    });
+    expect(sanitizeHttpFailureReason("a.b and a*b", ["a.b"])).toBe("[redacted] and a*b");
   });
 });
