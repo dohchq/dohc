@@ -234,7 +234,7 @@ where
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
         // The baseline is a document from elsewhere. A replay returns above.
         dohc_engine_storage::count_remote_change_in_tx(tx, &binding.workspace_id).map_err(E::from)?;
-        accepted_history::initialize(tx, &held, bytes).map_err(E::from)?;
+        accepted_history::initialize(tx, &held, &base).map_err(E::from)?;
         follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if readback != (input.clone(), binding.clone(), held.coordinate.clone(), marker.head_update_seq) { return Err(E::from(ApplicationError::Corrupt)); }

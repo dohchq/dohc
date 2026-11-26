@@ -1497,8 +1497,10 @@ pub fn adopt_owner_committed(
         if local.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
+        let baseline = crate::IncomingBase::new(&cut.baseline_bytes);
         let (coverage,covered_sequence,seed,current_outbox,retired) = match &succession {
             None => {
+                baseline.doc()?;
                 let journal = Ydoc::wire();
                 journal.apply(&cut.baseline_bytes)?;
                 let reader = imported_source.as_ref().is_some_and(|source| source.reader_source);
@@ -1602,7 +1604,7 @@ pub fn adopt_owner_committed(
         }
         // A successor continues the lineage's accepted history as it is.
         if succession.is_none() {
-            accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
+            accepted_history::initialize(tx, &held, &baseline)?;
             for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         }
         follow_up(tx, &held.namespace, b, cut.events.len() as i64)?;

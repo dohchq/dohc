@@ -447,11 +447,7 @@ pub fn fresh_successor_base(
     }
     let format_two = identity.schema_version == 2;
     if format_two && !body_sequence_setting() {
-        return Err(CollabError::InvalidSuccessorBase {
-            constraint: "format-2 successor",
-            expected: format!("an engine started with {BODY_SEQUENCE_SETTING}=1"),
-            observed: "an engine that does not read format 2".to_owned(),
-        });
+        return Err(CollabError::NewerBodyFormat);
     }
     let in_format_two = format_two
         .then(|| successor_doc(identity, artifact, 2.0).ok())
@@ -675,50 +671,29 @@ impl Ydoc {
         .fits_a_live_note()
     }
 
-    pub(crate) fn check_format_two_roots(&self) -> Result<(), CollabError> {
-        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        match self.body_sequence_roots() {
-            Some((sequence, containers))
-                if !body_sequence::roots_hold_only_their_own_items(
-                    &body,
-                    &sequence,
-                    &containers,
-                ) =>
-            {
-                Err(CollabError::MalformedUpdate {
-                    reason: "an update writes outside a format-2 note's sequence and containers"
-                        .into(),
-                })
-            }
-            _ => Ok(()),
-        }
-    }
-
-    pub(crate) fn check_format_two_base(&self) -> Result<(), CollabError> {
-        if self.note_schema_version() != 2 {
-            return Ok(());
-        }
-        let refused = |expected: String, observed: &str| CollabError::InvalidSuccessorBase {
-            constraint: "format-2 successor base",
-            expected,
-            observed: observed.to_owned(),
-        };
-        if !self.reads_body_sequence {
-            return Err(refused(
-                format!("an engine started with {BODY_SEQUENCE_SETTING}=1"),
-                "an engine that does not read format 2",
-            ));
-        }
-        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
-        let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
-        if !body_sequence::roots_hold_only_their_own_items(&body, &sequence, &containers) {
-            return Err(refused(
-                "a body held only in the sequence and its containers".to_owned(),
-                "items under body, or items of the wrong kind",
-            ));
+    fn refuse_a_newer_format(&self) -> Result<(), CollabError> {
+        if !self.reads_body_sequence && self.note_schema_version() == 2 {
+            return Err(CollabError::NewerBodyFormat);
         }
         Ok(())
+    }
+
+    pub(crate) fn check_format_two_note(&self) -> Result<(), CollabError> {
+        self.refuse_a_newer_format()?;
+        self.check_format_two_roots()
+    }
+
+    pub(crate) fn check_format_two_roots(&self) -> Result<(), CollabError> {
+        let Some((sequence, containers)) = self.body_sequence_roots() else {
+            return Ok(());
+        };
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        if body_sequence::roots_hold_only_their_own_items(&body, &sequence, &containers) {
+            return Ok(());
+        }
+        Err(CollabError::MalformedUpdate {
+            reason: "an update writes outside a format-2 note's sequence and containers".into(),
+        })
     }
 
     pub(crate) fn reads_as_format_two(&self) -> bool {
@@ -1104,6 +1079,7 @@ impl Ydoc {
                 });
             }
         }
+        self.refuse_a_newer_format()?;
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);

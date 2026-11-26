@@ -1072,7 +1072,7 @@ pub fn initialize_adopted_history_for_test(
         activation_id: None,
         live: true,
     };
-    accepted_history::initialize(tx, &held, &baseline)
+    accepted_history::initialize(tx, &held, &crate::IncomingBase::new(&baseline))
 }
 
 /// The ranges a relay first sees in `update` after `prior`: the structs it

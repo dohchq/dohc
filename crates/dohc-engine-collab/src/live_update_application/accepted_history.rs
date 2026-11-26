@@ -203,14 +203,14 @@ pub(super) fn validate_baseline(
 pub(super) fn initialize(
     tx: &Transaction<'_>,
     held: &Registration,
-    baseline: &[u8],
+    base: &crate::IncomingBase<'_>,
 ) -> Result<(), ApplicationError> {
+    let baseline = base.bytes();
     if hex_sha256(baseline) != held.binding.lineage_claim_id {
         return Err(ApplicationError::Conflict);
     }
-    let doc = Ydoc::wire();
-    doc.apply(baseline)?;
-    validate_baseline(tx, held, &doc, baseline, doc.has_reader_source())?;
+    let doc = base.doc()?;
+    validate_baseline(tx, held, doc, baseline, doc.has_reader_source())?;
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         event_count: 0,

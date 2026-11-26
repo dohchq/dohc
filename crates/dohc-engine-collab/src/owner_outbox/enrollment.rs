@@ -237,6 +237,9 @@ pub fn enroll_in_tx(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    crate::IncomingBase::new(&input.checkpoint)
+        .doc()
+        .map_err(collab)?;
     let host = Ydoc::wire();
     host.apply(&input.checkpoint).map_err(collab)?;
     let original = Ydoc::wire();

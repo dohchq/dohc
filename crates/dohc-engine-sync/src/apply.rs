@@ -468,7 +468,10 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         }
         if let Admission::Refused(refusal) = &admission
             && envelope.op_kind == "ydoc.update"
-            && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
+            && matches!(
+                refusal.reason.message(),
+                crate::ydoc_apply::LIVE_UNADMITTED_UPDATE | crate::ydoc_apply::NEWER_BODY_FORMAT
+            )
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }

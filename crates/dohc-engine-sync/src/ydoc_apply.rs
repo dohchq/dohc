@@ -2544,13 +2544,13 @@ fn drain_deferred_ydoc(
                     waiting = Some(pending);
                     break;
                 }
-                Err(SyncError::InvalidInput {
-                    reason: BASE_FAILS_REPLAY_CHECK,
-                }) => {
-                    let reason = BASE_FAILS_REPLAY_CHECK;
-                    let refusal =
-                        refuse_deferred_ydoc(store, key, &origin_id, origin_seq, reason, faults)?;
-                    refusals.push(refusal);
+                Err(SyncError::InvalidInput { reason }) if base_refused_for_its_note(reason) => {
+                    for (origin_id, origin_seq, ..) in take_lineage_rows(row, &mut queue) {
+                        let refusal = refuse_deferred_ydoc(
+                            store, key, &origin_id, origin_seq, reason, faults,
+                        )?;
+                        refusals.push(refusal);
+                    }
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -3201,6 +3201,9 @@ fn refuse_deferred_ydoc(
     let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
     match store.write_with(faults, |tx| {
         crate::apply::persist_refusal(tx, &refusal)?;
+        if refusal.reason.message() == NEWER_BODY_FORMAT {
+            retain_refused_ydoc_blob(tx, &key.workspace_id, origin_id, origin_seq)?;
+        }
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \
              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
@@ -9744,6 +9747,12 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
 
 const BASE_FAILS_REPLAY_CHECK: &str = "ydoc.update base fails the replay check";
 
+pub(crate) const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
+
+fn base_refused_for_its_note(reason: &str) -> bool {
+    reason == BASE_FAILS_REPLAY_CHECK || reason == NEWER_BODY_FORMAT
+}
+
 fn map_base_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {
         CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
@@ -9771,6 +9780,9 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::ProjectionTooLarge { .. }
         | CollabError::ProjectionTooComplex { .. }
         | CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput { reason },
+        CollabError::NewerBodyFormat => SyncError::InvalidInput {
+            reason: NEWER_BODY_FORMAT,
+        },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
         CollabError::BaseRelaySequencePending => SyncError::RetryableState {
             reason: "Y.Doc base is waiting for its authenticated relay position",

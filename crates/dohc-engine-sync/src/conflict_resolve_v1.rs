@@ -3244,11 +3244,9 @@ fn archive_conflicting_successor(
         return Ok(());
     }
     let base = imported_successor(tx, transition, successor)?;
-    let doc = dohc_engine_collab::validate_replay_parity_with_scratch(
-        &dohc_engine_collab::Ydoc::wire(),
-        &base.update,
-    )
-    .map_err(map_successor_collab_error)?;
+    let doc = dohc_engine_collab::IncomingBase::new(&base.update)
+        .into_doc()
+        .map_err(map_successor_collab_error)?;
     if doc.has_pending_dependencies()
         || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
             != successor.state_vector_blob_sha256
@@ -4305,11 +4303,8 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::InvalidSuccessorBase {
-            constraint: "format-2 successor",
-            ..
-        } => SyncError::InvalidInput {
-            reason: "ydoc-note-uses-a-newer-body-format",
+        CollabError::NewerBodyFormat => SyncError::InvalidInput {
+            reason: crate::ydoc_apply::NEWER_BODY_FORMAT,
         },
         CollabError::MarkdownNotRepresentable
         | CollabError::MarkdownQuoteDepthExceeded
@@ -4325,7 +4320,8 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
 
 fn map_successor_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
     match error {
-        dohc_engine_collab::CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
+        dohc_engine_collab::CollabError::ReplayParityViolation { .. }
+        | dohc_engine_collab::CollabError::MalformedUpdate { .. } => SyncError::InvalidInput {
             reason: "ydoc-resolution-not-representable",
         },
         other => map_local_collab_error(other),
