@@ -36,10 +36,7 @@ export function createPhysicalWorkspaceRemoval<
       return false;
     await confirmed();
     await dependencies.retireBinding(binding, {
-      finalize: async () => {
-        await beforeRegistryRemoval();
-        if (!keepLocalData) await dependencies.removeSecrets?.(binding.workspaceId);
-      },
+      finalize: beforeRegistryRemoval,
       removeBinding: () => {
         const current = dependencies.findWorkspace(binding.workspaceId);
         if (!current || current.rootPath !== binding.registeredRootPath) {
@@ -49,10 +46,12 @@ export function createPhysicalWorkspaceRemoval<
       },
     });
     if (keepLocalData) return true;
-    try {
-      await dependencies.removeDrafts(binding.workspaceId);
-    } catch (error) {
-      dependencies.onError(binding.workspaceId, error);
+    for (const remove of [dependencies.removeDrafts, dependencies.removeSecrets]) {
+      try {
+        await remove?.(binding.workspaceId);
+      } catch (error) {
+        dependencies.onError(binding.workspaceId, error);
+      }
     }
     return true;
   };

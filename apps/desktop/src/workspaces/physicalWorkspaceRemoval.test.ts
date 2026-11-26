@@ -123,17 +123,21 @@ it("still rejects registry removal failures and does not report them as draft cl
   expect(h.notifyRenderer).not.toHaveBeenCalled();
 });
 
-it("deletes a forgotten workspace's saved secrets before its row goes, and a failed delete keeps it listed", async () => {
+it("deletes a forgotten workspace's saved secrets only once its row is gone, and reports a failed delete", async () => {
   const h = harness();
-  const error = new Error("vault is busy");
-  h.removeSecrets.mockRejectedValueOnce(error);
-  await expect(h.forget(h.workspace.workspaceId)).rejects.toBe(error);
-  expect(h.current()).toEqual(h.workspace);
-  expect(h.removeWorkspace).not.toHaveBeenCalled();
+  const refused = new Error("registry removal refused");
+  h.removeWorkspace.mockImplementationOnce(() => {
+    throw refused;
+  });
+  await expect(h.forget(h.workspace.workspaceId)).rejects.toBe(refused);
+  expect(h.removeSecrets).not.toHaveBeenCalled();
 
+  const busy = new Error("vault is busy");
+  h.removeSecrets.mockRejectedValueOnce(busy);
   await h.forget(h.workspace.workspaceId);
-  expect(h.removeSecrets).toHaveBeenLastCalledWith(h.workspace.workspaceId);
   expect(h.current()).toBeNull();
+  expect(h.removeSecrets).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId);
+  expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, busy);
 });
 
 it("takes a failed join's entry out of the list without asking, and keeps its typing and secrets", async () => {

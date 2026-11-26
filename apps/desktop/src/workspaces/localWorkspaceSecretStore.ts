@@ -306,7 +306,7 @@ export function createLocalWorkspaceSecretStore(options: {
       inOrder(() =>
         access(fileFor(workspaceId)).then(
           () => true,
-          () => false,
+          (error: NodeJS.ErrnoException) => error.code !== "ENOENT",
         ),
       ),
   };

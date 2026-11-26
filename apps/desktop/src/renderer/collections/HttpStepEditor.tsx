@@ -1,7 +1,8 @@
 import { Info, Plus, Trash2 } from "lucide-react";
-import type {
-  WorkspaceSecretSummary,
-  WorkspaceSecretUsage,
+import {
+  normalizeSecretAllowedHost,
+  type WorkspaceSecretSummary,
+  type WorkspaceSecretUsage,
 } from "@dohc/workspace-contracts/workspace-secrets";
 import type { SecretDraft } from "../settings/WorkspaceSecretsSettings";
 import { IconButton, SecondaryButton } from "../ui/controls";
@@ -34,7 +35,8 @@ function Problem({ shown }: { shown: Shown }) {
 
 function hostOf(url: string): string[] {
   try {
-    return [new URL(url).hostname];
+    const host = normalizeSecretAllowedHost(new URL(url).hostname);
+    return host ? [host] : [];
   } catch {
     return [];
   }
@@ -172,7 +174,7 @@ export function HttpStepEditor(props: {
             }}
             className={selectClass}
           >
-            <option value="literal">Link</option>
+            <option value="literal">Link in this step</option>
             <option value="secret">Secret webhook link</option>
           </select>
           {step.url.kind === "literal" ? (
@@ -191,7 +193,7 @@ export function HttpStepEditor(props: {
             />
           ) : (
             <select
-              aria-label={`Step ${number}, webhook URL secret`}
+              aria-label={`Step ${number}, secret webhook link`}
               data-focus={`step-${stepKey}-first`}
               value={step.url.secret}
               onChange={(event) =>
@@ -580,7 +582,8 @@ export function HttpStepEditor(props: {
       </label>
 
       <StatusLine tone="muted" icon={Info} label="Confirmation required">
-        Confirm this step with Allow before it sends. Runs only while this Collection is private.
+        Confirm this step with Allow before it sends. Runs only while nobody else can edit this
+        Collection.
       </StatusLine>
     </div>
   );

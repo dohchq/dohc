@@ -44,16 +44,13 @@ const secretUsageLabel = (usage: WorkspaceSecretUsage) =>
   usage === "http-header" ? "API key" : "Webhook link";
 
 function SecretUses(props: { uses: readonly WorkspaceSecretUse[] | undefined }) {
-  if (props.uses === undefined) return null;
-  if (props.uses.length === 0) {
-    return <p className="m-0 text-[13px] text-muted">No automations use this secret.</p>;
-  }
+  if (!props.uses?.length) return null;
   return (
     <div data-testid="workspace-secret-uses" className="flex flex-col gap-1 text-[13px]">
       <span className="text-muted">Used by</span>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
-        {props.uses.map((use) => (
-          <li key={`${use.collectionPath}\u0000${use.automationName}`} className="text-ink">
+        {props.uses.map((use, index) => (
+          <li key={index} className="text-ink">
             {use.automationName}
             <span className="text-muted">{` in ${use.collectionPath}`}</span>
           </li>
@@ -212,7 +209,11 @@ export function SecretEditorDialog(props: {
       >
         <div className="flex flex-col gap-1">
           <h2 id={titleId} className="m-0 text-base font-semibold text-ink">
-            {existing ? `Replace ${existing.name}` : "Add secret"}
+            {existing
+              ? `Replace ${existing.name}`
+              : draft
+                ? `Add ${draft.usage === "http-header" ? "API key" : "webhook link"}`
+                : "Add secret"}
           </h2>
           <p className="m-0 text-[13px] text-muted">
             {props.storage === "server"
@@ -269,23 +270,29 @@ export function SecretEditorDialog(props: {
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-muted">Use</span>
-            <SegmentedControl
-              label="Secret use"
-              testId="workspace-secret-usage"
-              value={usage}
-              disabled={saving || draft !== undefined}
-              options={[
-                { value: "http-header", label: secretUsageLabel("http-header") },
-                { value: "http-url", label: secretUsageLabel("http-url") },
-              ]}
-              onChange={(nextUsage) => {
-                setUsage(nextUsage);
-                setFieldErrors((current) => ({ ...current, hosts: undefined, value: undefined }));
-              }}
-            />
-          </div>
+          {draft ? null : (
+            <div className="flex flex-col gap-1">
+              <span className="text-[12px] font-medium text-muted">Use</span>
+              <SegmentedControl
+                label="Secret use"
+                testId="workspace-secret-usage"
+                value={usage}
+                disabled={saving}
+                options={[
+                  { value: "http-header", label: secretUsageLabel("http-header") },
+                  { value: "http-url", label: secretUsageLabel("http-url") },
+                ]}
+                onChange={(nextUsage) => {
+                  setUsage(nextUsage);
+                  setFieldErrors((current) => ({
+                    ...current,
+                    hosts: undefined,
+                    value: undefined,
+                  }));
+                }}
+              />
+            </div>
+          )}
 
           {usage === "http-header" ? (
             <div className="flex flex-col gap-1">
@@ -596,13 +603,13 @@ export function WorkspaceSecretsSettings(props: {
   const storageLabel =
     state.storage === "server" ? "Sealed on your sync server" : "Sealed on this computer";
   const atLimit = state.secrets.length >= state.limit;
-  const usesOf = (name: string) => (state.uses ? (state.uses[name] ?? []) : undefined);
+  const usesOf = (name: string) => (query.pending ? undefined : state.uses?.[name]);
 
   return (
     <div data-testid="workspace-secrets-panel" className="flex flex-col gap-6">
       <p className="m-0 text-[13px] text-muted">
-        Secrets keep API keys and private webhook links out of your automation files. Automations
-        send each one only where you allow, and nobody can read it back after you save it.
+        Secrets keep API keys and private webhook links out of your automation files. An API key
+        goes only to the websites you allow, and dohc doesn't show a secret again after you save it.
       </p>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[12px] text-muted">
@@ -654,7 +661,10 @@ export function WorkspaceSecretsSettings(props: {
               <SecondaryButton
                 size="compact"
                 data-testid={`workspace-secret-replace-${secret.name}`}
-                onClick={() => setEditorMode({ kind: "replace", secret })}
+                onClick={() => {
+                  reloadSecrets();
+                  setEditorMode({ kind: "replace", secret });
+                }}
               >
                 Replace
               </SecondaryButton>
@@ -662,7 +672,10 @@ export function WorkspaceSecretsSettings(props: {
                 aria-label={`Delete secret ${secret.name}`}
                 title={`Delete secret ${secret.name}`}
                 data-testid={`workspace-secret-delete-${secret.name}`}
-                onClick={() => setDeletingSecret(secret.name)}
+                onClick={() => {
+                  reloadSecrets();
+                  setDeletingSecret(secret.name);
+                }}
               >
                 <Trash2 size={14} aria-hidden />
               </IconButton>
@@ -683,7 +696,7 @@ export function WorkspaceSecretsSettings(props: {
               data-testid="workspace-secrets-clear-local"
               onClick={() => setConfirmingClear(true)}
             >
-              Delete copies on this computer
+              Delete old secrets on this computer
             </SecondaryButton>
           </SettingRow>
         </SettingsSection>

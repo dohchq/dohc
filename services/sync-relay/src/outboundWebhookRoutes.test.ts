@@ -528,6 +528,8 @@ describe("outbound webhook relay routes (Model E1)", () => {
       (await handler(request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/remove`, jsonBody({}))))
         .status,
     ).toBe(200);
+    expect((await dispatchAs("delivery-after-pending-edit-invite")).status).toBe(403);
+    expect(sent).toHaveLength(4);
 
     // Sharing Collection with Edit access immediately stops dispatch authoritatively.
     await createShare(handler, OWNER, WORKSPACE, {

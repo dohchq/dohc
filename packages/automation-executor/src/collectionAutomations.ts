@@ -146,6 +146,7 @@ import {
   SHARED_BUTTON_UNCHECKED,
   type DatasetOperationCeiling,
 } from "./buttonPresser";
+import type { WorkspaceSecretUse } from "@dohc/workspace-contracts/workspace-secrets";
 import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
@@ -2206,7 +2207,7 @@ export class CollectionAutomations {
    * The automations whose webhook steps name each workspace secret, including
    * ones that can't run now, or null until this executor has opened.
    */
-  secretUses(): Map<string, Array<{ collectionPath: string; automationName: string }>> | null {
+  secretUses(): Map<string, WorkspaceSecretUse[]> | null {
     if (this.state !== "open") return null;
     const uses = new Map<string, Array<{ collectionPath: string; automationName: string }>>();
     for (const [collectionPath, indexed] of this.files) {

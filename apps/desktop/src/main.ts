@@ -3273,8 +3273,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
       type: "warning",
       title: "Remove this workspace from the list?",
       message: `This workspace has ${[drafts && "typing waiting to recover", secrets && "secrets saved on this computer"].filter(Boolean).join(" and ")}.`,
-      detail:
-        "Removing it deletes them from this computer. The folder stays. This cannot be undone.",
+      detail: secrets
+        ? "Removing it deletes them from this computer. The folder stays. This cannot be undone."
+        : "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
       buttons: ["Remove from list", "Cancel"],
       defaultId: 1,
       cancelId: 1,

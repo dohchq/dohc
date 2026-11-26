@@ -2209,9 +2209,9 @@ export function AutomationBuilder(props: {
     if (message?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
     if (step.kind === "http") {
       if (step.url.kind === "literal" && step.url.url.trim() === "") {
-        problems.set(`step-${key}/http`, "Enter an HTTPS webhook URL.");
+        problems.set(`step-${key}/http`, "Enter an https:// link.");
       } else if (step.url.kind === "secret" && step.url.secret.trim() === "") {
-        problems.set(`step-${key}/http`, "Choose a webhook URL secret.");
+        problems.set(`step-${key}/http`, "Choose a secret webhook link.");
       }
       if (step.as !== null && !RESULT_NAME.test(step.as)) {
         problems.set(

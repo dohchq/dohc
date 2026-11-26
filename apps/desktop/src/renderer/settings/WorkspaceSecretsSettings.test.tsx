@@ -229,7 +229,9 @@ describe("WorkspaceSecretsSettings", () => {
 
     render(<WorkspaceSecretsSettings workspaceId="ws-1" />);
     await user.click(await screen.findByTestId("workspace-secret-replace-RESEND_API_KEY"));
-    expect(screen.getByTestId("workspace-secret-uses").textContent).toBe(
+    await waitFor(() => expect(bridgeMock.listWorkspaceSecrets).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("workspace-secret-uses")).toHaveProperty(
+      "textContent",
       "Used byEmail new signups in Signups",
     );
     await user.click(screen.getByTestId("workspace-secret-cancel"));
@@ -239,9 +241,8 @@ describe("WorkspaceSecretsSettings", () => {
     await user.click(screen.getByTestId("workspace-secret-cancel-delete"));
 
     await user.click(screen.getByTestId("workspace-secret-delete-UNUSED_KEY"));
-    expect(screen.getByTestId("workspace-secret-confirm-delete").textContent).toContain(
-      "No automations use this secret.",
-    );
+    expect(await screen.findByTestId("workspace-secret-confirm-delete")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-secret-uses")).toBeNull();
   });
 
   it("deletes secrets left on this computer from before the workspace synced", async () => {
