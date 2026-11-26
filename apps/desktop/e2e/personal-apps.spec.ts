@@ -309,7 +309,9 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     // --- Ana can share it only once the owner lets members share apps -------
     const share = dialog.getByRole("button", { name: "Share", exact: true });
     await share.click();
-    await expect(dialog.getByRole("alert")).toContainText("Members can't share apps in this workspace");
+    await expect(dialog.getByRole("alert")).toContainText(
+      "Members can't share apps in this workspace",
+    );
     const openWorkspaceApps = async (target: typeof page) => {
       await target.keyboard.press("ControlOrMeta+k");
       await target
