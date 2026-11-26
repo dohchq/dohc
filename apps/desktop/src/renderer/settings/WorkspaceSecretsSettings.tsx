@@ -603,7 +603,8 @@ export function WorkspaceSecretsSettings(props: {
   const storageLabel =
     state.storage === "server" ? "Sealed on your sync server" : "Sealed on this computer";
   const atLimit = state.secrets.length >= state.limit;
-  const usesOf = (name: string) => (query.pending ? undefined : state.uses?.[name]);
+  const usesOf = (name: string) =>
+    query.pending || query.error !== null ? undefined : query.value?.uses?.[name];
 
   return (
     <div data-testid="workspace-secrets-panel" className="flex flex-col gap-6">
@@ -662,7 +663,7 @@ export function WorkspaceSecretsSettings(props: {
                 size="compact"
                 data-testid={`workspace-secret-replace-${secret.name}`}
                 onClick={() => {
-                  reloadSecrets();
+                  void retryQuery();
                   setEditorMode({ kind: "replace", secret });
                 }}
               >
@@ -673,7 +674,7 @@ export function WorkspaceSecretsSettings(props: {
                 title={`Delete secret ${secret.name}`}
                 data-testid={`workspace-secret-delete-${secret.name}`}
                 onClick={() => {
-                  reloadSecrets();
+                  void retryQuery();
                   setDeletingSecret(secret.name);
                 }}
               >
