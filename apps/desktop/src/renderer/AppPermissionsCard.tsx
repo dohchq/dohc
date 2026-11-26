@@ -4,19 +4,24 @@ import {
   Eye,
   Globe,
   Info,
+  KeyRound,
   Link as LinkIcon,
   Lock,
+  Monitor,
   Pencil,
   Play,
   Plus,
+  Send,
   ShieldCheck,
   Table2,
   Trash2,
   TriangleAlert,
+  User,
   Users,
 } from "lucide-react";
 import type { AppDatasetCapability, DatasetRevision } from "@dohc/security-contract/dataset";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import type { AppExternalOperation } from "@dohc/security-contract/app-external";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { collectionsRefusalError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
@@ -310,14 +315,125 @@ function AccessRows({ access }: { access: Access }) {
   );
 }
 
+const kilobytes = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
+
+function ExternalRows({
+  operation,
+  approved,
+}: {
+  operation: AppExternalOperation;
+  approved: readonly AppExternalOperation[] | null;
+}) {
+  const before = approved?.find((value) => value.name === operation.name);
+  const mark =
+    approved === null
+      ? null
+      : !before
+        ? "New"
+        : JSON.stringify(before) !== JSON.stringify(operation)
+          ? "Changed"
+          : null;
+  const slots = (text: string) => text.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, "{$1}");
+  const query = Object.entries(operation.query)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  const details = [
+    ...Object.entries(operation.params).map(
+      ([name, param]) =>
+        `{${name}}: ${
+          param.type === "integer"
+            ? `whole number ${param.min}–${param.max}`
+            : param.type === "enum"
+              ? `one of ${param.values.map((value) => JSON.stringify(value)).join(", ")}`
+              : param.type === "boolean"
+                ? "true or false"
+                : `text up to ${param.maxLength} characters`
+        }`,
+    ),
+    ...[
+      ...Object.entries(operation.headers).map(([key, value]) => `${key}: ${value}`),
+      ...(operation.body === null ? [] : [JSON.stringify(operation.body, null, 2)]),
+    ].map(slots),
+  ];
+  return (
+    <div
+      data-testid="app-access-external"
+      data-operation={operation.name}
+      className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3"
+    >
+      <Globe size={14} aria-hidden className="text-muted" />
+      <span className="truncate text-[13px] font-medium text-ink">
+        {operation.host}
+        <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+          {operation.name}
+        </span>
+        {mark ? (
+          <span className="ml-1.5 inline-block">
+            <Pill tone="warning">{mark}</Pill>
+          </span>
+        ) : null}
+      </span>
+      <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
+        <dt className="flex items-center gap-2 self-start text-muted">
+          <Send size={12} aria-hidden />
+          Sends
+        </dt>
+        <dd className="m-0 min-w-0 break-all font-mono text-[12px] text-ink">
+          {operation.method} {slots(operation.path)}
+          {query ? `?${slots(query)}` : ""}
+          {details.length ? (
+            <pre className="m-0 mt-1 whitespace-pre-wrap text-[11px] text-muted">
+              {details.join("\n")}
+            </pre>
+          ) : null}
+        </dd>
+        <dt className="flex items-center gap-2 self-start text-muted">
+          <KeyRound size={12} aria-hidden />
+          Secret
+        </dt>
+        <dd className="m-0 min-w-0 break-all font-mono text-[12px] text-ink">
+          {operation.secret.name}
+        </dd>
+        <dt className="flex items-center gap-2 self-start text-muted">
+          <Eye size={12} aria-hidden />
+          Returns
+        </dt>
+        <dd className="m-0 min-w-0 text-ink">
+          The service's JSON answer, up to {kilobytes(operation.response.maxBytes)}
+        </dd>
+        <dt className="flex items-center gap-2 self-start text-muted">
+          <User size={12} aria-hidden />
+          Who
+        </dt>
+        <dd className="m-0 min-w-0 text-ink">Only you</dd>
+        <dt className="flex items-center gap-2 self-start text-muted">
+          <Monitor size={12} aria-hidden />
+          Runs on
+        </dt>
+        <dd className="m-0 min-w-0 text-ink">This computer</dd>
+      </dl>
+      {operation.method === "POST" ? (
+        <p className="col-start-2 m-0 mt-1 flex items-start gap-2 text-[12px] text-warning">
+          <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+          <span className="min-w-0">It can change your data on {operation.host}.</span>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function AppAccessSummary({
   capabilities,
   approved,
+  external = null,
+  approvedExternal = null,
   failed,
   onRetry,
 }: {
   capabilities: readonly AppCapability[] | null;
   approved: readonly AppCapability[] | null;
+  external?: readonly AppExternalOperation[] | null;
+  approvedExternal?: readonly AppExternalOperation[] | null;
   failed: boolean;
   onRetry(): void;
 }) {
@@ -342,6 +458,13 @@ export function AppAccessSummary({
                   <span className="text-[13px] text-muted">No workspace data</span>
                 </div>
               )}
+              {external?.map((operation) => (
+                <ExternalRows
+                  key={operation.name}
+                  operation={operation}
+                  approved={approved === null ? null : (approvedExternal ?? [])}
+                />
+              ))}
             </div>
             <p
               data-testid="app-access-boundary"
@@ -352,7 +475,11 @@ export function AppAccessSummary({
             </p>
             <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
               <Globe size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              <span className="min-w-0">It can send what it receives to other websites.</span>
+              <span className="min-w-0">
+                {external?.length
+                  ? "It can send what it receives, including what these services return, to other websites."
+                  : "It can send what it receives to other websites."}
+              </span>
             </p>
           </>
         ) : failed ? (

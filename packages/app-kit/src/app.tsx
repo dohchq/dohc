@@ -22,6 +22,12 @@ export interface InvokeReply<T = unknown> {
   readonly replayed: boolean;
 }
 
+/** An outside service's answer to a call the app declared in app.publish.json. */
+export interface ExternalReply<T = unknown> {
+  readonly status: number;
+  readonly data: T;
+}
+
 export interface UploadedFileMeta {
   readonly fileId: string;
   readonly name: string;
@@ -124,6 +130,7 @@ export interface AppClient {
   upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply>;
   file(fileId: string, operation: string, input?: unknown): Promise<FileReply>;
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
+  external<T = unknown>(operation: string, input?: unknown): Promise<ExternalReply<T>>;
   copyText?(text: string): Promise<void>;
   print?(options?: PrintOptions): Promise<void>;
   notice?(notice: AppNotice): Promise<boolean>;
@@ -652,6 +659,16 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
           invokeTimeoutMs,
           isAttemptResult,
         ) as Promise<AttemptResult>;
+      },
+      external<T = unknown>(operation: string, input: unknown = {}): Promise<ExternalReply<T>> {
+        return send(
+          { op: "backend.external", operation, input },
+          invokeTimeoutMs,
+          (value) =>
+            isRecord(value) &&
+            Object.keys(value).sort().join() === "data,status" &&
+            typeof value.status === "number",
+        ) as Promise<ExternalReply<T>>;
       },
       async copyText(text: string): Promise<void> {
         if (typeof text !== "string") throw new AppBackendError(400);

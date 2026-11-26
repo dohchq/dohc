@@ -67,6 +67,8 @@ export function parseMemberAppUpload(bytes: Uint8Array, limits: AppPublicationLi
   } catch {
     throw badRequest("Invalid Member app candidate.");
   }
+  if (candidate.external)
+    throw badRequest("Apps that call outside services run only on the owner's computer for now.");
   const sizes = new Map<string, number>();
   for (const file of [...candidate.files, ...candidate.inputs]) {
     if (

@@ -1,5 +1,7 @@
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import type { LocalAppExternal } from "./localAppExternal";
 import type { LocalAppLaunchBackend } from "./localAppLaunch";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { createLocalCollectionApps } from "./localCollectionApps";
@@ -15,6 +17,7 @@ export function createLocalApps(
   unconnected: ReturnType<typeof createLocalUnconnectedApps>,
   onPublicationChanged?: () => void,
   localBudget?: () => boolean,
+  external?: LocalAppExternal,
 ) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
@@ -49,6 +52,20 @@ export function createLocalApps(
         ? dataset.request(publicationId, action, input, signal, activated)
         : collection.request(publicationId, action, input, signal, activated);
     },
+    external: async (publicationId, input, signal) => {
+      kind(publicationId, input.authorityRevision);
+      const operation = store
+        .row(publicationId, input.authorityRevision)
+        .candidate.external?.find((value) => value.name === input.operation);
+      if (!operation || operation.access !== "owner" || !external)
+        throw new AppBackendRuntimeError({
+          code: "external_not_approved",
+          message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,
+        });
+      return external.call(operation, input.input, signal, () =>
+        kind(publicationId, input.authorityRevision),
+      );
+    },
     readBrowserFile: async (publicationId, input, signal) => {
       if (kind(publicationId) !== "dataset")
         throw new Error("This app cannot read Collection files.");
@@ -70,6 +87,12 @@ export function createLocalApps(
     ...backend,
     async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent?: ApprovalAgent | null) {
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
+      const blocked = candidate.external
+        ? external
+          ? external.unavailable()
+          : "Apps can call outside services only in your own workspaces."
+        : null;
+      if (blocked) throw new Error(blocked);
       // Replacing a Collection app first settles the responses it admitted.
       await collection.settleRoot(candidate.appRoot);
       const declared = candidate.capabilities[0];
@@ -91,15 +114,14 @@ export function createLocalApps(
       return value?.kind === "dataset" ? value : null;
     },
     list: (appRoot: string) =>
-      store
-        .list(appRoot)
-        .map((value) =>
-          value.kind === "dataset"
-            ? dataset.describe(value)
-            : value.kind === "collection"
-              ? collection.describe(value)
-              : unconnected.describe(value),
-        ),
+      store.list(appRoot).map((value) => ({
+        ...(value.kind === "dataset"
+          ? dataset.describe(value)
+          : value.kind === "collection"
+            ? collection.describe(value)
+            : unconnected.describe(value)),
+        ...(value.candidate.external ? { external: value.candidate.external } : {}),
+      })),
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, displace);

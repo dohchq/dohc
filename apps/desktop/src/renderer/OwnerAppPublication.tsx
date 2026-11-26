@@ -1131,6 +1131,11 @@ function PublicationDialog(
       : !needsCandidate && approval
         ? approvedCapabilities(approval)
         : (localCandidate?.capabilities ?? null);
+  const boxExternal = staged
+    ? null
+    : !needsCandidate && approval
+      ? (approval.external ?? null)
+      : (localCandidate?.external ?? null);
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
@@ -1349,6 +1354,8 @@ function PublicationDialog(
               <AppAccessSummary
                 capabilities={boxCapabilities}
                 approved={changed && approval ? approvedCapabilities(approval) : null}
+                external={boxExternal}
+                approvedExternal={changed && approval ? (approval.external ?? null) : null}
                 failed={localReview.status === "failed" || candidateState === "failed"}
                 onRetry={() =>
                   localReview.status === "failed"

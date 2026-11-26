@@ -5,6 +5,7 @@ export type AppBrokerOp =
   | "backend.attempt"
   | "backend.upload"
   | "backend.file"
+  | "backend.external"
   | "host.copy"
   | "host.print"
   | "host.notice"
@@ -126,6 +127,7 @@ export function attachAppCollectionBroker(
     v === "backend.attempt" ||
     v === "backend.upload" ||
     v === "backend.file" ||
+    v === "backend.external" ||
     v === "host.copy" ||
     v === "host.print" ||
     v === "host.notice"
@@ -472,7 +474,9 @@ export function attachAppCollectionBroker(
                       "fileId,id,input,op,operation",
                       "dataset,fileId,id,input,op,operation",
                     ].includes(keys)
-                  : false);
+                  : body.op === "backend.external"
+                    ? keys === "id,input,op,operation"
+                    : false);
     if (!valid) return rejectLocal("invalid_keys", 400);
     const now = Date.now();
     backendTokens = Math.min(backendBurst, backendTokens + (now - updated) / backendRefillMs);
