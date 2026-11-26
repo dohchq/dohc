@@ -109,6 +109,7 @@ describe("the phone's app operations", () => {
         {
           datasetId: "registrations-id",
           name: "Registrations",
+          alias: null,
           access: null,
           operations: [
             { name: "registrations.list", readOnly: true, fields: ["Name"] },
@@ -120,15 +121,24 @@ describe("the phone's app operations", () => {
       scopeDigest: null,
       revocable: false,
     });
-    // An app over several Collections lists each, as its own row.
-    const second = { ...review.capabilities[0]!, datasetId: "tasks-id", name: "Tasks" };
+    // An app over several Collections lists each by its ID, with the name it binds it under.
+    const bound = (datasetId: string, alias: string) => ({
+      ...review.capabilities[0]!,
+      datasetId,
+      alias,
+    });
     server.on("POST", "/sync/ws-1/ops/appReview", {
       status: 200,
-      body: { ok: true, result: { ...review, capabilities: [...review.capabilities, second] } },
+      body: {
+        ok: true,
+        result: { ...review, capabilities: [bound("a-id", "signups"), bound("b-id", "waitlist")] },
+      },
     });
-    expect((await ops.review(A)).reach.map((collection) => collection.datasetId)).toEqual([
-      "registrations-id",
-      "tasks-id",
+    expect(
+      (await ops.review(A)).reach.map(({ datasetId, name, alias }) => [datasetId, name, alias]),
+    ).toEqual([
+      ["a-id", "Registrations", "signups"],
+      ["b-id", "Registrations", "waitlist"],
     ]);
     // An app that requests nothing in the workspace reaches nothing there.
     server.on("POST", "/sync/ws-1/ops/appReview", {

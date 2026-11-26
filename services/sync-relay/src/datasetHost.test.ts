@@ -2143,6 +2143,14 @@ it("refuses a phone launch of a Member app once it is withdrawn, taken down, or 
   expect((await run("memberApps", {})).memberApps).toMatchObject([
     { approved: false, consent: "none" },
   ]);
+  // Allowed again in the browser, it still waits for the phone's own approval.
+  f.allow(owner, app);
+  expect((await run("memberApps", {})).memberApps).toMatchObject([
+    { approved: false, consent: "current" },
+  ]);
+  await expect(
+    run("appLaunch", { publicationId: app, authorityRevision: 1 }),
+  ).rejects.toMatchObject(changed);
   await expect(f.invoke(reopened, id(6), {}, app, "republished")).rejects.toThrow();
 
   await allow(app);

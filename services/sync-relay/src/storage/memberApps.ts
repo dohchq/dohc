@@ -175,6 +175,9 @@ export function recordMemberAppConsent(
 
 function retire(storage: StorageContext, publicationId: string): void {
   storage.db
+    .prepare("DELETE FROM sync_relay_phone_app_approvals WHERE publication_id=?")
+    .run(publicationId);
+  storage.db
     .prepare(
       "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=? AND active=1",
     )

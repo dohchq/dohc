@@ -97,8 +97,7 @@ export function phoneAppApproval(
 /**
  * Approves a publication at one revision, inside the caller's transaction. A
  * retry at the same revision returns the same approval; approving a new
- * revision, or a publication made again since, replaces the old one and ends
- * its launches.
+ * revision replaces the old one and ends its launches.
  */
 export function approvePhoneApp(
   storage: SyncRelayStorage,
@@ -107,17 +106,12 @@ export function approvePhoneApp(
     workspaceId: string;
     publicationId: string;
     authorityRevision: number;
-    createdAtMs: number;
     newApprovalId: string;
     nowMs: number;
   },
 ): { approvalId: string; authorityRevision: number; approvedAtMs: number } {
   const current = phoneAppApproval(storage, input);
-  if (
-    current?.authorityRevision === input.authorityRevision &&
-    current.approvedAtMs >= input.createdAtMs
-  )
-    return current;
+  if (current?.authorityRevision === input.authorityRevision) return current;
   db(storage)
     .prepare(
       `DELETE FROM ${PHONE_APP_APPROVALS} WHERE user_id = ? AND workspace_id = ? AND publication_id = ?`,
@@ -238,8 +232,8 @@ export function redeemPhoneAppGrant(
 /**
  * An unexpired launch whose approval still stands at the launch's revision,
  * for the account's publication or a Member app in its workspace, while it is
- * active at that revision and was made before the approval. One statement and
- * no transaction of its own, so it runs inside a commit.
+ * active at that revision. One statement and no transaction of its own, so it
+ * runs inside a commit.
  */
 export function phoneAppLaunch(
   storage: SyncRelayStorage,
@@ -251,7 +245,7 @@ export function phoneAppLaunch(
       `SELECT l.* FROM ${PHONE_APP_LAUNCHES} l JOIN ${PHONE_APP_APPROVALS} a USING (approval_id)
        JOIN sync_relay_app_publications p ON p.publication_id = l.publication_id
        WHERE l.token_hash = ? AND l.launch_host IS NOT NULL AND l.expires_at_ms > ?
-         AND a.authority_revision = l.authority_revision AND a.approved_at_ms >= p.created_at_ms
+         AND a.authority_revision = l.authority_revision
          AND p.workspace_id = l.workspace_id
          AND p.active = 1 AND p.authority_revision = l.authority_revision
          AND (p.owner_user_id = l.user_id OR EXISTS (SELECT 1 FROM sync_relay_member_apps m

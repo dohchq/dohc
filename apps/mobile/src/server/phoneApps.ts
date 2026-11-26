@@ -46,6 +46,7 @@ export interface AppReview extends PhoneApp {
   readonly reach: readonly {
     readonly datasetId: string;
     readonly name: string;
+    readonly alias: string | null;
     readonly access: "view" | "comment" | "edit" | null;
     readonly operations: readonly AppOperation[];
   }[];
@@ -163,7 +164,13 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
       text(item.name, 256) &&
       operations &&
       access !== undefined
-      ? { datasetId: item.datasetId, name: item.name, access, operations }
+      ? {
+          datasetId: item.datasetId,
+          name: item.name,
+          alias: text(item.alias, 64) ? item.alias : null,
+          access,
+          operations,
+        }
       : null;
   });
   const sources = each(result.sources, (item) =>

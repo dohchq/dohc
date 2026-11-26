@@ -217,7 +217,12 @@ function Review({
       ) : null}
       {review.reach.map((collection) => (
         <View key={collection.datasetId} style={styles.group}>
-          <Text style={[styles.body, styles.strong, { color: theme.ink }]}>{collection.name}</Text>
+          <Text style={[styles.body, styles.strong, { color: theme.ink }]}>
+            {collection.name}
+            {collection.alias ? (
+              <Text style={[styles.alias, { color: theme.muted }]}> {collection.alias}</Text>
+            ) : null}
+          </Text>
           {collection.access ? (
             <Text style={[styles.note, { color: theme.muted }]}>
               {appWords.access(sharingWords.level[collection.access])}
@@ -318,6 +323,7 @@ const styles = StyleSheet.create({
   file: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 44 },
   path: { flex: 1, fontSize: 17 },
   code: { borderRadius: 8, padding: 12 },
+  alias: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 13 },
   mono: {
     fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
     fontSize: 13,

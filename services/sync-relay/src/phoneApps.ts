@@ -159,14 +159,12 @@ export function createPhoneApps(options: {
     const published = served(userId, workspaceId, id, reviewing);
     if (!published?.member || published.local || hiddenFile(published.candidate.appRoot))
       throw notFound();
-    const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
-    const { createdAtMs } = row;
-    const approved =
-      approval !== null &&
-      approval.authorityRevision === published.authorityRevision &&
-      approval.approvedAtMs >= createdAtMs;
-    return { ...published, member: published.member, createdAtMs, approved };
+    return { ...published, member: published.member, createdAtMs: row.createdAtMs };
   }
+  const allowed = (
+    approval: ReturnType<typeof phoneAppApproval>,
+    app: ReturnType<typeof memberApp>,
+  ) => approval?.authorityRevision === app.authorityRevision && app.member.consent === "current";
   const isMemberApp = (workspaceId: string, id: string) =>
     memberAppRow(context, id)?.workspaceId === workspaceId;
 
@@ -278,7 +276,14 @@ export function createPhoneApps(options: {
                 authorityRevision: app.authorityRevision,
                 appRoot: app.candidate.appRoot,
                 sourceRevision: app.candidate.sourceRevision,
-                approved: app.approved && app.member.consent === "current",
+                approved: allowed(
+                  phoneAppApproval(storage, {
+                    userId,
+                    workspaceId,
+                    publicationId: row.publicationId,
+                  }),
+                  app,
+                ),
                 name: row.slug,
                 author: { name: names.get(row.publisherUserId) ?? null },
                 consent: app.member.consent,
@@ -356,7 +361,7 @@ export function createPhoneApps(options: {
       const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
       const approved =
         "member" in row
-          ? row.approved && row.member.consent === "current"
+          ? allowed(approval, row)
           : approval?.authorityRevision === row.authorityRevision;
       if (operation === "appReview") {
         const { candidate } = row;
@@ -374,7 +379,7 @@ export function createPhoneApps(options: {
           sources: candidate.inputs
             .filter((file) => !hiddenFile(file.path))
             .map(({ path, byteLength }) => ({ path, byteLength })),
-          revocable: approval !== null || ("member" in row && row.member.consent !== "none"),
+          revocable: "member" in row ? approved || row.member.consent !== "none" : approved,
           approval:
             approval && approved
               ? { approvalId: approval.approvalId, approvedAtMs: approval.approvedAtMs }
@@ -450,7 +455,6 @@ export function createPhoneApps(options: {
             workspaceId,
             publicationId: id,
             authorityRevision,
-            createdAtMs: row.createdAtMs,
             newApprovalId: randomBytes(16).toString("hex"),
             nowMs: options.nowMs(),
           });

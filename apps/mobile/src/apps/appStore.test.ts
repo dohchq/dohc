@@ -91,6 +91,14 @@ describe("a launch", () => {
     }
   });
 
+  it("never touches the running app for a review already left, as a late Allow and open is", async () => {
+    const { apps, runner } = await running();
+    const left = new AbortController();
+    left.abort();
+    expect(await apps.open({ ...version(B, true), name: "other" }, left.signal)).toBe(false);
+    expect(runner.state()).toMatchObject({ publicationId: A });
+  });
+
   it("ends a launch that arrived as the review was left", async () => {
     const { server, runner, apps } = setup();
     answerLaunch(server);

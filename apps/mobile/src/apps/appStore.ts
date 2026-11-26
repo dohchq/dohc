@@ -230,7 +230,7 @@ export function createWorkspaceApps(options: {
       if (isLive()) await refresh();
     },
     async open(app, leaving) {
-      if (!options.canOpen) return false;
+      if (!options.canOpen || leaving.aborted || !isLive()) return false;
       const both = new AbortController();
       const abort = () => both.abort();
       for (const source of [signal, leaving]) {
