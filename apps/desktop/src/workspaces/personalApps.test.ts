@@ -17,6 +17,16 @@ import { createPersonalAppPublication, createPersonalApps, personalAppEdits } fr
 import type { CloudCredentials } from "./cloudCredentialStore";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const reads = vi.hoisted(() => [] as string[]);
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  const readFile = ((path: string, ...rest: never[]) => {
+    reads.push(String(path));
+    return actual.readFile(path, ...rest);
+  }) as typeof actual.readFile;
+  return { ...actual, readFile, default: { ...actual, readFile } };
+});
+
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -303,8 +313,12 @@ it("lets a member compile, approve, and launch a Personal app that runs a grante
   expect(m.openFolder).toHaveBeenCalledExactlyOnceWith(folder);
   await writeFile(join(folder, "trip", "clip.mp4"), "");
   await truncate(join(folder, "trip", "clip.mp4"), 129 * 1024 * 1024);
+  await writeFile(join(folder, "trip", "notes.bin"), new Uint8Array(1024 * 1024));
+  reads.length = 0;
   const { prepared, publicationId } = await m.approve("trip");
   expect(prepared.sourcePaths).toEqual(["trip/app.publish.json", "trip/main.ts"]);
+  expect(reads.some((path) => path.endsWith("main.ts"))).toBe(true);
+  expect(reads.filter((path) => /clip\.mp4|notes\.bin/.test(path))).toEqual([]);
   expect(prepared.capabilities).toEqual([
     expect.objectContaining({
       datasetId: id(1),

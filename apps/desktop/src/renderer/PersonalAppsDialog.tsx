@@ -42,6 +42,7 @@ export function PersonalAppsDialog(props: {
   const titleId = useId(),
     errorId = useId();
   reviewing.current = review;
+  const changed = () => setReload((value) => value + 1);
 
   const cancel = (prepared: Prepared | null) => {
     if (prepared)
@@ -75,16 +76,14 @@ export function PersonalAppsDialog(props: {
     })().catch((cause: unknown) => {
       if (!current) return;
       setLoadFailed(true);
-      props.reportError("dohc could not read your Personal apps.", cause, () =>
-        setReload((value) => value + 1),
-      );
+      props.reportError("dohc could not read your Personal apps.", cause, changed);
     });
     return () => {
       current = false;
     };
   }, [api, workspaceId, reload]);
 
-  const run = async (key: string, fallback: string, work: () => Promise<void>) => {
+  const run = async (key: string, fallback: string, work: () => Promise<unknown>) => {
     setBusy(key);
     setError(null);
     try {
@@ -96,7 +95,6 @@ export function PersonalAppsDialog(props: {
       if (alive.current) setBusy(null);
     }
   };
-  const changed = () => setReload((value) => value + 1);
   const close = () => {
     cancel(review);
     setReview(null);
@@ -150,13 +148,9 @@ export function PersonalAppsDialog(props: {
                 title="Open folder"
                 disabled={busy === "folder"}
                 onClick={() =>
-                  void run("folder", "dohc could not open your Personal app folder.", async () => {
-                    await api.publishOwnerApp({
-                      action: "personalFolder",
-                      workspaceId,
-                      open: true,
-                    });
-                  })
+                  void run("folder", "dohc could not open your Personal app folder.", () =>
+                    api.publishOwnerApp({ action: "personalFolder", workspaceId, open: true }),
+                  )
                 }
               >
                 <FolderOpen size={14} aria-hidden />
@@ -201,17 +195,13 @@ export function PersonalAppsDialog(props: {
                           size="compact"
                           disabled={busy !== null}
                           onClick={() =>
-                            void run(
-                              row.appRoot,
-                              `dohc could not open ${row.appRoot}.`,
-                              async () => {
-                                await openLocalApp(
-                                  api,
-                                  workspaceId,
-                                  row.approved!.publicationId,
-                                  () => alive.current,
-                                );
-                              },
+                            void run(row.appRoot, `dohc could not open ${row.appRoot}.`, () =>
+                              openLocalApp(
+                                api,
+                                workspaceId,
+                                row.approved!.publicationId,
+                                () => alive.current,
+                              ),
                             )
                           }
                         >

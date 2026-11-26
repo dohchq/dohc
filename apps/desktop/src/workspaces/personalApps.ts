@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
@@ -55,7 +56,7 @@ export async function openPersonalAppFolder(folder: string) {
   return { kind: "personalFolder" as const, path: folder, apps };
 }
 
-async function readInside(folder: string, path: string) {
+async function resolveInside(folder: string, path: string) {
   if (!isShareablePath(path)) throw new Error(`${path} is not a file in your Personal app folder.`);
   const real = await realpath(join(folder, ...path.split("/"))).catch(() => null);
   const stats = real === null ? null : await lstat(real);
@@ -64,7 +65,7 @@ async function readInside(folder: string, path: string) {
   if (!real.startsWith((await realpath(folder)) + sep))
     throw new Error(`${path} is outside your Personal app folder.`);
   if (stats.size > MAX_BYTES) throw new Error(`${path} is larger than 128 MB.`);
-  return new Uint8Array(await readFile(real));
+  return { real, size: stats.size };
 }
 
 async function walk(folder: string, under: string | undefined) {
@@ -97,32 +98,39 @@ export function personalAppSource(
 ): SourceAdapter {
   const read = new Map<string, Promise<Uint8Array>>();
   const bytesOf = (path: string) => {
-    let bytes = read.get(path);
-    if (!bytes) read.set(path, (bytes = readInside(folder, path)));
+    const bytes = read.get(path) ?? resolveInside(folder, path).then(({ real }) => readFile(real));
+    read.set(path, bytes);
     return bytes;
   };
-  const entry = async (path: string) => {
-    const bytes = await bytesOf(path);
-    return {
+  const metadata = (path: string, sha256: string, byteLength: number) =>
+    ({
       path,
       objectId: path,
-      contentKind: "text" as const,
-      sha256: sha256(bytes),
-      byteLength: bytes.byteLength,
+      contentKind: "text",
+      sha256,
+      byteLength,
       latestMomentId: "personal",
-    };
+    }) as const;
+  const entry = async (path: string) => {
+    const bytes = await bytesOf(path);
+    return metadata(path, sha256(bytes), bytes.byteLength);
   };
   return {
     workspace,
     async listTextFileMetadata({ under }) {
       return Promise.all(
-        (await walk(folder, under)).map(async (path) => ({
-          ...(await entry(path)),
-          binarySha256: null,
-          updatedAtMs: 0,
-          metadataOrigin: "personal",
-          hasYdocMarker: false,
-        })),
+        (await walk(folder, under)).map(async (path) => {
+          const { real, size } = await resolveInside(folder, path);
+          const hash = createHash("sha256");
+          for await (const chunk of createReadStream(real)) hash.update(chunk as Buffer);
+          return {
+            ...metadata(path, hash.digest("hex"), size),
+            binarySha256: null,
+            updatedAtMs: 0,
+            metadataOrigin: "personal",
+            hasYdocMarker: false,
+          };
+        }),
       );
     },
     async captureSourceMetadata({ paths, bounds }) {
