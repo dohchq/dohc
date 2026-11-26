@@ -655,7 +655,7 @@ The first key seals new secrets. Every listed key, and `DOHC_RELAY_LINK_KEY`, op
    [sync-relay] workspace secrets on key secrets-2026-12: 12 resealed, 0 already current, 0 unreadable, 0 changed while resealing
    ```
 
-4. When the line shows 0 changed while resealing, every secret is on the new key. Remove the old key from the list.
+4. When the line shows 0 unreadable and 0 changed while resealing, every secret is on the new key. Remove the old key from the list. If some are unreadable, check that the older keys are listed exactly as before and restart.
 
 Keep the old key until then. A secret whose key you remove stops working until its owner adds it again in Settings.
 
