@@ -1112,6 +1112,28 @@ fn an_archived_edit_its_drain_refuses_stays_kept_with_that_reason() {
     assert!(kept_reasons(&engine).contains(&refused));
 }
 
+#[test]
+fn an_archived_edit_its_drain_refuses_stays_kept_after_a_crash_at_each_commit() {
+    use std::sync::atomic::Ordering;
+    let point = dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck;
+    let refused = ("late-peer".to_owned(), 0, Some(STRAY_ROOTS.to_owned()));
+    let (_scratch, _path, mut engine) = archived_with_kept_edits(true);
+    let commits = crash_at(point, usize::MAX);
+    replay_with(&mut engine, &commits).expect("the replay goes on");
+    for nth in 0..commits.seen.load(Ordering::SeqCst) {
+        let (_scratch, _path, mut engine) = archived_with_kept_edits(true);
+        let crash = crash_at(point, nth);
+        let _ = replay_with(&mut engine, &crash);
+        assert!(crash.seen.load(Ordering::SeqCst) > nth, "#{nth}");
+        replay(&mut engine);
+        assert!(
+            kept_reasons(&engine).contains(&refused),
+            "#{nth}: {:?}",
+            kept_reasons(&engine)
+        );
+    }
+}
+
 fn oversized_note() -> Note {
     reading_body_sequence_here(|| {
         let newer = dohc_engine_collab::ydoc::format_two_note_for_test(
