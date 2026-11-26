@@ -604,7 +604,9 @@ export function WorkspaceSecretsSettings(props: {
     state.storage === "server" ? "Sealed on your sync server" : "Sealed on this computer";
   const atLimit = state.secrets.length >= state.limit;
   const usesOf = (name: string) =>
-    query.pending || query.error !== null ? undefined : query.value?.uses?.[name];
+    query.pending || query.error !== null || query.value?.kind !== "ready"
+      ? undefined
+      : query.value.uses?.[name];
 
   return (
     <div data-testid="workspace-secrets-panel" className="flex flex-col gap-6">
