@@ -351,6 +351,7 @@ export function MembersSettings(props: {
         onOpenSync={props.onOpenSync}
       >
         <MembersLoadView
+          workspaceId={workspaceId}
           load={shown}
           running={running}
           workspaceName={props.workspaceName}
@@ -443,6 +444,7 @@ function GateState(props: {
 }
 
 export function MembersLoadView(props: {
+  workspaceId: string;
   load: Load;
   running: MembersRequest | null;
   workspaceName: string;
@@ -504,6 +506,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
     case "ready":
       return (
         <MembersPage
+          workspaceId={props.workspaceId}
           view={load.view}
           running={props.running}
           ended={props.ended}
@@ -588,6 +591,7 @@ type Confirm =
 
 /** The page for a view the relay answered. The states page and tests draw it too. */
 export function MembersPage(props: {
+  workspaceId: string;
   view: WorkspaceMembersView;
   // The change running now. Every control waits for it.
   running: MembersRequest | null;
@@ -800,6 +804,7 @@ export function MembersPage(props: {
 
       {view.folderRules !== null ? (
         <FolderAccessSettings
+          workspaceId={props.workspaceId}
           view={view}
           rules={view.folderRules}
           busy={waiting}

@@ -1,17 +1,38 @@
-import { Folder, FolderX, LockKeyhole, Plus, Trash2, X } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { AtSign, Folder, FolderX, LockKeyhole, Plus, Trash2, X } from "lucide-react";
+import { useId, useMemo, useRef, useState, type FormEvent } from "react";
 import type { MembersRequest } from "@dohc/cli/members";
 import {
   FOLDER_RULE_CHANGED,
   type MemberLevel,
   type WorkspaceFolderRule,
   type WorkspaceMembersView,
+  type WorkspacePerson,
 } from "@dohc/security-contract/workspace-members";
 import { normalizeRuleEmail, prepareFolderRulePath } from "@dohc/security-contract/access-rules";
+import { isSharedWithMePath } from "@dohc/workspace-core";
+import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
-import { ConfirmActions, ConfirmationCard, ConfirmDialog, confirmPanel } from "../ui/ConfirmDialog";
+import {
+  ConfirmActions,
+  ConfirmationCard,
+  ConfirmDialog,
+  confirmPanel,
+  useOpeningFocus,
+} from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
-import { EmptyState, FieldError, IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import {
+  EmptyState,
+  FieldError,
+  GhostButton,
+  IconButton,
+  PrimaryButton,
+  RetryRow,
+  SecondaryButton,
+} from "../ui/controls";
+import { SegmentedControl } from "../ui/SegmentedControl";
+import { SuggestInput, type Suggestion } from "../ui/SuggestInput";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SettingRow } from "./SettingRow";
 
 type Access = Pick<WorkspaceFolderRule, "members" | "people">;
@@ -23,9 +44,30 @@ const STATE = {
   "marker-missing": "Marker missing",
   "folder-missing": "Folder missing",
 };
-const inputClass =
-  "h-8 min-w-0 rounded-md border border-line bg-bg px-2 text-[13px] text-ink focus:border-ink aria-invalid:border-danger";
+const LEVEL_OPTIONS = Object.entries(LEVELS).map(([value, label]) => ({
+  value: value as keyof typeof LEVELS,
+  label,
+}));
+const selectClass =
+  "h-8 shrink-0 rounded-md border border-line bg-bg pl-2 pr-1 text-[13px] text-ink focus:border-ink";
 const pathName = (path: string) => path || "Workspace root";
+
+// The folders a rule can name: every folder in the workspace's listing, but
+// not dohc's own or hidden ones, and not shares accepted from other people.
+function ruleFolders(listing: { files: ReadonlyArray<{ path: string }>; folders?: string[] }) {
+  const folders = new Set<string>();
+  const add = (path: string, depth: number) => {
+    const parts = path.split("/").slice(0, depth);
+    for (let at = 1; at <= parts.length; at += 1) {
+      const folder = parts.slice(0, at).join("/");
+      if (parts[at - 1]!.startsWith(".") || isSharedWithMePath(folder)) return;
+      folders.add(folder);
+    }
+  };
+  for (const folder of listing.folders ?? []) add(folder, Infinity);
+  for (const { path } of listing.files) add(path, path.split("/").length - 1);
+  return [...folders].sort((left, right) => left.localeCompare(right));
+}
 
 function narrows(before: Access, after: Access): boolean {
   if (RANK[after.members ?? "none"] < RANK[before.members ?? "none"]) return true;
@@ -56,6 +98,8 @@ function inheritedAccess(view: WorkspaceMembersView, folder: string): Access {
 }
 
 export function FolderAccessSettings(props: {
+  /** The open workspace, whose folders the dialogs suggest. */
+  workspaceId: string;
   view: WorkspaceMembersView;
   rules: WorkspaceFolderRule[];
   busy: boolean;
@@ -71,8 +115,13 @@ export function FolderAccessSettings(props: {
           <SecondaryButton disabled={props.busy} onClick={() => setEdit({ kind: "marker" })}>
             Remove marker
           </SecondaryButton>
-          <SecondaryButton disabled={props.busy} onClick={() => setEdit({ kind: "add" })}>
-            <Plus size={14} aria-hidden /> Add
+          <SecondaryButton
+            className="inline-flex items-center gap-1"
+            disabled={props.busy}
+            onClick={() => setEdit({ kind: "add" })}
+          >
+            <Plus size={14} aria-hidden />
+            Add
           </SecondaryButton>
         </div>
       </header>
@@ -126,6 +175,8 @@ export function FolderAccessSettings(props: {
       </div>
       {edit ? (
         <FolderAccessDialog
+          workspaceId={props.workspaceId}
+          people={props.view.people}
           edit={edit}
           busy={props.busy}
           run={props.run}
@@ -139,6 +190,8 @@ export function FolderAccessSettings(props: {
 }
 
 function FolderAccessDialog(props: {
+  workspaceId: string;
+  people: WorkspacePerson[];
   edit: Edit;
   busy: boolean;
   run: Parameters<typeof FolderAccessSettings>[0]["run"];
@@ -161,6 +214,13 @@ function FolderAccessDialog(props: {
   const [failure, setFailure] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<MembersRequest | null>(null);
   const stale = failure === FOLDER_RULE_CHANGED;
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Change starts on the member level, the first thing it can change.
+  useOpeningFocus(() =>
+    rule && accessForm
+      ? panelRef.current?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]')
+      : null,
+  );
   const title = marker
     ? "Remove an unknown marker"
     : remove
@@ -169,8 +229,18 @@ function FolderAccessDialog(props: {
         ? "Change folder access"
         : "Add folder access";
   const label = marker ? "Remove marker" : remove ? "Remove rule" : "Save";
-  const folderPaths = rule?.folders.map(({ path }) => pathName(path)).join(", ");
   const before = rule ?? props.inherited(folder);
+  // Rules never limit the owner or admins, so only members are offered.
+  const personSuggestions = useMemo<Suggestion[]>(
+    () =>
+      props.people.flatMap(({ role, state, name, email }) =>
+        role === "member" && state !== "removed" && email
+          ? [{ value: normalizeRuleEmail(email), label: name ?? email, detail: name ? email : "" }]
+          : [],
+      ),
+    [props.people],
+  );
+  const chosen = new Set(people.map(({ email }) => normalizeRuleEmail(email)));
   const members = pickedLevel ?? before.members ?? "none";
 
   const send = async (request: MembersRequest) => {
@@ -218,6 +288,7 @@ function FolderAccessDialog(props: {
   return (
     <>
       <Overlay
+        panelRef={panelRef}
         onClose={() => {
           if (!busy) close();
         }}
@@ -227,86 +298,98 @@ function FolderAccessDialog(props: {
           <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink">
             {title}
           </h2>
-          <form className="flex min-w-0 flex-col gap-4" onSubmit={submit} noValidate>
-            {rule ? (
-              <p className="m-0 wrap-anywhere text-[13px] text-muted">{folderPaths}</p>
-            ) : (
-              <label className="flex flex-col gap-1 text-[13px]">
-                Folder path
-                <input
-                  autoFocus
-                  name="folder"
-                  value={folder}
-                  maxLength={4096}
-                  placeholder="Projects/Research"
-                  className={inputClass}
-                  aria-invalid={invalid === "folder"}
-                  aria-describedby={invalid === "folder" ? `${id}-folder` : undefined}
-                  onChange={(event) => {
-                    setFolder(event.target.value);
-                    setInvalid(null);
-                  }}
-                  disabled={busy}
-                />
-                {invalid === "folder" ? (
-                  <FieldError id={`${id}-folder`}>
-                    Enter a workspace-relative path, or / for the workspace root.
-                  </FieldError>
-                ) : null}
-              </label>
-            )}
-            {remove ? (
-              <p className="m-0 text-[13px] text-muted">
-                Copies already on people's computers stay.
-              </p>
-            ) : null}
-            {accessForm ? (
-              <fieldset disabled={busy} className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-                <label className="flex flex-col gap-1 text-[13px]">
-                  Member level
-                  <select
-                    autoFocus={Boolean(rule)}
-                    className={inputClass}
-                    value={members}
-                    onChange={(event) => setPickedLevel(event.target.value as typeof members)}
+          <form className="flex min-w-0 flex-col gap-6" onSubmit={submit} noValidate>
+            <div className="flex min-w-0 flex-col gap-4">
+              {rule ? (
+                <ul className="m-0 flex list-none flex-col gap-1 p-0 text-[13px]">
+                  {rule.folders.map(({ path }) => (
+                    <li key={path} className="flex items-center gap-2">
+                      <Folder size={14} aria-hidden className="shrink-0 text-muted" />
+                      <span className="wrap-anywhere text-ink">{pathName(path)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <label htmlFor={`${id}-folder-field`} className="text-[13px] text-ink">
+                    Folder path
+                  </label>
+                  <FolderField
+                    id={`${id}-folder-field`}
+                    workspaceId={props.workspaceId}
+                    value={folder}
+                    onChange={(value) => {
+                      setFolder(value);
+                      setInvalid(null);
+                    }}
+                    disabled={busy}
+                    invalid={invalid === "folder"}
+                    describedBy={invalid === "folder" ? `${id}-folder` : undefined}
+                  />
+                  {invalid === "folder" ? (
+                    <FieldError id={`${id}-folder`}>
+                      Enter a workspace-relative path, or / for the workspace root.
+                    </FieldError>
+                  ) : null}
+                </div>
+              )}
+              {remove ? (
+                <p className="m-0 text-[13px] text-muted">
+                  Copies already on people's computers stay.
+                </p>
+              ) : null}
+              {accessForm ? (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <span aria-hidden className="text-[13px] text-ink">
+                      Member level
+                    </span>
+                    <SegmentedControl
+                      label="Member level"
+                      value={members}
+                      options={LEVEL_OPTIONS}
+                      onChange={setPickedLevel}
+                      disabled={busy}
+                    />
+                  </div>
+                  <fieldset
+                    disabled={busy}
+                    className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0"
                   >
-                    {Object.entries(LEVELS).map(([value, words]) => (
-                      <option key={value} value={value}>
-                        {words}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="max-h-48 space-y-2 overflow-y-auto">
-                  {people.map(({ email, level }, index) => (
-                    <div key={index} className="flex flex-col gap-1">
-                      <div className="flex items-end gap-2">
-                        <label className="flex min-w-0 flex-1 flex-col gap-1 text-[13px]">
-                          Email address
-                          <input
-                            className={inputClass}
+                    <legend className="mb-2 p-0 text-[13px] text-ink">People</legend>
+                    {people.map(({ email, level }, index) => (
+                      <div key={index} className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          <SuggestInput
+                            label="Email address"
+                            listLabel="People"
+                            icon={AtSign}
                             type="email"
                             name={`person-${index}`}
                             value={email}
                             maxLength={320}
-                            aria-invalid={invalid === `person-${index}`}
-                            aria-describedby={
-                              invalid === `person-${index}` ? `${id}-person` : undefined
-                            }
-                            onChange={(event) => {
+                            placeholder="sam@example.com"
+                            autoFocus={email === "" && index === people.length - 1}
+                            suggestions={personSuggestions.filter(
+                              (option) =>
+                                option.value === normalizeRuleEmail(email) ||
+                                !chosen.has(option.value),
+                            )}
+                            disabled={busy}
+                            invalid={invalid === `person-${index}`}
+                            describedBy={invalid === `person-${index}` ? `${id}-person` : undefined}
+                            onChange={(value) => {
                               setPeople(
                                 people.map((person, at) =>
-                                  at === index ? { ...person, email: event.target.value } : person,
+                                  at === index ? { ...person, email: value } : person,
                                 ),
                               );
                               setInvalid(null);
                             }}
                           />
-                        </label>
-                        <label className="flex flex-col gap-1 text-[13px]">
-                          Access
                           <select
-                            className={inputClass}
+                            aria-label="Access"
+                            className={selectClass}
                             value={level}
                             onChange={(event) =>
                               setPeople(
@@ -322,43 +405,45 @@ function FolderAccessDialog(props: {
                             <option value="comment">Comment</option>
                             <option value="edit">Edit</option>
                           </select>
-                        </label>
-                        <IconButton
-                          type="button"
-                          aria-label="Remove person"
-                          title="Remove person"
-                          onClick={() => {
-                            setPeople(people.filter((_, at) => at !== index));
-                            setInvalid(null);
-                          }}
-                        >
-                          <X size={14} aria-hidden />
-                        </IconButton>
+                          <IconButton
+                            type="button"
+                            aria-label="Remove person"
+                            title="Remove person"
+                            onClick={() => {
+                              setPeople(people.filter((_, at) => at !== index));
+                              setInvalid(null);
+                            }}
+                          >
+                            <X size={14} aria-hidden />
+                          </IconButton>
+                        </div>
+                        {invalid === `person-${index}` ? (
+                          <FieldError id={`${id}-person`}>
+                            Enter a different, valid email address for each person.
+                          </FieldError>
+                        ) : null}
                       </div>
-                      {invalid === `person-${index}` ? (
-                        <FieldError id={`${id}-person`}>
-                          Enter a different, valid email address for each person.
-                        </FieldError>
-                      ) : null}
-                    </div>
-                  ))}
+                    ))}
+                    <GhostButton
+                      type="button"
+                      // The hover fill hangs outside the column's edge.
+                      className="-ml-2 self-start"
+                      disabled={people.length >= 1000}
+                      onClick={() => setPeople([...people, { email: "", level: "view" }])}
+                    >
+                      <Plus size={14} aria-hidden />
+                      Add person
+                    </GhostButton>
+                  </fieldset>
+                </>
+              ) : null}
+              {failure ? (
+                <div className="flex items-start gap-2">
+                  <FieldError id={`${id}-failure`}>{failure}</FieldError>
+                  <CopyButton getText={() => failure} label="Copy error" iconOnly />
                 </div>
-                <SecondaryButton
-                  type="button"
-                  className="self-start"
-                  disabled={people.length >= 1000}
-                  onClick={() => setPeople([...people, { email: "", level: "view" }])}
-                >
-                  <Plus size={14} aria-hidden /> Add person
-                </SecondaryButton>
-              </fieldset>
-            ) : null}
-            {failure ? (
-              <div className="flex items-start gap-2">
-                <FieldError id={`${id}-failure`}>{failure}</FieldError>
-                <CopyButton getText={() => failure} label="Copy error" iconOnly />
-              </div>
-            ) : null}
+              ) : null}
+            </div>
             <ConfirmActions>
               <SecondaryButton type="button" onClick={close} disabled={busy}>
                 Cancel
@@ -398,6 +483,62 @@ function FolderAccessDialog(props: {
         >
           Copies already on people's computers stay.
         </ConfirmDialog>
+      ) : null}
+    </>
+  );
+}
+
+const ROOT: Suggestion = { value: "/", label: "Workspace root" };
+
+function FolderField(props: {
+  id: string;
+  workspaceId: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  invalid: boolean;
+  describedBy: string | undefined;
+}) {
+  const listing = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `folder-access-folders:${props.workspaceId}`,
+    load: () => bridge().listWorkspaceFiles({ workspaceId: props.workspaceId }),
+  });
+  const suggestions = useMemo<Suggestion[]>(
+    () => [
+      ROOT,
+      ...(listing.value ? ruleFolders(listing.value) : []).map((path) => ({
+        value: path,
+        label: path,
+      })),
+    ],
+    [listing.value],
+  );
+  return (
+    <>
+      <SuggestInput
+        id={props.id}
+        name="folder"
+        listLabel="Folders"
+        icon={Folder}
+        value={props.value}
+        onChange={props.onChange}
+        suggestions={suggestions}
+        maxLength={4096}
+        placeholder="Projects/Research"
+        autoFocus
+        disabled={props.disabled}
+        invalid={props.invalid}
+        describedBy={props.describedBy}
+      />
+      {/* A path can still be typed, so the field stays usable without the list. */}
+      {listing.error ? (
+        <RetryRow
+          testId="folder-access-folders-retry"
+          disabled={listing.pending}
+          onRetry={() => void listing.retry()}
+        >
+          dohc could not list this workspace's folders.
+        </RetryRow>
       ) : null}
     </>
   );
