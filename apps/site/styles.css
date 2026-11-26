@@ -1574,7 +1574,7 @@ main::before {
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
 .waitlist[data-state='joined'] .waitlist-field { display: none; }
 .waitlist[data-state='joined'] .waitlist-status { margin-top: 0; color: var(--ink); font-size: 15px; }
-.drive-offer-header > .drive-invited { margin-top: 12px; max-width: 420px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.drive-offer-header > .drive-invited { margin-top: 12px; max-width: none; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .drive-address { color: var(--ink); font-weight: 500; }
 .drive-visual { min-width: 0; }
 .drive-model-stage canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
