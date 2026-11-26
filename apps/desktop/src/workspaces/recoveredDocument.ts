@@ -212,7 +212,6 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
   const lost = new Map<Y.Item, Span[]>();
   const live: Y.Item[] = [];
   const found: NotInNote[] = [];
-  // Kept updates can repeat each other's content, so each clock is read once.
   const keptClocks = new Map<number, Span[]>();
   for (const { structs } of decoded)
     for (const struct of structs)
@@ -228,7 +227,6 @@ function droppedEdits(doc: Y.Doc, kept: readonly Uint8Array[]): Dropped {
       for (clock = Math.max(clock, from); clock < end;) {
         const part = Y.getItem(doc.store, Y.createID(client, clock));
         const partEnd = Math.min(end, part.id.clock + part.length);
-        // Collected with a block it was made in: its content is not in the document to show.
         if (!(part instanceof Y.Item)) found.push({ kind: "other" });
         else if (part.deleted) {
           const dropped = notDeleted(keptDeletes, client, clock, partEnd).map(
