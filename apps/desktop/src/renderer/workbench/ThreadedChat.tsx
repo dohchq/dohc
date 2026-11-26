@@ -34,7 +34,11 @@ import {
   WorkingRow,
   type ChatWorking,
 } from "./ChatThreadPanel";
-import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
+import {
+  MentionComposer,
+  type AddMessageFiles,
+  type FileMentionCandidate,
+} from "./MentionComposer";
 import { RunDetails } from "./ChatPosts";
 import { showChat } from "./chatsOnScreen";
 
@@ -76,6 +80,7 @@ export function ThreadedChat(props: {
   replyDisabled?: boolean;
   mentionCandidates: readonly MentionCandidate[];
   fileCandidates?: readonly FileMentionCandidate[];
+  onAddFiles?: AddMessageFiles;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   reactionControls?: ChatReactionControls;
@@ -537,6 +542,7 @@ export function ThreadedChat(props: {
                 candidates={mentionCandidates}
                 fileCandidates={props.fileCandidates}
                 loadFileHeadings={props.loadFileHeadings}
+                onAddFiles={props.onAddFiles}
                 onChange={setReplyDraft}
                 onSend={() => void sendReply()}
                 inset={narrow ? "narrow" : "thread"}

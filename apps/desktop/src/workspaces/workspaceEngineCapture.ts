@@ -987,6 +987,8 @@ export interface WorkspaceEngineCapture {
   readonly shuttingDown: boolean;
   // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
+  // Captures files the watcher has not reported yet. It scans the whole folder.
+  captureUnreported(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
   // written — the workspace shutdown chain awaits this so the last capture
   // is never dropped.
@@ -10132,6 +10134,11 @@ export function createWorkspaceEngineCapture(
 
     async fileObjectIdForPath(path) {
       return (await resolveFileForPath(path))?.objectId ?? null;
+    },
+
+    async captureUnreported() {
+      await chain;
+      await (await engineStore()).reconcileCapture?.();
     },
 
     async filePathForObjectId(objectId) {

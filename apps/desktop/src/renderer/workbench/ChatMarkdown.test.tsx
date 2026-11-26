@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { ChatMarkdown, createDrawnCache } from "./ChatMarkdown";
 import {
   CHAT_MARKDOWN_MAX_LENGTH,
@@ -138,6 +139,36 @@ describe("ChatMarkdown", () => {
     expect(onOpenPath).toHaveBeenCalledWith("notes/Trip plan.md", "Day 1");
     // The engine reads "**@agent" as no mention, so neither does the chat.
     expect(view.queryByTestId("body-mention")).toBeNull();
+  });
+
+  it("shows a linked picture from the workspace, and its chip when it cannot load", () => {
+    const onOpenPath = vi.fn();
+    const view = render(
+      <WorkspaceSessionProvider workspaceId="ws-1">
+        <ChatMarkdown
+          body="Here @[team/Cabin view.png] and @[team/plan.md]"
+          candidates={CANDIDATES}
+          testId="body"
+          onOpenPath={onOpenPath}
+          attachments={[{ attachmentId: "a", pathHint: "team/Cabin view.png" }] as never}
+        />
+      </WorkspaceSessionProvider>,
+    );
+    const picture = view.getByRole("img", { name: "Cabin view.png" });
+    expect(picture.getAttribute("src")).toBe("dohc-file://ws-1/team/Cabin%20view.png");
+    view.getByRole("button", { name: "Open Cabin view.png" }).click();
+    expect(onOpenPath).toHaveBeenCalledWith("team/Cabin view.png", undefined);
+    expect(view.getAllByTestId("body-file-mention")).toHaveLength(1);
+
+    fireEvent.error(picture);
+    expect(view.queryByRole("img")).toBeNull();
+    expect(view.getAllByTestId("body-file-mention")).toHaveLength(2);
+  });
+
+  it("shows a linked picture as its chip outside a workspace", () => {
+    const view = renderBody("@[team/cabin.png]");
+    expect(view.queryByRole("img")).toBeNull();
+    expect(view.getByTestId("body-file-mention")).toBeTruthy();
   });
 
   it("copies the Markdown source when the whole message is selected", () => {

@@ -124,8 +124,13 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
-import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
-import { channelFileCandidates } from "./chatFileMentionScope";
+import {
+  MentionComposer,
+  type AddMessageFiles,
+  type MentionComposerHandle,
+} from "./MentionComposer";
+import { channelFileCandidates, channelFileFolder } from "./chatFileMentionScope";
+import { addChatFiles } from "./chatAttachments";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import {
@@ -2783,8 +2788,8 @@ export function ChatsView(props: {
   // joined is unknown, so it offers every file.
   const shareMounts = props.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const listedChannels = overview.status === "ready" ? overview.channels : null;
-  const channelFiles = useMemo(() => {
-    if (!scopeResolved) return fileMentionCandidates;
+  const { channelFiles, channelFolder } = useMemo(() => {
+    if (!scopeResolved) return { channelFiles: fileMentionCandidates, channelFolder: null };
     const listed = activeChannel
       ? (listedChannels?.find((entry) => entry.id === activeChannel.id) ?? activeChannel)
       : null;
@@ -2792,7 +2797,10 @@ export function ChatsView(props: {
     const share = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
     const mounts = share ? shareMounts.filter((mount) => mount.shareId === share.shareId) : [];
     const joined = share ? { mountLabel: mounts.length === 1 ? mounts[0]!.label : null } : null;
-    return channelFileCandidates(fileMentionCandidates, listed, joined);
+    return {
+      channelFiles: channelFileCandidates(fileMentionCandidates, listed, joined),
+      channelFolder: channelFileFolder(listed, joined !== null),
+    };
   }, [
     activeChannel,
     fileMentionCandidates,
@@ -2801,6 +2809,27 @@ export function ChatsView(props: {
     scopeResolved,
     shareMounts,
   ]);
+  const reportError = useRef(props.onError);
+  reportError.current = props.onError;
+  const addMessageFiles = useMemo<AddMessageFiles | undefined>(() => {
+    if (channelFolder === null) return undefined;
+    const add: AddMessageFiles = async (link, files) => {
+      try {
+        const added = await addChatFiles(bridge(), workspaceId, channelFolder, files);
+        link(added.paths);
+        if (added.stoppedAt) reportError.current(`dohc could not add ${added.stoppedAt}.`);
+        else if (added.left > 0)
+          reportError.current(
+            `dohc could not add ${added.left} ${added.left === 1 ? "file" : "files"}.`,
+          );
+      } catch (error) {
+        reportError.current(ipcErrorMessage(error, "dohc could not add the files."), error, () => {
+          void add(link, files);
+        });
+      }
+    };
+    return add;
+  }, [channelFolder, workspaceId]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
@@ -4414,6 +4443,7 @@ export function ChatsView(props: {
                 candidates={mentionCandidates}
                 fileCandidates={channelFiles}
                 loadFileHeadings={loadFileHeadings}
+                onAddFiles={addMessageFiles}
                 onChange={(value) => {
                   setComposer(value);
                   presence.setTyping(value.trim().length > 0);
@@ -4739,6 +4769,7 @@ export function ChatsView(props: {
             mentionCandidates={mentionCandidates}
             fileCandidates={channelFiles}
             loadFileHeadings={loadFileHeadings}
+            onAddFiles={addMessageFiles}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
             onNotice={props.onNotice}
@@ -4803,6 +4834,7 @@ export function ChatsView(props: {
                       candidates={mentionCandidates}
                       fileCandidates={channelFiles}
                       loadFileHeadings={loadFileHeadings}
+                      onAddFiles={addMessageFiles}
                       onChange={setNewThreadBody}
                       poll={newThreadPoll}
                       onPollChange={(next) =>
