@@ -1264,6 +1264,30 @@ describe("LinkedChatsPanel comment on a passage", () => {
     expect(screen.getAllByTestId("linked-chat-open")).toHaveLength(2);
   });
 
+  it("keeps a new comment on the same passage while the last one still posts", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
+    bridgeMock.createFileChat.mockResolvedValue({
+      thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 },
+    });
+    let posted!: (value: unknown) => void;
+    bridgeMock.sendChatMessage.mockReturnValue(new Promise((resolve) => (posted = resolve)));
+    renderPanel();
+    await screen.findByTestId("linked-chat-quote");
+    const ask = () =>
+      act(() =>
+        requestFileComment("workspace-1", "docs/plan.md", { kind: "comment", quote: "plan" }),
+      );
+    ask();
+    const composer = await screen.findByTestId("linked-chat-new-composer");
+    fireEvent.change(composer, { target: { value: "Too soon?" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+    ask();
+    expect((await screen.findByTestId("linked-chat-new-quote")).textContent).toBe("plan");
+    await act(async () => posted({ message: { id: "m1" } }));
+    expect(screen.getByTestId("linked-chat-new-quote").textContent).toBe("plan");
+  });
+
   it("posts a comment whose chat was being made when a highlight opened another", async () => {
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
     let created!: (value: unknown) => void;

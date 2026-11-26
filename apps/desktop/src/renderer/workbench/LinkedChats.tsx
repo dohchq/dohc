@@ -457,19 +457,15 @@ export function LinkedChatsPanel(props: {
             ? { ...current, threads: [...current.threads, thread] }
             : current,
         );
-        if (token === liveToken.current) {
-          setCommenting(null);
-          setCommentQuote(null);
-        }
+        // The draft is spent, whatever this person has opened meanwhile.
+        setCommenting(null);
+        setCommentQuote(null);
         try {
           const result = await bridge().sendChatMessage({
             workspaceId,
             threadId: thread.id,
             body,
           });
-          // Posted, so the draft is spent unless this person wrote another.
-          setCommenting((current) => (current === words ? null : current));
-          setCommentQuote((current) => (current === quote ? null : current));
           if (token !== liveToken.current) return;
           // The comment saved, so its words stay out of the composer. Opening the chat shows it.
           if ("failure" in result)

@@ -1,5 +1,6 @@
+// @vitest-environment jsdom
 import { EditorState } from "@tiptap/pm/state";
-import type { EditorView } from "@tiptap/pm/view";
+import { EditorView } from "@tiptap/pm/view";
 import { describe, expect, it } from "vitest";
 import {
   commentHighlightKey,
@@ -41,30 +42,38 @@ describe("comment highlights", () => {
     expect(painted(state)).toEqual(["the plan"]);
   });
 
-  it("opens every comment whose passage holds the click, and not a neighbour's", () => {
+  it("opens every comment whose passage holds the clicked text, and not a neighbour's", () => {
     const opened: string[][] = [];
     const clicking = makeCommentHighlightPlugin({
       anchors: () => [],
       onOpen: (threadIds) => opened.push(threadIds),
     });
-    let state = EditorState.create({
-      doc: doc(paragraph("Ship the plan on Monday")),
-      plugins: [clicking],
+    const view = new EditorView(document.createElement("div"), {
+      state: EditorState.create({
+        doc: doc(paragraph("Ship the plan on Monday")),
+        plugins: [clicking],
+      }),
     });
-    state = state.apply(
-      setCommentAnchors(state, [
+    view.dispatch(
+      setCommentAnchors(view.state, [
         { threadId: "a", quote: "the plan" },
         { threadId: "b", quote: "plan on" },
       ]),
     );
-    // The span the click lands in names one comment, as the painted DOM does.
-    const click = (pos: number, span: string) =>
-      clicking.props.handleClick!.call(clicking, { state } as EditorView, pos, {
-        target: { closest: () => ({ getAttribute: () => span }) },
+    // The painted spans: "the " is the first passage's, "plan" both, " on" the second's.
+    const spans = [...view.dom.querySelectorAll("[data-comment-thread]")];
+    expect(spans.map((span) => span.textContent)).toEqual(["the ", "plan", " on"]);
+    // Where the caret lands within a span does not change whose comments open.
+    for (const [span, pos] of [
+      [0, 6],
+      [1, 14],
+      [1, 10],
+      [2, 14],
+    ] as const)
+      clicking.props.handleClick!.call(clicking, view, pos, {
+        target: spans[span],
       } as unknown as MouseEvent);
-    click(12, "b"); // "pl|an", in both passages
-    click(7, "a"); // "t|he", in the first only
-    click(10, "a"); // "the |plan", where the second passage only starts
-    expect(opened).toEqual([["a", "b"], ["a"], ["a"]]);
+    expect(opened).toEqual([["a"], ["a", "b"], ["a", "b"], ["b"]]);
+    view.destroy();
   });
 });

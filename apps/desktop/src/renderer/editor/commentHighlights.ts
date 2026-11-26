@@ -56,18 +56,18 @@ export function makeCommentHighlightPlugin(options: {
     },
     props: {
       decorations: (state) => commentHighlightKey.getState(state),
-      handleClick(view, pos, event) {
-        const clicked = (event.target as HTMLElement | null)
-          ?.closest(`[${ATTRIBUTE}]`)
-          ?.getAttribute(ATTRIBUTE);
-        if (!clicked) return false;
+      handleClick(view, _pos, event) {
+        const span = (event.target as HTMLElement | null)?.closest(`[${ATTRIBUTE}]`);
+        if (!span) return false;
         // Passages can overlap, and the painted span names only one of them.
-        // A passage that merely ends or starts where the click lands is a
-        // neighbour, not an overlap.
-        const around = (commentHighlightKey.getState(view.state)?.find(pos, pos) ?? [])
-          .filter((decoration) => decoration.from < pos && pos < decoration.to)
+        // Each span is a stretch the same passages cover, so the comments are
+        // those whose passage covers all of the clicked span.
+        const from = view.posAtDOM(span, 0);
+        const to = view.posAtDOM(span, span.childNodes.length);
+        const threadIds = (commentHighlightKey.getState(view.state)?.find(from, to) ?? [])
+          .filter((decoration) => decoration.from <= from && to <= decoration.to)
           .map((decoration) => (decoration.spec as { threadId: string }).threadId);
-        options.onOpen([...new Set([...around, clicked])]);
+        if (threadIds.length > 0) options.onOpen(threadIds);
         // The click still places the caret, so the passage stays editable.
         return false;
       },
