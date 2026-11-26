@@ -233,6 +233,48 @@ describe("owner app publication", () => {
     });
   });
 
+  it("publishes for workspace members without a link or link reads", async () => {
+    const read = {
+      operationId: "00000000-0000-4000-8000-000000000003",
+      name: "records.list",
+      access: "helper" as const,
+      readOnly: true,
+      fields: [{ fieldId: "00000000-0000-4000-8000-000000000004", name: "Name" }],
+    };
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({
+            ...prepared,
+            capabilities: [
+              { ...datasetCapability, operationIds: [read.operationId], operations: [read] },
+            ],
+          })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent
+      .setup()
+      .selectOptions(screen.getByLabelText("Publication share link"), "Workspace members");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByRole("heading", { name: "Review app publication" });
+    expect(actions("prepare")).toEqual([
+      { action: "prepare", workspaceId: "ws-trip", appRoot: "trip", audience: "workspace" },
+    ]);
+    expect(screen.getByText("Who can open it")).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /^Let anyone with the link use / })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    await screen.findByText("App published for workspace members.");
+    expect(actions("approve")).toEqual([
+      {
+        action: "approve",
+        workspaceId: "ws-trip",
+        approvalId: prepared.approvalId,
+        candidateDigest: prepared.candidateDigest,
+      },
+    ]);
+  });
+
   it.each([approvedCollection, "unavailable" as const])(
     "confirms revocation of %s, sends the displayed revision, and keeps the app published",
     async (currentCapability) => {

@@ -1,6 +1,6 @@
 import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
-import { editorTabTestId } from "../src/testPins";
+import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import { test, expect } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -69,6 +69,17 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("members")).click();
+    const members = page.getByTestId("settings-members-page");
+    await members.getByTestId("settings-members-invite-email").fill("shared-form-member@dohc.test");
+    await members.getByTestId("settings-members-invite-send").click();
+    await expect(
+      members
+        .getByTestId("settings-members-row")
+        .filter({ hasText: "shared-form-member@dohc.test" }),
+    ).toHaveAttribute("data-state", "active");
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")
@@ -169,8 +180,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await page.getByTestId("app-view-review").click();
     await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
     const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
-    await expect(shareLink.locator("option")).toHaveCount(2);
-    await shareLink.selectOption({ index: 1 });
+    await expect(shareLink.locator("option")).toHaveCount(3);
+    await shareLink.selectOption({ index: 2 });
     await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
     await expect(
       publication.getByRole("heading", { name: "Review app publication", exact: true }),
@@ -190,6 +201,32 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
       publication.getByRole("status").filter({ hasText: "App published on the selected link." }),
     ).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
+    const themed = async (name: string) => {
+      const before = await page.evaluate(() => document.documentElement.dataset.theme);
+      for (const theme of ["light", "dark"] as const) {
+        await page.evaluate((value) => {
+          document.documentElement.dataset.theme = value;
+        }, theme);
+        await page.screenshot({ path: info.outputPath(`${name}-${theme}.png`) });
+      }
+      await page.evaluate((value) => {
+        if (value) document.documentElement.dataset.theme = value;
+        else delete document.documentElement.dataset.theme;
+      }, before);
+    };
+    await shareLink.selectOption({ label: "Workspace members" });
+    await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
+    await expect(publication.getByText("Who can open it", { exact: true })).toBeVisible();
+    await expect(
+      publication.getByRole("checkbox", { name: /^Let anyone with the link use / }),
+    ).toHaveCount(0);
+    await themed("owner-workspace-publication-review");
+    await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
+    await expect(
+      publication.getByRole("status").filter({ hasText: "App published for workspace members." }),
+    ).toBeVisible();
+    await expect(publication.getByRole("button", { name: /^Unpublish / })).toHaveCount(2);
+    await themed("owner-workspace-publication-published");
     await publication.getByRole("button", { name: "Close", exact: true }).click();
     const listed = await page.evaluate(
       async (workspaceId) => window.dohcDesktop!.dataset({ workspaceId, action: "list" }),
@@ -233,6 +270,25 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     );
     if (online.kind !== "invoked") throw Error("Expected authoritative Collection data.");
     expect(JSON.stringify(online.result)).toContain("Shared browser participant");
+    await (await collectionCommand(collection, "Manage access")).click();
+    const access = page.getByRole("dialog", { name: "Collection access", exact: true });
+    const saveDefaults = access.getByRole("button", { name: "Save for members", exact: true });
+    await expect(saveDefaults).toBeDisabled();
+    const editDefault = access.getByRole("checkbox", { name: / for members with Edit$/ }).first();
+    await editDefault.focus();
+    await page.keyboard.press("Space");
+    await expect(editDefault).toBeChecked();
+    await themed("collection-workspace-defaults");
+    await saveDefaults.click();
+    await expect(saveDefaults).toBeDisabled();
+    const permissions = await page.evaluate(
+      async ({ workspaceId, datasetPath }) =>
+        window.dohcDesktop!.dataset({ workspaceId, datasetPath, action: "permissions" }),
+      { workspaceId, datasetPath: dataset.datasetPath! },
+    );
+    if (permissions.kind !== "permissions") throw Error("Expected Collection permissions.");
+    expect(permissions.defaults?.edit).toHaveLength(1);
+    await access.getByRole("button", { name: "Close", exact: true }).click();
     const appRoot = "registrations-form",
       manifestPath = join(workspace.rootPath, appRoot, "app.publish.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
@@ -270,7 +326,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
           expectedAuthorityRevision: item.authorityRevision,
         },
       );
-    const original = publications.publications[0]!;
+    const original = publications.publications.find((item) => item.grantId !== null)!;
     const dashboard = await page.evaluate(
       async (input) => window.dohcDesktop!.publishOwnerApp({ action: "prepare", ...input }),
       { workspaceId, appRoot, shareId: original.shareId, grantId: original.grantId! },

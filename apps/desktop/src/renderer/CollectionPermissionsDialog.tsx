@@ -26,15 +26,35 @@ interface Props {
   onSettled?(identity: string): void;
 }
 type Target = { workspaceId: string; datasetPath: string; expectedDatasetId: string };
+type Levels = { view: string[]; comment: string[]; edit: string[] };
+type Rules = NonNullable<DatasetPermissionsPage["rules"]>;
+const LEVELS = [
+  ["view", "View"],
+  ["comment", "Comment"],
+  ["edit", "Edit"],
+] as const;
 type Change =
   | { principalKey: string }
+  | { principalKey?: undefined; defaults: Levels & { revision: number; revisionSha256: string } }
   | {
       principalKey?: undefined;
+      defaults?: undefined;
       grantId: string;
       person: string;
       operationIds: string[];
     };
-type Failure = { principalKey?: string; words: string };
+type Failure = { principalKey?: string; defaults?: true; words: string };
+const levelsOf = (page: DatasetPermissionsPage): Levels => {
+  const known = (reads: boolean) => (id: string) =>
+    !!page.rules?.actions.some(
+      (action) => action.operationId === id && (action.readOnly || !reads),
+    );
+  return {
+    view: page.defaults?.view.filter(known(true)).sort() ?? [],
+    comment: page.defaults?.comment.filter(known(true)).sort() ?? [],
+    edit: page.defaults?.edit.filter(known(false)).sort() ?? [],
+  };
+};
 // One row in Notices for this Collection's failed access change, which the next change that succeeds removes,
 // so an older Try again never undoes newer access. A save names a person by grant and a removal by key, so the row can't be per person.
 const changeIdentity = (datasetId: string) => `collection-access:${datasetId}`;
@@ -42,17 +62,19 @@ async function changeAccess(target: Target, dataset: DatasetDescription, change:
   const result = await bridge().dataset(
     change.principalKey !== undefined
       ? { ...target, action: "removeGrant", principalKey: change.principalKey }
-      : {
-          ...target,
-          action: "setGrant",
-          grantId: change.grantId,
-          grant: {
-            revision: dataset.revision,
-            revisionSha256: dataset.revisionSha256,
-            operationIds: change.operationIds,
-            discover: true,
+      : change.defaults
+        ? { ...target, action: "setDefaults", defaults: change.defaults }
+        : {
+            ...target,
+            action: "setGrant",
+            grantId: change.grantId,
+            grant: {
+              revision: dataset.revision,
+              revisionSha256: dataset.revisionSha256,
+              operationIds: change.operationIds,
+              discover: true,
+            },
           },
-        },
   );
   if (result.kind !== "grant-updated") throw Error("dohc could not confirm Collection access.");
 }
@@ -68,7 +90,9 @@ function reportClosed(
     title:
       change.principalKey !== undefined
         ? "dohc could not remove access"
-        : `dohc could not save access for ${change.person}`,
+        : change.defaults
+          ? "dohc could not save access for workspace members"
+          : `dohc could not save access for ${change.person}`,
     message: readError(namingCollectionMove(cause, dataset.name)).words ?? UNKNOWN_ERROR_WORDS,
     cause,
     identity: changeIdentity(dataset.datasetId),
@@ -120,6 +144,10 @@ function Permissions({
   const [recipients, setRecipients] = useState<RelayShareGrantedRow[]>([]);
   const [grantId, setGrantId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [rules, setRules] = useState<Rules | null>(null);
+  const [saved, setSaved] = useState<Levels | null>(null);
+  const [levels, setLevels] = useState<Levels | null>(null);
+  const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
   const report = useContext(ShellErrorReporter);
   const alive = useRef(true),
@@ -146,6 +174,13 @@ function Permissions({
       setPage({ permissions: permissions.permissions, nextCursor: permissions.nextCursor });
       setPlace(permissions.place ?? null);
       if (!after) {
+        setRules(permissions.rules ?? null);
+        setSaved(levelsOf(permissions));
+        setLevels(levelsOf(permissions));
+        setStale(
+          !!permissions.defaults &&
+            permissions.defaults.revisionSha256 !== permissions.rules?.revisionSha256,
+        );
         setBoundApps(permissions.boundApps ?? []);
         setBoundAppsIncomplete(Boolean(permissions.boundAppsIncomplete));
       }
@@ -172,16 +207,24 @@ function Permissions({
       request.current++;
     };
   }, []);
-  async function change(principalKey?: string) {
+  async function change(principalKey?: string, defaults?: Levels) {
     if (!alive.current || locked.current) return;
     const recipient = recipients.find((row) => row.grantId === grantId);
     const asked: Change = principalKey
       ? { principalKey }
-      : {
-          grantId,
-          person: recipient?.recipientEmail ?? recipient?.recipientUserId ?? grantId,
-          operationIds: selected,
-        };
+      : defaults && rules
+        ? {
+            defaults: {
+              ...defaults,
+              revision: rules.revision,
+              revisionSha256: rules.revisionSha256,
+            },
+          }
+        : {
+            grantId,
+            person: recipient?.recipientEmail ?? recipient?.recipientUserId ?? grantId,
+            operationIds: selected,
+          };
     const run = () => changeAccess(target, dataset, asked);
     locked.current = true;
     const token = ++request.current;
@@ -191,8 +234,10 @@ function Permissions({
       await run();
       onSettled?.(changeIdentity(dataset.datasetId));
       if (!alive.current || token !== request.current) return;
-      setGrantId("");
-      setSelected([]);
+      if (!defaults) {
+        setGrantId("");
+        setSelected([]);
+      }
       locked.current = false;
       await load();
     } catch (cause) {
@@ -200,6 +245,7 @@ function Permissions({
       if (open.current)
         onFailure({
           ...(principalKey ? { principalKey } : {}),
+          ...(defaults ? { defaults: true as const } : {}),
           words: withErrorWords(
             principalKey ? "dohc could not remove access." : "dohc could not save access.",
             cause,
@@ -227,6 +273,95 @@ function Permissions({
         </p>
         {place?.kind === "server" ? (
           <p className="m-0 text-[12px] text-muted">This Collection is on {place.host}.</p>
+        ) : null}
+        {rules && levels ? (
+          <form
+            aria-labelledby="collection-defaults-title"
+            className="flex flex-col gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!busy) void change(undefined, levels);
+            }}
+          >
+            <h3 id="collection-defaults-title" className="m-0 text-sm font-semibold text-ink">
+              Workspace members
+            </h3>
+            <table className="w-full border-collapse text-[13px]">
+              <thead>
+                <tr className="text-[12px] text-muted">
+                  <th scope="col" className="py-1 text-left font-normal">
+                    Action
+                  </th>
+                  {LEVELS.map(([level, label]) => (
+                    <th key={level} scope="col" className="w-20 py-1 text-center font-normal">
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rules.actions.map((action) => {
+                  const name =
+                    dataset.operations.find(
+                      (operation) => operation.operationId === action.operationId,
+                    )?.label ?? action.name;
+                  return (
+                    <tr key={action.operationId} className="border-t border-line">
+                      <th scope="row" className="py-1.5 text-left font-normal text-ink">
+                        {name}
+                      </th>
+                      {LEVELS.map(([level, label], at) => {
+                        const lower = LEVELS.slice(0, at).find(([below]) =>
+                          levels[below].includes(action.operationId),
+                        );
+                        return (
+                          <td key={level} className="text-center">
+                            <input
+                              type="checkbox"
+                              aria-label={`${name} for members with ${label}`}
+                              title={lower ? `Included with ${lower[1]}` : undefined}
+                              disabled={busy || !!lower || (!action.readOnly && level !== "edit")}
+                              className="disabled:opacity-40"
+                              checked={!!lower || levels[level].includes(action.operationId)}
+                              onChange={(event) =>
+                                setLevels({
+                                  ...levels,
+                                  [level]: event.target.checked
+                                    ? [...levels[level], action.operationId].sort()
+                                    : levels[level].filter((id) => id !== action.operationId),
+                                })
+                              }
+                            />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="m-0 text-[12px] text-muted">
+              Members get these by their folder access. View and Comment get only reads.
+              {stale ? " These were chosen under earlier rules. Save to keep them." : null}
+            </p>
+            <div>
+              <p
+                role="status"
+                aria-live="polite"
+                className="m-0 mb-2 text-[12px] text-danger empty:mb-0"
+              >
+                {failure?.defaults ? failure.words : null}
+              </p>
+              <PrimaryButton
+                type="submit"
+                disabled={!stale && JSON.stringify(levels) === JSON.stringify(saved)}
+                aria-disabled={busy || undefined}
+                className="aria-disabled:cursor-wait aria-disabled:opacity-50"
+              >
+                Save for members
+              </PrimaryButton>
+            </div>
+          </form>
         ) : null}
         <form
           className="flex flex-col gap-3"
@@ -298,7 +433,7 @@ function Permissions({
               aria-live="polite"
               className="m-0 mb-2 text-[12px] text-danger empty:mb-0"
             >
-              {failure && !failure.principalKey ? failure.words : null}
+              {failure && !failure.principalKey && !failure.defaults ? failure.words : null}
             </p>
             <PrimaryButton
               type="submit"
@@ -324,7 +459,7 @@ function Permissions({
               <p className="m-0 text-[12px] text-muted">Refresh to see who has access.</p>
             )
           ) : !page.permissions.length ? (
-            <p className="m-0 text-[12px] text-muted">Only you have access.</p>
+            <p className="m-0 text-[12px] text-muted">No person or app has its own access.</p>
           ) : (
             page.permissions.map((permission) => {
               const app =
