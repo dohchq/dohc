@@ -1,4 +1,5 @@
 import { EditorState } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
 import { describe, expect, it } from "vitest";
 import {
   commentHighlightKey,
@@ -38,5 +39,29 @@ describe("comment highlights", () => {
     state = state.apply(setCommentAnchors(state, [{ threadId: "a", quote: "the plan" }]));
     state = state.apply(state.tr.insertText("Please ", 1));
     expect(painted(state)).toEqual(["the plan"]);
+  });
+
+  it("opens every comment whose passage holds the click", () => {
+    const opened: string[][] = [];
+    const clicking = makeCommentHighlightPlugin({
+      anchors: () => [],
+      onOpen: (threadIds) => opened.push(threadIds),
+    });
+    let state = EditorState.create({
+      doc: doc(paragraph("Ship the plan on Monday")),
+      plugins: [clicking],
+    });
+    state = state.apply(
+      setCommentAnchors(state, [
+        { threadId: "a", quote: "the plan" },
+        { threadId: "b", quote: "plan on Monday" },
+      ]),
+    );
+    const onHighlight = { target: { closest: () => ({}) } } as unknown as MouseEvent;
+    const click = (pos: number) =>
+      clicking.props.handleClick!.call(clicking, { state } as EditorView, pos, onHighlight);
+    click(11); // "pl|an", in both passages
+    click(6); // "t|he", in the first only
+    expect(opened).toEqual([["a", "b"], ["a"]]);
   });
 });

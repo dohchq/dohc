@@ -724,9 +724,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeHeadingFlashPlugin(),
               makeCommentHighlightPlugin({
                 anchors: () => anchorsRef.current,
-                onOpen: (threadId) => {
+                onOpen: (threadIds) => {
                   const file = commentFileRef.current;
-                  requestFileComment(file.workspaceId, file.path, { kind: "open", threadId });
+                  requestFileComment(file.workspaceId, file.path, { kind: "open", threadIds });
                 },
               }),
               makeLinkMenuPlugin({

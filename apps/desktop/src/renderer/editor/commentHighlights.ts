@@ -20,10 +20,15 @@ function paint(doc: ProseMirrorNode, anchors: readonly CommentAnchor[]): Decorat
     const range = findQuote(doc, anchor.quote);
     if (!range) continue;
     decorations.push(
-      Decoration.inline(range.from, range.to, {
-        class: "rounded-[2px] bg-accent/15 underline decoration-accent/60 underline-offset-2",
-        [ATTRIBUTE]: anchor.threadId,
-      }),
+      Decoration.inline(
+        range.from,
+        range.to,
+        {
+          class: "rounded-[2px] bg-accent/15 underline decoration-accent/60 underline-offset-2",
+          [ATTRIBUTE]: anchor.threadId,
+        },
+        { threadId: anchor.threadId },
+      ),
     );
   }
   return DecorationSet.create(doc, decorations);
@@ -36,7 +41,8 @@ export function setCommentAnchors(state: EditorState, anchors: readonly CommentA
 
 export function makeCommentHighlightPlugin(options: {
   anchors: () => readonly CommentAnchor[];
-  onOpen: (threadId: string) => void;
+  // Every comment whose passage holds the click, oldest first.
+  onOpen: (threadIds: string[]) => void;
 }) {
   return new Plugin<DecorationSet>({
     key: commentHighlightKey,
@@ -50,11 +56,13 @@ export function makeCommentHighlightPlugin(options: {
     },
     props: {
       decorations: (state) => commentHighlightKey.getState(state),
-      handleClick(_view, _pos, event) {
-        const threadId = (event.target as HTMLElement | null)
-          ?.closest(`[${ATTRIBUTE}]`)
-          ?.getAttribute(ATTRIBUTE);
-        if (threadId) options.onOpen(threadId);
+      handleClick(view, pos, event) {
+        if (!(event.target as HTMLElement | null)?.closest(`[${ATTRIBUTE}]`)) return false;
+        // Passages can overlap, and the painted span names only one of them.
+        const threadIds = (commentHighlightKey.getState(view.state)?.find(pos, pos) ?? []).map(
+          (decoration) => (decoration.spec as { threadId: string }).threadId,
+        );
+        if (threadIds.length > 0) options.onOpen(threadIds);
         // The click still places the caret, so the passage stays editable.
         return false;
       },

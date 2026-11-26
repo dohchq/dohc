@@ -25,7 +25,8 @@ export type FileComments = {
 
 export type FileCommentRequest =
   | { kind: "comment"; quote: string }
-  | { kind: "open"; threadId: string };
+  // Several when the passages overlap: About lists them all.
+  | { kind: "open"; threadIds: string[] };
 
 type Entry = {
   comments?: FileComments;

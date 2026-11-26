@@ -1238,17 +1238,63 @@ describe("LinkedChatsPanel comment on a passage", () => {
   });
 
   it("opens the comment a passage's highlight names, and shows the editor its passage", async () => {
-    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [searchThread, anchored],
+    });
     renderPanel();
     await screen.findByTestId("linked-chat-quote");
     act(() =>
       requestFileComment("workspace-1", "docs/plan.md", {
         kind: "open",
-        threadId: "thread-quoted",
+        threadIds: ["thread-quoted"],
       }),
     );
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Why Monday?");
     expect(screen.getByTestId("probe-reveal").textContent).toBe(anchored.quote);
+
+    // Overlapping passages open the list, where each comment shows its passage.
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", {
+        kind: "open",
+        threadIds: ["thread-quoted", searchThread.id],
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("linked-chat-title")).toBeNull());
+    expect(screen.getAllByTestId("linked-chat-open")).toHaveLength(2);
+  });
+
+  it("posts a comment whose chat was being made when a highlight opened another", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [anchored] });
+    let created!: (value: unknown) => void;
+    bridgeMock.createFileChat.mockReturnValue(new Promise((resolve) => (created = resolve)));
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1" } });
+    renderPanel();
+    await screen.findByTestId("linked-chat-quote");
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", { kind: "comment", quote: "plan" }),
+    );
+    const composer = await screen.findByTestId("linked-chat-new-composer");
+    fireEvent.change(composer, { target: { value: "Too soon?" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    act(() =>
+      requestFileComment("workspace-1", "docs/plan.md", {
+        kind: "open",
+        threadIds: ["thread-quoted"],
+      }),
+    );
+    expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Why Monday?");
+    await act(async () =>
+      created({ thread: { id: "thread-new", title: "New chat", createdAtMs: 2, updatedAtMs: 2 } }),
+    );
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-1",
+        threadId: "thread-new",
+        body: "> plan\n\nToo soon?",
+      }),
+    );
+    expect(screen.getByTestId("linked-chat-title").textContent).toBe("Why Monday?");
   });
 
   it("tells the editor a passage takes no comment where this person cannot comment", async () => {

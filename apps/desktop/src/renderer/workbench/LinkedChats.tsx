@@ -448,15 +448,18 @@ export function LinkedChatsPanel(props: {
       setSending(true);
       try {
         const created = await bridge().createFileChat({ workspaceId, path: filePath });
-        if (token !== liveToken.current) return;
         const thread = quote === null ? created.thread : { ...created.thread, quote };
-        setCommenting(null);
-        setCommentQuote(null);
-        setThreadsState((current) =>
-          current.status === "ready"
-            ? { ...current, threads: [...current.threads, thread] }
-            : current,
-        );
+        // The chat exists, so its comment posts even if this person has moved
+        // on; only what the panel shows waits for them.
+        if (token === liveToken.current) {
+          setCommenting(null);
+          setCommentQuote(null);
+          setThreadsState((current) =>
+            current.status === "ready"
+              ? { ...current, threads: [...current.threads, thread] }
+              : current,
+          );
+        }
         try {
           const result = await bridge().sendChatMessage({
             workspaceId,
@@ -473,9 +476,9 @@ export function LinkedChatsPanel(props: {
             );
           else if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         } catch (error) {
-          if (token !== liveToken.current) return;
-          setComposer(body);
+          if (token === liveToken.current) setComposer(body);
           props.onError(ipcErrorMessage(error, "dohc could not post that comment."), error);
+          if (token !== liveToken.current) return;
         }
         void openThread(thread);
       } catch (error) {
@@ -525,8 +528,19 @@ export function LinkedChatsPanel(props: {
     if (!request || !filePath || listedThreads === undefined) return;
     takeFileCommentRequest(workspaceId, filePath, request);
     if (request.kind === "open") {
-      const thread = listedThreads.find((listedThread) => listedThread.id === request.threadId);
-      if (thread && shownThreadId.current !== thread.id) void openThread(thread);
+      const threads = listedThreads.filter((listedThread) =>
+        request.threadIds.includes(listedThread.id),
+      );
+      if (threads.length === 1) {
+        if (shownThreadId.current !== threads[0]!.id) void openThread(threads[0]!);
+        return;
+      }
+      if (threads.length === 0) return;
+      // Overlapping passages: the list shows each comment with its passage.
+      liveToken.current += 1;
+      setActiveThread(null);
+      setMessages([]);
+      setSectionsOpen((current) => ({ ...current, chats: true }));
       return;
     }
     if (!canComment) return;

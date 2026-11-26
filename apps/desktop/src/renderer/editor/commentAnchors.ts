@@ -113,6 +113,7 @@ const QUOTE_MAX_CHARS = 1_000;
  *  words. The quote's punctuation is escaped, so it reads as the passage's
  *  text rather than as Markdown, and an @name in it asks no one. */
 export function quotedCommentBody(quote: string, comment: string): string {
-  const text = normalizeQuote(quote).slice(0, QUOTE_MAX_CHARS).trimEnd();
+  // The engine counts characters, and a cut must not split one.
+  const text = Array.from(normalizeQuote(quote)).slice(0, QUOTE_MAX_CHARS).join("").trimEnd();
   return `> ${text.replace(/[!-/:-@[-`{-~]/g, "\\$&")}\n\n${comment}`;
 }
