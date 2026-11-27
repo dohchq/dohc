@@ -299,7 +299,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     let keepalive: ReturnType<typeof setInterval> | undefined;
     let done = false;
     let draining = false,
-      closingForLimit = false;
+      closingWithReason = false;
     let refusalCode: LiveConnectionLimitCode | undefined;
     function refuseClose(closeCode: number, reason: string) {
       if (done) return;
@@ -309,7 +309,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
           accepted.on("error", stop);
         });
       if (browser) {
-        closingForLimit = true;
+        closingWithReason = true;
         browser.close(closeCode, reason);
         socket.resume();
         const deadline = setTimeout(() => browser?.terminate(), limits.drainTimeoutMs);
@@ -331,13 +331,13 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         connections.delete(stop);
         scopes.delete(stop);
       };
-      if (closingForLimit && browser && browser.readyState !== WebSocket.CLOSED)
+      if (closingWithReason && browser && browser.readyState !== WebSocket.CLOSED)
         browser.once("close", releaseConnection);
       else releaseConnection();
       // Refusal and fencing discard queued work. No successful frame is synthesized.
       route?.socket.terminate();
       if (browser) {
-        if (!closingForLimit) browser.terminate();
+        if (!closingWithReason) browser.terminate();
       } else refuse(socket);
     }
     const touch = () => {

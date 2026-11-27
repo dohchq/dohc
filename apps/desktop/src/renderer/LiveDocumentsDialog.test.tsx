@@ -115,7 +115,7 @@ it("shows a document whose note format the server turned off, with Stop and no R
   expect(off.children[1]?.textContent).toBe("Note format off on the server");
   expect(
     within(off).getByText(
-      "The server turned off the newer note format this note uses. Ask the server's operator to turn it back on.",
+      "The server turned off the newer note format this document uses. Ask the server's operator to turn it back on.",
     ),
   ).toBeDefined();
   expect(actions("docs/off.md").filter((name) => name?.endsWith("live editing"))).toEqual([

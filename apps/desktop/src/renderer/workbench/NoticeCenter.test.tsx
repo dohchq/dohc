@@ -805,7 +805,7 @@ describe("notice center", () => {
     {
       reason: "note-format-off" as const,
       title: "Live editing stopped",
-      body: "The server turned off the newer note format a note in this workspace uses, so live editing stopped. Your copy and its History are unchanged. Ask the server's operator to turn the format back on.",
+      body: "The server turned off the newer note format a document in this workspace uses, so live editing stopped. Your copy and its History are unchanged. Ask the server's operator to turn the format back on.",
     },
     {
       reason: "conflict-parent-withheld" as const,

@@ -1807,6 +1807,12 @@ it("lists a format-2 note unavailable while the relay's switch is off, with no R
     reason: "note-format-off",
     ...noted(["stop"], "live"),
   });
+  f.host.ready.mockReturnValue(false);
+  expect((await state()).reason).toBe("note-format-off");
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json=NULL");
+  expect((await state()).reason).toBe("note-format-off");
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  f.host.ready.mockReturnValue(true);
   admitBodySequenceNotes(true);
   try {
     expect((await state()).status).toBe("ready");

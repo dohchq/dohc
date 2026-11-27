@@ -1282,11 +1282,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       diverged === true || rows.some((row) => row.status === "unavailable");
                     const unavailableFor = (reason: OwnerLiveDeliveryReason) =>
                       rows.some((row) => row.status === "unavailable" && row.reason === reason);
-                    // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
-                    // One it cannot start goes before it: the owner must open it before a Resume can help.
-                    // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
-                    // A diverged server copy, or one document's damaged server record, goes first: only the server's operator can continue it.
-                    // One whose start keeps failing follows every reason that needs its owner, since the server keeps trying it.
                     const reason =
                       diverged === true || unavailableFor("session-host-diverged")
                         ? "session-host-diverged"

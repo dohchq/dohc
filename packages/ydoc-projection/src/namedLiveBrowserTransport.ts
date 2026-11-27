@@ -102,6 +102,8 @@ export class LiveStoppedError extends Error {}
 export class LiveStartingError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
+/** The server answered that its operator turned off the note format the document uses. Trying again cannot help. */
+export class LiveNoteFormatOffError extends Error {}
 /** The server answered that the owner removed this account's access. */
 class AccessRemoved extends Error {}
 /** The page has no session and has already asked for a new one in this outage. */
@@ -646,21 +648,23 @@ export function createNamedLiveBrowserTransport<
               ? "access-removed"
               : error instanceof LiveLinkFullError
                 ? "link-full"
-                : error instanceof SessionSpent
-                  ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
-                    ? "access-removed"
-                    : "authority-unavailable"
-                  : error instanceof LiveAuthorityUnavailableError
-                    ? !options.authorize && "grantId" in target
-                      ? await recheck(held, String(target.grantId), checking)
+                : error instanceof LiveNoteFormatOffError
+                  ? "note-format-off"
+                  : error instanceof SessionSpent
+                    ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                      ? "access-removed"
                       : "authority-unavailable"
-                    : error instanceof LiveStoppedError
-                      ? "live-stopped"
-                      : error instanceof LiveStartingError
-                        ? "live-starting"
-                        : error instanceof LiveHostUnavailableError
-                          ? "host-unavailable"
-                          : "connection-failed",
+                    : error instanceof LiveAuthorityUnavailableError
+                      ? !options.authorize && "grantId" in target
+                        ? await recheck(held, String(target.grantId), checking)
+                        : "authority-unavailable"
+                      : error instanceof LiveStoppedError
+                        ? "live-stopped"
+                        : error instanceof LiveStartingError
+                          ? "live-starting"
+                          : error instanceof LiveHostUnavailableError
+                            ? "host-unavailable"
+                            : "connection-failed",
         );
       }
     }

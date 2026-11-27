@@ -89,7 +89,9 @@ export function createNamedDesktopLive(options: {
       { status: 404, headers: { "cache-control": "private, no-store" } },
     );
   // The host's answer to hosting the document, which the desktop shows instead of waiting.
-  const hostRefused = (code: LiveHostingRefusal["reason"] | "live-document-without-lineage") =>
+  const hostRefused = (
+    code: LiveHostingRefusal["reason"] | "live-document-without-lineage" | "note-format-off",
+  ) =>
     Response.json(
       { ok: false, code },
       { status: 409, headers: { "cache-control": "private, no-store" } },
@@ -269,6 +271,9 @@ export function createNamedDesktopLive(options: {
                 shareId,
                 grantId: grant.grantId,
               };
+              const host = storage.resolveLiveObjectHostBinding(context, objectId);
+              if (host.kind === "current" && storage.liveNoteFormatOff(host.binding))
+                return hostRefused("note-format-off");
               let session = sessions.create(context);
               if (!session) return refuse();
               created = session.discriminator;

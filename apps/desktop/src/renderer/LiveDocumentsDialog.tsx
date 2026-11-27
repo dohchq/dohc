@@ -1116,7 +1116,7 @@ export function LiveDocumentsDialog({
                 !pendingStops.has(row.objectId) &&
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server turned off the newer note format this note uses. Ask the server's
+                    The server turned off the newer note format this document uses. Ask the server's
                     operator to turn it back on.
                   </p>
                 ) : null}

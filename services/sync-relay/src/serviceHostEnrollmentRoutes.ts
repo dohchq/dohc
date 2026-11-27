@@ -401,7 +401,8 @@ export type ServiceHostDocumentState =
     };
 /**
  * Each enrolled document's readiness, from its row, the host, and the metadata
- * of its current activation and live document. It reads no state or baseline bytes.
+ * of its current activation and live document. It reads no state bytes, and reads
+ * each baseline's bytes once per process to learn its note format.
  */
 const START_FAILED: Readonly<Record<LiveNoteStartFailure, string>> = {
   refused: "session-host-refused",
@@ -488,6 +489,8 @@ export function serviceHostReadiness(options: {
       if (!(error instanceof ServiceActivationDamaged)) throw error;
       return { ...base, status: "unavailable", reason: "session-host-diverged" };
     }
+    if (saved && storage.liveNoteFormatOff(saved.binding))
+      return { ...base, status: "unavailable", reason: "note-format-off" };
     if (row.note.state !== "live" || !saved?.completed) return starting();
     const document = {
       workspaceId: row.workspaceId,
@@ -500,8 +503,6 @@ export function serviceHostReadiness(options: {
       actor: { kind: "owner", userId: row.ownerUserId },
     });
     if (current.kind !== "current" || !host.ready(document)) return starting();
-    if (storage.liveNoteFormatOff(current.binding))
-      return { ...base, status: "unavailable", reason: "note-format-off" };
     return {
       ...base,
       path: current.binding.currentPath,
