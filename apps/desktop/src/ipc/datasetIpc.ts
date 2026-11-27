@@ -217,6 +217,7 @@ export function createDatasetHandler<
       scope?: string;
       credentialGeneration?: number;
       review: LocalDatasetMigrationPreparation;
+      restore?: Record<string, string>;
       clear(): void;
     }
   >();
@@ -830,18 +831,18 @@ export function createDatasetHandler<
             return paths.map((path) => {
               const file = files.find((value) => value.path === path);
               if (!file) throw new Error(`Collection source unavailable: ${path}.`);
-              return new TextDecoder().decode(file.bytes);
+              return new TextDecoder("utf-8", { ignoreBOM: true }).decode(file.bytes);
             });
           };
-          const descriptorAt = async (path: string) =>
-            parseDatasetDefinition(JSON.parse((await textsAt([path]))[0]!), {
-              descriptorPath: path,
-            });
-          const approvedDescriptorAt = async (
+          const approvedSources = async (
             descriptorPath: string,
             approved: { revision: DatasetRevision; schemaSql: string; operationSource: string },
           ) => {
-            const pinned = await descriptorAt(descriptorPath);
+            const unmarked = (text: string) => text.replace(/^﻿/, "");
+            const [descriptor] = await textsAt([descriptorPath]);
+            const pinned = parseDatasetDefinition(JSON.parse(unmarked(descriptor!)), {
+              descriptorPath,
+            });
             const [schemaSql, operationSource] = await textsAt([
               pinned.schemaPath,
               pinned.operationsPath,
@@ -850,8 +851,8 @@ export function createDatasetHandler<
               describeDatasetRevision({
                 definition,
                 revision: 1,
-                schemaSql: schema.replace(/^﻿/, ""),
-                operationSource: operations.replace(/^﻿/, ""),
+                schemaSql: unmarked(schema),
+                operationSource: unmarked(operations),
               }).revisionSha256;
             if (
               digest(pinned, schemaSql!, operationSource!) !==
@@ -860,7 +861,14 @@ export function createDatasetHandler<
               throw new Error(
                 "This Collection's rule files have edits that aren't approved yet. Review or undo them, then change fields.",
               );
-            return pinned;
+            return {
+              pinned,
+              files: {
+                [descriptorPath]: descriptor!,
+                [pinned.schemaPath]: schemaSql!,
+                [pinned.operationsPath]: operationSource!,
+              },
+            };
           };
           const credentialGeneration = dependencies.currentCredentialGeneration?.();
           const migrationAuthority = {
@@ -941,6 +949,7 @@ export function createDatasetHandler<
               pending.clear();
               await migrationAuthority.discardMigrationCandidate(candidate);
               migrationAuthority.assertCurrent();
+              if (pending.restore) await writeSources(pending.restore);
               return { kind: "migration-discarded" as const };
             }
             const result = await onMainLocked(async () => {
@@ -961,6 +970,7 @@ export function createDatasetHandler<
             datasetId: string;
             descriptorPath: string;
             migrationPath: string | null;
+            restore?: Record<string, string>;
           }) => {
             if (migrations.size + preparingMigrations >= 8)
               throw new Error(
@@ -997,6 +1007,7 @@ export function createDatasetHandler<
                 scope: operation.scope,
                 credentialGeneration,
                 review: structuredClone(prepared),
+                restore: selection.restore,
                 clear,
               });
               operation.signal.addEventListener("abort", expire, { once: true });
@@ -1428,26 +1439,33 @@ export function createDatasetHandler<
                     fieldId: input.fieldId,
                     labelFieldId: input.labelFieldId,
                   });
+            const descriptorPath = shared && "datasetPath" in request ? request.datasetPath : null;
+            const original = descriptorPath
+              ? await approvedSources(descriptorPath, approved)
+              : null;
             const generated =
-              shared && "datasetPath" in request
-                ? inPlace(
-                    changed,
-                    request.datasetPath,
-                    await approvedDescriptorAt(request.datasetPath, approved),
-                  )
+              original && descriptorPath
+                ? inPlace(changed, descriptorPath, original.pinned)
                 : changed;
+            const restore = original ? () => writeSources(original.files) : undefined;
             const expected = describeDatasetRevision({
               definition: generated.definition,
               revision: input.revision + 1,
               schemaSql: generated.schemaSql,
               operationSource: generated.operationSource,
             });
-            await onMainLocked(() => writeSources(generated.files));
-            current();
-            const prepared = await prepareMigration({
-              datasetId: input.datasetId,
-              descriptorPath: generated.descriptorPath,
-              migrationPath: generated.migrationPath,
+            const prepared = await (async () => {
+              await onMainLocked(() => writeSources(generated.files));
+              current();
+              return prepareMigration({
+                datasetId: input.datasetId,
+                descriptorPath: generated.descriptorPath,
+                migrationPath: generated.migrationPath,
+                restore: original?.files,
+              });
+            })().catch(async (error: unknown) => {
+              await restore?.().catch(() => {});
+              throw error;
             });
             current();
             if (
@@ -1462,6 +1480,7 @@ export function createDatasetHandler<
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
               });
+              await restore?.();
               throw new Error(
                 "The Collection change differs from this review. Refresh the Collection and prepare it again.",
               );

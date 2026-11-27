@@ -2126,12 +2126,12 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
   expect(activate).toHaveBeenCalledOnce();
 });
 
-it("refuses an Admin's field change while the joined copy holds rule edits that aren't approved", async () => {
+it("refuses an Admin's field change while the joined copy holds rule edits that aren't approved, and puts back the approved files when the change stops", async () => {
   const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
     throw new Error("Unexpected local store.");
   });
-  const writeSharedSources = vi.fn(async () => {
-    throw new Error("rule files sent");
+  const writeSharedSources = vi.fn(async (_workspace: unknown, files: Record<string, string>) => {
+    for (const [path, text] of Object.entries(files)) f.sources.set(path, text);
   });
   const data = { approvedArtifacts: async () => f.host.approvedArtifacts() };
   const named = { governance: () => ({ workspaceId: "owner-workspace", data }) };
@@ -2159,8 +2159,12 @@ it("refuses an Admin's field change while the joined copy holds rule edits that 
   );
   expect(writeSharedSources).not.toHaveBeenCalled();
   f.sources.set("data/schema.sql", "SCHEMA");
-  await expect(f.handler("window", change)).rejects.toThrow("rule files sent");
-  expect(writeSharedSources).toHaveBeenCalledOnce();
+  const original = Object.fromEntries(f.sources);
+  await expect(f.handler("window", change)).rejects.toThrow();
+  expect(writeSharedSources).toHaveBeenCalledTimes(2);
+  expect(writeSharedSources.mock.calls[0]![1]["data/dataset.json"]).toContain('"name": "Guests"');
+  expect(writeSharedSources.mock.calls[1]![1]).toEqual(original);
+  expect(Object.fromEntries(f.sources)).toMatchObject(original);
 });
 
 it("computes generatedSources on historyRevision from both schemaSql and operationSource", async () => {
