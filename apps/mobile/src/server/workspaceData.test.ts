@@ -602,6 +602,106 @@ describe("the change feed", () => {
     expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
   });
 
+  it("stops showing an open view's value on replace before its read answers", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["hidden/a.md", "object-a"]), "0.5.2"));
+    const answer = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(1));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+    const reread = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => reread.promise);
+    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(2));
+    expect(data.state(views.files)).toMatchObject({ value: null, loading: true });
+    reread.resolve(ops(files(), "1.0.0"));
+    await vi.waitFor(() =>
+      expect(data.state(views.files)).toMatchObject({ value: [], loading: false }),
+    );
+  });
+
+  it("keeps a view's failures through a replace, so a second failure still reports", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"), {
+      status: 503,
+      body: { ok: false, code: "server_busy" },
+    });
+    const answer = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual([]));
+    await data.refresh(views.files);
+    expect(data.state(views.files).failures).toBe(1);
+    const reread = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => reread.promise);
+    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(3));
+    expect(data.state(views.files)).toMatchObject({ value: null, loading: true, failures: 1 });
+    reread.resolve({ status: 503, body: { ok: false, code: "server_busy" } });
+    await vi.waitFor(() => expect(data.state(views.files).failures).toBe(2));
+  });
+
+  it("shows nothing it saved under two reaches, and reads afresh", async () => {
+    const server = testServer();
+    const cache = createReadCache();
+    const scope = cacheScope(signInTo(server), "ws-a", "member");
+    cache.set(scope, {
+      view: views.files,
+      value: files(["a.md", "object-a"]).files,
+      cursor: "0.5.2.0123456789abcdef",
+      stale: false,
+    });
+    cache.set(scope, {
+      view: views.chats,
+      value: [],
+      cursor: "0.4.2.fedcba9876543210",
+      stale: false,
+    });
+    server.on("POST", "/sync/ws-a/ops/listFiles", held);
+    const data = createWorkspaceData({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      role: "member",
+      cache,
+    });
+    expect(data.state(views.files).value).toBeNull();
+    expect(cache.entries(scope)).toEqual([]);
+    data.stop();
+  });
+
+  it("opens a joined workspace afresh on replace, and refreshes the owner's in place", async () => {
+    for (const [role, opens] of [
+      ["member", 1],
+      ["owner", 0],
+    ] as const) {
+      const server = testServer();
+      server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));
+      const answer = deferred<Answer>();
+      server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+      server.on("GET", feedPath("ws-a", "1.0.0"), held);
+      let reopened = 0;
+      const data = createWorkspaceData({
+        signIn: signInTo(server),
+        workspaceId: "ws-a",
+        role,
+        cache: createReadCache(),
+        reopen: () => void reopened++,
+      });
+      data.resume();
+      data.subscribe(views.files, () => {});
+      await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+      answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+      await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(2));
+      expect(reopened, role).toBe(opens);
+      data.stop();
+    }
+  });
+
   it("drops a closed view's read that a change overtakes, and reads it again when it opens", async () => {
     const server = testServer();
     const cache = createReadCache();
@@ -821,6 +921,19 @@ describe("the read cache and the sign-in", () => {
 });
 
 describe("a workspace's read marks", () => {
+  it("sends none in a workspace the account joined", async () => {
+    const server = testServer();
+    const data = createWorkspaceData({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      role: "member",
+      cache: createReadCache(),
+    });
+    await data.markRead("thread-1", "message-1");
+    expect(count(server, "/sync/ws-a/ops/markRead")).toBe(0);
+    data.stop();
+  });
+
   it("sends a thread's mark at a message once, again after it fails, and none once the store stops", async () => {
     const server = testServer();
     const path = "/sync/ws-a/ops/markRead";

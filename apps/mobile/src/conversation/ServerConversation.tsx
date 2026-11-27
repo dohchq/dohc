@@ -25,7 +25,7 @@ import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/types";
 import type { WakeTarget } from "../server/chatWakes";
-import { phoneWrites } from "../server/phoneWrites";
+import { phoneWrites, writesIn } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";
 import type {
   ChatGroupKind,
@@ -121,9 +121,10 @@ export function ServerConversation() {
   // Keyed by the workspace store, which is one sign-in's, and the chat, so a draft, a chosen reply or a controller made
   // for one never carries to another, even when the first comes back.
   const writesKey = `${data?.instance ?? 0}:${id}`;
-  // Writes are off unless the build turns them on (src/server/phoneWrites.ts): the chat stays read-only, as it was.
+  // Writes are off unless the build turns them on (src/server/phoneWrites.ts), and in a workspace the account joined.
+  const writes = writesIn(data);
   if (thread === "1" || id.startsWith("thread-"))
-    return phoneWrites ? (
+    return writes ? (
       <WritableThread
         key={writesKey}
         threadId={id}
@@ -134,7 +135,7 @@ export function ServerConversation() {
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
     );
-  return phoneWrites ? (
+  return writes ? (
     <WritableStream key={writesKey} groupId={id} name={name ?? ""} />
   ) : (
     <Stream groupId={id} name={name ?? ""} />

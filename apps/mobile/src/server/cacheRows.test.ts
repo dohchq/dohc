@@ -825,7 +825,9 @@ describe("emptying the cache", () => {
       status: 200,
       body: {
         ok: true,
-        workspaces: [{ workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true }],
+        workspaces: [
+          { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true, role: "owner" },
+        ],
       },
     });
     server.on("POST", "/sync/account/workspaces/ws-a/show-on-phone", {
@@ -909,7 +911,9 @@ describe("a restore that a delete overtakes", () => {
     expect(reads).toBe(1);
     cache
       .savedList({ origin: "https://dohc.example.com", userId: "u-1" })!
-      .listed([{ workspaceId: "ws-b", name: "ws-b", canOpen: true, showOnPhone: true }]);
+      .listed([
+        { workspaceId: "ws-b", name: "ws-b", canOpen: true, showOnPhone: true, role: "owner" },
+      ]);
     answer([SAVED_FILES]);
     await Promise.all([first, second]);
     expect(cache.entries(SCOPE_A)).toEqual([]);
@@ -991,6 +995,7 @@ describe("the saved workspace list", () => {
     name: workspaceId,
     canOpen: true,
     showOnPhone,
+    role: "owner",
   });
   const listAnswer = (...workspaces: ReturnType<typeof entry>[]): Answer => ({
     status: 200,
@@ -1273,6 +1278,7 @@ describe("a launch", () => {
     name: workspaceId,
     canOpen: true,
     showOnPhone: true,
+    role: "owner",
   });
 
   async function relaunch(signingOut: boolean) {

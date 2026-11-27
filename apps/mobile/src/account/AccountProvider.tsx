@@ -196,6 +196,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             canOpen: canOpenApps,
             cache,
             ends: stores,
+            role: data.role,
+            open: data.isOpen,
           })
         : null,
     [signIn, data, runner, cache, stores],
@@ -203,7 +205,16 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
-      signIn && data ? createWorkspaceCollections(signIn, data.workspaceId, stores, cache) : null,
+      signIn && data
+        ? createWorkspaceCollections(
+            signIn,
+            data.workspaceId,
+            stores,
+            cache,
+            data.role,
+            data.isOpen,
+          )
+        : null,
     [signIn, data, stores, cache],
   );
   useEffect(() => () => collections?.stop(), [collections]);

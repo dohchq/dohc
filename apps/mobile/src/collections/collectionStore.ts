@@ -1,3 +1,4 @@
+import type { WorkspaceRole } from "../server/api";
 import type { ScopedEnds } from "../pages/pageLive";
 import type { SignIn } from "../server/account";
 import { requestGenerations, ServerError, shownProblem } from "../server/client";
@@ -161,6 +162,8 @@ export function createWorkspaceCollections(
   workspaceId: string,
   ends: Pick<ScopedEnds, "add">,
   cache: ReadCache,
+  role: WorkspaceRole = "owner",
+  open: () => boolean = () => true,
 ): WorkspaceCollections {
   let controller = new AbortController();
   let operations = collectionOperations(signIn.client, workspaceId, controller.signal);
@@ -169,14 +172,14 @@ export function createWorkspaceCollections(
   const viewReads = requestGenerations();
   const recordReads = requestGenerations();
   const listeners = new Set<() => void>();
-  const listed = cachedList(cache, signIn, workspaceId, views.collections);
+  const listed = cachedList(cache, signIn, workspaceId, views.collections, role);
   let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
   let view: CollectionView | null = null;
   const held = new Map<string, CollectionView>();
   let described: string | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
-  const isLive = () => !stopped && signIn.isCurrent();
+  const isLive = () => !stopped && signIn.isCurrent() && open();
   const busy = (key: string) => {
     const action = actions.get(key)?.state.kind;
     return action === "saving" || action === "saved" || changes.get(key)?.state.kind === "saving";

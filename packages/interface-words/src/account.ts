@@ -109,6 +109,10 @@ export const accountWords = {
   notSyncedYet: "Not synced yet",
   noneSynced: "No workspace on this phone is synced yet. Turn on sync for one on your computer.",
   workspaces: "Workspaces",
+  /** Headings that split the workspace list once the account has joined someone else's workspace. */
+  yourWorkspaces: "Your workspaces",
+  sharedWithYou: "Shared with you",
+  roles: { admin: "Admin", member: "Member" },
 
   sessions: "Sessions",
   thisPhone: "This phone",

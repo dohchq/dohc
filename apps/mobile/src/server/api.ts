@@ -106,7 +106,13 @@ export interface AccountWorkspace {
   /** It has a sync identity, so the server can make a copy for the phone to read. */
   readonly canOpen: boolean;
   readonly showOnPhone: boolean;
+  /** The account's role: it owns the workspace, or joined it as an Admin or a Member, which the phone only reads. */
+  readonly role: WorkspaceRole;
 }
+
+export type WorkspaceRole = "owner" | "admin" | "member";
+const isRole = (value: unknown): value is WorkspaceRole =>
+  value === "owner" || value === "admin" || value === "member";
 
 /** One entry of the account's workspace list, as the server sends it and the phone saves it, or null. */
 export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
@@ -114,12 +120,14 @@ export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
   text(item.workspaceId, 256) &&
   textOrNull(item.name) &&
   typeof item.canOpen === "boolean" &&
-  typeof item.showOnPhone === "boolean"
+  typeof item.showOnPhone === "boolean" &&
+  isRole(item.role)
     ? {
         workspaceId: item.workspaceId,
         name: item.name,
         canOpen: item.canOpen,
         showOnPhone: item.showOnPhone,
+        role: item.role,
       }
     : null;
 

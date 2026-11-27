@@ -219,12 +219,18 @@ export function createAccountOperationRoute(options: {
         current.sessionId !== caller.sessionId ||
         current.userId !== caller.userId ||
         !reaches(caller.userId) ||
-        storage.workspaceOwner(route.workspaceId) !== owner ||
-        (sameReach &&
-          memberOf(caller.userId)?.selector.reach.signature() !==
-            member?.selector.reach.signature())
+        storage.workspaceOwner(route.workspaceId) !== owner
       )
         throw notFound();
+      if (
+        sameReach &&
+        memberOf(caller.userId)?.selector.reach.signature() !== member?.selector.reach.signature()
+      )
+        throw new RelayError(
+          "server_busy",
+          "Your access to this workspace changed. Try again.",
+          503,
+        );
     };
     const authorize = () => check(true);
     if (feed) {

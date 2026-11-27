@@ -1,6 +1,6 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import type { AccountState, SignIn } from "./account";
-import { accountWorkspace, each } from "./api";
+import { accountWorkspace, each, type WorkspaceRole } from "./api";
 import type { CacheRows, SavedView } from "./cacheRows";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
@@ -9,6 +9,7 @@ import { collectionOperations, type PhoneCollection } from "./phoneCollections";
 import { readLane } from "./readLane";
 import {
   earlierCursor,
+  reachOf,
   FEED_HOLD_MS,
   isCursor,
   laterCursor,
@@ -275,8 +276,17 @@ export interface ReadCache {
   }): () => void;
 }
 
-export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceId: string) =>
-  JSON.stringify([signIn.origin, signIn.userId, workspaceId]);
+/** Reads saved under one role never show under another: a joined workspace's scope names the role. */
+export const cacheScope = (
+  signIn: Pick<SignIn, "origin" | "userId">,
+  workspaceId: string,
+  role: WorkspaceRole = "owner",
+) =>
+  JSON.stringify(
+    role === "owner"
+      ? [signIn.origin, signIn.userId, workspaceId]
+      : [signIn.origin, signIn.userId, workspaceId, role],
+  );
 
 const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
@@ -386,7 +396,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
           const kept = new Set(
             workspaces
               .filter((entry) => entry.showOnPhone && entry.canOpen)
-              .map((entry) => cacheScope(signIn, entry.workspaceId)),
+              .map((entry) => cacheScope(signIn, entry.workspaceId, entry.role)),
           );
           for (const known of new Set([...scopes.keys(), ...restoring.keys()]))
             if (!kept.has(known)) forget(known);
@@ -429,8 +439,9 @@ export function cachedList<T>(
   signIn: Pick<SignIn, "origin" | "userId">,
   workspaceId: string,
   view: View<T>,
+  role: WorkspaceRole = "owner",
 ) {
-  const scope = cacheScope(signIn, workspaceId);
+  const scope = cacheScope(signIn, workspaceId, role);
   return {
     value: () => (cache.get(scope, view.id)?.value as T | undefined) ?? null,
     restored: cache.restore(scope) ?? Promise.resolve(),
@@ -440,6 +451,11 @@ export function cachedList<T>(
 
 export interface WorkspaceData {
   readonly workspaceId: string;
+  readonly role: WorkspaceRole;
+  /** False once the store has stopped, as when the workspace opens afresh: answers for it no longer count. */
+  isOpen(): boolean;
+  /** The account joined this workspace rather than owns it, so the phone only reads it: it marks nothing read. */
+  readonly joined: boolean;
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
   readonly instance: number;
   state<T>(view: View<T>): ViewState<T>;
@@ -492,12 +508,16 @@ interface Entry {
 export function createWorkspaceData(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
+  readonly role?: WorkspaceRole;
   readonly cache: ReadCache;
   readonly holdMs?: number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** The server answered 404 for the workspace: the store has stopped and cleared. */
   readonly onGone?: () => void;
-  /** Try again on a store that has gone: the account opens the workspace in a new store. */
+  /**
+   * Try again on a store that has gone, and the feed's `replace` in a workspace the account joined: the account opens
+   * the workspace in a new store.
+   */
   readonly reopen?: () => void;
   /** A read from the server that still counts showed these messages. */
   readonly onMessages?: (messages: readonly ChatMessage[]) => void;
@@ -505,7 +525,8 @@ export function createWorkspaceData(options: {
   const { signIn, workspaceId, cache } = options;
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
   const wait = options.sleep ?? sleep;
-  const scope = cacheScope(signIn, workspaceId);
+  const role = options.role ?? "owner";
+  const scope = cacheScope(signIn, workspaceId, role);
   const lane = readLane(signIn);
   const everything = new AbortController();
   const entries = new Map<string, Entry>();
@@ -521,6 +542,13 @@ export function createWorkspaceData(options: {
     for (const listener of feedListeners) listener();
   }
   function seed(found: readonly Cached[]) {
+    const reaches = new Set(
+      found.flatMap((cached) => (cached.cursor ? [reachOf(cached.cursor)] : [])),
+    );
+    if (reaches.size > 1) {
+      cache.drop(scope);
+      return;
+    }
     for (const cached of found) {
       if (cached.stale && cached.prefetched) continue;
       const target = entries.get(cached.view.id);
@@ -792,12 +820,20 @@ export function createWorkspaceData(options: {
       cache.drop(scope);
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
+          target.stale = false;
+          set(target, {
+            value: null,
+            loading: true,
+            problem: null,
+            failures: target.state.failures,
+          });
           void read(target, "feed");
           continue;
         }
         forget(target);
         entries.delete(id);
       }
+      if (role !== "owner") options.reopen?.();
       return;
     }
     const known: Known = {
@@ -819,6 +855,9 @@ export function createWorkspaceData(options: {
 
   const store: WorkspaceData = {
     workspaceId,
+    role,
+    joined: role !== "owner",
+    isOpen: () => !stopped,
     instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
     subscribe(view, listener) {
@@ -887,7 +926,12 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
     markRead(threadId, messageId) {
-      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId)
+      if (
+        store.joined ||
+        !live() ||
+        sending.get(threadId) === messageId ||
+        marked.get(threadId) === messageId
+      )
         return Promise.resolve();
       sending.set(threadId, messageId);
       return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal)

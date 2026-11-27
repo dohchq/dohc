@@ -20,7 +20,7 @@ import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
 import { copyText, useCopiedMark } from "../copy";
 import { pageTitle } from "../home/homeModel";
-import { phoneWrites } from "../server/phoneWrites";
+import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
@@ -42,14 +42,14 @@ import {
 } from "./pageParts";
 
 type PageParams = { path?: string; workspace?: string; t0?: string };
-const pageScript = (path: string, markdown: string) =>
+const pageScript = (path: string, markdown: string, live: boolean) =>
   `window.__dohcPage = ${JSON.stringify({
     title: pageTitle(path),
     properties: [],
     markdown,
     large: false,
     editable: false,
-    live: phoneWrites,
+    live,
     textScale: PixelRatio.getFontScale(),
   })}; true;`;
 
@@ -162,7 +162,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
 
   // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
   // or workspace ended (appTeardown) stays read-only.
-  const editsLive = phoneWrites && state.value?.kind === "page" && data !== null && !stopped;
+  const editsLive = writesIn(data) && state.value?.kind === "page" && data !== null && !stopped;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
@@ -225,7 +225,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     given.current = { mount, markdown };
     web.current?.injectJavaScript(
       sent === null
-        ? pageScript(path, markdown)
+        ? pageScript(path, markdown, writesIn(data))
         : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
     );
   }, [started, mount, markdown, painted, live, path, host, early]);
@@ -297,11 +297,14 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     setEarly({
       mount,
       markdown,
-      script: markdown === null ? undefined : pageScript(path, markdown),
+      script: markdown === null ? undefined : pageScript(path, markdown, writesIn(data)),
     });
   useEffect(() => {
     if (!webShown) host.gone();
   }, [webShown]);
+  useEffect(() => {
+    if (markdown === null && !holding && sentTo(mount) !== null) host.gone();
+  }, [markdown, holding, mount]);
   useEffect(() => {
     if (!editsLive || !webShown || !data) return;
     host.open((post) =>

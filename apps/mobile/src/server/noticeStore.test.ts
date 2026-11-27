@@ -142,12 +142,14 @@ const trip: AccountWorkspace = {
   name: "Trip",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const work: AccountWorkspace = {
   workspaceId: "w2",
   name: "Work",
   canOpen: true,
   showOnPhone: true,
+  role: "owner",
 };
 const OK = { ok: true, dismissed: [] };
 /** The tests' clock: after the fixtures were made and before they expire (`relayRow`). */

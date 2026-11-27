@@ -5,7 +5,9 @@ import { deferred, testServer, type Answer } from "./testServer";
 
 const WORKSPACES = {
   ok: true,
-  workspaces: [{ workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true }],
+  workspaces: [
+    { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true, role: "owner" },
+  ],
 };
 
 function client(
@@ -35,7 +37,7 @@ describe("the server client", () => {
     const server = testServer();
     server.on("GET", "/sync/account/workspaces", { status: 200, body: WORKSPACES });
     expect(await listWorkspaces(client(server))).toEqual([
-      { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true },
+      { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true, role: "owner" },
     ]);
     expect(server.calls[0]!.headers.authorization).toBe("Bearer tok");
   });

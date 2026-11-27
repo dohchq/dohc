@@ -6,3 +6,7 @@
 // simulator round is, turns it on; any other signed-in build stays read-only. The sample build shows its composer
 // whatever this says, over its own in-memory outbox, and never reaches a server.
 export const phoneWrites = process.env.EXPO_PUBLIC_DOHC_PHONE_WRITES === "1";
+
+/** Whether the open workspace takes chat writes and live page edits: never one the account joined rather than owns. */
+export const writesIn = (data: { readonly joined: boolean } | null) =>
+  phoneWrites && data !== null && !data.joined;

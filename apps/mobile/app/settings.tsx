@@ -25,6 +25,8 @@ import { pageTimings, timingOwner } from "../src/pages/pageTimings";
 import { launchTimings, type LaunchStep } from "../src/startup";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
+import type { AccountWorkspace } from "../src/server/api";
+import { workspaceGroups } from "../src/server/workspaceList";
 import {
   changeAgent,
   endSession,
@@ -123,6 +125,7 @@ function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
   const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone, alerts } = useAccount();
+  const groups = workspaceGroups(workspaces.status === "ready" ? workspaces.workspaces : []);
   const server = serverName(signIn.origin);
   const router = useRouter();
   const outboxState = useOutboxState(outbox);
@@ -259,19 +262,33 @@ function SettingsScreen() {
             {workspaces.workspaces.length === 0 ? (
               <Empty text={accountWords.noWorkspaces(server)} />
             ) : null}
-            {workspaces.workspaces.map((workspace) => {
-              const name = workspaceName(workspace);
-              return (
-                <Row key={workspace.workspaceId} title={name}>
-                  <Switch
-                    value={workspace.showOnPhone}
-                    disabled={workspaces.pending.has(workspace.workspaceId)}
-                    onValueChange={(value) => setShowOnPhone(workspace.workspaceId, value)}
-                    accessibilityLabel={accountWords.showOnPhoneLabel(name)}
-                  />
-                </Row>
-              );
-            })}
+            {(
+              [
+                [accountWords.yourWorkspaces, groups.own],
+                [accountWords.sharedWithYou, groups.shared],
+              ] as const
+            ).map(([heading, rows]) =>
+              rows.length === 0 ? null : (
+                <View key={heading} style={styles.group}>
+                  {groups.shared.length > 0 ? (
+                    <Text
+                      style={[styles.subheading, { color: theme.muted }]}
+                      accessibilityRole="header"
+                    >
+                      {heading}
+                    </Text>
+                  ) : null}
+                  {rows.map((workspace) => (
+                    <ShowOnPhoneRow
+                      key={workspace.workspaceId}
+                      workspace={workspace}
+                      pending={workspaces.pending.has(workspace.workspaceId)}
+                      onChange={setShowOnPhone}
+                    />
+                  ))}
+                </View>
+              ),
+            )}
           </>
         ) : null}
       </Section>
@@ -496,6 +513,31 @@ function Loaded<T>({
   );
 }
 
+function ShowOnPhoneRow({
+  workspace,
+  pending,
+  onChange,
+}: {
+  workspace: AccountWorkspace;
+  pending: boolean;
+  onChange(workspaceId: string, showOnPhone: boolean): void;
+}) {
+  const name = workspaceName(workspace);
+  return (
+    <Row
+      title={name}
+      detail={workspace.role === "owner" ? undefined : accountWords.roles[workspace.role]}
+    >
+      <Switch
+        value={workspace.showOnPhone}
+        disabled={pending}
+        onValueChange={(value) => onChange(workspace.workspaceId, value)}
+        accessibilityLabel={accountWords.showOnPhoneLabel(name)}
+      />
+    </Row>
+  );
+}
+
 function Section({ title, children }: { title?: string; children: ReactNode }) {
   const theme = useTheme();
   return (
@@ -578,6 +620,8 @@ const styles = StyleSheet.create({
   page: { paddingHorizontal: 16, paddingBottom: 48, gap: 32 },
   section: { gap: 8 },
   heading: { fontSize: 15, fontWeight: "600" },
+  group: { paddingTop: 4 },
+  subheading: { fontSize: 13, fontWeight: "600", paddingTop: 8 },
   row: {
     flexDirection: "row",
     alignItems: "center",

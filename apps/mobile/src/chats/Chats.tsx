@@ -13,7 +13,7 @@ import {
 } from "react";
 import { View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
-import { phoneWrites } from "../server/phoneWrites";
+import { writesIn } from "../server/phoneWrites";
 import { launchTimings } from "../startup";
 import { views } from "../server/workspaceData";
 import type { ChatGroup } from "../server/workspaceReads";
@@ -102,11 +102,11 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
   );
   const prefetch = useCallback(
     (row: ChatRowData) => {
-      if (data) prefetchChat(data, row, phoneWrites);
+      if (data) prefetchChat(data, row, writesIn(data));
     },
     [data],
   );
-  const [warmUnread] = useState(() => unreadPrefetch(phoneWrites));
+  const [warmUnread] = useState(() => unreadPrefetch(writesIn(data)));
   const [pulling, setPulling] = useState(false);
   const refresh = useCallback(() => {
     if (!data) return;
