@@ -24,6 +24,7 @@ afterEach(closeTestStorages);
 
 const NOW = 1_000_000;
 const MARKER = "chat-wakes-v1";
+const MEMORY_MARKER = "chat-runner-memory-v1";
 
 const target = (name: string, ...installs: string[]): ChatWakeTarget => ({
   target: `mention:${name}`,
@@ -130,7 +131,8 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   };
   const older = inspectDatabase(path);
   older.exec(`DROP TABLE sync_relay_chat_wakes; DROP TABLE sync_relay_chat_runners; DROP TABLE sync_relay_chat_wake_heads;
-    DROP TABLE sync_relay_chat_wake_retries; DELETE FROM sync_relay_migrations WHERE migration_id = '${MARKER}';`);
+    DROP TABLE sync_relay_chat_wake_retries;
+    DELETE FROM sync_relay_migrations WHERE migration_id IN ('${MARKER}', '${MEMORY_MARKER}');`);
   older.close();
 
   const upgraded = reopenTestStorage(path);
@@ -166,6 +168,33 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   damaged.exec("DROP INDEX idx_sync_relay_chat_wakes_ended");
   damaged.close();
   expect(() => reopenTestStorage(path)).toThrow("chat wake schema is missing or damaged");
+});
+
+it("adds runners' memory to a relay that has chat wakes, once, keeping its runners", async () => {
+  const storage = await testStorage();
+  storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
+  storage.replaceChatRunners({
+    accountId: "ana",
+    workspaceId: "trip",
+    installId: "mac",
+    computerLabel: "Mac",
+    runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }],
+    nowMs: NOW,
+  });
+  const path = storagePath(storage);
+  closeTestStorage(storage);
+  const older = inspectDatabase(path);
+  older.exec(`ALTER TABLE sync_relay_chat_runners DROP COLUMN memory;
+    DELETE FROM sync_relay_migrations WHERE migration_id = '${MEMORY_MARKER}';`);
+  older.close();
+
+  for (let boot = 0; boot < 2; boot += 1) {
+    const upgraded = reopenTestStorage(path);
+    expect(
+      upgraded.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
+    ).toMatchObject([{ installId: "mac", agentId: "default", memory: false }]);
+    closeTestStorage(upgraded);
+  }
 });
 
 it("deletes runners and wakes with their workspace, keeps retries' bindings, and deletes everything of an account with it", async () => {

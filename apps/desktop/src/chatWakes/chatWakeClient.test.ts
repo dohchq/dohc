@@ -212,4 +212,22 @@ describe("the chat wake client", () => {
     await expect(again.client.replaceRunners("ws", runners, again.signal)).rejects.toThrow();
     expect(again.sent).toHaveLength(1);
   });
+
+  it("declares again without agents' memory when an older relay refuses it", async () => {
+    const plain = { agentId: "default", displayName: "Claude", enabled: true };
+    const declaration = {
+      installId: "mac",
+      computerLabel: "Mac",
+      runners: [{ ...plain, memory: true as const }],
+    };
+    const w = world(
+      { status: 400, body: { ok: false } },
+      { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 } },
+    );
+    await w.client.replaceRunners("ws", declaration, w.signal);
+    expect(w.sent.map((sent) => JSON.parse(String(sent.init.body)))).toEqual([
+      declaration,
+      { installId: "mac", computerLabel: "Mac", runners: [plain] },
+    ]);
+  });
 });
