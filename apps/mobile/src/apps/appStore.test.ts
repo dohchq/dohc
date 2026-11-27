@@ -21,7 +21,7 @@ import {
 } from "../server/testServer";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { cacheScope, createReadCache, type ReadCache } from "../server/workspaceData";
-import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
+import { appTeardown, createAppRunner, createWorkspaceApps, REPLACED_KEPT_MS } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
@@ -308,6 +308,20 @@ describe("teardown", () => {
       server.on("POST", "/sync/ws-1/ops/apps", ...answers);
       await apps.refresh();
       expect(runner.state() === null, name).toBe(ends);
+    }
+  });
+
+  it("closes a replaced owner app once it has run for the launch's lifetime", async () => {
+    const owned = { ...version(A, true, "events/signup", true), name: "signup" };
+    const { server, runner, apps } = await running(owned);
+    const started = runner.state()?.startedAtMs ?? 0;
+    const now = vi.spyOn(Date, "now").mockReturnValue(started + REPLACED_KEPT_MS);
+    try {
+      server.on("POST", "/sync/ws-1/ops/apps", page([version(B, false, "events/signup", true)]));
+      await apps.refresh();
+      expect(runner.state()).toBeNull();
+    } finally {
+      now.mockRestore();
     }
   });
 
