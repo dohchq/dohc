@@ -11,11 +11,13 @@ import { createWorkspaceRefusalNotices } from "./workspaceRefusalNotices";
 import { createNoticeStore, type NoticeStore } from "./noticeStore";
 import { deferred, type Deferred } from "../testing/deferred";
 
+const REASON_SHA256 = "a".repeat(64);
+
 const notice = {
   noticeId: "refusal",
   originId: "peer",
   originSeq: 1,
-  refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+  refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
   reason: "seed-lineage-conflict",
   document: null,
 };
@@ -162,7 +164,7 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
       pending.push({
         ...notice,
         originSeq: 2,
-        refusalCoordinates: [{ originId: "peer", originSeq: 2 }],
+        refusalCoordinates: [{ originId: "peer", originSeq: 2, reasonSha256: REASON_SHA256 }],
       });
     },
     advanceYear: () => {
@@ -280,7 +282,7 @@ describe("workspace refusal notices", () => {
       expect(remaining).toMatchObject({
         noticeId: shown!.noticeId,
         readAtMs: null,
-        refusalCoordinates: [{ originId: "peer", originSeq: 2 }],
+        refusalCoordinates: [{ originId: "peer", originSeq: 2, reasonSha256: REASON_SHA256 }],
       });
       expect(
         f.sendRequest.mock.calls
@@ -290,7 +292,7 @@ describe("workspace refusal notices", () => {
         {
           workspaceId: "workspace",
           noticeId: "refusal",
-          refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+          refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
         },
       ]);
       await restarted.mark([remaining!], "dismissed", null);
@@ -314,7 +316,7 @@ describe("workspace refusal notices", () => {
         const [remaining] = (await store.list()).notices;
         expect(remaining).toMatchObject({
           noticeId: shown!.noticeId,
-          refusalCoordinates: [{ originId: "peer", originSeq: 2 }],
+          refusalCoordinates: [{ originId: "peer", originSeq: 2, reasonSha256: REASON_SHA256 }],
         });
         expect(
           f.sendRequest.mock.calls.find(

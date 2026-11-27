@@ -5,6 +5,8 @@ import { NOTICE_MARK_BATCH_MAX, MarkNoticesPayload, NoticeRow } from "../../ipc/
 import { deferred } from "../../testing/deferred";
 import { SENT_NOTICE_TOAST_MS, sentNoticeRef, useSentNotices } from "./useSentNotices";
 
+const REASON_SHA256 = "a".repeat(64);
+
 const ANA = "https://server.test#https://relay.test#ana";
 const BEN = "https://server.test#https://relay.test#ben";
 
@@ -66,7 +68,7 @@ describe("sent notices in a window", () => {
     const shown = notice("refusal", {
       store: "local",
       kind: "sync-refusal",
-      refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+      refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
     });
     listed = [shown];
     const { result } = renderHook(() => useSentNotices(true));
@@ -79,7 +81,12 @@ describe("sent notices in a window", () => {
           refusalCoordinates: shown.refusalCoordinates,
         },
       ]);
-      listed = [{ ...shown, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }];
+      listed = [
+        {
+          ...shown,
+          refusalCoordinates: [{ originId: "peer", originSeq: 2, reasonSha256: REASON_SHA256 }],
+        },
+      ];
     });
     await act(async () => result.current.dismiss([sentNoticeRef(shown)]));
     expect(result.current.notices).toEqual(listed);

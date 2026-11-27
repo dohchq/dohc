@@ -58,6 +58,8 @@ pub enum RefusalCoordinate {
         origin_id: String,
         #[serde(rename = "originSeq")]
         origin_seq: i64,
+        #[serde(rename = "reasonSha256")]
+        reason_sha256: String,
     },
     LocalObligation {
         #[serde(rename = "obligationOrder")]
@@ -123,6 +125,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
         .map_err(SyncError::corrupt)?;
     let mut notices = rows.into_iter()
         .map(|(origin_id, origin_seq, reason, payload, code)| {
+            let reason_sha256 = hex_sha256(serde_json::json!([code, reason]).to_string().as_bytes());
             let payload: Value = serde_json::from_str(&payload).map_err(SyncError::corrupt)?;
             let mut document = document(&payload);
             if reason == crate::moment_apply::pending::BINDING_CHANGED {
@@ -211,6 +214,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                 refusal_coordinates: vec![RefusalCoordinate::Replication {
                     origin_id: origin_id.clone(),
                     origin_seq,
+                    reason_sha256,
                 }],
                 notice_id: format!(
                     "sync-refusal-{}",
@@ -608,19 +612,13 @@ mod tests {
             let remaining = list_refusal_notices(&store, "ws").unwrap();
             assert_eq!(remaining.len(), 1);
             assert_eq!(remaining[0].notice_id, shown.notice_id);
-            assert_eq!(
-                remaining[0].refusal_coordinates,
-                vec![
-                    RefusalCoordinate::Replication {
-                        origin_id: "peer".into(),
-                        origin_seq: 2
-                    },
-                    RefusalCoordinate::Replication {
-                        origin_id: "another-peer".into(),
-                        origin_seq: 0
-                    },
-                ]
-            );
+            assert!(matches!(
+                remaining[0].refusal_coordinates.as_slice(),
+                [
+                    RefusalCoordinate::Replication { origin_id: first, origin_seq: 2, .. },
+                    RefusalCoordinate::Replication { origin_id: second, origin_seq: 0, .. },
+                ] if first == "peer" && second == "another-peer"
+            ));
         }
     }
 

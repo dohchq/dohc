@@ -48,6 +48,8 @@ import {
   type PostNoticeInput,
 } from "./noticeStore";
 
+const REASON_SHA256 = "a".repeat(64);
+
 afterEach(closeTestStorages);
 
 describe("Notice save durability", () => {
@@ -936,7 +938,7 @@ it("rebuilds refusal Notices from the engine and keeps read marks across restart
       noticeId: "sync-refusal-a",
       originId: "peer",
       originSeq: 1,
-      refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+      refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
       reason: "plaintext projection exceeds limit",
       document: {
         versionId: "main",
@@ -1174,7 +1176,7 @@ it("rejects a refusal dismissal without shown coordinates", async () => {
             noticeId: "refusal",
             originId: "peer",
             originSeq: 1,
-            refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+            refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
             reason: "Review this file",
             document: null,
           },
@@ -1189,6 +1191,10 @@ it("rejects a refusal dismissal without shown coordinates", async () => {
   expect(dismissRefusal).not.toHaveBeenCalled();
   expect((await first.store.list()).notices).toHaveLength(1);
 });
+
+function pick(f: ReturnType<typeof refusalEngine>) {
+  return { refusalNotices: f.refusalNotices, dismissRefusal: f.dismissRefusal };
+}
 
 function refusalEngine(coordinates: RefusalCoordinate[], reason: string) {
   const engine = { open: true, coordinates, applied: [] as RefusalCoordinate[][] };
@@ -1269,11 +1275,7 @@ describe("a refusal made again under the same coordinates", () => {
     f.engine.open = false;
     await computerA.store.mark(shown, "dismissed", null);
     f.engine.open = true;
-    const restarted = await computer(null, {
-      refusalNotices: f.refusalNotices,
-      dismissRefusal: f.dismissRefusal,
-      directory: computerA.directory,
-    });
+    const restarted = await computer(null, { ...pick(f), directory: computerA.directory });
     expect((await restarted.store.list()).notices).toEqual([]);
     expect((await restarted.store.list()).notices).toEqual([]);
     expect(f.engine.applied).toEqual([[first]]);
@@ -1287,13 +1289,47 @@ describe("a refusal made again under the same coordinates", () => {
     await computerA.store.mark(shown, "dismissed", null);
     f.engine.coordinates = [again];
     f.engine.open = true;
-    const restarted = await computer(null, {
-      refusalNotices: f.refusalNotices,
-      dismissRefusal: f.dismissRefusal,
-      directory: computerA.directory,
-    });
+    const restarted = await computer(null, { ...pick(f), directory: computerA.directory });
     expect((await restarted.store.list()).notices).toEqual([
       expect.objectContaining({ refusalCoordinates: [again], readAtMs: null }),
+    ]);
+    expect(f.engine.applied).toEqual([]);
+  });
+
+  it("drops refusal rows a version 1 file saved without a reason and keeps the rest", async () => {
+    const directory = await createTestScratch("notices-");
+    const row = {
+      workspaceId: WORKSPACE,
+      title: "Your agent finished",
+      body: "",
+      target: {},
+      createdAtMs: clock,
+      readAtMs: null,
+      dismissedAtMs: null,
+    };
+    const old = { originId: "peer", originSeq: 1 };
+    await writeFile(
+      join(directory, "local.json"),
+      JSON.stringify({
+        version: 1,
+        rows: [
+          { ...row, noticeId: "agent-run:1", kind: "agent-run" },
+          {
+            ...row,
+            noticeId: "sync-refusal-note",
+            kind: "sync-refusal",
+            refusalCoordinates: [],
+            pendingRefusalDismissals: [old],
+            dismissedAtMs: clock,
+          },
+        ],
+      }),
+    );
+    const f = refusalEngine([first], "ydoc-note-uses-a-newer-body-format");
+    const upgraded = await computer(null, { ...pick(f), directory });
+    expect((await upgraded.store.list()).notices.map((notice) => notice.noticeId).sort()).toEqual([
+      "agent-run:1",
+      "sync-refusal-note",
     ]);
     expect(f.engine.applied).toEqual([]);
   });
@@ -1304,7 +1340,7 @@ it("keeps unavailable workspace refusals while refreshing other workspaces", asy
     noticeId,
     originId: "peer",
     originSeq: 1,
-    refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    refusalCoordinates: [{ originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 }],
     reason: "Review this file",
     document: null,
   });
@@ -1340,8 +1376,8 @@ it("keeps unavailable workspace refusals while refreshing other workspaces", asy
 });
 
 describe("refusal work after quit stops it", () => {
-  const first = { originId: "peer", originSeq: 1 };
-  const second = { originId: "peer", originSeq: 2 };
+  const first = { originId: "peer", originSeq: 1, reasonSha256: REASON_SHA256 };
+  const second = { originId: "peer", originSeq: 2, reasonSha256: REASON_SHA256 };
   const hold = () => ({ started: deferred(), release: deferred() });
 
   // One workspace's engine with one refusal Notice. Null coordinates mean the
@@ -1418,7 +1454,11 @@ describe("refusal work after quit stops it", () => {
     const { each } = await withQueuedDismissal(refusals);
     const reads = refusals.refusalNotices.mock.calls.length;
     const changes = each.changes;
-    refusals.coordinates = [first, second, { originId: "peer", originSeq: 3 }];
+    refusals.coordinates = [
+      first,
+      second,
+      { originId: "peer", originSeq: 3, reasonSha256: REASON_SHA256 },
+    ];
     const read = refusals.holdRead();
     const dismissal = refusals.holdDismissal();
     const running = each.store.refreshRefusals(WORKSPACE);
@@ -1438,7 +1478,12 @@ describe("refusal work after quit stops it", () => {
     await expect(running).resolves.toBeUndefined();
     await expect(queued).resolves.toBeUndefined();
     expect((await listed).notices).toEqual([
-      expect.objectContaining({ refusalCoordinates: [second, { originId: "peer", originSeq: 3 }] }),
+      expect.objectContaining({
+        refusalCoordinates: [
+          second,
+          { originId: "peer", originSeq: 3, reasonSha256: REASON_SHA256 },
+        ],
+      }),
     ]);
     expect(refusals.refusalNotices).toHaveBeenCalledTimes(reads + 1);
     expect(each.changes).toBe(changes + 1);
@@ -1447,7 +1492,10 @@ describe("refusal work after quit stops it", () => {
     expect((await restarted.store.list()).notices).toEqual([
       expect.objectContaining({
         noticeId: "refusal",
-        refusalCoordinates: [second, { originId: "peer", originSeq: 3 }],
+        refusalCoordinates: [
+          second,
+          { originId: "peer", originSeq: 3, reasonSha256: REASON_SHA256 },
+        ],
       }),
     ]);
     expect(JSON.parse(await localFile(each)).rows[0].pendingRefusalDismissals).toEqual([first]);
@@ -1966,8 +2014,8 @@ it("says a chat message the server refused is set aside, and that later ones sti
           originId: "member",
           originSeq: 4,
           refusalCoordinates: [
-            { originId: "member", originSeq: 4 },
-            { originId: "member", originSeq: 5 },
+            { originId: "member", originSeq: 4, reasonSha256: REASON_SHA256 },
+            { originId: "member", originSeq: 5, reasonSha256: REASON_SHA256 },
           ],
           reason: SHARE_CHAT_REFUSED,
           document: null,
@@ -1991,7 +2039,7 @@ it("says a note in a newer format needs a newer dohc and that dohc kept the chan
     noticeId,
     originId: "member",
     originSeq: 0,
-    refusalCoordinates: [{ originId: "member", originSeq: 0 }],
+    refusalCoordinates: [{ originId: "member", originSeq: 0, reasonSha256: REASON_SHA256 }],
     reason: "ydoc-note-uses-a-newer-body-format",
     document: path
       ? { versionId: "main", path, objectId: noticeId, lineageClaimId: "claim", conflictId: null }

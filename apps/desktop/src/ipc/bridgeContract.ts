@@ -8261,7 +8261,11 @@ export const AutomationControlsTargetShape = z
   })
   .refine(isNoticeTarget);
 export const RefusalCoordinate = z.union([
-  z.object({ originId: z.string(), originSeq: z.number().int() }),
+  z.object({
+    originId: z.string(),
+    originSeq: z.number().int(),
+    reasonSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  }),
   z.object({
     obligationOrder: z.number().int().positive(),
     checkpointSha256: z.string(),

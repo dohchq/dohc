@@ -227,7 +227,7 @@ function coordinateKey(coordinate: RefusalCoordinate): string {
         coordinate.checkpointSha256,
         coordinate.headSha256,
       ])
-    : JSON.stringify([coordinate.originId, coordinate.originSeq]);
+    : JSON.stringify([coordinate.originId, coordinate.originSeq, coordinate.reasonSha256]);
 }
 
 function withoutCoordinates(
@@ -281,10 +281,11 @@ const RelayRow = z.object({
 type RelayRow = z.infer<typeof RelayRow>;
 
 const LocalFile = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   rows: z.array(LocalRow),
 });
 type LocalFile = z.infer<typeof LocalFile>;
+const LocalFileVersion1 = z.object({ version: z.literal(1), rows: z.array(z.unknown()) });
 
 const OutboxMark = z.object({
   withdraw: z.literal(true).optional(),
@@ -447,7 +448,15 @@ export function createNoticeStore(deps: {
 
   async function loadLocal(): Promise<LocalFile> {
     if (!localFile) {
-      localFile = await load("local.json", LocalFile, { version: 1, rows: [] });
+      localFile = await load("local.json", LocalFile, { version: 2, rows: [] }, (json) => {
+        const old = LocalFileVersion1.safeParse(json);
+        if (!old.success) return null;
+        const rows = old.data.rows.flatMap((row) => {
+          const parsed = LocalRow.safeParse(row);
+          return parsed.success && !isRefusalNoticeKind(parsed.data.kind) ? [parsed.data] : [];
+        });
+        return { version: 2, rows };
+      });
       if (pruneLocal(localFile)) await saveLocal(localFile);
     }
     return localFile;
