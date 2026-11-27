@@ -81,7 +81,7 @@ describe("collection commands", () => {
         ? { ok: true, recordId: "rec_1", recordPath: "tasks/launch.md" }
         : { ok: true, recordPath: "tasks/launch.md" },
     );
-    const typed = { points: 3, done: true, tags: ["a", "b"], due: null };
+    const typed = { points: 3, done: true, tags: ["a", "b"], due: null, toString: "x" };
     await executeCli({
       argv: [
         "collection",

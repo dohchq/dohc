@@ -118,8 +118,7 @@ function verbHelp(
     "",
     verb.summary,
     ...(details.length > 0 ? ["", ...paragraph(details)] : []),
-    "",
-    ...paragraph(verb.capabilityId === null ? command.notes : [where, ...command.notes]),
+    ...(verb.capabilityId === null ? [] : ["", ...paragraph([where, ...command.notes])]),
     "",
     "Options:",
     ...flagRows([

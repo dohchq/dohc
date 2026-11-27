@@ -603,7 +603,7 @@ function recordFields(input: VerbInput): Record<string, unknown> {
   if (json === undefined) return named;
   if (typeof json !== "object" || json === null || Array.isArray(json))
     fail("--fields-json takes a JSON object");
-  if (Object.keys(json).some((name) => name in named))
+  if (Object.keys(json).some((name) => Object.hasOwn(named, name)))
     fail("set each field with --field or --fields-json, not both");
   return { ...named, ...json };
 }
