@@ -2827,13 +2827,16 @@ describe("the owner's page", () => {
 
   it("shows the owner where the agent their post woke stands, until it starts or fails", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await ownerPost({ wakes: [[wake("waiting")], [wake("claimed")], [wake("unclaimed")]] });
+    const plans: unknown[] = [chat(3, "Plans start here")];
+    await ownerPost({
+      history: { "wire-plans": plans },
+      wakes: [[wake("waiting")], [wake("claimed")], [wake("unclaimed")]],
+    });
     const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
     await settle(() => line() === "Claude is waiting for a computer");
     expect(
       groupPanel().querySelector(".chat-wake")?.closest(".chat-message")?.textContent,
     ).toContain("@claude plan it");
-    const sent = posts.find((post) => post.body === "@claude plan it")!;
     expect(wakeReads()).toEqual([
       {
         shareId: "owner:ws-1",
@@ -2842,17 +2845,39 @@ describe("the owner's page", () => {
         messageId: expect.any(String),
       },
     ]);
-    expect(sent).toMatchObject({ shareId: "owner:ws-1" });
-    await act(async () => vi.advanceTimersByTime(10_000));
+    // A hidden tab reads nothing, and reads again once it shows.
+    const visibility = (state: string) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    visibility("hidden");
+    await act(async () => vi.advanceTimersByTime(30_000));
+    expect(wakeReads()).toHaveLength(1);
+    await act(async () => visibility("visible"));
     await settle(() => line() === "Claude is starting on a computer");
-    await act(async () => vi.advanceTimersByTime(10_000));
+    // Another Group and back keeps the line, and reads on. The Group's history now holds the post.
+    plans.unshift(chat(40, "@claude plan it", "sam"));
+    await click("All Groups");
+    await act(async () =>
+      buttons()
+        .find((node) => node.textContent?.startsWith("food"))!
+        .click(),
+    );
+    await settle(() => groupPanel().querySelector("h2")?.textContent === "food");
+    expect(groupPanel().querySelector(".chat-wake")).toBeNull();
+    await click("All Groups");
+    await act(async () =>
+      buttons()
+        .find((node) => node.textContent?.startsWith("plans"))!
+        .click(),
+    );
     await settle(() => line() === "Claude didn't start");
     await act(async () => vi.advanceTimersByTime(30_000));
     expect(wakeReads()).toHaveLength(3);
   });
 
   it("tells the owner a post would start too many agents, with no Try again", async () => {
-    await ownerPost({ postFails: { status: 400, code: "too_many_wakes" } });
+    await ownerPost({ user: "ana", postFails: { status: 400, code: "too_many_wakes" } });
     await settle(() =>
       groupPanel().textContent!.includes(
         "dohc could not send this message. It would start too many agents on your computers. Mention fewer agents.",

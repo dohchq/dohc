@@ -1,4 +1,5 @@
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 
 // Client for share-web's named recipient chat HTTP. The README section "Named recipient chat HTTP" is the contract.
 export const CHAT_PAGE_LIMIT = 50;
@@ -360,13 +361,16 @@ export async function postNamedChatMessage(
 }
 
 /** Where one agent a post wakes stands, for the owner's page. */
-export interface ChatWake {
-  wakeId: string;
-  state: "held" | "waiting" | "claimed" | "queued" | "unclaimed" | "unconfirmed";
-  agentName: string | null;
-}
+export type ChatWake = Pick<PhoneChatWake, "wakeId" | "state" | "agentName">;
 
-const WAKE_STATES = new Set(["held", "waiting", "claimed", "queued", "unclaimed", "unconfirmed"]);
+const WAKE_STATES: ReadonlySet<string> = new Set<ChatWake["state"]>([
+  "held",
+  "waiting",
+  "claimed",
+  "queued",
+  "unclaimed",
+  "unconfirmed",
+]);
 
 /** The wakes of the owner's own post. Only the owner's page asks; the relay refuses anyone else. */
 export async function readNamedChatWakes(
