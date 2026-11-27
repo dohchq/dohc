@@ -527,9 +527,18 @@ export function createWorkspaceCollections(
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
       const last = held.get(datasetId);
+      const queried = Boolean(last && (last.search || last.sort || last.queryUnsupported));
       described = null;
       view = last
-        ? { ...last, search: "", sort: null, queryUnsupported: false, problem: null, opened: null }
+        ? {
+            ...last,
+            ...(queried ? { rows: [], files: {}, relations: {}, next: null } : {}),
+            search: "",
+            sort: null,
+            queryUnsupported: false,
+            problem: null,
+            opened: null,
+          }
         : {
             datasetId,
             description: null,

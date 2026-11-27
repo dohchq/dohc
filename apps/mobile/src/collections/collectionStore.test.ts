@@ -1424,6 +1424,13 @@ describe("search, sort, and relation labels", () => {
     while (collections.changes().get(key)?.state.kind === "saving" || collections.view()?.reading)
       await new Promise((done) => setTimeout(done, 0));
     expect(collections.view()?.rows.map((r) => r.id)).toEqual(["anna", "bob"]);
+
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, "offline");
+    await collections.open(D);
+    expect(collections.view()?.search).toBe("");
+    expect(collections.view()?.rows).toEqual([]);
+    expect(collections.view()?.next).toBeNull();
   });
 
   it("merges relation labels on edits including retries and loads relation options", async () => {
