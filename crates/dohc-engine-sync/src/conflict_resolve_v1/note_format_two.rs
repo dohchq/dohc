@@ -10,6 +10,7 @@ pub enum FormatTwoConversion {
 }
 
 pub(crate) const CONVERSION_ID_PREFIX: &str = "note-format-two-";
+pub(crate) const CONVERSION_BASE_PENDING: &str = "note-format-two-base-pending";
 
 const WAITS: [(&str, &str); 5] = [
     (
@@ -285,6 +286,28 @@ pub(super) fn received(
     let Some(marker) =
         dohc_engine_collab::read_marker_in(tx, &key).map_err(map_local_collab_error)?
     else {
+        let base_retained: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops WHERE workspace_id=?1 \
+                 AND json_extract(envelope_json,'$.opKind')='ydoc.update' \
+                 AND json_extract(envelope_json,'$.payload.versionId')=?2 \
+                 AND json_extract(envelope_json,'$.payload.objectId')=?3 \
+                 AND json_extract(envelope_json,'$.payload.lineageClaimId')=?4 \
+                 AND json_extract(envelope_json,'$.payload.isBaseState')=1)",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    transition.predecessor_claim_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if base_retained {
+            return Err(SyncError::RetryableState {
+                reason: CONVERSION_BASE_PENDING,
+            });
+        }
         return Ok(Received::NothingToInstall);
     };
     let here = marker.lineage_claim_status == LineageClaimStatus::Exact

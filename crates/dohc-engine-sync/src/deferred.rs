@@ -43,8 +43,9 @@ fn scope(op: &ReplicationEnvelope) -> Option<Scope> {
 const SCOPE_JSON: &str = "json_extract(d.envelope_json,'$.opKind','$.payload.conflictId',
     '$.payload.objectId','$.payload.beforeObjectId','$.payload.path',
     '$.payload.payloadBeforePath','$.payload.payloadAfterPath','$.payload.beforePath',
-    '$.payload.transition.current.objectId','$.payload.paths[0]')";
-const SCOPE_PAYLOAD: [&str; 9] = [
+    '$.payload.transition.current.objectId','$.payload.paths[0]',
+    '$.payload.resolution','$.payload.effects[0]')";
+const SCOPE_PAYLOAD: [&str; 11] = [
     "/conflictId",
     "/objectId",
     "/beforeObjectId",
@@ -54,9 +55,28 @@ const SCOPE_PAYLOAD: [&str; 9] = [
     "/beforePath",
     NOTE_OBJECT,
     NOTE_PATH,
+    "/resolution",
+    "/effects/0",
 ];
 const NOTE_OBJECT: &str = "/transition/current/objectId";
 const NOTE_PATH: &str = "/paths/0";
+const FILE_JSON: &str = "COALESCE(json_extract(d.envelope_json,'$.payload.objectId'),
+    CASE WHEN json_extract(d.envelope_json,'$.opKind')='conflict.resolve'
+      AND json_extract(d.envelope_json,'$.payload.conflictId') LIKE 'note-format-two-%'
+      AND json_extract(d.envelope_json,'$.payload.resolution')='kept-current'
+      AND json_extract(d.envelope_json,'$.payload.effects[0]') IS NULL
+    THEN json_extract(d.envelope_json,'$.payload.transition.current.objectId') END)";
+
+fn file_of(op: &ReplicationEnvelope) -> &str {
+    let field = match (op.op_kind.as_str(), scope(op)) {
+        ("conflict.resolve", Some(_)) => NOTE_OBJECT,
+        _ => "/objectId",
+    };
+    op.payload
+        .pointer(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
 
 fn retained_scope(fields: &str) -> Result<Option<Scope>, SyncError> {
     let fields: Vec<serde_json::Value> =
@@ -90,7 +110,10 @@ fn scope_of<'a>(
         ("conflict.resolve", Some(id))
             if id
                 .as_str()
-                .is_some_and(|id| id.starts_with(CONVERSION_ID_PREFIX)) =>
+                .is_some_and(|id| id.starts_with(CONVERSION_ID_PREFIX))
+                && field("/resolution").and_then(serde_json::Value::as_str)
+                    == Some("kept-current")
+                && field("/effects/0").is_none_or(serde_json::Value::is_null) =>
         {
             (&[NOTE_OBJECT], &[NOTE_PATH])
         }
@@ -143,12 +166,7 @@ impl Scope {
 /// origin alone for an op with no scope.
 pub(crate) fn hold_key(op: &ReplicationEnvelope) -> String {
     match scope(op) {
-        Some(_) => {
-            let object = ["/objectId", NOTE_OBJECT]
-                .into_iter()
-                .find_map(|field| op.payload.pointer(field)?.as_str());
-            format!("{}\u{1f}{}", op.origin_id, object.unwrap_or_default())
-        }
+        Some(_) => format!("{}\u{1f}{}", op.origin_id, file_of(op)),
         None => op.origin_id.clone(),
     }
 }
@@ -242,14 +260,14 @@ pub(crate) fn read(
         // within one, files take turns by when their work was last checked,
         // then share the page op by op, so held files cannot keep a ready
         // file out of it.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT d.envelope_json FROM relay_deferred_ops d JOIN
              (SELECT origin_id,MAX(checked_sequence) AS checked FROM relay_deferred_ops
               WHERE workspace_id=?1 GROUP BY origin_id) q ON q.origin_id=d.origin_id
              WHERE d.workspace_id=?1
-             WINDOW file AS (PARTITION BY d.origin_id,json_extract(d.envelope_json,'$.payload.objectId'))
+             WINDOW file AS (PARTITION BY d.origin_id,{FILE_JSON})
              ORDER BY q.checked,d.origin_id,MIN(d.checked_sequence) OVER file,
-               ROW_NUMBER() OVER (file ORDER BY d.origin_seq),d.origin_seq LIMIT ?2")?;
+               ROW_NUMBER() OVER (file ORDER BY d.origin_seq),d.origin_seq LIMIT ?2"))?;
         let encoded = stmt.query_map(params![workspace, REPLAY_PAGE], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>((mismatched, encoded, origins))
@@ -749,12 +767,12 @@ pub(crate) fn claim_report(
         } else {
             let mut files: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
             for op in checked {
-                files.entry(&op.origin_id).or_default().insert(op.payload["objectId"].as_str().unwrap_or_default());
+                files.entry(&op.origin_id).or_default().insert(file_of(op));
             }
             for (origin, objects) in files {
                 let objects = serde_json::to_string(&objects).map_err(SyncError::corrupt)?;
-                tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?4 WHERE workspace_id=?1 AND origin_id=?2
-                    AND COALESCE(json_extract(envelope_json,'$.payload.objectId'),'') IN (SELECT value FROM json_each(?3))",
+                tx.execute(&format!("UPDATE relay_deferred_ops AS d SET checked_sequence=?4 WHERE d.workspace_id=?1 AND d.origin_id=?2
+                    AND COALESCE({FILE_JSON},'') IN (SELECT value FROM json_each(?3))"),
                     params![workspace,origin,objects,next]).map_err(SyncError::persist)?;
             }
         }
