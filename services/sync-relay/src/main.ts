@@ -67,7 +67,13 @@ import { startLiveJournalCheck } from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound, relayError } from "./errors";
 import { appBackendLimit } from "@dohc/security-contract/app-backend";
-import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
+import {
+  ENGINE_API_MIN_SETTING,
+  RELAY_API_VERSIONS,
+  engineApiMinimum,
+  relayApiVersionRefusal,
+  relayApiVersionsFor,
+} from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import {
@@ -236,6 +242,11 @@ try {
 } catch {
   fatal(`FATAL: ${BODY_SEQUENCE_SETTING} must be 0 or 1.`);
 }
+const engineApiMin =
+  engineApiMinimum() ??
+  fatal(
+    `FATAL: ${ENGINE_API_MIN_SETTING} must be a whole number from 1 to ${RELAY_API_VERSIONS.max}.`,
+  );
 // This server keeps copies of workspaces to run their automations and to answer their owners' phones.
 // A self-hosted server always keeps them; a development relay only while it runs automations.
 const copiesOn = automationsOn || selfHostedLive;
@@ -1017,6 +1028,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
         service: "sync-relay",
         selfHostedLive: selfHostedLive && ready,
         apiVersions: RELAY_API_VERSIONS,
+        engineApiMin,
         automations: !automationsOn
           ? "off"
           : automations && !automations.unavailable
@@ -1040,7 +1052,10 @@ const fetchHandler = async (request: Request): Promise<Response> => {
       { status: storage.unavailable.aborted ? 503 : 200 },
     );
   }
-  const refusal = relayApiVersionRefusal(request.headers);
+  const refusal = relayApiVersionRefusal(
+    request.headers,
+    relayApiVersionsFor(request, engineApiMin),
+  );
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
   const path = new URL(request.url).pathname;
   return normalizeLinkRefusal(result, path, isLinkLivePath(path));
