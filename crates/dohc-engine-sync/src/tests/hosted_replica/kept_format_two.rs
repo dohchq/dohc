@@ -241,7 +241,7 @@ fn archived_note_with(
 }
 
 #[test]
-fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
+fn a_replayed_archived_edit_stays_kept_with_the_refusal_an_always_reading_replica_gives() {
     let edit = |note: &dohc_engine_collab::Ydoc| {
         crate::moment_apply_tests::format_two_sequence_edit(note, 7, "z")
     };
@@ -431,7 +431,7 @@ fn a_replayed_base_of_another_document_does_not_rewind_this_one() {
     assert_eq!(retry, None);
 }
 
-fn resolution_after(
+pub(in crate::tests) fn resolution_after(
     probe: &mut EngineStore,
     claim: &str,
 ) -> (Vec<ReplicationEnvelope>, Vec<Vec<u8>>, String) {

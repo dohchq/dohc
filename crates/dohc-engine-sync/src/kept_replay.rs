@@ -222,7 +222,8 @@ fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
            'recordedAtMs',l.recorded_at_ms) END \
          {KEPT_ROWS} WHERE k.workspace_id NOT IN (SELECT workspace_id FROM hosted_replicas) \
            AND (k.replayed=1 OR ({CANDIDATE})) \
-         ORDER BY 1, MIN(k.rowid) OVER (PARTITION BY {CLAIM_OF}), NOT {BASE}, \
+         ORDER BY 1, MAX(k.rowid, COALESCE(MIN(CASE WHEN {BASE} THEN k.rowid END) \
+           OVER (PARTITION BY {CLAIM_OF}), k.rowid)), NOT {BASE}, \
            k.relay_seq, k.origin_id, k.origin_seq"
     );
     let rows = store

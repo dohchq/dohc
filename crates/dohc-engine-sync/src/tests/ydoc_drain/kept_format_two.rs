@@ -1399,3 +1399,89 @@ fn a_newer_format_row_decides_a_later_edit_over_a_live_unadmitted_row_of_the_sam
     assert_eq!(refused_as(&later), Some(NEWER_BODY_FORMAT));
     assert_eq!(count(&engine, QUEUED), 0);
 }
+
+#[test]
+fn a_late_edit_of_a_kept_base_replays_after_the_resolution_it_followed() {
+    let note = note();
+    let open = || {
+        let (scratch, path, mut engine) = open_store();
+        seed_object(&mut engine, "doc-a");
+        (scratch, path, engine)
+    };
+    let row = |engine: &mut EngineStore, origin: &str, relay: i64, bytes: &[u8]| {
+        let blob = engine.put_binary_blob(bytes).expect("blob");
+        let mut op = envelope(
+            origin,
+            0,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"doc-a","path":"a.md","contentKind":"richdoc",
+                   "updateBlobSha256":blob,"lineageClaimId":note.claim,"isBaseState":blob == note.claim}),
+        );
+        op.relay_seq = Some(relay);
+        op
+    };
+    let apply = |engine: &mut EngineStore, op: &ReplicationEnvelope| {
+        crate::apply_replication_envelope(
+            engine,
+            &mut WriterDocCache::new(),
+            op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the op arrives");
+    };
+    let (_probe_scratch, _probe_path, mut probe) = open();
+    let base = row(&mut probe, "owner", 1, &note.base);
+    reading_body_sequence_here(|| apply(&mut probe, &base));
+    let (resolution, blobs, successor) =
+        super::super::hosted_replica::kept_format_two::resolution_after(&mut probe, &note.claim);
+    let pulled = |engine: &mut EngineStore| {
+        for bytes in &blobs[..2] {
+            engine.put_binary_blob(bytes).expect("blob");
+        }
+        engine
+            .write_with(&NoFaults, |tx| {
+                for text in &blobs[2..] {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        rusqlite::params![
+                            dohc_engine_storage::hex_sha256(text),
+                            text.len() as i64,
+                            std::str::from_utf8(text).unwrap()
+                        ],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                Ok::<_, SyncError>(())
+            })
+            .expect("text blobs");
+        let mut ops = vec![row(engine, "owner", 1, &note.base)];
+        for (relay, op) in (2..).zip(&resolution) {
+            let mut op = op.clone();
+            op.relay_seq = Some(relay);
+            ops.push(op);
+        }
+        ops.push(row(engine, "offline", 4, &note.edits[0]));
+        for op in &ops {
+            apply(engine, op);
+        }
+    };
+    let outcome = |engine: &EngineStore| {
+        let key = DocKey::new("ws", "main", "doc-a").expect("doc key");
+        let claim = dohc_engine_collab::read_marker(engine, &key)
+            .expect("marker")
+            .and_then(|marker| marker.lineage_claim_id);
+        let reviews = "SELECT COUNT(*) FROM ydoc_inactive_lineages \
+                       WHERE disposition='conflicting-successor'";
+        let opened = "SELECT COUNT(*) FROM conflicts WHERE status='open'";
+        (claim, count(engine, reviews), count(engine, opened))
+    };
+    let (_always_scratch, _always_path, mut always) = open();
+    reading_body_sequence_here(|| pulled(&mut always));
+    assert_eq!(outcome(&always).0, Some(successor));
+    let (_scratch, _path, mut engine) = open();
+    pulled(&mut engine);
+    assert_eq!(count(&engine, KEPT), 3);
+    replay(&mut engine);
+    assert_eq!(outcome(&engine), outcome(&always));
+}
