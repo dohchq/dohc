@@ -219,6 +219,42 @@ describe("containers the editor writes", () => {
     a.expectMirror();
   });
 
+  it("ticks a to-do as the editors do, writing only its record, which someone else reads and undo takes back", () => {
+    const baseline = noteIn(
+      [
+        ["T", "taskList"],
+        ["I", "taskItem"],
+        ["J", "taskItem"],
+        ["K", "taskItem"],
+      ],
+      [
+        [["T", "I"], "one"],
+        [["T", "J"], "two"],
+        [["T", "K"], "three"],
+      ],
+    );
+    const a = person(baseline, 10);
+    const b = person(baseline, 20);
+    const ticks = (one: Person) =>
+      [0, 1, 2].map((at) => one.view.state.doc.child(0).child(at).attrs.checked as boolean);
+    const pos = 1 + a.view.state.doc.child(0).child(0).nodeSize;
+    const { attrs } = a.view.state.doc.nodeAt(pos)!;
+    const sequenceBefore = Y.encodeStateVector(a.doc);
+    a.view.dispatch(a.view.state.tr.setNodeMarkup(pos, undefined, { ...attrs, checked: true }));
+    expect(a.sent).toHaveLength(1);
+    expect(ticks(a)).toEqual([false, true, false]);
+    expect(a.containers.get("J.checked")).toBe(true);
+    const written = Y.decodeUpdate(Y.encodeStateAsUpdate(a.doc, sequenceBefore)).structs;
+    expect(written).toHaveLength(1);
+    a.expectMirror();
+    exchange(a, b);
+    expect(ticks(b)).toEqual([false, true, false]);
+    expect(b.view.state.doc.eq(a.view.state.doc)).toBe(true);
+    expect(a.undo()).toBe(true);
+    expect(ticks(a)).toEqual([false, false, false]);
+    a.expectMirror();
+  });
+
   it("tries a quote put around a line in the middle of a long note on the blocks around it", () => {
     const baseline = note(...Array.from({ length: 12 }, (_, at) => `line ${String(at)}`));
     const a = person(baseline, 10);

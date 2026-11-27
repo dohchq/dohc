@@ -10,7 +10,7 @@ import {
   type Step,
 } from "@tiptap/pm/transform";
 import * as Y from "yjs";
-import { startingRecords } from "./bodySequenceGrammar.js";
+import { keepsAttrs, startingRecords } from "./bodySequenceGrammar.js";
 import {
   BODY_SEQUENCE_CHANGE_MAX_VALUES,
   bodySequenceChangeLimit,
@@ -720,7 +720,7 @@ function writeContainersThatDiffer(
     high = Math.max(high, at);
   });
   if (high >= 0) reader.touch(low, high);
-  if (recorded.length > 0) reader.touchRecords();
+  if (recorded.length > 0) reader.touchRecords(recorded.map(([key]) => key));
   for (const [key, value] of recorded) records.set(key, value);
   for (const [element, { path }] of writes.attributes)
     setAttribute(element as SequenceElement, "path", path as string[]);
@@ -966,6 +966,86 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
   }
 }
 
+function blocksHolding(reading: BodyReading): Map<string, number> {
+  const held = new Map<string, number>();
+  for (const path of reading.paths) for (const id of path) held.set(id, (held.get(id) ?? 0) + 1);
+  return held;
+}
+
+function markupChangedAt(step: Step, before: ProseMirrorNode): number {
+  if (step instanceof AttrStep) return step.pos;
+  if (!(step instanceof ReplaceAroundStep) || step.insert !== 1) return -1;
+  const node = before.nodeAt(step.from);
+  const put = step.slice.content.firstChild;
+  const keeps =
+    node !== null &&
+    step.to === step.from + node.nodeSize &&
+    step.gapFrom === step.from + 1 &&
+    step.gapTo === step.to - 1 &&
+    step.slice.openStart === 0 &&
+    step.slice.openEnd === 0 &&
+    step.slice.content.childCount === 1 &&
+    put?.type === node.type &&
+    put.content.size === 0;
+  return keeps ? step.from : -1;
+}
+
+/**
+ * The records a dispatch writes when it only sets attributes of containers that each have an id
+ * of their own, each to a value read back as itself, by key. Null for any other dispatch.
+ */
+function containerAttributes(
+  reading: BodyReading,
+  transactions: readonly Transform[],
+): Map<string, unknown> | null {
+  const writes = new Map<string, unknown>();
+  let held: Map<string, number> | null = null;
+  let steps = 0;
+  for (const transaction of transactions) {
+    steps += transaction.steps.length;
+    const docs = [...transaction.docs, transaction.doc];
+    for (let at = 0; at < transaction.steps.length; at++) {
+      const pos = markupChangedAt(transaction.steps[at]!, docs[at]!);
+      const was = pos < 0 ? null : docs[at]!.nodeAt(pos);
+      const node = pos < 0 ? null : docs[at + 1]!.nodeAt(pos);
+      if (!was || !node || !holdsBlocks(node) || !keepsAttrs(node.type, node.attrs)) return null;
+      if (was.type !== node.type || reading.doc.nodeAt(pos)?.type !== node.type) return null;
+      const depth = reading.doc.resolve(pos).depth;
+      const first = countBelow(reading.starts, pos + 1);
+      const end = countBelow(reading.starts, pos + node.nodeSize);
+      const id = first < end ? reading.paths[first]![depth] : undefined;
+      if (id === undefined) return null;
+      held ??= blocksHolding(reading);
+      if (held.get(id) !== end - first) return null;
+      for (let block = first; block < end; block++)
+        if (reading.paths[block]![depth] !== id) return null;
+      for (const [name, value] of Object.entries(node.attrs)) {
+        if (same(was.attrs[name], value)) continue;
+        if (typeof value === "string" && LONE_HALF.test(value)) return null;
+        writes.set(`${id}.${name}`, value);
+      }
+    }
+  }
+  return steps > 0 ? writes : null;
+}
+
+const RECORD_BYTES = 64;
+
+function fitsOneChange(writes: ReadonlyMap<string, unknown>): boolean {
+  let bytes = 0;
+  for (const [key, value] of writes)
+    bytes += RECORD_BYTES + RANGE_BYTES + 3 * (key.length + String(JSON.stringify(value)).length);
+  return bytes <= BODY_SEQUENCE_CHANGE_MAX_VALUES;
+}
+
+function writeContainerAttributes(writing: BodyWriting, writes: ReadonlyMap<string, unknown>) {
+  const records = writing.sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
+  const changed = [...writes].filter(([key, value]) => !same(storedValue(records, key), value));
+  if (changed.length === 0) return;
+  writing.reader.touchRecords(changed.map(([key]) => key));
+  for (const [key, value] of changed) records.set(key, value);
+}
+
 /**
  * Writes one editor transaction to the sequence, each step by its own step map. A step that
  * replaces one range is written without what it leaves as it was at either end of that range:
@@ -1030,6 +1110,14 @@ export function writeTransaction(
   transaction: Transform,
   afterEachStep?: (shown: ProseMirrorNode) => boolean,
 ): boolean {
+  const attributes = containerAttributes(writing.reader.reading(), [transaction]);
+  if (attributes) {
+    writeContainerAttributes(writing, attributes);
+    return (
+      writeBlockStartsThatDiffer(writing, transaction.doc) &&
+      afterEachStep?.(transaction.doc) !== false
+    );
+  }
   const docs = [...transaction.docs, transaction.doc];
   type Run = { kind: "marks" | "containers" | "inserts"; from: number };
   let run = null as Run | null;
@@ -1860,6 +1948,8 @@ export function howToWriteOrWhy(
   transactions: readonly Transform[],
   trial: "window" | "note" = "window",
 ): HowToWrite | { refused: "limit"; limit: string } | { refused: "shape" } {
+  const attributes = containerAttributes(writing.reader.reading(), transactions);
+  if (attributes && fitsOneChange(attributes)) return { lines: [], transactions };
   const lines = linesToGiveFirst(writing, transactions, trial);
   if (Array.isArray(lines)) return { lines, transactions };
   const asOne = transactions.map((each) => asOneRange(each) ?? each);
