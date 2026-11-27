@@ -1796,6 +1796,64 @@ fn an_empty_id_in_the_first_batch_fails_and_the_next_batch_resumes_after_it() {
 }
 
 #[test]
+fn an_unreadable_path_after_the_batch_does_not_stop_the_notes_before_it() {
+    let (_scratch, _path, mut store) = open_store();
+    let keys: Vec<DocKey> = (1..=3)
+        .map(|n| {
+            let text = format!("Note {n}.\n");
+            let (object, path) = (format!("note-{n}"), format!("note-{n}.md"));
+            seed_at(
+                &mut store,
+                (&object, &path),
+                &text,
+                &format!("moment-{n}"),
+                Some(&base_of(&[&text])),
+            )
+        })
+        .collect();
+    exec(
+        &mut store,
+        "UPDATE snapshots SET path=CAST(X'FF' AS TEXT) WHERE object_id='note-2'",
+    );
+    let first = convert_all(&mut store, None, 1, &NoLiveLeases);
+    assert_eq!(first.converted, vec![keys[0].clone()]);
+    let rest = convert_all(&mut store, first.resume_after.as_deref(), 10, &NoLiveLeases);
+    assert_eq!(
+        rest.failed
+            .iter()
+            .map(|(object_id, _, _)| object_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-2"]
+    );
+    assert_eq!(rest.converted, vec![keys[2].clone()]);
+}
+
+#[test]
+fn a_damaged_unsent_edit_stops_the_pass_instead_of_failing_a_note() {
+    let (_scratch, mut store, _key) = owner(&base_of(&[NOTE]));
+    exec(
+        &mut store,
+        "INSERT INTO replication_log \
+         (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+         VALUES('ws','origin-damaged',1,'collection.update','{',1,0)",
+    );
+    let result = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
+            &NoFaults,
+            21,
+        )
+    });
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
 fn a_note_open_in_this_workspace_folder_is_skipped_as_open_here() {
     let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
     let registry = dohc_engine_collab::LeaseRegistry::new();
