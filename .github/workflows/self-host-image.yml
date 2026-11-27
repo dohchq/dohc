@@ -60,8 +60,8 @@ jobs:
           if grep '^\[missing\]' check.log | grep -v -e '^\[missing\] public HTTPS connection and device approval' \
             -e '^\[missing\] native executable and relay HTTPS reachability'; then exit 1; fi
           curl -fsSk --retry 10 --retry-all-errors --resolve "${ORIGIN#https://}:443:127.0.0.1" \
-            "$ORIGIN/.well-known/dohc-server" | tee descriptor.json
-          jq -e --arg origin "$ORIGIN" '.version == 1 and .authUrl == $origin and .relayUrl == $origin' descriptor.json
+            --output descriptor.json "$ORIGIN/.well-known/dohc-server"
+          jq -e --arg origin "$ORIGIN" '.version == 1 and .authUrl == $origin and .relayUrl == $origin and .shareUrl == $origin' descriptor.json
       - name: Show service logs
         if: failure()
         working-directory: ${{ runner.temp }}/smoke
