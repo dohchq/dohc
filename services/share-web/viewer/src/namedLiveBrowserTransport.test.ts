@@ -15,7 +15,7 @@ import {
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
-import { draftNeedsReview } from "./NamedDocumentEditor";
+import { draftNeedsReview, editingOf } from "./NamedDocumentEditor";
 import { memberDocument } from "./memberLive";
 import {
   createNamedLiveBrowserTransport,
@@ -640,7 +640,9 @@ describe("named browser transport", () => {
     await waitState(f.value, (state) => state.pendingUpdates === 0);
     const replaced = f.value.doc,
       successor = document("base saved"),
-      next = { ...binding, lineageClaimId: "successor" };
+      next = { ...binding, lineageClaimId: "successor" },
+      old = editingOf(f.value, replaced);
+    expect(old.canEdit()).toBe(true);
     f.socket.close();
     const connecting = f.value.reconnect(),
       socket = await f.socketAt(1),
@@ -660,6 +662,10 @@ describe("named browser transport", () => {
     expect(getDohcYDocBodyFragment(f.value.doc).toString()).toBe(
       getDohcYDocBodyFragment(successor).toString(),
     );
+    const late = vi.fn();
+    expect(old.canEdit()).toBe(false);
+    expect(old.edit(late)).toBe(false);
+    expect(late).not.toHaveBeenCalled();
     expect(edit(f.value, " more")).toBe(true);
     Y.applyUpdate(successor, (await fresh.submitted()).bytes);
     expect(getDohcYDocBodyFragment(successor).toString()).toContain("base saved more");

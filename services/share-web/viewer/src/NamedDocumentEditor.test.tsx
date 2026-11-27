@@ -403,6 +403,24 @@ it("edits a note in format 2 from the toolbar", async () => {
   expect(unwrittenNotice()).toBeNull();
 });
 
+it("mounts the editor again on the note's new lineage, in format 2", async () => {
+  const live = session("Old text");
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  expect(textbox()?.textContent).toBe("Old text");
+  const successor = markdownToYDoc("New text", { bodySequence: true });
+  live.doc = successor;
+  await act(async () => live.report({ status: "live" }));
+  expect(textbox()?.textContent).toBe("New text");
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[role="toolbar"] button[aria-label="Quote"]')!
+      .click(),
+  );
+  expect(yDocToMarkdown(successor)).toContain("> New text");
+});
+
 async function overtaken() {
   const live = session("Zero\n\nOne", {}, { bodySequence: true });
   live.doc.getText("sequence").delete(0, 1);

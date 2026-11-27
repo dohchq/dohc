@@ -149,6 +149,14 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   );
 }
 
+/** An editor's calls into a session, which take no edit once the session reopens on another document. */
+export function editingOf(session: NamedDocumentSession, doc: NamedDocumentSession["doc"]) {
+  return {
+    canEdit: () => session.doc === doc && namedLiveEditable(session.state()),
+    edit: (change: () => void) => session.doc === doc && session.edit(change),
+  };
+}
+
 /** The page's unsaved words, read again as the note or the session changes. */
 function useUnsentText(session: NamedDocumentSession) {
   const [unsent, setUnsent] = useState(() => session.unsentText());
@@ -295,8 +303,7 @@ export function NamedDocumentEditor({
     const editor = mountLiveBodyEditor(element.current, {
       doc,
       label: "Shared file editor",
-      canEdit: () => namedLiveEditable(session.state()),
-      edit: session.edit,
+      ...editingOf(session, doc),
       unwritten: (why) => why !== "guarded" && setUnwritten(why),
       resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
     });
