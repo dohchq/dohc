@@ -132,7 +132,8 @@ const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
   "link.title": textOrNone,
 };
 
-function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
+/** The attributes a node or mark of `type` reads with from stored ones, each by its rule (2.3). */
+export function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const given = record(raw) ?? {};
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {

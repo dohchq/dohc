@@ -3,11 +3,12 @@ import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import { lift, wrapIn } from "@tiptap/pm/commands";
 import { liftListItem, wrapInList } from "@tiptap/pm/schema-list";
-import { EditorState, TextSelection, type Command, type Transaction } from "@tiptap/pm/state";
+import { EditorState, TextSelection, type Command } from "@tiptap/pm/state";
 import { addColumnAfter, setCellAttr } from "@tiptap/pm/tables";
 import { dropPoint } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { bodySequenceAnchor, bodySequencePlugin } from "./bodySequenceEditor.js";
+import { toggleListCommand } from "./browser-editor.js";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { bodySequenceChangeLimit, bodySequenceChangeSize } from "./bodySequenceIntake.js";
 import { createBodyReader } from "./bodySequenceReading.js";
@@ -395,17 +396,6 @@ function selectLines(view: EditorView, first: number, last: number): void {
   );
 }
 
-const toDoOnTheSharePage: Command = (state, dispatch) => {
-  const lifted: Transaction[] = [];
-  const wrapped: Transaction[] = [];
-  liftListItem(schema.nodes.listItem!)(state, (tr) => lifted.push(tr));
-  wrapInList(schema.nodes.taskList!)(state.apply(lifted[0]!), (tr) => wrapped.push(tr));
-  const combined = state.tr;
-  for (const step of [...lifted[0]!.steps, ...wrapped[0]!.steps]) combined.step(step);
-  dispatch?.(combined);
-  return true;
-};
-
 it("writes container changes to 1,000 lines of a note of 10,000 paragraphs in time, each within the room's limits", () => {
   const long = note(...Array.from({ length: 10_000 }, () => LINE));
   const base = page(long, 60);
@@ -439,11 +429,13 @@ it("writes container changes to 1,000 lines of a note of 10,000 paragraphs in ti
   expect(act("the quote taken off them", lift, 1_000)).toBeLessThan(1_000);
   expect(view.state.doc.child(0).type.name).toBe("paragraph");
   act("1,000 lines made a bullet list", wrapInList(schema.nodes.bulletList!), 1_000);
-  act(
-    "the list made a to-do list as the share page does, a lift then a wrap",
-    toDoOnTheSharePage,
-    1_000,
-  );
+  expect(
+    act(
+      "the list made a to-do list on the share page",
+      toggleListCommand(schema, "taskList"),
+      1_000,
+    ),
+  ).toBeLessThan(1_000);
   expect(view.state.doc.child(0).type.name).toBe("taskList");
   act("the to-do list turned off", liftListItem(schema.nodes.taskItem!), 1_000);
   expect(view.state.doc.childCount).toBe(10_000);
@@ -532,8 +524,10 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)("measures a tick in to-do lists of e
     const sent = base.sent.length;
     const took = median(
       () => {
-        const { checked } = view.state.doc.nodeAt(pos)!.attrs;
-        view.dispatch(view.state.tr.setNodeAttribute(pos, "checked", !checked));
+        const { attrs } = view.state.doc.nodeAt(pos)!;
+        view.dispatch(
+          view.state.tr.setNodeMarkup(pos, undefined, { ...attrs, checked: !attrs.checked }),
+        );
       },
       { samples: 5 },
     );
@@ -543,6 +537,51 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)("measures a tick in to-do lists of e
         ? `${items.toLocaleString("en-US")} to-dos`
         : `${items.toLocaleString("en-US")} to-dos above ${around.toLocaleString("en-US")} paragraphs`;
     report.push(`a tick in the middle of ${name}, editor to sequence: ${took}`);
+  }
+  console.log(report.join("\n"));
+});
+
+it("reads a column of a 10,000-row table aligned by someone else in time, as the note reads", () => {
+  const rows = 10_000;
+  const table = noteOf(({ sequence, containers }) => {
+    const records = (id: string, type: string) => {
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        containers.set(key, value);
+    };
+    records("TB", "table");
+    for (let row = 0; row < rows; row++) {
+      records(`R${String(row)}`, "tableRow");
+      records(`C${String(row)}`, "tableCell");
+      sequence.insertEmbed(
+        sequence.length,
+        boundary({ path: ["TB", `R${String(row)}`, `C${String(row)}`] }),
+        {},
+      );
+      sequence.insert(sequence.length, LINE, {});
+    }
+  });
+  const base = page(table, 62);
+  const { view, release } = editorWithNoPage(base);
+  onStop(release);
+  const other = page(table, 63);
+  const report: string[] = [];
+  for (const align of ["center", "right"]) {
+    other.doc.transact(() => {
+      for (let row = 0; row < rows; row++) other.containers.set(`C${String(row)}.align`, align);
+    });
+    const update = other.sent.at(-1)!;
+    const start = performance.now();
+    base.receive(update);
+    const took = performance.now() - start;
+    report.push(`every cell of the column made ${align}, update to editor: ${took.toFixed(0)} ms`);
+    expect(took).toBeLessThan(1_000);
+    expect(readBodySequence(schema, base.doc).eq(view.state.doc)).toBe(true);
+    expect(
+      view.state.doc
+        .child(0)
+        .child(rows - 1)
+        .child(0).attrs.align,
+    ).toBe(align);
   }
   console.log(report.join("\n"));
 });

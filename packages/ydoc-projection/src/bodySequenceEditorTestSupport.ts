@@ -350,13 +350,13 @@ export type Agreement = {
 };
 export const AGREEMENT_COUNTS: Agreement = {
   compared: 54151,
-  trials: 54151,
-  inTheWindow: 54102,
+  trials: 54118,
+  inTheWindow: 54069,
   onTheWholeNote: 49,
 };
 export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
-  sample: { compared: 2237, trials: 2237, inTheWindow: 2237, onTheWholeNote: 0 },
-  full: { compared: 12121, trials: 12121, inTheWindow: 12121, onTheWholeNote: 0 },
+  sample: { compared: 2237, trials: 2231, inTheWindow: 2231, onTheWholeNote: 0 },
+  full: { compared: 12121, trials: 12106, inTheWindow: 12106, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
@@ -493,8 +493,8 @@ export const ORACLE_PARTS: readonly {
       },
       agreed: {
         compared: 2806,
-        trials: 2806,
-        inTheWindow: 2800,
+        trials: 2800,
+        inTheWindow: 2794,
         onTheWholeNote: 6,
       },
     },
@@ -530,8 +530,8 @@ export const ORACLE_PARTS: readonly {
       },
       agreed: {
         compared: 21720,
-        trials: 21720,
-        inTheWindow: 21675,
+        trials: 21702,
+        inTheWindow: 21657,
         onTheWholeNote: 45,
       },
     },

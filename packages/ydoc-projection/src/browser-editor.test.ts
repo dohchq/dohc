@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
+import { liftListItem, wrapInList } from "@tiptap/pm/schema-list";
+import { EditorState, Selection, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   mountLiveBodyEditor,
+  toggleListCommand,
   type LiveBodyEditorHandle,
   type LiveEditorToolbarState,
 } from "./browser-editor.js";
-import { markdownToYDoc, yDocToMarkdown } from "./import-export.js";
+import {
+  getDohcProseMirrorSchema,
+  markdownToYDoc,
+  parseRichdocMarkdown,
+  yDocToMarkdown,
+} from "./import-export.js";
 import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
 
 beforeAll(() => {
@@ -154,6 +162,76 @@ function setup(
     },
   };
 }
+
+describe("toggleListCommand", () => {
+  const schema = getDohcProseMirrorSchema();
+  type Kind = "bulletList" | "orderedList" | "taskList";
+
+  const liftThenWrap = (state: EditorState, target: Kind): Transaction | null => {
+    const { $from } = state.selection;
+    let depth = $from.depth;
+    while (depth > 0 && !$from.node(depth).type.name.endsWith("List")) depth--;
+    const current = $from.node(depth).type === schema.nodes.taskList ? "taskItem" : "listItem";
+    let lifted: Transaction | null = null;
+    liftListItem(schema.nodes[current]!)(state, (tr) => (lifted = tr));
+    if (!lifted) return null;
+    let wrapped: Transaction | null = null;
+    wrapInList(schema.nodes[target]!)(state.apply(lifted), (tr) => (wrapped = tr));
+    if (!wrapped) return null;
+    const combined = state.tr;
+    for (const step of [...(lifted as Transaction).steps, ...(wrapped as Transaction).steps])
+      combined.step(step);
+    return combined.setSelection(
+      Selection.fromJSON(combined.doc, (wrapped as Transaction).selection.toJSON()),
+    );
+  };
+
+  const selecting = (markdown: string, from: string, to: string) => {
+    const doc = schema.nodeFromJSON(parseRichdocMarkdown(markdown));
+    const find = (text: string) => {
+      let found = -1;
+      doc.descendants((node, pos) => {
+        const at = node.isText ? node.text!.indexOf(text) : -1;
+        if (found < 0 && at >= 0) found = pos + at;
+        return found < 0;
+      });
+      return found;
+    };
+    return EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, find(from), find(to) + to.length),
+    });
+  };
+
+  it.each([
+    ["- one\n- two\n- three\n", "one", "three", "taskList", true],
+    ["- one\n- two\n- three\n", "two", "two", "taskList", true],
+    ["- one\n- two\n- three\n", "one", "two", "orderedList", true],
+    ["- one\n- two\n- three\n", "two", "three", "taskList", true],
+    ["1. one\n2. two\n", "one", "two", "bulletList", true],
+    ["3. one\n4. two\n5. three\n", "two", "two", "taskList", true],
+    ["- [x] one\n- [ ] two\n", "one", "one", "bulletList", true],
+    ["> - one\n> - two\n> - three\n", "two", "three", "taskList", true],
+    ["- one\n\n  more\n- two\n", "one", "two", "taskList", false],
+    ["- one\n  - two\n  - three\n", "two", "three", "taskList", false],
+    ["- # one\n- two\n", "one", "two", "taskList", false],
+  ] as const)(
+    "in %j from %s to %s, makes a %s as a lift and a wrap do",
+    (markdown, from, to, kind, oneStep) => {
+      const state = selecting(markdown, from, to);
+      let made: Transaction | null = null;
+      toggleListCommand(schema, kind)(state, (tr) => (made = tr));
+      const expected = liftThenWrap(state, kind);
+      expect(made === null).toBe(expected === null);
+      if (!made || !expected) return;
+      const tr = made as Transaction;
+      expect(tr.doc.toJSON()).toEqual(expected.doc.toJSON());
+      expect(tr.selection.toJSON()).toEqual(expected.selection.toJSON());
+      expect(tr.scrolledIntoView).toBe(true);
+      expect(tr.steps.length === 1).toBe(oneStep);
+    },
+  );
+});
 
 describe("mountLiveBodyEditor", () => {
   it("applies formatting commands and updates toolbar state", () => {

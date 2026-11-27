@@ -163,7 +163,41 @@ function setHeadingCommand(schema: Schema, level: 0 | 1 | 2 | 3): Command {
   };
 }
 
-function toggleListCommand(
+function changeListKind(
+  state: EditorState,
+  depth: number,
+  listType: NodeType,
+  itemType: NodeType,
+): Transaction | null {
+  const { selection } = state;
+  if (!(selection instanceof TextSelection)) return null;
+  const { $from, $to } = selection;
+  if ($from.depth !== depth + 2 || $to.depth !== depth + 2) return null;
+  if ($to.before(depth) !== $from.before(depth)) return null;
+  const holder = $from.node(depth - 1).type.name;
+  if (holder === "listItem" || holder === "taskItem") return null;
+  const list = $from.node(depth);
+  const items: ProseMirrorNode[] = [];
+  for (let at = $from.index(depth); at <= $to.index(depth); at++) {
+    const item = list.child(at);
+    if (item.childCount !== 1 || !itemType.validContent(item.content)) return null;
+    items.push(itemType.create(null, item.content));
+  }
+  const start = $from.start(depth);
+  const before = $from.before(depth + 1) - start;
+  const after = $to.after(depth + 1) - start;
+  const lists = [listType.create(null, items)];
+  if (before > 0) lists.unshift(list.copy(list.content.cut(0, before)));
+  if (after < list.content.size) lists.push(list.copy(list.content.cut(after)));
+  const tr = state.tr.replaceWith($from.before(depth), $from.after(depth), lists);
+  const shift = before > 0 ? 2 : 0;
+  return tr
+    .setSelection(TextSelection.create(tr.doc, selection.anchor + shift, selection.head + shift))
+    .scrollIntoView();
+}
+
+/** Turns the lines in the selection into a list of `target`'s kind, or out of it when they are one. */
+export function toggleListCommand(
   schema: Schema,
   target: "bulletList" | "orderedList" | "taskList",
 ): Command {
@@ -187,6 +221,11 @@ function toggleListCommand(
       if (!currentItemType) return false;
       if (currentList.type === listType) {
         return liftListItem(currentItemType)(state, dispatch, view);
+      }
+      const changed = changeListKind(state, enclosingListDepth, listType, targetItemType);
+      if (changed) {
+        dispatch?.(changed);
+        return true;
       }
       let liftTr: Transaction | null = null;
       const lifted = liftListItem(currentItemType)(

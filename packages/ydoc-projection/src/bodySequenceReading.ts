@@ -1,6 +1,7 @@
-import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
+import { Fragment, type Node as ProseMirrorNode, type Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
+  attrsFor,
   leavesOfSequence,
   placeLeaves,
   readLeaf,
@@ -95,6 +96,35 @@ export function countBelow(sorted: readonly number[], value: number): number {
     else high = middle;
   }
   return low;
+}
+
+function replacedAt(doc: ProseMirrorNode, pos: number, node: ProseMirrorNode): ProseMirrorNode {
+  const $pos = doc.resolve(pos);
+  let made = node;
+  for (let depth = $pos.depth; depth >= 0; depth--) {
+    const parent = $pos.node(depth);
+    made = parent.copy(parent.content.replaceChild($pos.index(depth), made));
+  }
+  return made;
+}
+
+function withNodesAt(
+  doc: ProseMirrorNode,
+  nodes: ReadonlyMap<number, ProseMirrorNode>,
+): ProseMirrorNode {
+  const places = [...nodes.keys()].sort((one, other) => one - other);
+  let next = 0;
+  const rebuilt = (node: ProseMirrorNode, start: number): ProseMirrorNode => {
+    if (next >= places.length || places[next]! >= start + node.content.size) return node;
+    const children: ProseMirrorNode[] = [];
+    node.forEach((child, offset) => {
+      const given = nodes.get(start + offset);
+      if (given) next++;
+      children.push(rebuilt(given ?? child, start + offset + 1));
+    });
+    return node.copy(Fragment.fromArray(children));
+  };
+  return rebuilt(doc, 0);
 }
 
 const contentSize = (node: ProseMirrorNode) => (node.isTextblock ? node.content.size : 0);
@@ -294,7 +324,7 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
   let lines: SequenceLine[] = [];
   let reading: BodyReading | null = null;
   let stale = true;
-  let recordsChanged = false;
+  const changedRecords = new Set<string>();
   let touched: SequenceLine[] = [];
 
   const touch = (line: SequenceLine) => {
@@ -363,12 +393,45 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     return { line, next: end };
   };
 
-  const refit = (line: SequenceLine) => {
+  const refit = (line: SequenceLine, ids?: ReadonlySet<string>) => {
     const leaf = line.read?.leaf;
     if (!leaf || !Object.hasOwn(leaf.attrs, "path")) return;
     if (!Array.isArray(leaf.attrs.path) || leaf.attrs.path.length === 0) return;
+    if (ids && !leaf.attrs.path.some((id: unknown) => ids.has(id as string))) return;
     const [again] = leavesOfSequence<ShownPiece>(schema, [{ boundary: leaf.attrs }], records);
     line.read = { ...line.read!, leaf: { ...leaf, path: again!.path } };
+  };
+
+  const ownersOfAttributes = (keys: ReadonlySet<string>): Set<string> | null => {
+    const ids = new Set<string>();
+    for (const key of keys) {
+      const dot = key.indexOf(".");
+      if (dot < 0) return null;
+      ids.add(key.slice(0, dot));
+    }
+    return ids;
+  };
+
+  const refreshContainers = (now: BodyReading, ids: ReadonlySet<string>) => {
+    const refreshed = new Map<number, ProseMirrorNode>();
+    let block = 0;
+    const visit = (parent: ProseMirrorNode, start: number, depth: number) =>
+      parent.forEach((node, offset) => {
+        if (node.isTextblock || node.isLeaf) {
+          block += 1;
+          return;
+        }
+        const pos = start + offset;
+        const id = now.paths[block]?.[depth];
+        const frame =
+          id !== undefined && ids.has(id) ? now.lines[block]?.read?.leaf.path[depth] : undefined;
+        const attrs = frame ? attrsFor(node.type, frame.attrs) : node.attrs;
+        if (!node.hasMarkup(node.type, attrs, node.marks))
+          refreshed.set(pos, node.type.create(attrs, node.content, node.marks));
+        visit(node, pos + 1, depth + 1);
+      });
+    visit(now.doc, 0, 0);
+    if (refreshed.size > 0) now.doc = withNodesAt(now.doc, refreshed);
   };
 
   const place = (): BodyReading => {
@@ -425,13 +488,7 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
       const old = now.blocks[block]!.node;
       now.starts[block]! += grown;
       if (old !== next.node) {
-        const $pos = doc.resolve(now.starts[block]!);
-        let made = next.node;
-        for (let depth = $pos.depth; depth >= 0; depth--) {
-          const parent = $pos.node(depth);
-          made = parent.copy(parent.content.replaceChild($pos.index(depth), made));
-        }
-        doc = made;
+        doc = replacedAt(doc, now.starts[block]!, next.node);
         grown += next.node.nodeSize - old.nodeSize;
       }
       now.blocks[block] = next;
@@ -458,7 +515,8 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
       if (!(struct instanceof Y.Item)) return;
       const parent = struct.parent;
       if (parent === sequence) touchLineHolding(struct);
-      else if (parent === containers) recordsChanged = true;
+      else if (parent === containers && struct.parentSub !== null)
+        changedRecords.add(struct.parentSub);
       else if (parent instanceof Y.XmlElement && parent._item?.parent === sequence)
         touchLineHolding(parent._item);
     };
@@ -576,10 +634,13 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     const follow = transactions.length > 0 && change.follow?.length ? change.follow : null;
     const followed = follow ? followPositions(follow, transactions) : null;
     note(transactions);
-    if (!reading || recordsChanged || !rebuildTouched(reading)) rebuildAll();
+    const wrote = changedRecords.size > 0;
+    const ids = wrote ? ownersOfAttributes(changedRecords) : null;
+    changedRecords.clear();
+    if (!reading || (wrote && !ids) || !rebuildTouched(reading)) rebuildAll();
     touched = [];
-    if (recordsChanged) lines.forEach(refit);
-    recordsChanged = false;
+    if (wrote) for (const line of lines) refit(line, ids ?? undefined);
+    if (reading && ids) refreshContainers(reading, ids);
     reading ??= place();
     stale = false;
     return followed ? followed() : [];
@@ -604,10 +665,10 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
         at = end;
       }
     },
-    /** Says that container records are about to be written. */
-    touchRecords(): void {
+    /** Says that the container records under `keys` are about to be written. */
+    touchRecords(keys: Iterable<string>): void {
       stale = true;
-      recordsChanged = true;
+      for (const key of keys) changedRecords.add(key);
     },
     /** Takes the editor's document for the reading's own, once the two are known to be equal. */
     adopt(doc: ProseMirrorNode): void {
