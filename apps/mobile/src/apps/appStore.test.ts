@@ -21,7 +21,7 @@ import {
 } from "../server/testServer";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { cacheScope, createReadCache, type ReadCache } from "../server/workspaceData";
-import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
+import { appTeardown, createAppRunner, createWorkspaceApps, REPLACED_KEPT_MS } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
@@ -49,10 +49,10 @@ function setup(
   return { server, signIn, runner, apps };
 }
 
-async function running() {
+async function running(opened = app) {
   const context = setup();
   answerLaunch(context.server);
-  expect(await context.apps.open(app, still)).toBe(true);
+  expect(await context.apps.open(opened, still)).toBe(true);
   expect(context.runner.state()).toMatchObject({
     publicationId: A,
     action: ACTION,
@@ -276,8 +276,14 @@ describe("teardown", () => {
 
   it("ends the app only when a complete catalog no longer lists it approved", async () => {
     const cases: [string, Answer[], boolean][] = [
-      ["withdrawn", [page([version(B, true)])], true],
+      ["withdrawn", [page([version(B, true, "trip")])], true],
       ["revoked elsewhere", [page([version(A)])], true],
+      [
+        "a link version beside a newer one",
+        [page([version(B, false, "events/signup", true)])],
+        true,
+      ],
+      ["revoked beside a newer version", [page([version(A), version(B, true)])], true],
       ["still approved", [page([version(A, true)])], false],
       ["a failed read", [{ status: 503 }], false],
       ["an incomplete read", [page([version(B)], B)], false],
@@ -287,6 +293,35 @@ describe("teardown", () => {
       server.on("POST", "/sync/ws-1/ops/apps", ...answers);
       await apps.refresh();
       expect(runner.state() === null, name).toBe(ends);
+    }
+  });
+
+  it("keeps the owner's app running when a newer version of it replaces it", async () => {
+    const owned = { ...version(A, true, "events/signup", true), name: "signup" };
+    const cases: [string, Answer[], boolean][] = [
+      ["replaced by a newer version", [page([version(B, false, "events/signup", true)])], false],
+      ["another app's version", [page([version(B, false, "trip", true)])], true],
+      ["withdrawn with no replacement", [page([])], true],
+    ];
+    for (const [name, answers, ends] of cases) {
+      const { server, runner, apps } = await running(owned);
+      server.on("POST", "/sync/ws-1/ops/apps", ...answers);
+      await apps.refresh();
+      expect(runner.state() === null, name).toBe(ends);
+    }
+  });
+
+  it("closes a replaced owner app once it has run for the launch's lifetime", async () => {
+    const owned = { ...version(A, true, "events/signup", true), name: "signup" };
+    const { server, runner, apps } = await running(owned);
+    const started = runner.state()?.startedAtMs ?? 0;
+    const now = vi.spyOn(Date, "now").mockReturnValue(started + REPLACED_KEPT_MS);
+    try {
+      server.on("POST", "/sync/ws-1/ops/apps", page([version(B, false, "events/signup", true)]));
+      await apps.refresh();
+      expect(runner.state()).toBeNull();
+    } finally {
+      now.mockRestore();
     }
   });
 

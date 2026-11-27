@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { A, B, memberVersion, version } from "../server/testApps";
 import type { WorkspaceFile } from "../server/workspaceReads";
-import { FILES_SHOWN, homeRows, revealedPages } from "./homeModel";
+import { appGroups, FILES_SHOWN, homeRows, revealedPages } from "./homeModel";
 
 const file = (path: string): WorkspaceFile => ({
   path,
@@ -83,5 +84,34 @@ describe("Home's rows", () => {
     const { others } = homeRows(many, new Set());
     expect(others.shown).toHaveLength(FILES_SHOWN);
     expect(others.count).toBe(FILES_SHOWN + 5);
+  });
+});
+
+describe("Home's apps", () => {
+  const C = "c".repeat(64);
+  const D = "d".repeat(64);
+  const E = "e".repeat(64);
+
+  it("show the owner's phone version over its link versions, keeping approved ones to revoke", () => {
+    const groups = appGroups([
+      version(A, true),
+      version(E, false),
+      version(B, false, "events/signup", true),
+      version(C, true, "trip"),
+      memberVersion(D),
+    ]);
+    const ids = groups.map(({ key, versions }) => [key, versions.map((app) => app.publicationId)]);
+    expect(ids).toEqual([
+      ["events/signup", [B, A]],
+      ["trip", [C]],
+      [`member:${D}`, [D]],
+    ]);
+    expect(groups.map((group) => group.approvedBefore)).toEqual([true, true, false]);
+  });
+
+  it("keep every version of an app with no phone version", () => {
+    const [group] = appGroups([version(A), version(B)]);
+    expect(group?.versions.map((app) => app.publicationId)).toEqual([A, B]);
+    expect(group?.approvedBefore).toBe(false);
   });
 });

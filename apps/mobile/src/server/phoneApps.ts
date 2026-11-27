@@ -28,6 +28,7 @@ export interface PhoneApp {
   readonly appRoot: string;
   readonly sourceRevision: string;
   readonly approved: boolean;
+  readonly owner: boolean;
   /** Null for the owner's own published app. */
   readonly member: MemberApp | null;
 }
@@ -70,6 +71,7 @@ export interface AppLaunch {
 type Version = Pick<PhoneApp, "publicationId" | "authorityRevision">;
 const ACCESS = ["view", "comment", "edit"] as const;
 const CONSENT: readonly MemberConsent[] = ["none", "current", "changed"];
+const AUDIENCE: readonly unknown[] = [undefined, "link", "workspace", "owner"];
 
 const PUBLICATION = /^[0-9a-f]{64}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
@@ -97,7 +99,8 @@ function readVersion(item: unknown, member: boolean): PhoneApp | null {
     !revision(item.authorityRevision) ||
     !text(item.appRoot) ||
     !text(item.sourceRevision, 128) ||
-    typeof item.approved !== "boolean"
+    typeof item.approved !== "boolean" ||
+    !AUDIENCE.includes(item.audience)
   )
     return null;
   const author = readAuthor(item.author);
@@ -109,6 +112,7 @@ function readVersion(item: unknown, member: boolean): PhoneApp | null {
     appRoot: item.appRoot,
     sourceRevision: item.sourceRevision,
     approved: item.approved,
+    owner: item.audience === "owner",
     member: member ? { name: item.name as string, author: author!, consent: consent! } : null,
   };
 }
@@ -135,7 +139,8 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
     !text(result.sourceRevision, 128) ||
     !revision(result.createdAtMs) ||
     (result.approval !== null && !isFields(result.approval)) ||
-    typeof result.revocable !== "boolean"
+    typeof result.revocable !== "boolean" ||
+    !AUDIENCE.includes(result.audience)
   )
     return null;
   const member =
@@ -183,6 +188,7 @@ function readReview(result: unknown, publicationId: string): AppReview | null {
         appRoot: result.appRoot,
         sourceRevision: result.sourceRevision,
         approved: result.approval !== null,
+        owner: result.audience === "owner",
         member,
         createdAtMs: result.createdAtMs,
         agent,

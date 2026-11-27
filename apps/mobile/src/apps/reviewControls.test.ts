@@ -1,7 +1,7 @@
 import { appWords } from "@dohc/interface-words/apps";
 import { describe, expect, it } from "vitest";
 import type { MemberConsent } from "../server/phoneApps";
-import { memberAppState, reviewControls, reviewStatus } from "./reviewControls";
+import { appState, reviewControls, reviewStatus } from "./reviewControls";
 
 const owner = { approved: false, revocable: false, member: null };
 const member = (consent: MemberConsent, approved = false, revocable = false) => ({
@@ -63,9 +63,14 @@ describe("an app review's controls", () => {
   });
 
   it("marks a Member app in the list until it's allowed, and a changed one as updated", () => {
-    expect(memberAppState(member("none"))).toBe(appWords.toReview);
-    expect(memberAppState(member("changed"))).toBe(appWords.updated);
-    expect(memberAppState(member("current", true))).toBeNull();
-    expect(memberAppState({ approved: false, member: null })).toBeNull();
+    expect(appState(member("none"), true)).toBe(appWords.toReview);
+    expect(appState(member("changed"), false)).toBe(appWords.updated);
+    expect(appState(member("current", true), false)).toBeNull();
+  });
+
+  it("marks the owner's app for review, as updated once another version was approved", () => {
+    expect(appState({ approved: false, member: null }, false)).toBe(appWords.toReview);
+    expect(appState({ approved: false, member: null }, true)).toBe(appWords.updated);
+    expect(appState({ approved: true, member: null }, true)).toBeNull();
   });
 });

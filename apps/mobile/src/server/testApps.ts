@@ -13,12 +13,18 @@ export const ACTION = `https://${"c".repeat(48)}.apps.example.net/bootstrap`;
 
 type Server = ReturnType<typeof testServer>;
 
-export const version = (publicationId: string, approved = false, appRoot = "events/signup") => ({
+export const version = (
+  publicationId: string,
+  approved = false,
+  appRoot = "events/signup",
+  owner = false,
+) => ({
   publicationId,
   authorityRevision: 1,
   appRoot,
   sourceRevision: "1".repeat(64),
   approved,
+  owner,
   member: null as PhoneApp["member"],
 });
 
@@ -31,7 +37,7 @@ export const memberVersion = (
   ...version(publicationId, approved, "app"),
   member: { name: "tracker", author: "Ana", consent },
 });
-const listed = (app: ReturnType<typeof version>) =>
+const listed = ({ owner, ...app }: ReturnType<typeof version>) =>
   app.member
     ? {
         ...app,
@@ -40,7 +46,7 @@ const listed = (app: ReturnType<typeof version>) =>
         author: { name: app.member.author },
         consent: app.member.consent,
       }
-    : { ...app, member: undefined };
+    : { ...app, member: undefined, ...(owner ? { audience: "owner" } : {}) };
 
 export const page = (
   apps: ReturnType<typeof version>[],

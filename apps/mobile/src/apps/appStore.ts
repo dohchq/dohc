@@ -17,6 +17,8 @@ import { cachedList, views, type ReadCache, type ReadProblem } from "../server/w
 // sign-in change, a workspace change and Show on phone off (appTeardown). The workspace's store ends it on Revoke,
 // before it sends, and when a complete catalog read no longer lists it approved: a revoke on another phone or a
 // withdrawn publication shows here at the next read, every 15 s while it runs. The server has already cut its access.
+// An owner's app that a catalog lists another version of in its place keeps running until it closes, for at most
+// REPLACED_KEPT_MS from its launch, so a revoke from another phone still closes it.
 
 /** Whose a launch is: the sign-in and workspace it was made for, and its app. */
 export interface AppScope {
@@ -29,7 +31,11 @@ export interface RunningApp extends AppScope, AppLaunch {
   /** New for each launch, so each gets a new WebView. */
   readonly key: number;
   readonly name: string;
+  readonly appRoot: string | null;
+  readonly startedAtMs: number;
 }
+
+export const REPLACED_KEPT_MS = 10 * 60_000;
 
 export interface AppRunner {
   state(): RunningApp | null;
@@ -45,7 +51,7 @@ export interface AppRunner {
   stopped(): AppScope | null;
 }
 
-type LaunchScope = AppScope & { readonly name: string };
+type LaunchScope = AppScope & { readonly name: string; readonly appRoot: string | null };
 
 export function createAppRunner(): AppRunner {
   const listeners = new Set<() => void>();
@@ -101,7 +107,7 @@ export function createAppRunner(): AppRunner {
       }
       if (pending?.key !== key) return false;
       pending = null;
-      set({ ...scope, ...answer, key });
+      set({ ...scope, ...answer, key, startedAtMs: Date.now() });
       return true;
     },
     stop() {
@@ -233,11 +239,12 @@ export function createWorkspaceApps(options: {
         if (!lands()) return;
         saved.save(apps);
         const running = runner.state();
-        if (
-          running &&
-          mine()(running) &&
-          !apps.some((app) => app.publicationId === running.publicationId && app.approved)
-        )
+        const listed = apps.find((app) => app.publicationId === running?.publicationId);
+        const replaced =
+          running !== null &&
+          Date.now() - running.startedAtMs < REPLACED_KEPT_MS &&
+          apps.some((app) => app.owner && app.appRoot === running.appRoot);
+        if (running && mine()(running) && (listed ? !listed.approved : !replaced))
           runner.end((scope) => scope === running);
         set({ apps, problem: null, failures: state.failures });
       },
@@ -277,7 +284,13 @@ export function createWorkspaceApps(options: {
       const both = new AbortController();
       const abort = () => both.abort();
       const sources = [signal, leaving];
-      const scope = { signIn, workspaceId, publicationId: app.publicationId, name: app.name };
+      const scope = {
+        signIn,
+        workspaceId,
+        publicationId: app.publicationId,
+        name: app.name,
+        appRoot: app.owner ? app.appRoot : null,
+      };
       try {
         const shown = await runner.start(scope, (ended) => {
           sources.push(ended);

@@ -28,9 +28,10 @@ describe("the phone's app operations", () => {
   it("lists every catalog page, the owner's apps then the Member apps", async () => {
     const { server, ops } = setup();
     const C = "c".repeat(64);
-    server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)], A), page([version(B)]));
+    const phoneOnly = version(B, false, "events/signup", true);
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)], A), page([phoneOnly]));
     server.on("POST", "/sync/ws-1/ops/memberApps", memberPage([memberVersion(C, "changed")]));
-    expect(await ops.list()).toEqual([version(A, true), version(B), memberVersion(C, "changed")]);
+    expect(await ops.list()).toEqual([version(A, true), phoneOnly, memberVersion(C, "changed")]);
     expect(server.paths().map((path) => path.split("/").at(-1))).toEqual([
       "apps",
       "apps",
@@ -53,6 +54,7 @@ describe("the phone's app operations", () => {
     let pages = 0;
     const cases = [
       ["unreadable", [page([{ ...version(A), approved: "yes" } as never])]],
+      ["an unknown audience", [page([{ ...version(A), audience: "public" } as never])]],
       // The last answer repeats, so the second cursor comes back.
       ["a repeated cursor", [page([version(A)], B), page([], A)]],
       // A new cursor on every page, as a catalog over the limit has.
