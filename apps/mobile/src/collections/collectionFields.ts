@@ -1,5 +1,12 @@
 import { collectionWords } from "@dohc/interface-words/collections";
-import type { CollectionField, RecordValue } from "../server/phoneCollections";
+import {
+  isRelationKey,
+  type CollectionField,
+  type CreateCollectionField,
+  type RecordId,
+  type RecordValue,
+  type RelationLabels,
+} from "../server/phoneCollections";
 
 // How the phone shows a record's values, read-only and plain, by field type.
 
@@ -39,11 +46,12 @@ function date(value: string): string {
       });
 }
 
-/** One field's value. `files` names attached files by ID. */
+/** One field's value. `files` names attached files by ID; `relationLabels` maps JSON-encoded keys to labels. */
 export function shownValue(
   field: Pick<CollectionField, "type">,
   value: RecordValue | undefined,
   files: Readonly<Record<string, string>>,
+  relationLabels?: Readonly<Record<string, string>>,
 ): ShownValue {
   if (field.type === "checkbox") return { kind: "check", checked: value === true };
   if (
@@ -66,7 +74,13 @@ export function shownValue(
         text:
           typeof value === "string" ? (files[value] ?? collectionWords.attachedFile) : plain(value),
       };
-    // Text, a number, a choice or several, and a relation's record IDs.
+    case "relation": {
+      const label = (item: RecordValue) => relationLabels?.[JSON.stringify(item)] ?? plain(item);
+      return {
+        kind: "text",
+        text: Array.isArray(value) ? value.map(label).join(", ") : label(value),
+      };
+    }
     default:
       return { kind: "text", text: plain(value) };
   }
@@ -91,16 +105,22 @@ export function recordName(
   lead: CollectionField | null,
   values: Readonly<Record<string, RecordValue>>,
   files: Readonly<Record<string, string>>,
+  relations?: RelationLabels,
 ): string {
-  const text = lead && rowText(shownValue(lead, values[lead.fieldId], files), lead.name);
+  const text =
+    lead &&
+    rowText(shownValue(lead, values[lead.fieldId], files, relations?.[lead.fieldId]), lead.name);
   return text?.trim() ? text : collectionWords.untitledRecord;
 }
 
-/**
- * How the phone edits a field's type: typed text, a number or a web address with their keyboards, a switch, a list
- * of choices, or the system's date picker. Null for a type it doesn't edit yet: a relation or an attachment needs a
- * picker of records or files.
- */
+export const supportsSearch = (fields: readonly Pick<CollectionField, "type">[]): boolean =>
+  fields.some((f) => f.type === "text" || f.type === "url" || f.type === "select");
+
+export const supportsSort = (field: Pick<CollectionField, "type" | "relation">): boolean =>
+  field.type !== "attachment" &&
+  field.type !== "multi-select" &&
+  (field.type !== "relation" || field.relation?.many === false);
+
 export type EditorKind =
   | "text"
   | "number"
@@ -108,21 +128,12 @@ export type EditorKind =
   | "checkbox"
   | "select"
   | "multi-select"
-  | "date";
+  | "date"
+  | "relation";
 
-export function editorKind(field: Pick<CollectionField, "type">): EditorKind | null {
-  switch (field.type) {
-    case "text":
-    case "number":
-    case "url":
-    case "checkbox":
-    case "select":
-    case "multi-select":
-    case "date":
-      return field.type;
-    default:
-      return null;
-  }
+export function editorKind(field: Pick<CollectionField, "type" | "relation">): EditorKind | null {
+  if (field.type === "relation") return field.relation ? "relation" : null;
+  return field.type === "attachment" ? null : field.type;
 }
 
 /**
@@ -144,16 +155,21 @@ export function dayOf(date: Date): string {
   return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-export type Draft = string | boolean | readonly string[];
+export type Draft = string | boolean | readonly RecordId[];
 
-/** A date starts from today when the record has no day, so Save keeps the day the picker shows. */
+/** A date starts from today when editing alone and empty, or empty in a multi-field form. */
 export function draftOf(
-  field: Pick<CollectionField, "type">,
+  field: Pick<CollectionField, "type" | "relation">,
   value: RecordValue | undefined,
+  options?: { readonly emptyDate?: boolean },
 ): Draft {
   switch (field.type) {
     case "date":
-      return typeof value === "string" && dateOf(value) ? value : dayOf(new Date());
+      return typeof value === "string" && dateOf(value)
+        ? value
+        : options?.emptyDate
+          ? ""
+          : dayOf(new Date());
     case "checkbox":
       return value === true;
     case "select":
@@ -162,6 +178,14 @@ export function draftOf(
       return Array.isArray(value)
         ? value.filter((item): item is string => typeof item === "string")
         : [];
+    case "relation":
+      return field.relation?.many
+        ? Array.isArray(value)
+          ? value.filter(isRelationKey)
+          : []
+        : isRelationKey(value)
+          ? [value]
+          : [];
     default:
       return typeof value === "string" || typeof value === "number" ? String(value) : "";
   }
@@ -174,13 +198,17 @@ const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
  * the editor keeps rather than send as null and empty the field.
  */
 export function valueOf(
-  field: Pick<CollectionField, "type" | "options">,
+  field: Pick<CollectionField, "type" | "options" | "relation">,
   draft: Draft,
 ): { readonly value: RecordValue } | null {
   if (field.type === "checkbox") return { value: draft === true };
   if (field.type === "select" || field.type === "multi-select") {
     const chosen = Array.isArray(draft) ? field.options.filter((item) => draft.includes(item)) : [];
     return { value: field.type === "multi-select" ? chosen : (chosen[0] ?? null) };
+  }
+  if (field.type === "relation") {
+    const chosen = Array.isArray(draft) ? draft.filter(isRelationKey) : [];
+    return { value: field.relation?.many ? chosen : (chosen[0] ?? null) };
   }
   if (typeof draft !== "string") return { value: null };
   if (field.type === "text") return { value: draft === "" ? null : draft };
@@ -190,4 +218,31 @@ export function valueOf(
   // A decimal comma, as some keyboards type it.
   const number = typed.replace(",", ".");
   return NUMBER.test(number) && Number.isFinite(Number(number)) ? { value: Number(number) } : null;
+}
+
+export function draftProblem(
+  field: Pick<CreateCollectionField, "name" | "type" | "required" | "options" | "relation">,
+  draft: Draft,
+): string | null {
+  const parsed = valueOf(field, draft);
+  if (!parsed) return collectionWords.enterNumber;
+  const v = parsed.value;
+  const empty = v === null || v === "" || (Array.isArray(v) && v.length === 0);
+  if (empty) {
+    if (!field.required) return null;
+    return ["relation", "select", "multi-select", "date"].includes(field.type)
+      ? collectionWords.chooseField(field.name)
+      : collectionWords.enterField(field.name);
+  }
+  if (field.type === "url" && typeof v === "string") {
+    try {
+      if (/\s/u.test(v) || !["http:", "https:"].includes(new URL(v).protocol))
+        return collectionWords.enterUrl;
+    } catch {
+      return collectionWords.enterUrl;
+    }
+  }
+  if (field.type === "relation" && field.relation?.many && Array.isArray(v) && v.length > 100)
+    return collectionWords.tooManyRelations;
+  return null;
 }

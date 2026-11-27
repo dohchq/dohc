@@ -5,6 +5,7 @@ import {
   readDeleteAnswer,
   readDescription,
   readPage,
+  readRelationOptions,
   type CollectionField,
   type CollectionTable,
 } from "./phoneCollections";
@@ -40,6 +41,7 @@ const table: CollectionTable = {
   name: "People",
   primaryFieldId: "f-name",
   fields: [name, paid, status],
+  createFields: [],
   canCreate: true,
   canDelete: false,
 };
@@ -104,6 +106,63 @@ describe("a Collection's description", () => {
         ?.fields[1],
     ).toMatchObject({ editable: false, reversible: false });
   });
+
+  it("reads createFields with defaults, options, and relation shape, and rejects malformed ones", () => {
+    const createFields = [
+      { fieldId: "f-code", name: "Code", type: "text", required: true },
+      {
+        fieldId: "f-status",
+        name: "Status",
+        type: "select",
+        required: true,
+        default: "Paid",
+        options: ["Unpaid", "Paid"],
+      },
+      {
+        fieldId: "f-org",
+        name: "Org",
+        type: "relation",
+        required: true,
+        relation: { many: false },
+      },
+    ];
+    const parsed = readDescription({ ...described, tables: [{ ...table, createFields }] }, D);
+    expect(parsed?.tables[0]?.createFields).toEqual([
+      { fieldId: "f-code", name: "Code", type: "text", required: true, options: [] },
+      {
+        fieldId: "f-status",
+        name: "Status",
+        type: "select",
+        required: true,
+        default: "Paid",
+        options: ["Unpaid", "Paid"],
+      },
+      {
+        fieldId: "f-org",
+        name: "Org",
+        type: "relation",
+        required: true,
+        options: [],
+        relation: { many: false },
+      },
+    ]);
+    expect(
+      readDescription(
+        {
+          ...described,
+          tables: [
+            {
+              ...table,
+              createFields: [{ fieldId: "f-org", name: "Org", type: "relation", required: true }],
+            },
+          ],
+        },
+        D,
+      ),
+    ).toBeNull();
+    const { createFields: _, ...withoutCreateFields } = table;
+    expect(readDescription({ ...described, tables: [withoutCreateFields] }, D)).toBeNull();
+  });
 });
 
 describe("a page of records", () => {
@@ -117,15 +176,17 @@ describe("a page of records", () => {
     rows: [row("a", { "f-name": "Ana", "f-paid": true, "f-secret": "x" })],
     nextCursor: { id: "a", value: "Ana" },
     files: { "file-1": "receipt.pdf" },
+    relations: { "f-org": { '"c-1"': "Acme" } },
     ...fields,
   });
 
-  it("keeps each record's version, its described fields, the cursor and the file names", () => {
+  it("keeps each record's version, its described fields, the cursor, file names, and relation labels", () => {
     expect(readPage(page({}), table)).toEqual({
       status: "ready",
       rows: [{ id: "a", version: 1, values: { "f-name": "Ana", "f-paid": true } }],
       next: { id: "a", value: "Ana" },
       files: { "file-1": "receipt.pdf" },
+      relations: { "f-org": { '"c-1"': "Acme" } },
     });
     expect(readPage(page({ nextCursor: null }), table)).toMatchObject({ next: null });
     expect(readPage(page({ rows: [row(7)] }), table)).toMatchObject({
@@ -142,9 +203,12 @@ describe("a page of records", () => {
     });
   });
 
-  it("reads the refusal of a table nothing reads", () => {
+  it("reads the refusal of a table nothing reads or whose custom read rejects search/sort", () => {
     expect(readPage({ status: "refused", reason: "no-read" }, table)).toEqual({
       status: "refused",
+    });
+    expect(readPage({ status: "refused", reason: "unsupported-query" }, table)).toEqual({
+      status: "unsupported-query",
     });
     expect(readPage({ status: "refused", reason: "other" }, table)).toBeNull();
   });
@@ -160,6 +224,40 @@ describe("a page of records", () => {
     expect(readPage(page({ nextCursor: { id: "a" } }), table)).toBeNull();
     expect(readPage(page({ nextCursor: undefined }), table)).toBeNull();
     expect(readPage(page({ files: undefined }), table)).toBeNull();
+    expect(readPage(page({ relations: undefined }), table)).toBeNull();
+  });
+});
+
+describe("relation options", () => {
+  it("reads options, cursor, and unsupported search flag, and rejects duplicates", () => {
+    expect(
+      readRelationOptions({
+        options: [
+          { value: "c-1", label: "Acme" },
+          { value: 1.5, label: "Globex" },
+        ],
+        nextCursor: { id: 2, value: 2 },
+      }),
+    ).toEqual({
+      options: [
+        { value: "c-1", label: "Acme" },
+        { value: 1.5, label: "Globex" },
+      ],
+      next: { id: 2, value: 2 },
+      searchUnsupported: false,
+    });
+    expect(readRelationOptions({ options: [], nextCursor: null, searchUnsupported: true })).toEqual(
+      { options: [], next: null, searchUnsupported: true },
+    );
+    expect(
+      readRelationOptions({
+        options: [
+          { value: "c-1", label: "Acme" },
+          { value: "c-1", label: "Other" },
+        ],
+        nextCursor: null,
+      }),
+    ).toBeNull();
   });
 });
 

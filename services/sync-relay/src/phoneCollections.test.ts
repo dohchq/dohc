@@ -442,8 +442,14 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
             field(PAID, "Paid", "checkbox", true),
             field(RECEIPT, "Receipt", "attachment"),
           ],
-          // A new person needs an ID and a name, which have no defaults.
-          canCreate: false,
+          // Required and optional inputtable create fields (including write-only Email; excluding attachment Receipt).
+          createFields: [
+            { fieldId: KEY, name: "ID", type: "text", required: true },
+            { fieldId: NAME, name: "Name", type: "text", required: true },
+            { fieldId: PAID, name: "Paid", type: "checkbox", required: false },
+            { fieldId: EMAIL, name: "Email", type: "text", required: false },
+          ],
+          canCreate: true,
           canDelete: true,
         },
         {
@@ -451,6 +457,7 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
           name: "Notes",
           primaryFieldId: null,
           fields: [],
+          createFields: [],
           canCreate: false,
           canDelete: false,
         },
@@ -464,6 +471,18 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
             field(GUEST_PAID, "Paid", "checkbox"),
             { ...field(GUEST_STATUS, "Status", "select"), options: ["Unpaid", "Paid"] },
           ],
+          createFields: [
+            { fieldId: GUEST_NAME, name: "Name", type: "text", required: false },
+            { fieldId: GUEST_PAID, name: "Paid", type: "checkbox", required: true },
+            {
+              fieldId: GUEST_STATUS,
+              name: "Status",
+              type: "select",
+              required: true,
+              default: "Unpaid",
+              options: ["Unpaid", "Paid"],
+            },
+          ],
           canCreate: true,
           canDelete: true,
         },
@@ -476,6 +495,7 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
     status: "ready",
     nextCursor: { id: "r49", value: "r49" },
     files: {},
+    relations: {},
   });
   expect(rowKeys(first)).toEqual(KEYS.slice(0, PHONE_COLLECTION_PAGE));
   expect((first.body.result as { rows: unknown[] }).rows[0]).toEqual({
@@ -919,15 +939,19 @@ it("refuses a new record or deletion that a table's operations don't allow, befo
       message: "The Collection's rules no longer allow this change, so dohc did not save it.",
     },
   });
-  // A new person needs an ID and a name, which have no defaults. Nothing reads Notes, so the phone can't show what it
-  // would add or delete there.
-  expect(await create(f, { tableId: PEOPLE })).toEqual(refused);
+  // Nothing reads Notes, so the phone can't show what it would add or delete there.
   expect(await create(f, { tableId: NOTES })).toEqual(refused);
   expect(await remove(f, { tableId: NOTES })).toEqual(refused);
   expect(await create(f, { tableId: OTHER })).toEqual(notFound);
-  // Nor does a key that isn't random, a version that isn't one, or values from the phone.
+  // Disallowed create fieldIds (generated key, another table's field, or attachment) are refused before invoke.
+  expect(await create(f, { values: { [GUEST_KEY]: "forced" } })).toEqual(refused);
+  expect(
+    await create(f, { tableId: PEOPLE, values: { [RECEIPT]: "file-1234567890abcdef" } }),
+  ).toEqual(refused);
+  // Nor does a key that isn't random, a version that isn't one, or malformed values.
   expect((await create(f, { idempotencyKey: "new-guest" })).status).toBe(400);
-  expect((await create(f, { values: { [GUEST_NAME]: "Ada" } })).status).toBe(400);
+  expect((await create(f, { values: "bad" })).status).toBe(400);
+  expect((await create(f, { values: { notAUuid: "x" } })).status).toBe(400);
   expect((await remove(f, { expectedVersion: 0 })).status).toBe(400);
   expect(invoked).toBe(0);
 });
@@ -1112,4 +1136,1457 @@ it("commits no Member's change once their phone stops reaching the workspace as 
   expect((await r01(f)).version).toBe(1);
   storage.setShowOnPhone({ userId: "ana", workspaceId: "w", showOnPhone: true });
   expect(await edit(f, {}, ana)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+});
+
+it("creates records with required and write-only fields via values, refuses disallowed fields, and disables create on required attachments", async () => {
+  const f = await phone([]);
+  const added = await create(f, {
+    tableId: PEOPLE,
+    values: { [KEY]: "p-1", [NAME]: "Ada Lovelace", [PAID]: true, [EMAIL]: "ada@example.test" },
+  });
+  expect(added).toEqual(ok({ saved: { id: "p-1", version: 1 } }));
+  const row = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: PEOPLE,
+    recordId: "p-1",
+  });
+  expect((row.body.result as { rows: unknown[] }).rows).toEqual([
+    {
+      id: "p-1",
+      version: 1,
+      values: { [KEY]: "p-1", [NAME]: "Ada Lovelace", [PAID]: true, [RECEIPT]: null },
+    },
+  ]);
+  expect(
+    await create(f, { tableId: PEOPLE, values: { [KEY]: "p-2" }, idempotencyKey: id(202) }),
+  ).toEqual(ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }));
+  let invoked = 0;
+  f.during(() => void invoked++);
+  expect(
+    await create(f, {
+      tableId: PEOPLE,
+      values: { [KEY]: "p-3", [NAME]: "No Receipt", [RECEIPT]: "file_1234567890abcdef" },
+      idempotencyKey: id(203),
+    }),
+  ).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
+
+  f.describing((desc) => ({
+    ...desc,
+    tables: desc.tables.map((t) =>
+      t.tableId !== PEOPLE
+        ? t
+        : {
+            ...t,
+            fields: t.fields.map((field) =>
+              field.fieldId !== RECEIPT ? field : { ...field, required: true },
+            ),
+          },
+    ),
+  }));
+  const desc = (await f.op("collection", { datasetId: DATASET })).body.result as {
+    tables: Array<{ tableId: string; canCreate: boolean; createFields: unknown[] }>;
+  };
+  expect(desc.tables.find((t) => t.tableId === PEOPLE)).toMatchObject({
+    canCreate: false,
+    createFields: [],
+  });
+  expect(
+    await create(f, {
+      tableId: PEOPLE,
+      values: { [KEY]: "p-4", [NAME]: "Blocked" },
+      idempotencyKey: id(204),
+    }),
+  ).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
+});
+
+it("resolves same-dataset relation labels, supports searchable RelationPicker and relation creates/edits, and isolates forbidden tables from Members", async () => {
+  const REL_DS = id(400),
+    CUSTOMERS = id(401),
+    CUST_ID = id(402),
+    CUST_NAME = id(403),
+    TAGS = id(404),
+    TAG_ID = id(405),
+    TAG_LABEL = id(406),
+    ORDERS = id(407),
+    ORD_ID = id(408),
+    ORD_TITLE = id(409),
+    ORD_CUST = id(410),
+    ORD_TAGS = id(411),
+    ORD_SECRET = id(412),
+    ORD_FILE = id(413),
+    CUST_READ = id(420),
+    CUST_CREATE = id(421),
+    TAG_READ = id(422),
+    TAG_CREATE = id(423),
+    ORD_READ = id(424),
+    ORD_CREATE = id(425),
+    ORD_EDIT = id(426);
+  const relDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: REL_DS,
+    name: "Shop",
+    schemaPath: "shop/schema.sql",
+    operationsPath: "shop/operations.js",
+    tables: [
+      {
+        tableId: CUSTOMERS,
+        name: "Customers",
+        sqlName: "customers",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: CUST_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: CUST_NAME,
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: TAGS,
+        name: "Tags",
+        sqlName: "tags",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: TAG_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: TAG_LABEL,
+            name: "Label",
+            sqlColumn: "label",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: ORDERS,
+        name: "Orders",
+        sqlName: "orders",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ORD_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+            generated: "record-id",
+          },
+          {
+            fieldId: ORD_TITLE,
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: ORD_CUST,
+            name: "Customer",
+            sqlColumn: "customer_id",
+            type: "relation",
+            required: true,
+            unique: false,
+            relation: { datasetId: REL_DS, tableId: CUSTOMERS, fieldId: CUST_ID, many: false },
+          },
+          {
+            fieldId: ORD_TAGS,
+            name: "Tags",
+            sqlColumn: "tag_ids",
+            type: "relation",
+            required: false,
+            unique: false,
+            relation: { datasetId: REL_DS, tableId: TAGS, fieldId: TAG_ID, many: true },
+          },
+          {
+            fieldId: ORD_SECRET,
+            name: "Internal code",
+            sqlColumn: "secret_code",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: ORD_FILE,
+            name: "Invoice",
+            sqlColumn: "invoice",
+            type: "attachment",
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: CUST_READ,
+        name: "readCustomers",
+        label: "Read customers",
+        tableId: CUSTOMERS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [CUST_ID, CUST_NAME],
+      },
+      {
+        operationId: CUST_CREATE,
+        name: "createCustomer",
+        label: "Create customer",
+        tableId: CUSTOMERS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [CUST_ID, CUST_NAME],
+      },
+      {
+        operationId: TAG_READ,
+        name: "readTags",
+        label: "Read tags",
+        tableId: TAGS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: TAG_CREATE,
+        name: "createTag",
+        label: "Create tag",
+        tableId: TAGS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: ORD_READ,
+        name: "readOrders",
+        label: "Read orders",
+        tableId: ORDERS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ORD_ID, ORD_TITLE, ORD_CUST, ORD_TAGS],
+      },
+      {
+        operationId: ORD_CREATE,
+        name: "createOrder",
+        label: "Create order",
+        tableId: ORDERS,
+        kind: "create",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ORD_TITLE, ORD_CUST, ORD_TAGS, ORD_SECRET, ORD_FILE],
+      },
+      {
+        operationId: ORD_EDIT,
+        name: "editOrder",
+        label: "Edit order",
+        tableId: ORDERS,
+        kind: "edit",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ORD_TITLE, ORD_CUST, ORD_TAGS],
+        reversible: true,
+      },
+    ],
+  };
+  const relSql = `CREATE TABLE customers(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE tags(id TEXT PRIMARY KEY NOT NULL,label TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,customer_id TEXT NOT NULL REFERENCES customers(id),tag_ids TEXT,secret_code TEXT NOT NULL,invoice TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const relSource = generateDatasetOperations(relDef);
+  const relRev = describeDatasetRevision({
+    definition: relDef,
+    revision: 1,
+    schemaSql: relSql,
+    operationSource: relSource,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: relRev,
+    schemaSql: relSql,
+    operationSource: relSource,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(f.storage, "shop-dataset", null, {
+    path: "shop/dataset.json",
+    text: JSON.stringify({ datasetId: REL_DS }),
+  });
+  for (const [cid, cname] of [
+    ["c-1", "Acme Corp"],
+    ["c-2", "Beacon Labs"],
+    ["c-3", "Unused Secret"],
+  ])
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: REL_DS,
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+      operationId: CUST_CREATE,
+      input: { values: { [CUST_ID]: cid, [CUST_NAME]: cname } },
+      idempotencyKey: `cust-${cid}`,
+    });
+  for (const [tid, tlabel] of [
+    ["t-1", "VIP"],
+    ["t-2", "Urgent"],
+  ])
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: REL_DS,
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+      operationId: TAG_CREATE,
+      input: { values: { [TAG_ID]: tid, [TAG_LABEL]: tlabel } },
+      idempotencyKey: `tag-${tid}`,
+    });
+
+  // Omitting required write-only ORD_SECRET fails with invalid_input; providing it succeeds (proving values forwarded).
+  expect(
+    await f.op("collectionCreate", {
+      datasetId: REL_DS,
+      tableId: ORDERS,
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+      idempotencyKey: id(449),
+      values: { [ORD_TITLE]: "Missing secret", [ORD_CUST]: "c-1" },
+    }),
+  ).toEqual(ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }));
+  const created = await f.op("collectionCreate", {
+    datasetId: REL_DS,
+    tableId: ORDERS,
+    revision: 1,
+    revisionSha256: relRev.revisionSha256,
+    idempotencyKey: id(450),
+    values: {
+      [ORD_TITLE]: "First order",
+      [ORD_CUST]: "c-1",
+      [ORD_TAGS]: ["t-1", "t-2"],
+      [ORD_SECRET]: "S-99",
+    },
+  });
+  expect(created).toEqual(ok({ saved: { id: expect.any(String), version: 1 } }));
+  const orderId = (created.body.result as { saved: { id: string } }).saved.id;
+
+  // Owner sees resolved relation labels (only for referenced keys, not Unused Secret) and searchable options.
+  const ownerPage = await f.op("collectionRecords", { datasetId: REL_DS, tableId: ORDERS });
+  expect(ownerPage.body.result).toMatchObject({
+    status: "ready",
+    relations: {
+      [ORD_CUST]: { '"c-1"': "Acme Corp" },
+      [ORD_TAGS]: { '"t-1"': "VIP", '"t-2"': "Urgent" },
+    },
+  });
+  expect(JSON.stringify(ownerPage.body)).not.toContain("Unused Secret");
+  expect(
+    await f.op("collectionRelationOptions", {
+      datasetId: REL_DS,
+      tableId: ORDERS,
+      fieldId: ORD_CUST,
+      search: "Beac",
+    }),
+  ).toEqual(ok({ options: [{ value: "c-2", label: "Beacon Labs" }], nextCursor: null }));
+
+  // Owner can edit relation field and undo it.
+  expect(
+    await f.op("collectionEdit", {
+      datasetId: REL_DS,
+      tableId: ORDERS,
+      recordId: orderId,
+      fieldId: ORD_CUST,
+      value: "c-2",
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+      idempotencyKey: id(451),
+    }),
+  ).toEqual(ok({ saved: { version: 2, priorValue: "c-1" } }));
+
+  // Member Ana has Edit access on Orders ONLY (no read on Customers or Tags).
+  const storage = f.storage as SyncRelayStorage;
+  storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Shop",
+    email: "ana@example.test",
+    recipientUserId: "ana",
+    newMemberId: () => "member-ana",
+    newGrantId: () => "grant-ana",
+    newShareId: () => "share-w",
+    nowMs: 1,
+  });
+  storage.setWorkspaceMemberLevel({
+    workspaceId: "w",
+    actorUserId: "owner",
+    level: "edit",
+    workspaceName: undefined,
+    newShareId: () => "share-w-edit",
+    nowMs: 2,
+  });
+  f.host.setWorkspaceDefaults(owner, {
+    workspaceId: "w",
+    datasetId: REL_DS,
+    defaults: {
+      view: [ORD_READ],
+      comment: [ORD_READ],
+      edit: [ORD_READ, ORD_CREATE, ORD_EDIT],
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+    },
+  });
+  const ana = "ana:ana-phone:phone";
+  const anaDesc = (await f.op("collection", { datasetId: REL_DS }, ana)).body.result as {
+    tables: Array<{
+      tableId: string;
+      canCreate: boolean;
+      createFields: unknown[];
+      fields: Array<{ fieldId: string; editable: boolean; relation?: unknown }>;
+    }>;
+  };
+  const anaOrders = anaDesc.tables.find((t) => t.tableId === ORDERS)!;
+  expect(anaOrders.canCreate).toBe(false);
+  expect(anaOrders.createFields).toEqual([]);
+  expect(anaOrders.fields.find((item) => item.fieldId === ORD_CUST)).toMatchObject({
+    editable: false,
+  });
+  expect(anaOrders.fields.find((item) => item.fieldId === ORD_CUST)?.relation).toBeUndefined();
+  const anaRecords = await f.op("collectionRecords", { datasetId: REL_DS, tableId: ORDERS }, ana);
+  expect(anaRecords.status).toBe(200);
+  expect((anaRecords.body.result as { relations: unknown }).relations).toEqual({});
+  expect(JSON.stringify(anaRecords.body)).not.toContain("Acme");
+  expect(JSON.stringify(anaRecords.body)).not.toContain("Beacon");
+  expect(JSON.stringify(anaRecords.body)).not.toContain("VIP");
+  expect(
+    await f.op(
+      "collectionRelationOptions",
+      { datasetId: REL_DS, tableId: ORDERS, fieldId: ORD_CUST },
+      ana,
+    ),
+  ).toEqual(notFound);
+  expect(
+    await f.op(
+      "collectionRelationOptions",
+      { datasetId: REL_DS, tableId: ORDERS, fieldId: ORD_TAGS },
+      ana,
+    ),
+  ).toEqual(notFound);
+  // Attempting to write forbidden relation field is refused before invoke.
+  let invoked = 0;
+  f.during(() => void invoked++);
+  expect(
+    await f.op(
+      "collectionEdit",
+      {
+        datasetId: REL_DS,
+        tableId: ORDERS,
+        recordId: orderId,
+        fieldId: ORD_CUST,
+        value: "c-1",
+        expectedVersion: 2,
+        revision: 1,
+        revisionSha256: relRev.revisionSha256,
+        idempotencyKey: id(452),
+      },
+      ana,
+    ),
+  ).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
+
+  // Granting Ana read on Customers (still not Tags) unlocks Customers labels/options while keeping Tags isolated.
+  f.host.setWorkspaceDefaults(owner, {
+    workspaceId: "w",
+    datasetId: REL_DS,
+    defaults: {
+      view: [ORD_READ, CUST_READ],
+      comment: [ORD_READ, CUST_READ],
+      edit: [ORD_READ, ORD_CREATE, ORD_EDIT, CUST_READ],
+      revision: 1,
+      revisionSha256: relRev.revisionSha256,
+    },
+  });
+  const anaWithCust = await f.op("collectionRecords", { datasetId: REL_DS, tableId: ORDERS }, ana);
+  expect((anaWithCust.body.result as { relations: unknown }).relations).toEqual({
+    [ORD_CUST]: { '"c-2"': "Beacon Labs" },
+  });
+  expect(JSON.stringify(anaWithCust.body)).not.toContain("VIP");
+  expect(
+    await f.op(
+      "collectionRelationOptions",
+      { datasetId: REL_DS, tableId: ORDERS, fieldId: ORD_CUST },
+      ana,
+    ),
+  ).toEqual(
+    ok({
+      options: [
+        { value: "c-1", label: "Acme Corp" },
+        { value: "c-2", label: "Beacon Labs" },
+        { value: "c-3", label: "Unused Secret" },
+      ],
+      nextCursor: null,
+    }),
+  );
+  expect(
+    await f.op(
+      "collectionRelationOptions",
+      { datasetId: REL_DS, tableId: ORDERS, fieldId: ORD_TAGS },
+      ana,
+    ),
+  ).toEqual(notFound);
+  // With Edit access + Customers read, Ana can now create an Order (with write-only secret + required relation) via RelayDatasetHost.
+  expect(
+    await f.op(
+      "collectionCreate",
+      {
+        datasetId: REL_DS,
+        tableId: ORDERS,
+        revision: 1,
+        revisionSha256: relRev.revisionSha256,
+        idempotencyKey: id(453),
+        values: { [ORD_TITLE]: "Ana order", [ORD_CUST]: "c-1", [ORD_SECRET]: "ANA-1" },
+      },
+      ana,
+    ),
+  ).toEqual(ok({ saved: { id: expect.any(String), version: 1 } }));
+});
+
+it("resolves cross-dataset relation labels and enforces visibility and Member authorization on the target dataset", async () => {
+  const TARGET_DS = id(500),
+    ACCOUNTS = id(501),
+    ACC_ID = id(502),
+    ACC_NAME = id(503),
+    ACC_READ = id(504),
+    ACC_CREATE = id(505);
+  const targetDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: TARGET_DS,
+    name: "Accounts",
+    schemaPath: "accounts/schema.sql",
+    operationsPath: "accounts/operations.js",
+    tables: [
+      {
+        tableId: ACCOUNTS,
+        name: "Accounts",
+        sqlName: "accounts",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ACC_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ACC_NAME,
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: ACC_READ,
+        name: "read",
+        label: "Read",
+        tableId: ACCOUNTS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ACC_ID, ACC_NAME],
+      },
+      {
+        operationId: ACC_CREATE,
+        name: "create",
+        label: "Create",
+        tableId: ACCOUNTS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ACC_ID, ACC_NAME],
+      },
+    ],
+  };
+  const targetSql = `CREATE TABLE accounts(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const targetSource = generateDatasetOperations(targetDef);
+  const targetRev = describeDatasetRevision({
+    definition: targetDef,
+    revision: 1,
+    schemaSql: targetSql,
+    operationSource: targetSource,
+  });
+  const f = await phone(["r00"]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: targetRev,
+    schemaSql: targetSql,
+    operationSource: targetSource,
+    capacityBytes: 1024 * 1024,
+  });
+  const targetFile = {
+    path: "accounts/dataset.json",
+    text: JSON.stringify({ datasetId: TARGET_DS }),
+  };
+  pushFile(f.storage, "accounts-dataset", null, targetFile);
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: TARGET_DS,
+    revision: 1,
+    revisionSha256: targetRev.revisionSha256,
+    operationId: ACC_CREATE,
+    input: { values: { [ACC_ID]: "Person r00", [ACC_NAME]: "Globex Corp" } },
+    idempotencyKey: id(510),
+  });
+  // Wire PEOPLE.NAME as a cross-dataset relation targeting TARGET_DS.ACCOUNTS.ACC_ID.
+  f.describing((desc) =>
+    desc.datasetId !== DATASET
+      ? desc
+      : {
+          ...desc,
+          tables: desc.tables.map((t) =>
+            t.tableId !== PEOPLE
+              ? t
+              : {
+                  ...t,
+                  fields: t.fields.map((field) =>
+                    field.fieldId !== NAME || field.type === "button"
+                      ? field
+                      : {
+                          ...field,
+                          type: "relation" as const,
+                          relation: {
+                            datasetId: TARGET_DS,
+                            tableId: ACCOUNTS,
+                            fieldId: ACC_ID,
+                            many: false,
+                          },
+                        },
+                  ),
+                },
+          ),
+        },
+  );
+  // Owner sees cross-dataset label and picker option.
+  const ownerPage = await f.records();
+  expect((ownerPage.body.result as { relations: unknown }).relations).toEqual({
+    [NAME]: { '"Person r00"': "Globex Corp" },
+  });
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DATASET, tableId: PEOPLE, fieldId: NAME }),
+  ).toEqual(ok({ options: [{ value: "Person r00", label: "Globex Corp" }], nextCursor: null }));
+
+  // Member Ana can read DATASET (Registrations) ONLY, NOT TARGET_DS (Accounts): zero target labels leak.
+  const storage = f.storage as SyncRelayStorage;
+  storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Fundraiser",
+    email: "ana@example.test",
+    recipientUserId: "ana",
+    newMemberId: () => "member-ana",
+    newGrantId: () => "grant-ana",
+    newShareId: () => "share-w",
+    nowMs: 1,
+  });
+  f.host.setWorkspaceDefaults(owner, {
+    ...scope,
+    defaults: {
+      view: [READ],
+      comment: [READ],
+      edit: [READ],
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
+  const ana = "ana:ana-phone:phone";
+  const anaPage = await f.records(undefined, ana);
+  expect(anaPage.status).toBe(200);
+  expect((anaPage.body.result as { relations: unknown }).relations).toEqual({});
+  expect(JSON.stringify(anaPage.body)).not.toContain("Globex");
+  expect(
+    await f.op(
+      "collectionRelationOptions",
+      { datasetId: DATASET, tableId: PEOPLE, fieldId: NAME },
+      ana,
+    ),
+  ).toEqual(notFound);
+
+  // Once Ana is granted read access to TARGET_DS, she sees Globex Corp.
+  f.host.setWorkspaceDefaults(owner, {
+    workspaceId: "w",
+    datasetId: TARGET_DS,
+    defaults: {
+      view: [ACC_READ],
+      comment: [ACC_READ],
+      edit: [ACC_READ],
+      revision: 1,
+      revisionSha256: targetRev.revisionSha256,
+    },
+  });
+  expect((await f.records(undefined, ana)).body.result).toMatchObject({
+    relations: { [NAME]: { '"Person r00"': "Globex Corp" } },
+  });
+  // If TARGET_DS becomes invisible mid-read (after invoke), zero labels leak and options return 404.
+  let targetCalls = 0;
+  f.during(() => {
+    if (++targetCalls === 4) pushFile(f.storage, "accounts-dataset", targetFile, null);
+  });
+  const midRevoked = await f.records(undefined, ana);
+  f.during(() => undefined);
+  expect(midRevoked.status).toBe(200);
+  expect((midRevoked.body.result as { relations: unknown }).relations).toEqual({});
+  expect(JSON.stringify(midRevoked.body)).not.toContain("Globex");
+  // While TARGET_DS's dataset.json is deleted (invisible), even the Owner gets zero target labels and 404 on options.
+  const hiddenPage = await f.records();
+  expect((hiddenPage.body.result as { relations: unknown }).relations).toEqual({});
+  expect(JSON.stringify(hiddenPage.body)).not.toContain("Globex");
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DATASET, tableId: PEOPLE, fieldId: NAME }),
+  ).toEqual(notFound);
+});
+
+it("forwards search and sort to generated reads and falls back cleanly on custom-op invalid_input", async () => {
+  const f = await phone(["r00", "r01", "r02"]);
+  const searched = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: PEOPLE,
+    search: "Person r01",
+  });
+  expect(rowKeys(searched)).toEqual(["r01"]);
+  const sorted = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: PEOPLE,
+    sort: { fieldId: NAME, direction: "desc" },
+  });
+  expect(rowKeys(sorted)).toEqual(["r02", "r01", "r00"]);
+  // Unsortable field (attachment), bad direction, or combining search with recordId returns 400.
+  expect(
+    (
+      await f.op("collectionRecords", {
+        datasetId: DATASET,
+        tableId: PEOPLE,
+        sort: { fieldId: RECEIPT, direction: "asc" },
+      })
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.op("collectionRecords", {
+        datasetId: DATASET,
+        tableId: PEOPLE,
+        sort: { fieldId: NAME, direction: "up" },
+      })
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.op("collectionRecords", {
+        datasetId: DATASET,
+        tableId: PEOPLE,
+        recordId: "r00",
+        search: "x",
+      })
+    ).status,
+  ).toBe(400);
+
+  // Custom operations.js that rejects search and sort with invalid_input.
+  const CUSTOM_DS = id(600),
+    ITEMS = id(601),
+    ITEM_ID = id(602),
+    ITEM_NAME = id(603),
+    ITEM_READ = id(604),
+    ITEM_CREATE = id(605);
+  const customDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: CUSTOM_DS,
+    name: "Custom",
+    schemaPath: "custom/schema.sql",
+    operationsPath: "custom/operations.js",
+    tables: [
+      {
+        tableId: ITEMS,
+        name: "Items",
+        sqlName: "items",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ITEM_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ITEM_NAME,
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: ITEM_READ,
+        name: "read",
+        label: "Read",
+        tableId: ITEMS,
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [ITEM_ID, ITEM_NAME],
+      },
+      {
+        operationId: ITEM_CREATE,
+        name: "create",
+        label: "Create",
+        tableId: ITEMS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ITEM_ID, ITEM_NAME],
+      },
+    ],
+  };
+  const customSql = `CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const customSource = `globalThis.operations = {
+    read(ctx, input) {
+      if (input.search !== undefined || input.sort !== undefined) ctx.refuse('invalid_input', 'No query here.');
+      const rows = ctx.db.query('SELECT id, name, "_record_version" FROM items ORDER BY id LIMIT ?', [input.limit ?? 50]);
+      return { rows: rows.map(r => ({ id: r.id, version: r._record_version, values: { ${JSON.stringify(ITEM_ID)}: r.id, ${JSON.stringify(ITEM_NAME)}: r.name } })), nextCursor: null };
+    },
+    create(ctx, input) {
+      ctx.db.execute('INSERT INTO items(id, name) VALUES (?, ?)', [input.values[${JSON.stringify(ITEM_ID)}], input.values[${JSON.stringify(ITEM_NAME)}]]);
+      return { id: input.values[${JSON.stringify(ITEM_ID)}], version: 1 };
+    },
+  };`;
+  const customRev = describeDatasetRevision({
+    definition: customDef,
+    revision: 1,
+    schemaSql: customSql,
+    operationSource: customSource,
+  });
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: customRev,
+    schemaSql: customSql,
+    operationSource: customSource,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(f.storage, "custom-dataset", null, {
+    path: "custom/dataset.json",
+    text: JSON.stringify({ datasetId: CUSTOM_DS }),
+  });
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: CUSTOM_DS,
+    revision: 1,
+    revisionSha256: customRev.revisionSha256,
+    operationId: ITEM_CREATE,
+    input: { values: { [ITEM_ID]: "i-1", [ITEM_NAME]: "Alpha" } },
+    idempotencyKey: id(610),
+  });
+  expect(
+    rowKeys(await f.op("collectionRecords", { datasetId: CUSTOM_DS, tableId: ITEMS })),
+  ).toEqual(["i-1"]);
+  expect(
+    await f.op("collectionRecords", { datasetId: CUSTOM_DS, tableId: ITEMS, search: "Al" }),
+  ).toEqual(ok({ status: "refused", reason: "unsupported-query" }));
+  expect(
+    await f.op("collectionRecords", {
+      datasetId: CUSTOM_DS,
+      tableId: ITEMS,
+      sort: { fieldId: ITEM_NAME, direction: "desc" },
+    }),
+  ).toEqual(ok({ status: "refused", reason: "unsupported-query" }));
+  // Relation picker targeting a custom-op table that refuses search returns searchUnsupported cleanly.
+  f.describing((desc) =>
+    desc.datasetId !== DATASET
+      ? desc
+      : {
+          ...desc,
+          tables: desc.tables.map((t) =>
+            t.tableId !== PEOPLE
+              ? t
+              : {
+                  ...t,
+                  fields: t.fields.map((field) =>
+                    field.fieldId !== NAME || field.type === "button"
+                      ? field
+                      : {
+                          ...field,
+                          type: "relation" as const,
+                          relation: {
+                            datasetId: CUSTOM_DS,
+                            tableId: ITEMS,
+                            fieldId: ITEM_ID,
+                            many: false,
+                          },
+                        },
+                  ),
+                },
+          ),
+        },
+  );
+  expect(
+    await f.op("collectionRelationOptions", {
+      datasetId: DATASET,
+      tableId: PEOPLE,
+      fieldId: NAME,
+      search: "Al",
+    }),
+  ).toEqual(ok({ options: [], nextCursor: null, searchUnsupported: true }));
+});
+
+it("handles decimal relation keys, truncates long target labels, and blocks mid-flight source/target read narrowing or write revocation", async () => {
+  const DS = id(700),
+    CATS = id(701),
+    CAT_ID = id(702),
+    CAT_CODE = id(703),
+    CAT_NAME = id(704),
+    ENTRIES = id(705),
+    ENT_ID = id(706),
+    ENT_CAT = id(707),
+    CAT_READ = id(710),
+    CAT_CREATE = id(711),
+    ENT_READ = id(712),
+    ENT_CREATE = id(713),
+    ENT_EDIT = id(714);
+  const def: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: DS,
+    name: "Catalog",
+    schemaPath: "cat/schema.sql",
+    operationsPath: "cat/operations.js",
+    tables: [
+      {
+        tableId: CATS,
+        name: "Categories",
+        sqlName: "categories",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: CAT_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: CAT_CODE,
+            name: "Code",
+            sqlColumn: "code",
+            type: "number",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: CAT_NAME,
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: ENTRIES,
+        name: "Entries",
+        sqlName: "entries",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ENT_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ENT_CAT,
+            name: "Category",
+            sqlColumn: "cat_code",
+            type: "relation",
+            required: false,
+            unique: false,
+            relation: { datasetId: DS, tableId: CATS, fieldId: CAT_CODE, many: false },
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: CAT_READ,
+        name: "readCats",
+        label: "Read",
+        tableId: CATS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [CAT_ID, CAT_CODE, CAT_NAME],
+      },
+      {
+        operationId: CAT_CREATE,
+        name: "createCat",
+        label: "Create",
+        tableId: CATS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [CAT_ID, CAT_CODE, CAT_NAME],
+      },
+      {
+        operationId: ENT_READ,
+        name: "readEnts",
+        label: "Read",
+        tableId: ENTRIES,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ENT_ID, ENT_CAT],
+      },
+      {
+        operationId: ENT_CREATE,
+        name: "createEnt",
+        label: "Create",
+        tableId: ENTRIES,
+        kind: "create",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ENT_ID, ENT_CAT],
+      },
+      {
+        operationId: ENT_EDIT,
+        name: "editEnt",
+        label: "Edit",
+        tableId: ENTRIES,
+        kind: "edit",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ENT_CAT],
+        reversible: true,
+      },
+    ],
+  };
+  const sql = `CREATE TABLE categories(id TEXT PRIMARY KEY NOT NULL,code REAL NOT NULL UNIQUE,name TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE entries(id TEXT PRIMARY KEY NOT NULL,cat_code REAL REFERENCES categories(code),"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const src = generateDatasetOperations(def);
+  const rev = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: sql,
+    operationSource: src,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: rev,
+    schemaSql: sql,
+    operationSource: src,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(f.storage, "cat-dataset", null, {
+    path: "cat/dataset.json",
+    text: JSON.stringify({ datasetId: DS }),
+  });
+  const huge = "L".repeat(2500);
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: CAT_CREATE,
+    input: { values: { [CAT_ID]: "c1", [CAT_CODE]: 1.5, [CAT_NAME]: huge } },
+    idempotencyKey: id(720),
+  });
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: ENT_CREATE,
+    input: { values: { [ENT_ID]: "e1", [ENT_CAT]: 1.5 } },
+    idempotencyKey: id(721),
+  });
+
+  // Decimal relation key 1.5 resolves and long labels truncate to <= 500 chars.
+  const page = await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES });
+  expect(
+    (page.body.result as { relations: Record<string, Record<string, string>> }).relations,
+  ).toEqual({
+    [ENT_CAT]: { "1.5": "L".repeat(500) },
+  });
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DS, tableId: ENTRIES, fieldId: ENT_CAT }),
+  ).toEqual(ok({ options: [{ value: 1.5, label: "L".repeat(500) }], nextCursor: null }));
+
+  // Narrowing target read projection mid-read omits old label on collectionRecords and returns 404 on options.
+  let narrowed = false;
+  let calls = 0;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !narrowed
+      ? desc
+      : {
+          ...desc,
+          operations: desc.operations.map((o) =>
+            o.operationId === CAT_READ ? { ...o, fieldIds: [CAT_ID, CAT_CODE] } : o,
+          ),
+        },
+  );
+  f.during(() => {
+    if (++calls === 4) narrowed = true;
+  });
+  const narrowedPage = await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES });
+  f.during(() => undefined);
+  expect((narrowedPage.body.result as { relations: unknown }).relations).toEqual({});
+  narrowed = false;
+  calls = 0;
+  f.during(() => {
+    if (++calls === 2) narrowed = true;
+  });
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DS, tableId: ENTRIES, fieldId: ENT_CAT }),
+  ).toEqual(notFound);
+  f.during(() => undefined);
+  narrowed = false;
+
+  // Revoking source read mid-read returns no-read with zero rows.
+  let noRead = false;
+  calls = 0;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !noRead
+      ? desc
+      : { ...desc, operations: desc.operations.filter((o) => o.operationId !== ENT_READ) },
+  );
+  f.during(() => {
+    if (++calls === 2) noRead = true;
+  });
+  expect(await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES })).toEqual(
+    ok({ status: "refused", reason: "no-read" }),
+  );
+  f.during(() => undefined);
+  noRead = false;
+
+  // Losing target read mid-commit aborts a relation edit without mutating the record.
+  let noTarget = false;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !noTarget
+      ? desc
+      : { ...desc, operations: desc.operations.filter((o) => o.operationId !== CAT_READ) },
+  );
+  f.during(() => {
+    noTarget = true;
+  });
+  expect(
+    await f.op("collectionEdit", {
+      datasetId: DS,
+      tableId: ENTRIES,
+      recordId: "e1",
+      fieldId: ENT_CAT,
+      value: null,
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      idempotencyKey: id(722),
+    }),
+  ).toEqual(notFound);
+  f.during(() => undefined);
+  noTarget = false;
+  const after = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ENTRIES,
+    recordId: "e1",
+  });
+  expect(
+    (after.body.result as { rows: Array<{ version: number; values: Record<string, unknown> }> })
+      .rows[0],
+  ).toMatchObject({
+    version: 1,
+    values: { [ENT_CAT]: 1.5 },
+  });
+});
+
+it("resolves more than 25 relation links beyond row 100 and paginates cursors on long sorted text", async () => {
+  const DS = id(800),
+    TAGS = id(801),
+    TAG_ID = id(802),
+    TAG_LABEL = id(803),
+    ITEMS = id(804),
+    ITEM_ID = id(805),
+    ITEM_TITLE = id(806),
+    ITEM_TAGS = id(807),
+    TAG_READ = id(810),
+    TAG_CREATE = id(811),
+    ITEM_READ = id(812),
+    ITEM_CREATE = id(813);
+  const def: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: DS,
+    name: "Big",
+    schemaPath: "big/schema.sql",
+    operationsPath: "big/operations.js",
+    tables: [
+      {
+        tableId: TAGS,
+        name: "Tags",
+        sqlName: "tags",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: TAG_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: TAG_LABEL,
+            name: "Label",
+            sqlColumn: "label",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: ITEMS,
+        name: "Items",
+        sqlName: "items",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ITEM_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ITEM_TITLE,
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: ITEM_TAGS,
+            name: "Tags",
+            sqlColumn: "tag_ids",
+            type: "relation",
+            required: false,
+            unique: false,
+            relation: { datasetId: DS, tableId: TAGS, fieldId: TAG_ID, many: true },
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: TAG_READ,
+        name: "readTags",
+        label: "Read",
+        tableId: TAGS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: TAG_CREATE,
+        name: "createTag",
+        label: "Create",
+        tableId: TAGS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: ITEM_READ,
+        name: "readItems",
+        label: "Read",
+        tableId: ITEMS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ITEM_ID, ITEM_TITLE, ITEM_TAGS],
+      },
+      {
+        operationId: ITEM_CREATE,
+        name: "createItem",
+        label: "Create",
+        tableId: ITEMS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ITEM_ID, ITEM_TITLE, ITEM_TAGS],
+      },
+    ],
+  };
+  const sql = `CREATE TABLE tags(id TEXT PRIMARY KEY NOT NULL,label TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,tag_ids TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const src = generateDatasetOperations(def);
+  const rev = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: sql,
+    operationSource: src,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: rev,
+    schemaSql: sql,
+    operationSource: src,
+    capacityBytes: 4 * 1024 * 1024,
+  });
+  pushFile(f.storage, "big-dataset", null, {
+    path: "big/dataset.json",
+    text: JSON.stringify({ datasetId: DS }),
+  });
+  for (let i = 0; i < 126; i++) {
+    const tid = `t-${String(i).padStart(3, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: TAG_CREATE,
+      input: { values: { [TAG_ID]: tid, [TAG_LABEL]: `Tag ${i}` } },
+      idempotencyKey: `bt-${i}`,
+    });
+  }
+  const lateTags = Array.from({ length: 26 }, (_, i) => `t-${String(100 + i).padStart(3, "0")}`);
+  const longText = "A".repeat(4096);
+  for (let i = 0; i < PHONE_COLLECTION_PAGE + 1; i++) {
+    const iid = `i-${String(i).padStart(2, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: ITEM_CREATE,
+      input: {
+        values: {
+          [ITEM_ID]: iid,
+          [ITEM_TITLE]: `${longText}-${String(i).padStart(2, "0")}`,
+          [ITEM_TAGS]: i === 0 ? lateTags : [],
+        },
+      },
+      idempotencyKey: `bi-${i}`,
+    });
+  }
+  const page1 = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    sort: { fieldId: ITEM_TITLE, direction: "asc" },
+  });
+  expect(page1.status).toBe(200);
+  const res1 = page1.body.result as {
+    nextCursor: unknown;
+    relations: Record<string, Record<string, string>>;
+  };
+  expect(Object.keys(res1.relations[ITEM_TAGS] ?? {})).toHaveLength(26);
+  expect(res1.relations[ITEM_TAGS]?.['"t-125"']).toBe("Tag 125");
+  expect(res1.nextCursor).not.toBeNull();
+  const page2 = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    sort: { fieldId: ITEM_TITLE, direction: "asc" },
+    after: res1.nextCursor,
+  });
+  expect(page2.status).toBe(200);
+  expect((page2.body.result as { rows: Array<{ id: string }> }).rows.map((r) => r.id)).toEqual([
+    `i-${PHONE_COLLECTION_PAGE}`,
+  ]);
+  // If a scan page hits resource_limit (e.g. bulky rows on page 2), per-key filter fallback still resolves labels.
+  const bulk = "X".repeat(10_000);
+  for (let i = 126; i < 156; i++) {
+    const tid = `t-${String(i).padStart(3, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: TAG_CREATE,
+      input: { values: { [TAG_ID]: tid, [TAG_LABEL]: `${tid} ${bulk}` } },
+      idempotencyKey: `bt-${i}`,
+    });
+  }
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: ITEM_CREATE,
+    input: { values: { [ITEM_ID]: "i-bulk", [ITEM_TITLE]: "000-bulk", [ITEM_TAGS]: ["t-155"] } },
+    idempotencyKey: "bi-bulk",
+  });
+  const bulkPage = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    recordId: "i-bulk",
+  });
+  expect(bulkPage.status).toBe(200);
+  expect(
+    (bulkPage.body.result as { relations: Record<string, Record<string, string>> }).relations[
+      ITEM_TAGS
+    ]?.['"t-155"'],
+  ).toBe(`t-155 ${bulk}`.slice(0, 500));
 });

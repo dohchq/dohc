@@ -1,36 +1,24 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { confirmWords } from "@dohc/interface-words/confirmations";
-import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import * as Haptics from "expo-haptics";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { Check } from "lucide-react-native";
-import { useEffect, useState } from "react";
-import {
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { useCallback, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text } from "react-native";
 import { useAccount } from "../account/AccountProvider";
-import type { CollectionField, RecordValue } from "../server/phoneCollections";
+import type {
+  CollectionField,
+  RecordCursor,
+  RecordId,
+  RecordValue,
+} from "../server/phoneCollections";
 import { phoneWrites } from "../server/phoneWrites";
 import { useTheme } from "../theme";
+import { ripple, TOUCH } from "../touch";
 import { ScreenFailure } from "../workspace/ListStates";
-import {
-  dateOf,
-  dayOf,
-  draftOf,
-  editorKind,
-  rowText,
-  shownValue,
-  valueOf,
-  type Draft,
-  type EditorKind,
-} from "./collectionFields";
+import { draftOf, editorKind, valueOf, type Draft, type EditorKind } from "./collectionFields";
+import { recordKey, type WorkspaceCollections } from "./collectionStore";
+import { FieldInput } from "./FieldInput";
+import { RelationPicker } from "./RelationPicker";
 
 // One field of the open record, changed in a sheet: Cancel and Save in its header, as iOS edits a value. Save sends the
 // change and closes the sheet; the record's screen shows it saving, or the Collection's refusal.
@@ -42,20 +30,33 @@ export function FieldEditorScreen() {
   // As it opens: Save names the record's version and the rules then, so a change made since answers as one.
   const [opened] = useState(() => {
     const edit = (fieldId && collections?.edit(fieldId)) || null;
-    return edit && collections ? { store: collections, edit } : null;
+    const view = collections?.view();
+    const current = view?.opened;
+    const pending =
+      view && current
+        ? collections?.changes().get(recordKey(view.datasetId, current.tableId, current.record.id))
+        : undefined;
+    const labels = {
+      ...(fieldId && current ? current.relations[fieldId] : undefined),
+      ...(pending && pending.change.fieldId === fieldId ? pending.relationLabels : undefined),
+    };
+    return edit && collections ? { store: collections, edit, labels } : null;
   });
   const kind = opened ? editorKind(opened.edit.field) : null;
   if (!phoneWrites || !opened || !kind)
     return <ScreenFailure text={collectionWords.recordMissing} />;
-  const { store, edit } = opened;
+  const { store, edit, labels } = opened;
   const current = edit.from.value;
   return (
     <Editor
+      store={store}
+      tableId={edit.from.tableId}
       field={edit.field}
       kind={kind}
       start={value === undefined ? current : parsed(value, current)}
       current={current}
-      onSave={(next) => store.change(edit, next)}
+      initialLabels={labels}
+      onSave={(next, nextLabels) => store.change(edit, next, nextLabels)}
     />
   );
 }
@@ -69,30 +70,46 @@ function parsed(text: string, otherwise: RecordValue): RecordValue {
 }
 
 function Editor(props: {
+  store: WorkspaceCollections;
+  tableId: string;
   field: CollectionField;
   kind: EditorKind;
   start: RecordValue;
   current: RecordValue;
-  onSave(value: RecordValue): void;
+  initialLabels: Readonly<Record<string, string>>;
+  onSave(value: RecordValue, relationLabels?: Readonly<Record<string, string>>): void;
 }) {
-  const { field, kind } = props;
+  const { store, tableId, field, kind } = props;
   const theme = useTheme();
   const router = useRouter();
   const [draft, setDraft] = useState<Draft>(() => draftOf(field, props.start));
+  const [labels, setLabels] = useState<Readonly<Record<string, string>>>(props.initialLabels);
   const save = (next: Draft = draft) => {
     const result = valueOf(field, next);
-    // Text that isn't a number stays to be corrected.
     if (!result) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       return;
     }
-    if (JSON.stringify(result.value) !== JSON.stringify(props.current)) props.onSave(result.value);
+    if (JSON.stringify(result.value) !== JSON.stringify(props.current))
+      props.onSave(result.value, kind === "relation" ? labels : undefined);
     router.back();
   };
+  const loadRelations = useCallback(
+    (search: string, after: RecordCursor | null, signal: AbortSignal) =>
+      store.relationOptions(tableId, field.fieldId, search, after, signal),
+    [store, tableId, field.fieldId],
+  );
   const header = (
     <Stack.Screen
       options={{
         title: field.name,
+        ...(kind === "relation"
+          ? {
+              headerTransparent: false,
+              headerStyle: { backgroundColor: theme.bg },
+              headerShadowVisible: false,
+            }
+          : {}),
         headerLeft: () => (
           <HeaderButton label={confirmWords.cancel} onPress={() => router.back()} />
         ),
@@ -102,79 +119,23 @@ function Editor(props: {
       }}
     />
   );
-  let editor;
-  if (kind === "checkbox")
-    editor = (
-      <View style={[styles.row, { borderColor: theme.line }]}>
-        <Text style={[styles.text, { color: theme.ink }]}>{field.name}</Text>
-        <Switch
-          value={draft === true}
-          onValueChange={setDraft}
-          accessibilityLabel={field.name}
-          trackColor={{ true: theme.accent }}
-        />
-      </View>
-    );
-  else if (kind === "date")
-    editor = (
-      <DateEditor
-        name={field.name}
-        day={typeof draft === "string" ? draft : ""}
-        onPick={setDraft}
-        // Clearing an empty field changes nothing. A required field's Collection refuses it, with its reason.
-        onClear={props.current === null || props.current === "" ? null : () => save("")}
-      />
-    );
-  else if (kind === "select" || kind === "multi-select") {
-    const chosen = Array.isArray(draft) ? draft : [];
-    const many = kind === "multi-select";
-    editor = field.options.map((option) => {
-      const on = chosen.includes(option);
-      return (
-        <Pressable
-          key={option}
-          onPress={() => {
-            void Haptics.selectionAsync();
-            setDraft(
-              on ? chosen.filter((item) => item !== option) : many ? [...chosen, option] : [option],
-            );
+  if (kind === "relation")
+    return (
+      <>
+        {header}
+        <RelationPicker
+          name={field.name}
+          many={field.relation?.many === true}
+          selected={Array.isArray(draft) ? (draft as readonly RecordId[]) : []}
+          labels={labels}
+          load={loadRelations}
+          onChange={(next, nextLabels) => {
+            setDraft(next);
+            setLabels(nextLabels);
           }}
-          style={({ pressed }) => [
-            styles.row,
-            { borderColor: theme.line },
-            pressed ? { backgroundColor: theme.panel2 } : null,
-          ]}
-          accessibilityRole={many ? "checkbox" : "radio"}
-          accessibilityState={many ? { checked: on } : { selected: on }}
-        >
-          <Text style={[styles.text, { color: theme.ink }]}>{option}</Text>
-          {on ? <Check size={20} color={theme.accent} strokeWidth={2} /> : null}
-        </Pressable>
-      );
-    });
-  } else
-    editor = (
-      <TextInput
-        value={typeof draft === "string" ? draft : ""}
-        onChangeText={setDraft}
-        autoFocus
-        multiline={kind === "text"}
-        keyboardType={
-          kind === "number" ? "numbers-and-punctuation" : kind === "url" ? "url" : "default"
-        }
-        autoCapitalize={kind === "text" ? "sentences" : "none"}
-        autoCorrect={kind === "text"}
-        returnKeyType={kind === "text" ? "default" : "done"}
-        onSubmitEditing={kind === "text" ? undefined : () => save()}
-        accessibilityLabel={field.name}
-        style={[
-          styles.input,
-          kind === "text" ? styles.multiline : null,
-          { color: theme.ink, borderColor: theme.line },
-        ]}
-      />
+        />
+      </>
     );
-
   return (
     <ScrollView
       style={{ backgroundColor: theme.bg }}
@@ -183,58 +144,16 @@ function Editor(props: {
       keyboardShouldPersistTaps="handled"
     >
       {header}
-      {editor}
+      <FieldInput
+        field={field}
+        draft={draft}
+        onChange={setDraft}
+        onSubmit={() => save()}
+        inlineDate
+        autoFocus
+        onClearDate={props.current === null || props.current === "" ? null : () => save("")}
+      />
     </ScrollView>
-  );
-}
-
-/** The system's date picker: inline in the sheet on iOS; on Android its dialog, which opens with the sheet and from its row. */
-function DateEditor(props: {
-  name: string;
-  day: string;
-  onPick(day: string): void;
-  onClear: (() => void) | null;
-}) {
-  const theme = useTheme();
-  const value = dateOf(props.day) ?? new Date();
-  const pick = (_: unknown, picked: Date) => props.onPick(dayOf(picked));
-  const openDialog = () => DateTimePickerAndroid.open({ value, mode: "date", onValueChange: pick });
-  useEffect(() => {
-    if (Platform.OS === "android") openDialog();
-  }, []);
-  return (
-    <>
-      {Platform.OS === "ios" ? (
-        <DateTimePicker
-          value={value}
-          mode="date"
-          display="inline"
-          accentColor={theme.accent}
-          onValueChange={pick}
-          accessibilityLabel={props.name}
-        />
-      ) : (
-        <Pressable
-          onPress={openDialog}
-          style={[styles.row, { borderColor: theme.line }]}
-          accessibilityRole="button"
-          accessibilityLabel={props.name}
-        >
-          <Text style={[styles.text, { color: theme.ink }]}>
-            {rowText(shownValue({ type: "date" }, props.day, {}), props.name)}
-          </Text>
-        </Pressable>
-      )}
-      {props.onClear ? (
-        <Pressable
-          onPress={props.onClear}
-          style={[styles.row, { borderColor: theme.line }]}
-          accessibilityRole="button"
-        >
-          <Text style={[styles.text, { color: theme.accent }]}>{collectionWords.clearValue}</Text>
-        </Pressable>
-      ) : null}
-    </>
   );
 }
 
@@ -244,6 +163,7 @@ function HeaderButton(props: { label: string; onPress(): void; strong?: boolean 
     <Pressable
       onPress={props.onPress}
       hitSlop={8}
+      android_ripple={ripple(theme, true)}
       style={styles.headerButton}
       accessibilityRole="button"
     >
@@ -256,26 +176,7 @@ function HeaderButton(props: { label: string; onPress(): void; strong?: boolean 
 
 const styles = StyleSheet.create({
   screen: { padding: 16, gap: 8 },
-  row: {
-    minHeight: 44,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  text: { fontSize: 17, flexShrink: 1 },
-  input: {
-    minHeight: 44,
-    fontSize: 17,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  multiline: { minHeight: 120, textAlignVertical: "top" },
-  headerButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 8 },
+  headerButton: { minHeight: TOUCH, justifyContent: "center", paddingHorizontal: 8 },
   headerLabel: { fontSize: 17 },
   strong: { fontWeight: "600" },
 });

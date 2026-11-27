@@ -5,10 +5,13 @@ import {
   dateOf,
   dayOf,
   draftOf,
+  draftProblem,
   editorKind,
   recordName,
   rowText,
   shownValue,
+  supportsSearch,
+  supportsSort,
   valueOf,
 } from "./collectionFields";
 
@@ -53,13 +56,20 @@ describe("a field's value", () => {
     expect(shown("date", "soon")).toEqual({ kind: "text", text: "soon" });
   });
 
-  it("shows a web address as a link, a relation as its record IDs, and an attachment by its file's name", () => {
+  it("shows a web address as a link, a relation by resolved labels or raw IDs, and an attachment by its file's name", () => {
     expect(shown("url", "https://example.com/a")).toEqual({
       kind: "link",
       url: "https://example.com/a",
     });
     expect(shown("relation", "r-1")).toEqual({ kind: "text", text: "r-1" });
     expect(shown("relation", ["r-1", 2])).toEqual({ kind: "text", text: "r-1, 2" });
+    expect(shownValue({ type: "relation" }, "r-1", files, { '"r-1"': "Acme Corp" })).toEqual({
+      kind: "text",
+      text: "Acme Corp",
+    });
+    expect(
+      shownValue({ type: "relation" }, ["r-1", 2], files, { '"r-1"': "Acme Corp", "2": "Globex" }),
+    ).toEqual({ kind: "text", text: "Acme Corp, Globex" });
     expect(shown("attachment", "file-1234567890abcdef")).toEqual({
       kind: "text",
       text: "receipt.pdf",
@@ -92,7 +102,7 @@ describe("a field's editor", () => {
   const field = (type: DatasetColumnFieldType, options: string[] = []) => ({ type, options });
   const choices = ["Unpaid", "Paid", "Waived"];
 
-  it("edits the types the phone has an editor for, and not a relation or an attachment", () => {
+  it("edits the types the phone has an editor for, including readable relations, and not attachments or unreadable relations", () => {
     for (const type of [
       "text",
       "number",
@@ -103,7 +113,10 @@ describe("a field's editor", () => {
       "date",
     ] as const)
       expect(editorKind({ type })).toBe(type);
-    for (const type of ["relation", "attachment"] as const) expect(editorKind({ type })).toBeNull();
+    expect(editorKind({ type: "relation", relation: { many: false } })).toBe("relation");
+    expect(editorKind({ type: "relation", relation: { many: true } })).toBe("relation");
+    expect(editorKind({ type: "relation" })).toBeNull();
+    expect(editorKind({ type: "attachment" })).toBeNull();
   });
 
   it("starts from the record's value", () => {
@@ -164,9 +177,70 @@ describe("a field's editor", () => {
       expect(draftOf({ type: "date" }, value), String(value)).toBe(dayOf(new Date()));
   });
 
-  it("saves a picked day, and Clear as null", () => {
+  it("saves a picked day, and Clear as null, and keeps form dates empty when asked", () => {
     expect(valueOf(field("date"), "2026-11-14")).toEqual({ value: "2026-11-14" });
     expect(valueOf(field("date"), "")).toEqual({ value: null });
+    expect(draftOf({ type: "date" }, undefined, { emptyDate: true })).toBe("");
+  });
+
+  it("handles single and many relations in drafts and saved values", () => {
+    const single = { type: "relation" as const, options: [], relation: { many: false } };
+    const many = { type: "relation" as const, options: [], relation: { many: true } };
+    expect(draftOf(single, "c-1")).toEqual(["c-1"]);
+    expect(draftOf(single, 7)).toEqual([7]);
+    expect(draftOf(single, null)).toEqual([]);
+    expect(draftOf(many, ["t-1", 2, ""])).toEqual(["t-1", 2]);
+    expect(valueOf(single, ["c-1"])).toEqual({ value: "c-1" });
+    expect(valueOf(single, [])).toEqual({ value: null });
+    expect(valueOf(many, ["t-1", 2])).toEqual({ value: ["t-1", 2] });
+    expect(valueOf(many, [])).toEqual({ value: [] });
+  });
+
+  it("checks required fields, numbers, urls, and relation limits in new-record forms", () => {
+    expect(draftProblem({ name: "Name", type: "text", required: true, options: [] }, "")).toBe(
+      collectionWords.enterField("Name"),
+    );
+    expect(
+      draftProblem(
+        { name: "Org", type: "relation", required: true, options: [], relation: { many: false } },
+        [],
+      ),
+    ).toBe(collectionWords.chooseField("Org"));
+    expect(
+      draftProblem({ name: "Amount", type: "number", required: false, options: [] }, "abc"),
+    ).toBe(collectionWords.enterNumber);
+    expect(
+      draftProblem({ name: "Site", type: "url", required: false, options: [] }, "ftp://x"),
+    ).toBe(collectionWords.enterUrl);
+    expect(
+      draftProblem({ name: "Site", type: "url", required: false, options: [] }, "https://dohc.dev"),
+    ).toBeNull();
+    expect(
+      draftProblem(
+        { name: "Tags", type: "relation", required: false, options: [], relation: { many: true } },
+        Array.from({ length: 101 }, (_, i) => `t-${i}`),
+      ),
+    ).toBe(collectionWords.tooManyRelations);
+  });
+
+  it("preserves decimal relation keys through drafts and values", () => {
+    const single = { type: "relation" as const, options: [], relation: { many: false } };
+    const many = { type: "relation" as const, options: [], relation: { many: true } };
+    expect(draftOf(single, 1.5)).toEqual([1.5]);
+    expect(valueOf(single, [1.5])).toEqual({ value: 1.5 });
+    expect(draftOf(many, [1.5, 2.25])).toEqual([1.5, 2.25]);
+    expect(valueOf(many, [1.5, 2.25])).toEqual({ value: [1.5, 2.25] });
+  });
+
+  it("identifies searchable and sortable fields accurately", () => {
+    expect(supportsSearch([{ type: "number" }, { type: "checkbox" }])).toBe(false);
+    expect(supportsSearch([{ type: "select" }])).toBe(true);
+    expect(supportsSort({ type: "text" })).toBe(true);
+    expect(supportsSort({ type: "attachment" })).toBe(false);
+    expect(supportsSort({ type: "multi-select" })).toBe(false);
+    expect(supportsSort({ type: "relation", relation: { many: false } })).toBe(true);
+    expect(supportsSort({ type: "relation", relation: { many: true } })).toBe(false);
+    expect(supportsSort({ type: "relation" })).toBe(false);
   });
 });
 

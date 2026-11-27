@@ -15,10 +15,14 @@ import {
   type RecordCursor,
   type RecordDelete,
   type RecordId,
+  type RecordSort,
   type RecordValue,
+  type RelationLabels,
+  type RelationOptionsPage,
   type WriteRefusal,
 } from "../server/phoneCollections";
 import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
+import { supportsSort } from "./collectionFields";
 
 // The open workspace's transactional Collections, and the one Collection on screen. The list is kept in the read
 // cache with the workspace's views. Each Collection opened stays in memory, so opening it again shows it at once while
@@ -34,6 +38,7 @@ import { cachedList, views, type ReadCache, type ReadProblem } from "../server/w
 export interface RecordChange {
   readonly change: FieldChange;
   readonly reversible: boolean;
+  readonly relationLabels?: Readonly<Record<string, string>>;
   readonly state:
     | { readonly kind: "saving" }
     | ChangeAnswer
@@ -88,11 +93,19 @@ export interface CollectionsState {
   readonly failures: number;
 }
 
-/** The record on its own screen, with its files' names. A refresh that reads pages without it keeps it. */
+const mergeRelations = (base: RelationLabels, added: RelationLabels): RelationLabels => {
+  if (!Object.keys(added).length) return base;
+  const out: Record<string, Readonly<Record<string, string>>> = { ...base };
+  for (const [fid, map] of Object.entries(added)) out[fid] = { ...out[fid], ...map };
+  return out;
+};
+
+/** The record on its own screen, with its files' names and relation labels. */
 export interface OpenRecord {
   readonly tableId: string;
   readonly record: CollectionRecord;
   readonly files: Readonly<Record<string, string>>;
+  readonly relations: RelationLabels;
 }
 
 /** The Collection on screen: its tables, and the records of one, read a page at a time. */
@@ -102,11 +115,15 @@ export interface CollectionView {
   readonly tableId: string | null;
   readonly rows: readonly CollectionRecord[];
   readonly files: Readonly<Record<string, string>>;
+  readonly relations: RelationLabels;
   readonly next: RecordCursor | null;
+  readonly search: string;
+  readonly sort: RecordSort | null;
   /** `first` reads the table from its start, `refresh` reads it again while it shows, `more` its next page. */
   readonly reading: "first" | "refresh" | "more" | null;
   /** Nothing in the Collection reads this table. */
   readonly refused: boolean;
+  readonly queryUnsupported: boolean;
   /** Why the last read failed, and whether it was the next page's, which Try again reads again. */
   readonly problem: { readonly cause: ReadProblem; readonly more: boolean } | null;
   readonly opened: OpenRecord | null;
@@ -127,6 +144,14 @@ export interface WorkspaceCollections {
   /** Reads the Collection on screen again: its tables, then its table's first page. */
   reload(): Promise<void>;
   chooseTable(tableId: string): Promise<void>;
+  setQuery(patch: { readonly search?: string; readonly sort?: RecordSort | null }): Promise<void>;
+  relationOptions(
+    tableId: string,
+    fieldId: string,
+    search: string,
+    after: RecordCursor | null,
+    signal?: AbortSignal,
+  ): Promise<RelationOptionsPage>;
   /** Reads the next page, unless the table has none or a read is running. */
   more(): Promise<void>;
   /** Keeps a record of the table on screen for its own screen. */
@@ -138,7 +163,11 @@ export interface WorkspaceCollections {
   /** A field of the open record as its editor starts, or null when the phone can't change it. */
   edit(fieldId: string): FieldEdit | null;
   /** Sends `value` as `edit` opened it, unless the record's last change is still saving. */
-  change(edit: FieldEdit, value: RecordValue): void;
+  change(
+    edit: FieldEdit,
+    value: RecordValue,
+    relationLabels?: Readonly<Record<string, string>>,
+  ): void;
   /** Sends a failed change again, as it was. */
   retry(key: string): void;
   /** Drops a change that isn't saving. */
@@ -148,7 +177,7 @@ export interface WorkspaceCollections {
   reloadRecord(): Promise<boolean>;
   actions(): ReadonlyMap<string, RecordAction>;
   /** Adds a record to the table on screen and lists it first; true if it opened, as no other record did meanwhile. */
-  create(): Promise<boolean>;
+  create(values?: Readonly<Record<string, RecordValue>>): Promise<boolean>;
   remove(): void;
   retryAction(key: string): Promise<boolean>;
   discardAction(key: string): void;
@@ -221,10 +250,10 @@ export function createWorkspaceCollections(
     changes = copy;
     emit();
   };
-  // The record as a saved change left it, wherever the Collection on screen shows it.
   const saved = (
     { datasetId, tableId, recordId, fieldId, value }: FieldChange,
     version: number,
+    relationLabels?: Readonly<Record<string, string>>,
   ) => {
     const now = view;
     if (now?.datasetId !== datasetId) return;
@@ -233,11 +262,22 @@ export function createWorkspaceCollections(
       record.id === recordId && (record.version ?? 0) < version
         ? { ...record, version, values: { ...record.values, [fieldId]: value } }
         : record;
+    const added: RelationLabels =
+      relationLabels && Object.keys(relationLabels).length ? { [fieldId]: relationLabels } : {};
     const { opened } = now;
     update(datasetId, {
       rows: now.tableId === tableId ? now.rows.map(patch) : now.rows,
-      opened: opened?.tableId === tableId ? { ...opened, record: patch(opened.record) } : opened,
+      relations: now.tableId === tableId ? mergeRelations(now.relations, added) : now.relations,
+      opened:
+        opened?.tableId === tableId
+          ? {
+              ...opened,
+              record: patch(opened.record),
+              relations: mergeRelations(opened.relations, added),
+            }
+          : opened,
     });
+    if (now.tableId === tableId && (now.search || now.sort)) void read("refresh", false);
   };
   // An answer lands only while its change is still the record's, so one Discard dropped, or a store cleared, never
   // comes back.
@@ -250,7 +290,7 @@ export function createWorkspaceCollections(
       const answer = await operations.change(sent.change);
       if (!lands()) return;
       setChange(key, { ...sent, state: answer });
-      if (answer.kind === "saved") saved(sent.change, answer.version);
+      if (answer.kind === "saved") saved(sent.change, answer.version, sent.relationLabels);
     } catch (error) {
       const problem = shownProblem(error);
       // A cancelled change belongs to a store cleared already, and a 401 clears it.
@@ -319,12 +359,18 @@ export function createWorkspaceCollections(
         current.record,
         now.rows.find((row) => row.id === answer.id),
       );
+      const queried = Boolean(now.search || now.sort);
       const opens = screen !== null && recordReads.isLatest(screen);
       update(datasetId, {
-        rows: [record, ...now.rows.filter((row) => row.id !== record.id)],
-        ...(opens ? { opened: { tableId, record, files: current.files } } : {}),
+        rows: queried ? now.rows : [record, ...now.rows.filter((row) => row.id !== record.id)],
+        files: { ...now.files, ...current.files },
+        relations: mergeRelations(now.relations, current.relations),
+        ...(opens
+          ? { opened: { tableId, record, files: current.files, relations: current.relations } }
+          : {}),
       });
-      reread(now.reading);
+      if (queried) void read("refresh", false);
+      else reread(now.reading);
       return opens;
     } catch (error) {
       const problem = shownProblem(error);
@@ -370,10 +416,37 @@ export function createWorkspaceCollections(
       if (!lands()) return;
       const table =
         description.tables.find((table) => table.tableId === now.tableId) ?? description.tables[0];
+      const activeSort =
+        table &&
+        now.sort &&
+        table.fields.some((f) => f.fieldId === now.sort!.fieldId && supportsSort(f))
+          ? now.sort
+          : null;
+      const sameSort = activeSort === now.sort;
       const page = table
-        ? await operations.records(datasetId, table, more ? now.next : null)
+        ? await operations.records(datasetId, table, more && sameSort ? now.next : null, {
+            search: now.search,
+            sort: activeSort,
+          })
         : null;
       if (!lands() || !view) return;
+      described = datasetId;
+      if (page?.status === "unsupported-query") {
+        update(datasetId, {
+          description,
+          tableId: table?.tableId ?? null,
+          sort: activeSort,
+          rows: [],
+          files: {},
+          relations: {},
+          next: null,
+          refused: false,
+          queryUnsupported: true,
+          reading: null,
+          problem: null,
+        });
+        return;
+      }
       const ready = page?.status === "ready" ? page : null;
       const { opened } = view;
       const held = new Map(
@@ -387,28 +460,34 @@ export function createWorkspaceCollections(
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
           : undefined;
-      described = datasetId;
       update(datasetId, {
         description,
         tableId: table?.tableId ?? null,
+        sort: activeSort,
         // A record added here can come again in a later page.
         rows:
-          more && ready
+          more && sameSort && ready
             ? [
                 ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
                 ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
               ]
             : rows,
-        files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
+        files: !ready ? {} : more && sameSort ? { ...view.files, ...ready.files } : ready.files,
+        relations: !ready
+          ? {}
+          : more && sameSort
+            ? mergeRelations(view.relations, ready.relations)
+            : ready.relations,
         next: ready?.next ?? null,
         refused: page?.status === "refused",
+        queryUnsupported: false,
         reading: null,
         problem: null,
         opened:
           page?.status === "refused" && opened?.tableId === table?.tableId
             ? null
             : opened && fresh && ready && newest(fresh, opened.record) === fresh
-              ? { ...opened, record: fresh, files: ready.files }
+              ? { ...opened, record: fresh, files: ready.files, relations: ready.relations }
               : opened,
       });
     } catch (error) {
@@ -418,7 +497,17 @@ export function createWorkspaceCollections(
         cause === "refused" && !(error instanceof ServerError && error.status === 413);
       if (refused) held.delete(datasetId);
       update(datasetId, {
-        ...(refused ? { description: null, rows: [], files: {}, next: null, opened: null } : {}),
+        ...(refused
+          ? {
+              description: null,
+              rows: [],
+              files: {},
+              relations: {},
+              next: null,
+              queryUnsupported: false,
+              opened: null,
+            }
+          : {}),
         reading: null,
         problem: cause ? { cause, more } : (view?.problem ?? null),
       });
@@ -438,18 +527,31 @@ export function createWorkspaceCollections(
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
       const last = held.get(datasetId);
+      const queried = Boolean(last && (last.search || last.sort || last.queryUnsupported));
       described = null;
       view = last
-        ? { ...last, problem: null, opened: null }
+        ? {
+            ...last,
+            ...(queried ? { rows: [], files: {}, relations: {}, next: null } : {}),
+            search: "",
+            sort: null,
+            queryUnsupported: false,
+            problem: null,
+            opened: null,
+          }
         : {
             datasetId,
             description: null,
             tableId: null,
             rows: [],
             files: {},
+            relations: {},
             next: null,
+            search: "",
+            sort: null,
             reading: null,
             refused: false,
+            queryUnsupported: false,
             problem: null,
             opened: null,
           };
@@ -467,18 +569,47 @@ export function createWorkspaceCollections(
     reload: () => read("refresh", true),
     chooseTable(tableId) {
       if (!view || view.tableId === tableId) return Promise.resolve();
-      update(view.datasetId, { tableId, rows: [], files: {}, next: null, refused: false });
+      update(view.datasetId, {
+        tableId,
+        rows: [],
+        files: {},
+        relations: {},
+        next: null,
+        search: "",
+        sort: null,
+        refused: false,
+        queryUnsupported: false,
+      });
       return read("first", false);
     },
+    setQuery(patch) {
+      if (!view) return Promise.resolve();
+      const search = patch.search !== undefined ? patch.search.slice(0, 200) : view.search;
+      const sort = patch.sort !== undefined ? patch.sort : view.sort;
+      if (
+        search === view.search &&
+        JSON.stringify(sort) === JSON.stringify(view.sort) &&
+        !view.queryUnsupported
+      )
+        return Promise.resolve();
+      update(view.datasetId, { search, sort, next: null, queryUnsupported: false });
+      return read("first", false);
+    },
+    relationOptions(tableId, fieldId, search, after, signal) {
+      if (!isLive() || !view) return Promise.reject(new ServerError("cancelled"));
+      return operations.relationOptions(view.datasetId, tableId, fieldId, search, after, signal);
+    },
     more: () =>
-      view?.next && view.reading === null && !view.refused
+      view?.next && view.reading === null && !view.refused && !view.queryUnsupported
         ? read("more", false)
         : Promise.resolve(),
     openRecord(record) {
       recordReads.next();
       if (!view?.tableId) return;
       forget(recordKey(view.datasetId, view.tableId, record.id));
-      update(view.datasetId, { opened: { tableId: view.tableId, record, files: view.files } });
+      update(view.datasetId, {
+        opened: { tableId: view.tableId, record, files: view.files, relations: view.relations },
+      });
     },
     closeRecord: () => void recordReads.next(),
     changes: () => changes,
@@ -511,10 +642,11 @@ export function createWorkspaceCollections(
         },
       };
     },
-    change({ field, from }, value) {
+    change({ field, from }, value, relationLabels) {
       void send(recordKey(from.datasetId, from.tableId, from.recordId), {
         change: { ...from, value, idempotencyKey: crypto.randomUUID() },
         reversible: field.reversible,
+        ...(relationLabels ? { relationLabels } : {}),
       });
     },
     retry(key) {
@@ -552,7 +684,7 @@ export function createWorkspaceCollections(
         const table = description.tables.find((table) => table.tableId === tableId);
         const read = table
           ? await operations.record(datasetId, table, id)
-          : { record: null, files: {} };
+          : { record: null, files: {}, relations: {} };
         if (!lands() || !view?.opened) return false;
         const held = view.opened.record;
         const record = read.record && newest(read.record, held);
@@ -566,9 +698,15 @@ export function createWorkspaceCollections(
               ? view.rows.map((row) => (row.id === id ? newest(record, row) : row))
               : view.rows.filter((row) => row.id !== id),
           files: shown ? { ...view.files, ...read.files } : view.files,
+          relations: shown ? mergeRelations(view.relations, read.relations) : view.relations,
           problem: null,
           opened: record
-            ? { ...view.opened, record, files: record === held ? view.opened.files : read.files }
+            ? {
+                ...view.opened,
+                record,
+                files: record === held ? view.opened.files : read.files,
+                relations: record === held ? view.opened.relations : read.relations,
+              }
             : null,
         });
         if (asked && changes.get(key) === asked) setChange(key, null);
@@ -580,14 +718,16 @@ export function createWorkspaceCollections(
       }
     },
     actions: () => actions,
-    create() {
+    create(values) {
       const now = view;
       const description = now?.description;
       const table = description?.tables.find((table) => table.tableId === now?.tableId);
       if (!now || !description || !table?.canCreate) return Promise.resolve(false);
       // One that didn't save waits for Try again or Discard, since a failed one may have saved.
       const key = newRecordKey(now.datasetId, table.tableId);
-      if (actions.has(key)) return Promise.resolve(false);
+      const existing = actions.get(key);
+      if (existing && (existing.state.kind === "saving" || existing.state.kind === "failed"))
+        return Promise.resolve(false);
       return act(key, {
         kind: "create",
         table,
@@ -597,6 +737,7 @@ export function createWorkspaceCollections(
           revision: description.revision,
           revisionSha256: description.revisionSha256,
           idempotencyKey: crypto.randomUUID(),
+          ...(values ? { values } : {}),
         },
         state: { kind: "saving" },
       });

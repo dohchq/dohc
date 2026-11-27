@@ -5,14 +5,29 @@ import type { ServerClient } from "./client";
 // The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, a
 // change to one field of a record, and a new record or a deletion.
 
+export interface CollectionRelation {
+  readonly many: boolean;
+}
+
 export interface CollectionField {
   readonly fieldId: string;
   readonly name: string;
   readonly type: DatasetColumnFieldType;
   /** A select's or a multi-select's choices, in order; empty for any other type. */
   readonly options: readonly string[];
+  readonly relation?: CollectionRelation;
   readonly editable: boolean;
   readonly reversible: boolean;
+}
+
+export interface CreateCollectionField {
+  readonly fieldId: string;
+  readonly name: string;
+  readonly type: DatasetColumnFieldType;
+  readonly required: boolean;
+  readonly default?: RecordValue;
+  readonly options: readonly string[];
+  readonly relation?: CollectionRelation;
 }
 
 export interface CollectionTable {
@@ -21,7 +36,7 @@ export interface CollectionTable {
   /** The field that names a record, or null when it's one the phone doesn't show. */
   readonly primaryFieldId: string | null;
   readonly fields: readonly CollectionField[];
-  /** Whether the phone can add a record, which starts with the values the desktop gives a new one. */
+  readonly createFields: readonly CreateCollectionField[];
   readonly canCreate: boolean;
   readonly canDelete: boolean;
 }
@@ -69,17 +84,34 @@ export interface FieldChange extends RulesStamp {
   readonly idempotencyKey: string;
 }
 
-/** A new record in a table, with the values the desktop gives one, which the relay picks. */
 export interface RecordCreate extends RulesStamp {
   readonly datasetId: string;
   readonly tableId: string;
-  /** A random UUID, the same on every try. */
   readonly idempotencyKey: string;
+  readonly values?: Readonly<Record<string, RecordValue>>;
 }
 
-export interface RecordDelete extends RecordCreate {
+export interface RecordDelete extends Omit<RecordCreate, "values"> {
   readonly recordId: RecordId;
   readonly expectedVersion: number;
+}
+
+export interface RecordSort {
+  readonly fieldId: string;
+  readonly direction: "asc" | "desc";
+}
+
+export interface RelationOption {
+  readonly value: RecordId;
+  readonly label: string;
+}
+
+export type RelationLabels = Readonly<Record<string, Readonly<Record<string, string>>>>;
+
+export interface RelationOptionsPage {
+  readonly options: readonly RelationOption[];
+  readonly next: RecordCursor | null;
+  readonly searchUnsupported: boolean;
 }
 
 /** Why a write didn't save. */
@@ -113,11 +145,11 @@ export type RecordPage =
       readonly status: "ready";
       readonly rows: readonly CollectionRecord[];
       readonly next: RecordCursor | null;
-      /** Attached files' names, by file ID. */
       readonly files: Readonly<Record<string, string>>;
+      readonly relations: RelationLabels;
     }
-  /** Nothing in the Collection reads this table. */
-  | { readonly status: "refused" };
+  | { readonly status: "refused" }
+  | { readonly status: "unsupported-query" };
 
 const TYPES: ReadonlySet<string> = new Set<DatasetColumnFieldType>([
   "text",
@@ -145,28 +177,53 @@ const readCollection = (item: unknown): PhoneCollection | null =>
 const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 
-function readField(item: unknown): CollectionField | null {
+function readBaseField(item: unknown) {
   if (
     !isFields(item) ||
     !text(item.fieldId, 64) ||
     !text(item.name, 1024) ||
     typeof item.type !== "string" ||
-    !TYPES.has(item.type) ||
-    typeof item.editable !== "boolean" ||
-    typeof item.reversible !== "boolean"
+    !TYPES.has(item.type)
   )
     return null;
   const type = item.type as DatasetColumnFieldType;
   const choices = type === "select" || type === "multi-select";
   const options = choices ? each(item.options, (option) => (text(option) ? option : null)) : [];
   if (!options) return null;
+  let relation: CollectionRelation | undefined;
+  if (type === "relation" && item.relation !== undefined) {
+    if (!isFields(item.relation) || typeof item.relation.many !== "boolean") return null;
+    relation = { many: item.relation.many };
+  }
   return {
     fieldId: item.fieldId,
     name: item.name,
     type,
     options,
-    editable: item.editable,
-    reversible: item.editable && item.reversible,
+    ...(relation ? { relation } : {}),
+  };
+}
+
+function readField(item: unknown): CollectionField | null {
+  const base = readBaseField(item);
+  if (
+    !base ||
+    !isFields(item) ||
+    typeof item.editable !== "boolean" ||
+    typeof item.reversible !== "boolean"
+  )
+    return null;
+  return { ...base, editable: item.editable, reversible: item.editable && item.reversible };
+}
+
+function readCreateField(item: unknown): CreateCollectionField | null {
+  const base = readBaseField(item);
+  if (!base || !isFields(item) || typeof item.required !== "boolean") return null;
+  if (base.type === "relation" && !base.relation) return null;
+  return {
+    ...base,
+    required: item.required,
+    ...(Object.hasOwn(item, "default") ? { default: item.default as RecordValue } : {}),
   };
 }
 
@@ -180,14 +237,20 @@ function readTable(item: unknown): CollectionTable | null {
   )
     return null;
   const fields = each(item.fields, readField);
+  const createFields = each(item.createFields, readCreateField);
   const primary = item.primaryFieldId;
-  if (!fields || (primary !== null && !fields.some((field) => field.fieldId === primary)))
+  if (
+    !fields ||
+    !createFields ||
+    (primary !== null && !fields.some((field) => field.fieldId === primary))
+  )
     return null;
   return {
     tableId: item.tableId,
     name: item.name,
     primaryFieldId: primary as string | null,
     fields,
+    createFields,
     canCreate: item.canCreate,
     canDelete: item.canDelete,
   };
@@ -242,11 +305,34 @@ export const readCreateAnswer = (result: unknown): CreateAnswer | null =>
 export const readDeleteAnswer = (result: unknown): DeleteAnswer | null =>
   readWrite(result, () => ({ kind: "saved" as const }));
 
+const readCursor = (cursor: unknown): RecordCursor | null | undefined =>
+  cursor === null
+    ? null
+    : isFields(cursor) && recordId(cursor.id) && Object.hasOwn(cursor, "value")
+      ? { id: cursor.id, value: cursor.value as RecordValue }
+      : undefined;
+
+function readRelationLabels(value: unknown): RelationLabels | null {
+  if (!isFields(value)) return null;
+  const out: Record<string, Record<string, string>> = {};
+  for (const [fieldId, entries] of Object.entries(value)) {
+    if (!text(fieldId, 64) || !isFields(entries)) return null;
+    const map: Record<string, string> = {};
+    for (const [key, label] of Object.entries(entries)) if (text(label, 2000)) map[key] = label;
+    out[fieldId] = map;
+  }
+  return out;
+}
+
 /** A page of a table's records, each keeping only the fields the table describes. */
 export function readPage(result: unknown, table: CollectionTable): RecordPage | null {
   if (!isFields(result)) return null;
   if (result.status === "refused")
-    return result.reason === "no-read" ? { status: "refused" } : null;
+    return result.reason === "no-read"
+      ? { status: "refused" }
+      : result.reason === "unsupported-query"
+        ? { status: "unsupported-query" }
+        : null;
   if (
     result.status !== "ready" ||
     !Array.isArray(result.rows) ||
@@ -266,17 +352,38 @@ export function readPage(result: unknown, table: CollectionTable): RecordPage | 
         values[field.fieldId] = row.values[field.fieldId] as RecordValue;
     return { id: row.id, version: isCount(row.version) ? row.version : null, values };
   });
-  const cursor = result.nextCursor;
-  const next =
-    cursor === null
-      ? null
-      : isFields(cursor) && recordId(cursor.id) && Object.hasOwn(cursor, "value")
-        ? { id: cursor.id, value: cursor.value as RecordValue }
-        : undefined;
+  const next = readCursor(result.nextCursor);
   const files: Record<string, string> = {};
   for (const [fileId, name] of Object.entries(result.files))
     if (text(name, 1024)) files[fileId] = name;
-  return rows && next !== undefined ? { status: "ready", rows, next, files } : null;
+  const relations = readRelationLabels(result.relations);
+  return rows && next !== undefined && relations
+    ? { status: "ready", rows, next, files, relations }
+    : null;
+}
+
+export const isRelationKey = (value: unknown): value is RecordId =>
+  text(value, 1024) || (typeof value === "number" && Number.isFinite(value));
+
+export function readRelationOptions(result: unknown): RelationOptionsPage | null {
+  if (!isFields(result) || !Array.isArray(result.options) || result.options.length > PAGE)
+    return null;
+  const seen = new Set<string>();
+  const options = each(result.options, (item): RelationOption | null => {
+    if (!isFields(item) || !isRelationKey(item.value) || !text(item.label, 2000)) return null;
+    const key = JSON.stringify(item.value);
+    if (seen.has(key)) return null;
+    seen.add(key);
+    return { value: item.value, label: item.label };
+  });
+  const next = readCursor(result.nextCursor);
+  if (
+    !options ||
+    next === undefined ||
+    (result.searchUnsupported !== undefined && typeof result.searchUnsupported !== "boolean")
+  )
+    return null;
+  return { options, next, searchUnsupported: result.searchUnsupported === true };
 }
 
 /** One workspace's Collection reads, for one sign-in's client. Each request ends when `signal` aborts. */
@@ -293,14 +400,25 @@ export function collectionOperations(
     describe: (datasetId: string) =>
       run("collection", { datasetId }, (result) => readDescription(result, datasetId)),
 
-    records: (datasetId: string, table: CollectionTable, after: RecordCursor | null) =>
+    records: (
+      datasetId: string,
+      table: CollectionTable,
+      after: RecordCursor | null,
+      query?: { readonly search?: string; readonly sort?: RecordSort | null },
+    ) =>
       run(
         "collectionRecords",
-        { datasetId, tableId: table.tableId, ...(after ? { after } : {}) },
+        {
+          datasetId,
+          tableId: table.tableId,
+          ...(after ? { after } : {}),
+          ...(query?.search ? { search: query.search } : {}),
+          ...(query?.sort ? { sort: query.sort } : {}),
+        },
         (result) => readPage(result, table),
       ),
 
-    /** One record, read again by its key, with its files' names, or null when it is gone. */
+    /** One record, read again by its key, with its files' names and relation labels, or null when it is gone. */
     record: (datasetId: string, table: CollectionTable, id: RecordId) =>
       run(
         "collectionRecords",
@@ -310,12 +428,32 @@ export function collectionOperations(
         ): {
           record: CollectionRecord | null;
           files: Readonly<Record<string, string>>;
+          relations: RelationLabels;
         } | null => {
           const page = readPage(result, table);
           if (page?.status !== "ready" || page.rows.length > 1) return null;
           const record = page.rows[0];
-          return { record: record && record.id === id ? record : null, files: page.files };
+          return {
+            record: record && record.id === id ? record : null,
+            files: page.files,
+            relations: page.relations,
+          };
         },
+      ),
+
+    relationOptions: (
+      datasetId: string,
+      tableId: string,
+      fieldId: string,
+      search: string,
+      after: RecordCursor | null,
+      requestSignal?: AbortSignal,
+    ) =>
+      run(
+        "collectionRelationOptions",
+        { datasetId, tableId, fieldId, ...(search ? { search } : {}), ...(after ? { after } : {}) },
+        readRelationOptions,
+        requestSignal ? AbortSignal.any([signal, requestSignal]) : signal,
       ),
 
     change: (change: FieldChange) => run("collectionEdit", change, readChangeAnswer),
