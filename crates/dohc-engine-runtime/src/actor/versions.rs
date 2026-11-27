@@ -1727,8 +1727,7 @@ fn materialize_page_on_store(
             let Some(head) = head.as_ref() else {
                 return Err(DomainError::ConflictStaleTarget.into());
             };
-            if held.is_none()
-                && approved.get(&change.path) != projection_preimage(&state).as_ref()
+            if held.is_none() && approved.get(&change.path) != projection_preimage(&state).as_ref()
             {
                 if head.current(&state, secret) {
                     continue;
