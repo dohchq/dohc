@@ -196,7 +196,6 @@ export function DecisionStatus(props: {
   testIdPrefix: string;
 }) {
   const hasOptions = (props.decision.options?.length ?? 0) > 0;
-  // A poll is a card the choices sit in. A bare question is one line.
   const frame = hasOptions
     ? "flex w-full max-w-md flex-col gap-1 rounded-lg border border-line bg-panel p-3"
     : "flex min-w-0 flex-1 flex-col";
@@ -677,7 +676,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     ? NO_ATTACHMENTS
     : (attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS);
   const openingDecision = openingDeleted ? undefined : decisionsByMessage.get(openingMessage.id);
-  // A poll's card gets its own row; a bare question stays beside work and runs.
   const openingStatus = openingDecision ? (
     <DecisionStatus
       decision={openingDecision}

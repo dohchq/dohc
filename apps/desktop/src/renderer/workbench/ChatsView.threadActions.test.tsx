@@ -176,7 +176,6 @@ describe("ChatsView decisions", () => {
         "Friday",
         "MondayAfter the release check",
       ]);
-      // A choice is named by its label, and its explanation describes it.
       expect(screen.getByRole("button", { name: "Friday" })).toBe(options[0]);
       expect(
         screen.getByRole("button", { name: "Monday", description: "After the release check" }),
