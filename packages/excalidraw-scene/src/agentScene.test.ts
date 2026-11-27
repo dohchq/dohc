@@ -430,6 +430,13 @@ describe("planDrawingEdit", () => {
     expect(wide[0]).toMatch(/^ {4}W/u);
     expect(wide.find((line) => line.trim() === "")).toBeUndefined();
     expect(wide.filter((line) => line.startsWith(" W"))).toHaveLength(1);
+    apply(doc, {
+      add: [
+        { id: "deep", type: "rectangle", x: 0, y: 800, width: 90 },
+        { id: "indent", type: "text", x: 0, y: 0, text: "        WWWW", containerId: "deep" },
+      ],
+    });
+    expectInside(scene().get("indent")!, scene().get("deep")!, 5);
     const arrowLabel = scene().get("said")!;
     expect(String(arrowLabel.text)).toContain("\n");
     expect(numberOf(arrowLabel.width)).toBeLessThanOrEqual(220);
