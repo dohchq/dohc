@@ -51,6 +51,8 @@ import { checkDesktopReleasePublication } from "./check-desktop-release-publicat
 import { LEGACY_NIGHTLIES, selectUpgradeNightly } from "./select-upgrade-nightly.mjs";
 import { createMockUpdateServer, resolveServablePath } from "./mock-update-server.mjs";
 import {
+  POSTHOG_CLI_ARCHIVES,
+  TAR,
   scriptsWithoutChunkIds,
   sourceMapUpload,
   uploadSourceMaps,
@@ -1150,9 +1152,6 @@ async function builtDist({ injected }) {
 
 test("a build with a PostHog key injects and uploads its source maps under the release and dist its reports carry", () => {
   assert.deepEqual(sourceMapUpload(SOURCE_MAP_ENV).args, [
-    "dlx",
-    "--allow-build=@posthog/cli",
-    "@posthog/cli@0.18.10",
     "sourcemap",
     "process",
     "--directory",
@@ -1192,52 +1191,130 @@ test("a build with a PostHog key injects and uploads its source maps under the r
   );
 });
 
-test("the source map upload leaves a PostHog host the release did not set unset, and keeps one it did", async () => {
+const CLI_RELEASE = "https://github.com/PostHog/posthog/releases/download/posthog-cli/v0.18.10";
+
+/** A tiny CLI archive, its pin, and a download that serves it. */
+async function cliArchive() {
+  const root = await mkdtemp(join(tmpdir(), "dohc-posthog-cli-fixture-"));
+  await mkdir(join(root, "posthog-cli-fixture"));
+  await writeFile(join(root, "posthog-cli-fixture", "posthog-cli"), "fixture cli");
+  const name = "posthog-cli-fixture.tar.gz";
+  await promisify(execFile)(TAR, ["-czf", join(root, name), "-C", root, "posthog-cli-fixture"]);
+  const bytes = await readFile(join(root, name));
+  const downloads = [];
+  return {
+    archive: {
+      name,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      binary: "posthog-cli-fixture/posthog-cli",
+    },
+    bytes,
+    downloads,
+    download: async (url) => {
+      downloads.push(url);
+      return new Response(bytes);
+    },
+  };
+}
+
+test("the source map upload pins one @posthog/cli archive for each platform releases build on", () => {
+  assert.deepEqual(Object.keys(POSTHOG_CLI_ARCHIVES), ["darwin-arm64", "linux-x64", "win32-x64"]);
+  for (const archive of Object.values(POSTHOG_CLI_ARCHIVES))
+    assert.match(archive.sha256, /^[0-9a-f]{64}$/);
+});
+
+test("the source map upload runs the CLI from an archive whose SHA-256 matches its pin, and removes it after", async () => {
   const directories = await builtDist({ injected: true });
+  const cli = await cliArchive();
   const calls = [];
   const spawn = (command, args, options) => {
-    calls.push({ command, args, env: options.env });
+    calls.push({
+      command,
+      args,
+      env: options.env,
+      shell: options.shell,
+      cli: readFileSync(command, "utf8"),
+    });
     return { status: 0 };
   };
+  const signing = {
+    CSC_LINK: "cert.p12",
+    CSC_KEY_PASSWORD: "x",
+    APPLE_APP_SPECIFIC_PASSWORD: "x",
+    WIN_CSC_LINK: "w",
+    win_csc_key_password: "x",
+  };
   // A repository variable that is not set reaches the step as an empty string.
-  uploadSourceMaps({ ...SOURCE_MAP_ENV, PATH: "/bin", POSTHOG_CLI_HOST: " " }, spawn, directories);
-  uploadSourceMaps(
+  await uploadSourceMaps(
+    { ...SOURCE_MAP_ENV, ...signing, PATH: "/bin", POSTHOG_CLI_HOST: " " },
+    { ...cli, spawn, directories },
+  );
+  await uploadSourceMaps(
     { ...SOURCE_MAP_ENV, POSTHOG_CLI_HOST: "https://eu.posthog.com" },
-    spawn,
-    directories,
+    { ...cli, spawn, directories },
   );
 
   const [unset, configured] = calls;
-  assert.equal(unset.command, "pnpm");
+  assert.deepEqual(cli.downloads, [
+    `${CLI_RELEASE}/posthog-cli-fixture.tar.gz`,
+    `${CLI_RELEASE}/posthog-cli-fixture.tar.gz`,
+  ]);
+  assert.equal(unset.cli, "fixture cli");
+  assert.match(
+    unset.command.replaceAll("\\", "/"),
+    /\/dohc-posthog-cli-[^/]+\/posthog-cli-fixture\/posthog-cli$/,
+  );
+  assert.equal(unset.shell, undefined);
+  assert.equal(existsSync(unset.command), false, "the CLI is removed after the upload");
   assert.deepEqual(unset.args, sourceMapUpload(SOURCE_MAP_ENV).args);
   assert.equal("POSTHOG_CLI_HOST" in unset.env, false);
+  for (const name of Object.keys(signing))
+    assert.equal(name in unset.env, false, `the CLI never sees ${name}`);
   assert.equal(unset.env.POSTHOG_CLI_API_KEY, SOURCE_MAP_ENV.POSTHOG_CLI_API_KEY);
   assert.equal(unset.env.POSTHOG_CLI_PROJECT_ID, SOURCE_MAP_ENV.POSTHOG_CLI_PROJECT_ID);
   assert.equal(unset.env.PATH, "/bin");
   assert.equal(configured.env.POSTHOG_CLI_HOST, "https://eu.posthog.com");
 
-  assert.throws(
-    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 1 }), directories),
+  await assert.rejects(
+    uploadSourceMaps(SOURCE_MAP_ENV, { ...cli, spawn: () => ({ status: 1 }), directories }),
     /The source map upload failed with exit code 1/,
   );
 });
 
-test("the source map upload leaves PowerShell 7's module path out of the CLI's environment on Windows", () => {
-  for (const name of ["PSModulePath", "PSMODULEPATH"]) {
-    const env = {
-      ...SOURCE_MAP_ENV,
-      [name]: "C:\\Program Files\\PowerShell\\7\\Modules",
-      PATH: "/bin",
-    };
-    const windows = sourceMapUpload(env, "win32").env;
-    assert.equal(
-      Object.keys(windows).some((key) => key.toUpperCase() === "PSMODULEPATH"),
-      false,
-    );
-    assert.equal(windows.PATH, "/bin");
-    for (const platform of ["darwin", "linux"])
-      assert.equal(sourceMapUpload(env, platform).env[name], env[name]);
-  }
+test("the source map upload refuses an archive that does not match its pin before it unpacks or runs it", async () => {
+  const cli = await cliArchive();
+  const directories = await builtDist({ injected: true });
+  const spawn = () => assert.fail("the CLI must not run");
+  const tampered = Buffer.concat([cli.bytes, Buffer.from("x")]);
+  const tamperedHash = createHash("sha256").update(tampered).digest("hex");
+  await assert.rejects(
+    uploadSourceMaps(SOURCE_MAP_ENV, {
+      archive: cli.archive,
+      download: async () => new Response(tampered),
+      spawn,
+      directories,
+    }),
+    (error) =>
+      error.message ===
+      `posthog-cli-fixture.tar.gz has SHA-256 ${tamperedHash}, not the pinned ${cli.archive.sha256}.`,
+  );
+  await assert.rejects(
+    uploadSourceMaps(SOURCE_MAP_ENV, {
+      archive: cli.archive,
+      download: async () => new Response("Not Found", { status: 404 }),
+      spawn,
+      directories,
+    }),
+    (error) =>
+      error.message ===
+      `Downloading ${CLI_RELEASE}/posthog-cli-fixture.tar.gz failed with HTTP 404.`,
+  );
+  const download = () => assert.fail("nothing downloads");
+  await uploadSourceMaps({ DOHC_POSTHOG_KEY: "" }, { download, spawn });
+  await assert.rejects(
+    uploadSourceMaps({ ...SOURCE_MAP_ENV, POSTHOG_CLI_PROJECT_ID: "" }, { download, spawn }),
+    /POSTHOG_CLI_PROJECT_ID is empty/,
+  );
 });
 
 test("a dry run installs and runs the CLI with the release's environment, and uploads nothing", async () => {
@@ -1246,16 +1323,10 @@ test("a dry run installs and runs the CLI with the release's environment, and up
     DOHC_POSTHOG_KEY: "",
     POSTHOG_CLI_API_KEY: "",
     POSTHOG_CLI_HOST: "",
-    PSModulePath: "C:\\Modules",
     PATH: "/bin",
   };
-  const upload = sourceMapUpload(dryRun, "win32");
-  assert.deepEqual(upload.args, [
-    "dlx",
-    "--allow-build=@posthog/cli",
-    "@posthog/cli@0.18.10",
-    "--version",
-  ]);
+  const upload = sourceMapUpload(dryRun);
+  assert.deepEqual(upload.args, ["--version"]);
   assert.deepEqual(upload.env, {
     DOHC_SOURCE_MAPS_DRY_RUN: "true",
     DOHC_POSTHOG_KEY: "",
@@ -1267,18 +1338,19 @@ test("a dry run installs and runs the CLI with the release's environment, and up
 
   // A dry run's build has no PostHog key, so its files carry no chunk ID.
   const directories = await builtDist({ injected: false });
+  const cli = await cliArchive();
   const calls = [];
-  uploadSourceMaps(
-    dryRun,
-    (command, args) => {
+  await uploadSourceMaps(dryRun, {
+    ...cli,
+    spawn: (command, args) => {
       calls.push(args);
       return { status: 0 };
     },
     directories,
-  );
+  });
   assert.deepEqual(calls, [upload.args]);
-  assert.throws(
-    () => uploadSourceMaps(dryRun, () => ({ status: 1 }), directories),
+  await assert.rejects(
+    uploadSourceMaps(dryRun, { ...cli, spawn: () => ({ status: 1 }), directories }),
     /failed with exit code 1/,
   );
 });
@@ -1291,8 +1363,12 @@ test("the source map upload fails when a script the reports name ships without i
       .sort(),
     ["app.js", "index-Cd34.js", "posthogErrors-Ab12.js"],
   );
-  assert.throws(
-    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 0 }), directories),
+  await assert.rejects(
+    uploadSourceMaps(SOURCE_MAP_ENV, {
+      ...(await cliArchive()),
+      spawn: () => ({ status: 0 }),
+      directories,
+    }),
     /These scripts carry no chunk ID[\s\S]*app\.js/,
   );
   assert.deepEqual(scriptsWithoutChunkIds(await builtDist({ injected: true })), []);
@@ -1323,6 +1399,8 @@ test("the release injects source maps for every build that names PostHog before 
   assert.equal(upload.if, undefined);
   assert.equal(upload.env.DOHC_SOURCE_MAPS_DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
+  for (const name of Object.keys(upload.env))
+    assert.doesNotMatch(name, /CSC|APPLE/, `the upload step never sees ${name}`);
   for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {
     assert.ok(build.env[name], `the build sets ${name}`);
     assert.equal(upload.env[name], build.env[name], `the upload reads the build's ${name}`);
@@ -2295,6 +2373,7 @@ test("Mac packaging signs and notarizes only a real release, from the release ke
     WIN_CSC_LINK: "w",
     POSTHOG_CLI_API_KEY: "k",
     DOHC_POSTHOG_KEY: "phc",
+    DOHC_SOURCE_MAPS_DRY_RUN: "true",
   };
   assert.deepEqual(releaseEnvironment(inherited, { CSC_NAME: "Example Maker (TEAM123456)" }), {
     PATH: "/usr/bin",

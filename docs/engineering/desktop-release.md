@@ -258,7 +258,7 @@ A real run unlocks the release keychain for two short periods.
 Before it builds, the command checks that the identity is valid and that the notarytool profile signs in. It reads the PostHog key into memory and locks the keychain again.
 Before it packages, the command unlocks the keychain again. The keychain locks once Apple accepts the DMG.
 The install, the builds, and the source map upload run with the keychain locked.
-The upload fetches `@posthog/cli` outside the lockfile and runs its install script, and only that step receives the PostHog key.
+The upload downloads a pinned `@posthog/cli` build and checks its SHA-256 before it runs it. Only that step receives the PostHog key.
 If the keychain is already unlocked when packaging starts, someone opened it while the build ran. The command says so, locks it, and unlocks it again the usual way.
 The command also locks the keychain when it ends, however it ends.
 
@@ -551,7 +551,10 @@ original source lines:
 The **Upload source maps** step runs
 [`scripts/upload-desktop-source-maps.mjs`](../../scripts/upload-desktop-source-maps.mjs)
 for each package, after the desktop build and before packaging. The script
-runs `posthog-cli sourcemap process` from `@posthog/cli`. The CLI writes a
+downloads the `@posthog/cli` release build for its platform from GitHub,
+checks it against the SHA-256 the script pins, and runs
+`posthog-cli sourcemap process`. It never runs the npm package's install
+script, and it hides signing variables from the CLI. The CLI writes a
 chunk ID into each script, then uploads each source map under that ID. The
 package ships those modified files, and error reports carry each frame's
 chunk ID. No later step may rebuild `apps/desktop/dist`.
@@ -559,7 +562,7 @@ chunk ID. No later step may rebuild `apps/desktop/dist`.
 Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
 `POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
 add the missing value or clear the key. A dry run uploads nothing. It only
-installs the CLI and runs `posthog-cli --version`, so a CLI that cannot install
+downloads and checks the CLI and runs `posthog-cli --version`, so a CLI that cannot install
 fails the dry run before it can fail a release.
 
 ### Check a release against PostHog
@@ -567,6 +570,8 @@ fails the dry run before it can fail a release.
 The tests prove what leaves the app, but not that PostHog accepts and
 resolves it. Run both checks below on Windows and on macOS for the first
 release that reports, and after a `posthog-node` or `@posthog/cli` update.
+To update `@posthog/cli`, change the release URL and each pinned archive's
+SHA-256 in the upload script to the values in that release's `sha256.sum`.
 
 #### Check source maps before the release
 
