@@ -31,7 +31,7 @@ Agents can build a small app fast. Every app then needs the same things: a place
 
 Developers can wire that up with git, MCP servers, Tailscale, Supabase, and Cloudflare. That setup is tedious, so most of these apps stay on one laptop, and most people never build them. dohc puts that runtime in one desktop app.
 
-Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc is that layer. Sync, history, permissions, and app isolation work the same for people and agents. When you approve an agent-built app, you choose which workspace data and capabilities it can reach, without reading its code. Its browser frontend can still make ordinary network requests, so check where it sends data.
+Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc is that layer. Sync, history, permissions, and app isolation work the same for people and agents. When you approve an agent-built app, you choose which workspace data and capabilities it can reach, without reading its code. Its browser frontend can still make ordinary network requests, so review where it sends data.
 
 Keeping an app's source, data, documents, and chat in one workspace makes the work easier to use, change, and hand over. A workspace is useful on one computer, and another person or agent can continue the same work when you share it.
 

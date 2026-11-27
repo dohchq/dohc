@@ -562,8 +562,9 @@ chunk ID. No later step may rebuild `apps/desktop/dist`.
 Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
 `POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
 add the missing value or clear the key. A dry run uploads nothing. It only
-downloads and checks the CLI and runs `posthog-cli --version`, so a CLI that cannot install
-fails the dry run before it can fail a release.
+downloads and checks the CLI and runs `posthog-cli --version`, so a CLI that
+cannot download or fails its checksum fails the dry run before it can fail a
+release.
 
 ### Check a release against PostHog
 
