@@ -1536,6 +1536,35 @@ describe("several changes the room took, saved as one", () => {
   }, 120_000);
 });
 
+describe("a note an edit puts past the nodes the engine's Markdown writer reads", () => {
+  it("is refused for capacity by the save and by registration, a node past the budget", () => {
+    const quotes = Array.from({ length: 63 }, (_, depth) => depth.toString(16));
+    const quotedLine = (sequence: Y.Text) => {
+      sequence.insertEmbed(sequence.length, element("block", { type: "paragraph", path: quotes }));
+      sequence.insert(sequence.length, "a");
+    };
+    const doc = new Y.Doc({ gc: false });
+    doc.clientID = 5;
+    doc.getMap("meta").set("schemaVersion", 2);
+    for (const id of quotes) doc.getMap(BODY_CONTAINERS_FIELD).set(id, "blockquote");
+    for (let line = 0; line < 4_032; line++) quotedLine(doc.getText(BODY_SEQUENCE_FIELD));
+    const baseline = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    expect(
+      said(register({ document: documentFor(baseline), currentPath: PATH, checkpoint: baseline })),
+    ).toBe("accepted");
+
+    const held = room(baseline);
+    const kept = held.offer(changeMadeBy(baseline, 6, ({ sequence }) => quotedLine(sequence))!);
+    expect(kept, "the room's check").toBeDefined();
+    expect(held.laterChecks(kept!)).toEqual({
+      journal: "refused: capacity-refused (final)",
+      engineReader: "refused: capacity-refused (final)",
+      registration: "refused: capacity-refused (registration-input)",
+    });
+  }, 120_000);
+});
+
 describe("what the room keeps of a value no encoder writes", () => {
   const record =
     (bytes: readonly number[]): Case["change"] =>

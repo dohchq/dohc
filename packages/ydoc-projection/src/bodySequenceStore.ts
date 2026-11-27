@@ -140,7 +140,7 @@ export function bodySequenceReading(doc: Y.Doc): string {
   return JSON.stringify([pieces, containers], asText);
 }
 
-const INLINE_ITEMS = new Set([
+export const INLINE_ITEMS: ReadonlySet<string> = new Set([
   "hardBreak",
   "image",
   "escapedPunctuation",
@@ -149,7 +149,7 @@ const INLINE_ITEMS = new Set([
   "mathInline",
   "rawInline",
 ]);
-const HOLDS_BLOCKS = new Set([
+export const HOLDS_BLOCKS: ReadonlySet<string> = new Set([
   "blockquote",
   "callout",
   "listItem",
@@ -165,7 +165,7 @@ const BLOCK_CONTAINERS = new Set([
   "table",
   "taskList",
 ]);
-const ONLY_CHILD: Record<string, string> = {
+export const ONLY_CHILD: Readonly<Record<string, string>> = {
   bulletList: "listItem",
   orderedList: "listItem",
   taskList: "taskItem",
@@ -173,7 +173,7 @@ const ONLY_CHILD: Record<string, string> = {
 };
 const CELLS = new Set(["tableCell", "tableHeader"]);
 
-const childrenOf = (parent: string | null): ReadonlySet<string> =>
+export const childrenOf = (parent: string | null): ReadonlySet<string> =>
   parent === null || HOLDS_BLOCKS.has(parent)
     ? BLOCK_CONTAINERS
     : parent === "tableRow"
