@@ -191,7 +191,7 @@ Returns `{ ok: true, appRoot, files }`, or `{ ok: false, reason, written?, path?
 
 ### `dohc_test_app`
 
-Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.
+Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.
 
 - `appRoot`: `string`. Required.
 

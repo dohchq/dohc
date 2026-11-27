@@ -269,7 +269,7 @@ export const MCP_INSTRUCTIONS = [
   "dohc serves one workspace folder: files, live Markdown documents, Collections, apps, automations, and chat, with History and Versions.",
   "- Markdown files are live documents. Create them with dohc_create_document, read them with dohc_read_document, and change them with dohc_edit_document. dohc_write_file writes every other file and refuses Markdown.",
   "- A document Collection is a folder of Markdown records with collection.yaml: use dohc_query_collection, dohc_create_record, and dohc_set_record_fields. A transactional Collection (a dataset) has dataset.json, SQLite tables, and approved operations: use dohc_dataset.",
-  "- An app is a folder with app.publish.json. dohc_publish_app action verifyFrontend compiles and runs it in dohc's sandbox; dohc_test_app only checks the folder. Then prepareLocal, approve, and launchLocal.",
+  "- An app is a folder with app.publish.json. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs it in dohc's sandbox; dohc_test_app only checks the folder. Then prepareLocal, approve, and launchLocal.",
   "- dohc_dataset, dohc_collection_access, and dohc_publish_app fill in workspaceId for this workspace when you leave it out.",
   `- Read a guide before you author: ${Object.keys(GUIDES)
     .map((name) => `dohc://guides/${name}`)
@@ -409,7 +409,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",
       inputSchema: { collectionPath: z.string().min(1).max(4096) },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await listAutomations(ctx, args)),
   );
@@ -426,7 +426,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         reformat: z.boolean().optional(),
         submitId: requestIdSchema,
       },
-      annotations: CHANGE,
+      annotations: CHANGE_SERVER,
     },
     async (args) => text(await switchAutomation(ctx, args)),
   );
@@ -467,7 +467,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Create, prepare, approve, inspect, and use transactional Collections (dataset.json, SQLite tables, and approved operations) in the owning workspace. Address one with datasetPath, its dataset.json path relative to the MCP server folder, such as tracker/dataset.json, never a folder or datasetId; list returns these paths, and a move changes them. expectedDatasetId refuses the request when the path now names another Collection. create takes definition, a dataset.json descriptor object (formatVersion 1 or 2), and approves revision 1. prepare takes descriptorPath; approve takes its preparationId and revisionSha256. invoke runs an approved operation with its described revision and revisionSha256 and a stable idempotencyKey. Generated create operations take input { values: { <fieldId>: value } }, and edit operations add id and expectedVersion; field ids come from describe. Apps bind to these Collections and have no separate store. export writes a private recovery archive, with private records and retry credentials, to an absolute savePath outside the workspace. dohc://guides/collections lists every action's fields, migrations, history restore, permissions, and recovery.",
       inputSchema: { request: forServedWorkspace(DatasetRequest) },
-      annotations: CHANGE,
+      annotations: CHANGE_SERVER,
     },
     async ({ request }) =>
       text(await inServedWorkspace(ctx, request, (filled) => dataset(ctx, filled))),
@@ -1085,7 +1085,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_test_app",
     {
       description:
-        "Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.",
+        "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       inputSchema: {
         appRoot: z.string().min(1).max(4096),
       },
@@ -1288,7 +1288,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         body: chatWriteInput.body.optional(),
         nothingToReport: z.literal(true).optional(),
       },
-      annotations: ADD,
+      annotations: CHANGE,
     },
     async ({ model, body, nothingToReport, ...args }) => {
       if (nothingToReport) {

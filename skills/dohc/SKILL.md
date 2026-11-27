@@ -25,7 +25,7 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 | Create, read, and edit Markdown documents | `dohc_create_document`, `dohc_read_document`, `dohc_edit_document` | `dohc document create\|read\|edit` |
 | Work with document Collections (`collection.yaml`) | `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields` | `dohc document set-fields` |
 | Create, approve, migrate, and invoke transactional Collections (`dataset.json`) | `dohc_dataset` | `dohc dataset <verb> '<JSON>'` |
-| Scaffold, stage, verify, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_publish_app` (`verifyFrontend` runs the app) | `dohc app <verb> '<JSON>'` |
+| Scaffold, stage, verify, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_publish_app` (in a workspace you own, `verifyFrontend` runs the app) | `dohc app <verb> '<JSON>'` |
 | Import CSV/JSON and query SQLite | `dohc_import_data`, `dohc_query_database` | (MCP only) |
 | Check and change Collection automations (`automations.yaml`) | `dohc_list_automations`, then edit `automations.yaml` with `dohc_write_file`. In a workspace shared with you at Edit, `dohc_switch_automation` turns one on or off | `dohc automation list\|switch` |
 | Post or reply in Groups and file comments | `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat` | `dohc chat groups\|post\|reply` |

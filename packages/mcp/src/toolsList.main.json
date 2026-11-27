@@ -2412,7 +2412,7 @@
         "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
@@ -3270,7 +3270,7 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
@@ -5607,7 +5607,7 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
       }
@@ -6372,7 +6372,7 @@
     },
     {
       "name": "dohc_test_app",
-      "description": "Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -7253,7 +7253,7 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
@@ -9189,7 +9189,7 @@
     },
     {
       "name": "dohc_test_app",
-      "description": "Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -9927,7 +9927,7 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
@@ -11846,7 +11846,7 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
       }
@@ -12113,7 +12113,7 @@
     },
     {
       "name": "dohc_test_app",
-      "description": "Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -13023,7 +13023,7 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
@@ -14942,7 +14942,7 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
       }
@@ -15295,12 +15295,12 @@
         "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_test_app",
-      "description": "Check an app folder without running it: detector diagnostics and entry presence. To compile and run the app in dohc's sandbox, use dohc_publish_app action verifyFrontend.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
