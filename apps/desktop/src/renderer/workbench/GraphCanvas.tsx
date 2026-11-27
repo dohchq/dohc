@@ -277,8 +277,7 @@ export function createGraphRenderer(
   let hasPending = new Uint8Array(0);
   let pathIndex = new Map<string, number>();
   let useGlow = false,
-    useCurved = false,
-    curvedCount = 0;
+    useCurved = false;
   let glowLayer: visuals.GlowLayer | null = null;
   const remembered = new Map<string, { x: number; y: number; label: number }>();
 
@@ -308,6 +307,8 @@ export function createGraphRenderer(
     hoverFlowStart = -1,
     surgeStart = -1,
     lastSurgeNonce = -1;
+  let litPath: string | null = null;
+  let hoverFlowEdges = new Set<number>();
   let surgeEdges: readonly (readonly [string, string])[] = [];
 
   type Gesture =
@@ -372,17 +373,17 @@ export function createGraphRenderer(
     hasPending = new Uint8Array(count);
     pathIndex = new Map(next.nodes.map((node, i) => [node.path, i]));
     useGlow = next.nodes.filter((node) => node.structural).length <= visuals.MAX_GLOW_STRUCTURAL;
-    curvedCount = 0;
+    let curved = 0;
     next.links.forEach(([s, t, kind = LINK_STYLE.prose], l) => {
       source[l] = s;
       target[l] = t;
       style[l] = kind;
       if (kind === LINK_STYLE.pending) hasPending[s] = 1;
-      if (kind === LINK_STYLE.structural || kind === LINK_STYLE.pending) curvedCount++;
+      if (kind === LINK_STYLE.structural || kind === LINK_STYLE.pending) curved++;
       degree[s]!++;
       degree[t]!++;
     });
-    useCurved = curvedCount <= visuals.MAX_CURVED_LINKS;
+    useCurved = curved <= visuals.MAX_CURVED_LINKS;
     if (count === 0) surgeEdges = [];
     offsets = new Uint32Array(count + 1);
     for (let i = 0; i < count; i++) offsets[i + 1] = offsets[i]! + degree[i]!;
@@ -501,29 +502,46 @@ export function createGraphRenderer(
     wake();
   }
 
-  const hasHoverMotion = (nodeIndex: number) =>
-    hasPending[nodeIndex] === 1 ||
-    source.some(
-      (s, l) =>
-        (s === nodeIndex || target[l] === nodeIndex) &&
-        (style[l] === LINK_STYLE.pending ||
-          (style[l] === LINK_STYLE.structural &&
-            !model.nodes[s]?.paused &&
-            !model.nodes[target[l]!]?.paused)),
-    );
+  const collectHoverEdges = (nodeIndex: number) => {
+    const edges = new Set<number>();
+    for (let l = 0; l < source.length && edges.size < 24; l++) {
+      const s = source[l]!,
+        t = target[l]!;
+      if (s !== nodeIndex && t !== nodeIndex) continue;
+      if (
+        style[l] === LINK_STYLE.pending ||
+        (style[l] === LINK_STYLE.structural && !model.nodes[s]?.paused && !model.nodes[t]?.paused)
+      )
+        edges.add(l);
+    }
+    return edges;
+  };
 
   function relight(): void {
     const next = hover >= 0 ? hover : focus;
     if (next < 0) {
+      litPath = null;
       hoverFlowActive = false;
       hoverFlowStart = -1;
-    } else if (next !== lit) {
+      hoverFlowEdges = new Set();
+    } else if (next !== lit || litPath === null) {
+      const nextPath = model.nodes[next]!.path;
+      const sameNode = nextPath === litPath;
       litSet.fill(0);
       litSet[next] = 1;
       for (let a = offsets[next]!; a < offsets[next + 1]!; a++) litSet[adjacency[a]!] = 1;
       lit = next;
-      hoverFlowActive = !reduced && ctx !== null && hasHoverMotion(next);
-      hoverFlowStart = -1;
+      litPath = nextPath;
+      hoverFlowEdges = collectHoverEdges(next);
+      const hasMotion =
+        !reduced && ctx !== null && (hasPending[next] === 1 || hoverFlowEdges.size > 0);
+      if (!sameNode) {
+        hoverFlowActive = hasMotion;
+        hoverFlowStart = -1;
+      } else if (!hasMotion) {
+        hoverFlowActive = false;
+        hoverFlowStart = -1;
+      }
     }
     const target = next >= 0 ? 1 : 0;
     if (reduced) {
@@ -718,12 +736,15 @@ export function createGraphRenderer(
         if (litOnly) {
           const litW = lineWidth * (1 + 0.4 * mix);
           ctx.setLineDash([]);
+          ctx.lineDashOffset = 0;
           ctx.globalAlpha = 0.2 * mix;
           ctx.lineWidth = litW * 2.5;
           stroke();
           ctx.setLineDash(LINK_DASH[edgeStyle]!);
           ctx.lineDashOffset =
-            edgeStyle === LINK_STYLE.pending && hoverProgress >= 0 ? -hoverProgress * 36 : 0;
+            edgeStyle === LINK_STYLE.pending && hoverProgress >= 0 && hoverFlowEdges.has(l)
+              ? -hoverProgress * 36
+              : 0;
           ctx.globalAlpha = palette.edgeAlpha + (0.9 - palette.edgeAlpha) * mix;
           ctx.lineWidth = litW;
           stroke();
@@ -731,15 +752,15 @@ export function createGraphRenderer(
           ctx.setLineDash(LINK_DASH[edgeStyle]!);
           ctx.globalAlpha =
             palette.edgeAlpha * linkRest * (edgeStyle === LINK_STYLE.pending ? 2.4 : 2.2);
-          ctx.lineWidth = strokeWidth(curvedCount, lineWidth);
+          ctx.lineWidth = lineWidth;
           stroke();
         }
       }
       ctx.lineDashOffset = 0;
     };
-    ctx.strokeStyle = palette.edge;
     for (let pass = 0; pass < LINK_DASH.length; pass++) {
       if (visuals.isCurvedEdge(useCurved, pass)) continue;
+      ctx.strokeStyle = pass === LINK_STYLE.pending ? palette.warning : palette.edge;
       ctx.globalAlpha =
         palette.edgeAlpha *
         linkRest *
@@ -771,23 +792,26 @@ export function createGraphRenderer(
     }
     if (useCurved) drawCurved(false);
     if (highlight) {
-      ctx.strokeStyle = palette.match;
       ctx.globalAlpha = palette.edgeAlpha + (0.75 - palette.edgeAlpha) * mix;
       ctx.lineWidth = strokeWidth(offsets[lit + 1]! - offsets[lit]!, lineWidth * (1 + 0.4 * mix));
       for (let pass = 0; pass < LINK_DASH.length; pass++) {
         if (visuals.isCurvedEdge(useCurved, pass)) continue;
+        ctx.strokeStyle = pass === LINK_STYLE.pending ? palette.warning : palette.match;
         ctx.setLineDash(LINK_DASH[pass]!);
-        ctx.lineDashOffset =
-          pass === LINK_STYLE.pending && hoverProgress >= 0 ? -hoverProgress * 36 : 0;
-        ctx.beginPath();
-        for (let l = 0; l < source.length; l++) {
-          const s = source[l]!,
-            t = target[l]!;
-          if (style[l] !== pass || (s !== lit && t !== lit)) continue;
-          ctx.moveTo(sx(s), sy(s));
-          ctx.lineTo(sx(t), sy(t));
+        const splitPending = pass === LINK_STYLE.pending && hoverProgress >= 0;
+        for (const animated of splitPending ? [false, true] : [false]) {
+          ctx.lineDashOffset = animated ? -hoverProgress * 36 : 0;
+          ctx.beginPath();
+          for (let l = 0; l < source.length; l++) {
+            const s = source[l]!,
+              t = target[l]!;
+            if (style[l] !== pass || (s !== lit && t !== lit)) continue;
+            if (splitPending && hoverFlowEdges.has(l) !== animated) continue;
+            ctx.moveTo(sx(s), sy(s));
+            ctx.lineTo(sx(t), sy(t));
+          }
+          ctx.stroke();
         }
-        ctx.stroke();
       }
       ctx.lineDashOffset = 0;
       if (useCurved) drawCurved(true);
@@ -845,23 +869,16 @@ export function createGraphRenderer(
       }
     }
     if (hoverProgress >= 0 && lit >= 0) {
-      for (let l = 0, comets = 0; l < source.length && comets < 24; l++) {
+      for (const l of hoverFlowEdges) {
+        if (style[l] !== LINK_STYLE.structural) continue;
         const s = source[l]!,
           t = target[l]!;
-        if (
-          style[l] !== LINK_STYLE.structural ||
-          (s !== lit && t !== lit) ||
-          model.nodes[s]?.paused ||
-          model.nodes[t]?.paused
-        )
-          continue;
-        const color = linkColor(s, style[l]!, palette.match);
+        const color = linkColor(s, LINK_STYLE.structural, palette.match);
         visuals.drawComet(ctx, [sx(s), sy(s), sx(t), sy(t)], hoverProgress, {
           curved: useCurved,
           color,
           head: palette.dark ? palette.ink : color,
         });
-        comets++;
       }
     }
     if (surgeProgress >= 0 && surgeEdges.length > 0) {
@@ -1008,7 +1025,8 @@ export function createGraphRenderer(
     }
     // The grid cells a node's dot covers, out to a diamond's tips, the widest
     // shape, and the hovered node's larger dot.
-    const dotR = (i: number) => 1.25 * screenR(i) * (highlight && i === lit ? 1 + 0.15 * mix : 1);
+    const dotR = (i: number) =>
+      Math.max(1.25 * screenR(i) * (highlight && i === lit ? 1 + 0.15 * mix : 1), ringR(i) + 1);
     const dotCol = (i: number, side: number) =>
       Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * dotR(i)) / CELL)));
     const dotRow = (i: number, side: number) =>
@@ -1043,30 +1061,38 @@ export function createGraphRenderer(
         title = shortTitle(model.nodes[i]!.title);
         w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
         const pillPad = isPill ? 4 : 0;
+        const vPad = isPill ? 1 : 0;
         left = sx(i) - w / 2 - pillPad;
         boxW = w + pillPad * 2;
-        top = sy(i) + (i === lit || i === active || hasPending[i] ? ringR(i) : screenR(i)) + 3;
-        fits =
-          left >= 2 &&
-          top >= (isPill ? 1 : 0) &&
-          left + boxW <= width - 2 &&
-          top + LABEL_HEIGHT + (isPill ? 1 : 0) <= height;
-        c0 = Math.floor(left / CELL);
-        c1 = Math.floor((left + boxW) / CELL);
-        r0 = Math.floor(top / CELL);
-        r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
-        // The label may touch its own node's dot, not another's.
         const a0 = dotCol(i, -1),
           a1 = dotCol(i, 1),
           b0 = dotRow(i, -1),
           b1 = dotRow(i, 1);
-        const avoidDots = !own && i !== active;
-        for (let r = r0; fits && r <= r1; r++) {
-          for (let c = c0; c <= c1; c++) {
-            const mine = r >= b0 && r <= b1 && c >= a0 && c <= a1 ? 1 : 0;
-            if (taken[r * cols + c] || (avoidDots && dots[r * cols + c]! > mine)) fits = false;
+        const avoidDots = isPill || (!own && i !== active);
+        const tryTop = (candidate: number) => {
+          if (
+            left < 2 ||
+            candidate < vPad ||
+            left + boxW > width - 2 ||
+            candidate + LABEL_HEIGHT + vPad > height
+          )
+            return false;
+          c0 = Math.floor(left / CELL);
+          c1 = Math.floor((left + boxW) / CELL);
+          r0 = Math.max(0, Math.floor((candidate - vPad) / CELL));
+          r1 = Math.min(rows - 1, Math.floor((candidate + LABEL_HEIGHT + vPad) / CELL));
+          for (let r = r0; r <= r1; r++) {
+            for (let c = c0; c <= c1; c++) {
+              const mine = r >= b0 && r <= b1 && c >= a0 && c <= a1 ? 1 : 0;
+              if (taken[r * cols + c] || (avoidDots && dots[r * cols + c]! > mine)) return false;
+            }
           }
-        }
+          top = candidate;
+          return true;
+        };
+        const below =
+          sy(i) + (i === lit || i === active || hasPending[i] ? ringR(i) : screenR(i)) + 3;
+        fits = tryTop(below) || (isPill && tryTop(sy(i) - ringR(i) - LABEL_HEIGHT - 3));
       }
       if (!fits) {
         labelAlpha[i] = 0;

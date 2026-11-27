@@ -500,18 +500,22 @@ describe("createGraphRenderer visual behaviours", () => {
     });
     renderer.zoomBy(8);
     env.drain();
-    const sample = calls.find(
-      (c, i) =>
-        c.op === "quadraticCurveTo" &&
-        i > 0 &&
-        calls[i - 1]?.op === "moveTo" &&
-        (c.args[0] as number) > Math.max(calls[i - 1]!.args[0] as number, c.args[2] as number) + 4,
-    );
+    const sample = calls.find((c, i) => {
+      if (c.op !== "quadraticCurveTo" || i === 0 || calls[i - 1]?.op !== "moveTo") return false;
+      const x1 = calls[i - 1]!.args[0] as number;
+      const cx = c.args[0] as number;
+      const x2 = c.args[2] as number;
+      const midX = 0.25 * x1 + 0.5 * cx + 0.25 * x2;
+      return midX > Math.max(x1, x2) + 4;
+    });
     expect(sample).toBeDefined();
     const moveBefore = calls[calls.indexOf(sample!) - 1]!;
-    const maxEndX = Math.max(moveBefore.args[0] as number, sample!.args[2] as number);
-    const bowX = sample!.args[0] as number;
-    const shiftX = -(maxEndX + (bowX - maxEndX) / 2);
+    const sx1 = moveBefore.args[0] as number;
+    const scx = sample!.args[0] as number;
+    const sx2 = sample!.args[2] as number;
+    const maxEndX = Math.max(sx1, sx2);
+    const midX = 0.25 * sx1 + 0.5 * scx + 0.25 * sx2;
+    const shiftX = -(maxEndX + (midX - maxEndX) / 2);
 
     calls.length = 0;
     fire("pointerdown", { button: 0, pointerId: 1, clientX: 390, clientY: 290 });
@@ -523,9 +527,153 @@ describe("createGraphRenderer visual behaviours", () => {
       const x1 = calls[i - 1]!.args[0] as number;
       const cx = c.args[0] as number;
       const x2 = c.args[2] as number;
-      return x1 < 0 && x2 < 0 && cx > 0;
+      return x1 < 0 && x2 < 0 && 0.25 * x1 + 0.5 * cx + 0.25 * x2 > 0;
     });
     expect(pannedCurve).toBeDefined();
+    renderer.destroy();
+  });
+
+  it("preserves finished hover flow across model refreshes, caps animated pending edges at 24, and keeps warning hue past the curve cutoff", () => {
+    const env = setupRendererEnv();
+    const { canvas, calls } = env.makeCanvas();
+    const renderer = createGraphRenderer(canvas, "bg", { open: vi.fn(), settled: vi.fn() });
+    renderer.resize(600, 500);
+    const hub = {
+      path: "collection:hub",
+      title: "Hub",
+      kind: "Collection",
+      shape: "square" as const,
+      degree: 26,
+      structural: true,
+    };
+    const apps = Array.from({ length: 26 }, (_, i) => ({
+      path: `app:a${i}`,
+      title: `App ${i}`,
+      kind: "App",
+      shape: "hexagon" as const,
+      degree: 1,
+      structural: true,
+    }));
+    const model = {
+      nodes: [hub, ...apps],
+      links: apps.map((_, i) => [i + 1, 0, LINK_STYLE.pending] as const),
+    };
+    renderer.setModel(model);
+    renderer.setGroups(Int16Array.from([0, ...apps.map(() => 5)]));
+    env.drain();
+
+    calls.length = 0;
+    renderer.setFocus(0);
+    const firstSteps = env.drain();
+    expect(firstSteps).toBeGreaterThan(70);
+    const movedPendingPerFrame = calls.filter(
+      (c) =>
+        c.op === "quadraticCurveTo" &&
+        c.state.strokeStyle === palette.dark.warning &&
+        (c.state.lineDashOffset as number) !== 0,
+    ).length;
+    expect(movedPendingPerFrame / firstSteps).toBeLessThanOrEqual(24);
+
+    calls.length = 0;
+    renderer.setModel({ nodes: [...model.nodes], links: [...model.links] });
+    const refreshSteps = env.drain();
+    expect(refreshSteps).toBeLessThan(10);
+    expect(env.pending()).toBe(0);
+
+    const manyNodes = Array.from({ length: 130 }, (_, i) => ({
+      path: `collection:c${i}`,
+      title: `C${i}`,
+      kind: "Collection",
+      shape: "square" as const,
+      degree: 2,
+      structural: true,
+    }));
+    const manyLinks = [
+      [1, 0, LINK_STYLE.pending] as const,
+      ...Array.from({ length: 125 }, (_, i) => [i + 2, 0, LINK_STYLE.structural] as const),
+    ];
+    renderer.setFocus(-1);
+    env.drain();
+    calls.length = 0;
+    renderer.setModel({ nodes: manyNodes, links: manyLinks });
+    env.drain();
+    expect(
+      calls.some((c) => c.op === "stroke" && c.state.strokeStyle === palette.dark.warning),
+    ).toBe(true);
+
+    calls.length = 0;
+    renderer.setFocus(0);
+    env.drain();
+    expect(
+      calls.some(
+        (c) =>
+          c.op === "stroke" &&
+          c.state.strokeStyle === palette.dark.warning &&
+          (c.state.lineDashOffset as number) !== 0,
+      ),
+    ).toBe(true);
+    renderer.destroy();
+  });
+
+  it("avoids covering a neighboring node's active and pending rings with the hovered title pill", () => {
+    const env = setupRendererEnv();
+    const { canvas, calls, fire } = env.makeCanvas();
+    const renderer = createGraphRenderer(canvas, "bg", { open: vi.fn(), settled: vi.fn() });
+    renderer.resize(500, 400);
+    renderer.setModel({
+      nodes: [
+        {
+          path: "collection:hub",
+          title: "Tasks",
+          kind: "Collection",
+          shape: "square",
+          degree: 1,
+          structural: true,
+        },
+        {
+          path: "app:req",
+          title: "Board",
+          kind: "App",
+          shape: "hexagon",
+          degree: 1,
+          structural: true,
+        },
+      ],
+      links: [[1, 0, LINK_STYLE.pending]],
+    });
+    renderer.setGroups(Int16Array.from([0, 5]));
+    renderer.setActive(1);
+    env.drain();
+    const activeBefore = calls.find(
+      (c) =>
+        c.op === "arc" && c.state.strokeStyle === palette.dark.ink && c.state.lineWidth === 1.5,
+    )!;
+    const hubSquare = calls.find(
+      (c) => c.op === "roundRect" && c.state.fillStyle === identityHues.dark.teal,
+    )!;
+    const hubX = (hubSquare.args[0] as number) + (hubSquare.args[2] as number) / 2;
+    const hubY = (hubSquare.args[1] as number) + (hubSquare.args[3] as number) / 2;
+    const appX = activeBefore.args[0] as number;
+    const appY = activeBefore.args[1] as number;
+
+    fire("pointerdown", { button: 0, pointerId: 1, clientX: appX, clientY: appY });
+    fire("pointermove", { pointerId: 1, clientX: hubX, clientY: hubY + 26 });
+    fire("pointerup", { pointerId: 1 });
+    env.drain();
+
+    calls.length = 0;
+    renderer.setFocus(0);
+    env.drain();
+    const pill = calls.find((c) => c.op === "roundRect" && c.state.fillStyle === palette.dark.bg);
+    const activeAfter = calls.find(
+      (c) =>
+        c.op === "arc" && c.state.strokeStyle === palette.dark.ink && c.state.lineWidth === 1.5,
+    );
+    expect(pill).toBeDefined();
+    expect(activeAfter).toBeDefined();
+    const pillBottom = (pill!.args[1] as number) + (pill!.args[3] as number);
+    const ringTop = (activeAfter!.args[1] as number) - (activeAfter!.args[2] as number);
+    expect(pillBottom).toBeLessThanOrEqual(ringTop);
     renderer.destroy();
   });
 
