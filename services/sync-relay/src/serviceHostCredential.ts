@@ -27,6 +27,23 @@ export function deriveServiceHostBearer(
   return `dohc-service-v1.${createHmac("sha256", config.key).update(input).digest("base64url")}`;
 }
 
+export function replicationCredential(
+  request: Request,
+  prefix: string,
+): { workspaceId: string; bearer: string; method: string; pathname: string } | null {
+  const url = new URL(request.url),
+    parts = url.pathname.split("/"),
+    authorization = request.headers.get("authorization") ?? "";
+  if (parts[1] !== "sync" || parts.length < 4) return null;
+  if (!authorization.startsWith(`Bearer ${prefix}`) || request.headers.has("cookie")) return null;
+  return {
+    workspaceId: decodeURIComponent(parts[2]!),
+    bearer: authorization.slice(7),
+    method: request.method,
+    pathname: url.pathname,
+  };
+}
+
 export function serviceHostReplicationRoute(input: {
   workspaceId: string;
   method: string;

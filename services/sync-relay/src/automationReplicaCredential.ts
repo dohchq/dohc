@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { SyncRelayStorage } from "./storage";
 import type { AutomationWorkspace } from "./storage/automationWorkspaces";
 import {
+  replicationCredential,
   serviceHostReplicationRoute,
   type ServiceHostCredentialKey,
 } from "./serviceHostCredential";
@@ -62,4 +63,16 @@ export function authorizeAutomationReplication(
   return supplied.length === expected.length && timingSafeEqual(supplied, expected)
     ? workspace.ownerUserId
     : null;
+}
+
+export function verifiesAutomationReplica(
+  storage: Pick<SyncRelayStorage, "currentAutomationWorkspace">,
+  key: ServiceHostCredentialKey,
+): (request: Request) => boolean {
+  return (request) => {
+    const credential = replicationCredential(request, AUTOMATION_REPLICA_BEARER_PREFIX);
+    return (
+      !!credential && authorizeAutomationReplication(storage, { ...key, ...credential }) !== null
+    );
+  };
 }

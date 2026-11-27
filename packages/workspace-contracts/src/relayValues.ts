@@ -36,9 +36,11 @@ export function relayUrlsMatch(left: string, right: string): boolean {
 // serve with `api_version_too_old` or `api_version_too_new`. Raise it when a
 // relay route, body, or code changes meaning, and keep the Rust relay client's
 // copy in `crates/dohc-engine-sync-http` equal. Version 2 changes no wire
-// shape. It promises that the client reads notes in body format 2, or keeps
-// them and refuses them note by note, and takes part in the format-2 reset. The
-// relay can require it on the engine's routes with DOHC_RELAY_ENGINE_API_MIN.
+// shape. From a desktop's replication client, it promises that the desktop
+// reads notes in body format 2, or keeps them and refuses them note by note,
+// and takes part in the format-2 reset. Phones send no version, and share-web
+// sends this one without that promise. The relay can require version 2 on the
+// engine's routes with DOHC_RELAY_ENGINE_API_MIN.
 export const RELAY_API_VERSION_HEADER = "x-dohc-api-version";
 export const RELAY_API_VERSION = 1;
 

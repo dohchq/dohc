@@ -35,16 +35,18 @@ export function engineApiMinimum(
 }
 
 export function relayApiVersionsFor(
-  request: Pick<Request, "url">,
+  request: Request,
   engineMin: number,
+  ownReplica: (request: Request) => boolean,
 ): { min: number; max: number } {
+  if (engineMin === RELAY_API_VERSIONS.min) return RELAY_API_VERSIONS;
   let route: SyncRelayRoute["route"];
   try {
     route = parseRoute(request).route;
   } catch {
     return RELAY_API_VERSIONS;
   }
-  return ENGINE_ROUTES.has(route)
+  return ENGINE_ROUTES.has(route) && !ownReplica(request)
     ? { min: engineMin, max: RELAY_API_VERSIONS.max }
     : RELAY_API_VERSIONS;
 }
