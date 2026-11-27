@@ -403,6 +403,33 @@ describe("planDrawingEdit", () => {
     expectInside(elements.get("label")!, elements.get("a")!, 5);
   });
 
+  it("keeps a resent label wrapped, wraps an arrow label to the drawn arrow, and keeps indents", () => {
+    const doc = new Y.Doc();
+    const long = "Send the signed receipts to the accountant before Friday";
+    const list = "Steps:\n    import\n    review";
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0 },
+        { id: "b", type: "rectangle", x: 300, y: 0 },
+        { id: "label", type: "text", x: 0, y: 0, text: long, containerId: "a" },
+        { id: "go", type: "arrow", x: 0, y: 0, start: "a", end: "b" },
+        { id: "said", type: "text", x: 0, y: 0, text: long, containerId: "go" },
+        { id: "c", type: "rectangle", x: 0, y: 300, width: 300 },
+        { id: "steps", type: "text", x: 0, y: 0, text: list, containerId: "c" },
+      ],
+    });
+    const scene = () => new Map(foldScene(doc).elements.map((element) => [element.id, element]));
+    expect(scene().get("steps")).toMatchObject({ text: list });
+    const arrowLabel = scene().get("said")!;
+    expect(String(arrowLabel.text)).toContain("\n");
+    expect(numberOf(arrowLabel.width)).toBeLessThanOrEqual(220);
+
+    apply(doc, {
+      update: [{ id: "label", expectedVersion: 1, text: long, strokeColor: "#e03131" }],
+    });
+    expectInside(scene().get("label")!, scene().get("a")!, 5);
+  });
+
   it("aims an arrow bound at its start toward its height", () => {
     const doc = new Y.Doc();
     apply(doc, {

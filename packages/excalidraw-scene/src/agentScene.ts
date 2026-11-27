@@ -172,21 +172,27 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
       after.boundElements = after.boundElements.filter((bound) => !gone((bound as JsonObject).id));
     if (stableJson(after) !== stableJson(before)) next.set(id, after);
   }
-  for (const id of new Set([...current.keys(), ...next.keys()])) {
-    const text = existing(id);
-    if (text?.type !== "text" || typeof text.containerId !== "string") continue;
-    const container = existing(text.containerId);
-    if (!container || !CONTAINERS.has(container.type)) continue;
-    const before = { text: current.get(text.id), container: current.get(container.id) };
-    const retexted = before.text?.originalText !== text.originalText;
-    const resized =
-      before.container?.width !== container.width || before.container?.height !== container.height;
-    if (!retexted && !resized) continue;
-    const label = fitLabel(text, container);
-    next.set(text.id, label);
-    const height = labelledHeight(container, numberOr(label.height));
-    if (height > numberOr(container.height)) next.set(container.id, { ...container, height });
-  }
+  const fitLabels = (onArrows: boolean) => {
+    for (const id of new Set([...current.keys(), ...next.keys()])) {
+      const text = existing(id);
+      if (text?.type !== "text" || typeof text.containerId !== "string") continue;
+      const container = existing(text.containerId);
+      if (!container || !CONTAINERS.has(container.type)) continue;
+      if ((container.type === "arrow") !== onArrows) continue;
+      const before = { text: current.get(text.id), container: current.get(container.id) };
+      const retexted =
+        before.text?.text !== text.text || before.text?.originalText !== text.originalText;
+      const resized =
+        before.container?.width !== container.width ||
+        before.container?.height !== container.height;
+      if (!retexted && !resized) continue;
+      const label = fitLabel(text, container);
+      next.set(text.id, label);
+      const height = labelledHeight(container, numberOr(label.height));
+      if (height > numberOr(container.height)) next.set(container.id, { ...container, height });
+    }
+  };
+  fitLabels(false);
   const placing = new Set(
     (edit.update ?? [])
       .filter((change) => change.x !== undefined || change.y !== undefined || change.points)
@@ -239,6 +245,7 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
     frame(input.frameId);
     link(next, live, existing, id, input);
   }
+  fitLabels(true);
   for (const id of new Set([...current.keys(), ...next.keys()])) {
     const text = existing(id);
     if (text?.type !== "text" || typeof text.containerId !== "string") continue;
@@ -475,24 +482,24 @@ function wrapText(text: string, room: number, fontSize: number): string {
     .split("\n")
     .flatMap((paragraph) => {
       const lines: string[] = [];
-      let line = "";
+      let line: string | undefined;
       for (const word of paragraph.split(" ")) {
-        const joined = line ? `${line} ${word}` : word;
+        const joined = line === undefined ? word : `${line} ${word}`;
         if (fits(joined)) {
           line = joined;
           continue;
         }
         if (line) lines.push(line);
-        line = "";
+        line = undefined;
         for (const char of word) {
           if (line && !fits(line + char)) {
             lines.push(line);
-            line = "";
+            line = undefined;
           }
-          line += char;
+          line = (line ?? "") + char;
         }
       }
-      return [...lines, line];
+      return [...lines, line ?? ""];
     })
     .join("\n");
 }
