@@ -462,6 +462,38 @@
       }
     },
     {
+      "name": "dohc_create_incoming_webhook",
+      "description": "Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "collection": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "name",
+          "collection"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_create_record",
       "description": "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       "inputSchema": {
@@ -3853,6 +3885,25 @@
       }
     },
     {
+      "name": "dohc_list_incoming_webhooks",
+      "description": "List this workspace's incoming webhooks: each one's name, Collection, paused state, and recent deliveries. Never returns their addresses. List before you retry a create whose result you don't know.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "dohc_list_kept_copies",
       "description": "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path. Changes to protected files such as `.env` that a sync replaced or deleted are listed in `protectedCopies` as [path, id, keptAtMs] entries, kept on this computer only; use dohc_restore_protected_copy or dohc_discard_protected_copy.",
       "inputSchema": {
@@ -5600,6 +5651,25 @@
       }
     },
     {
+      "name": "dohc_read_automation_host",
+      "description": "Read which of the owner's computers, or the dohc server, runs this workspace's automations and schedules. kind relay gives the generation that dohc_use_server_for_automations needs, the host's installId (server for the dohc server), and handoverFrom while a computer hands over.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "dohc_read_automation_run",
       "description": "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.",
       "inputSchema": {
@@ -6993,6 +7063,34 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
+      }
+    },
+    {
+      "name": "dohc_use_server_for_automations",
+      "description": "Move a synced workspace's automations and schedules to the dohc server, so they run while the owner's computers are off. Pass the generation from dohc_read_automation_host. moved means the server runs them now. handover-pending names the computer that must release them first; if it stays offline, the owner uses Take over in Settings › Advanced. A stale generation is refused: read the host again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
       }
     },
     {

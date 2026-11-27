@@ -273,6 +273,13 @@ function buildCliRequest(
           grantId: command.grantId,
         },
       };
+    case "automationHost":
+    case "webhookList":
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "shareAgents":
       return {
         protocolVersion: common.protocolVersion,

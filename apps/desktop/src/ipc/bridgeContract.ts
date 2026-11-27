@@ -21,6 +21,8 @@ import {
   ShareLinkAgentDisconnectInput,
   ShareLinkAgentsInput,
 } from "@dohc/workspace-contracts/share-link-agents";
+import { ScheduleHostResult } from "@dohc/workspace-contracts/relay";
+export { ScheduleHostResult, type ScheduleHostComputer } from "@dohc/workspace-contracts/relay";
 export {
   DisconnectRelayShareLinkAgentResult,
   ListRelayShareLinkAgentsResult,
@@ -8353,50 +8355,6 @@ export const RetryAutomationNoticeResult = z.union([
 
 // Which of the owner's computers runs a workspace's schedules.
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
-const ScheduleHostComputer = z.object({
-  installId: z.string().min(1).max(256),
-  // "server" for the dohc server, listed first while it runs automations.
-  kind: z.enum(["computer", "server"]),
-  label: z.string().min(1).max(64),
-  lastSeenMs: z.number().int().nonnegative(),
-  thisComputer: z.boolean(),
-});
-export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
-export const ScheduleHostResult = z.discriminatedUnion("kind", [
-  // A workspace that never synced runs its schedules on one computer: this
-  // one, or the one named. `sameName` says it has this computer's name, so
-  // it may be an earlier installation here. `waits` says this computer has
-  // schedules or Group triggers that the other one runs.
-  z.object({ kind: z.literal("this-computer") }),
-  z.object({
-    kind: z.literal("another-computer"),
-    label: z.string().min(1).max(64),
-    sameName: z.boolean(),
-    waits: z.boolean(),
-  }),
-  // dohc cannot read which computer runs a workspace that never synced, so
-  // none does until one takes over. `cause` is the error, for Copy.
-  z.object({
-    kind: z.literal("no-computer"),
-    message: z.string().min(1).max(500),
-    cause: z.string().min(1).max(2000).optional(),
-  }),
-  // A shared view never runs schedules.
-  z.object({ kind: z.literal("none") }),
-  // dohc cannot ask the relay; `message` says what to do.
-  z.object({ kind: z.literal("note"), message: z.string().min(1).max(300) }),
-  z.object({
-    kind: z.literal("relay"),
-    // Rises on every change; choose and take over name the one they read.
-    generation: z.number().int().nonnegative(),
-    hostInstallId: z.string().min(1).max(256).nullable(),
-    // The computer that is handing over, while a handover waits.
-    handoverFrom: z.string().min(1).max(256).nullable(),
-    // Most recently seen first.
-    computers: z.array(ScheduleHostComputer).max(64),
-  }),
-]);
-export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
 export const ChatDispatchNotice = z.object({

@@ -393,6 +393,18 @@
     ],
     "drawingEdit": [
       "drawing.edit"
+    ],
+    "automationUseServer": [
+      "automation.host.choose"
+    ],
+    "webhookCreate": [
+      "workspace.webhooks.create"
+    ],
+    "automationHost": [
+      "automation.host.read"
+    ],
+    "webhookList": [
+      "workspace.webhooks.list"
     ]
   },
   "public": {
@@ -562,6 +574,10 @@
     "collection validate": null,
     "drawing read": "drawing.read",
     "drawing create": "drawing.create",
-    "drawing edit": "drawing.edit"
+    "drawing edit": "drawing.edit",
+    "automation use-server": "automation.host.choose",
+    "webhook create": "workspace.webhooks.create",
+    "webhook list": "workspace.webhooks.list",
+    "automation host": "automation.host.read"
   }
 }

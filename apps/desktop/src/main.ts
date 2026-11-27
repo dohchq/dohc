@@ -812,7 +812,10 @@ import {
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
-import { type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import {
+  AUTOMATION_SERVER_INSTALL_ID,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   fetchShareViewInfo,
@@ -8405,6 +8408,16 @@ const { startDesktopCliServer } = createDesktopCliServer({
   },
   notices: async (workspaceId) =>
     agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
+  agentSetup: {
+    readHost: (workspaceId) => scheduleHostState(workspaceId),
+    useServer: (workspaceId, generation) =>
+      scheduleHostState(workspaceId, {
+        action: "choose",
+        body: { installId: AUTOMATION_SERVER_INSTALL_ID, generation },
+      }),
+    listWebhooks: listIncomingWebhooksState,
+    createWebhook: createIncomingWebhookState,
+  },
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
   workspaceMembers,

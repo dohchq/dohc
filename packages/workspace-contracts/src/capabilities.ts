@@ -2,6 +2,7 @@
 import { DECLARATION_FAMILIES } from "./allDeclarations";
 import type { McpAccessLevel, OperationDeclaration } from "./operationDeclaration";
 import type { WriteDeclaration } from "./writeDeclaration";
+import { OWNER_SETUP_REASON } from "./agentSetupWriteDeclarations";
 import { WRITE_DECLARATION_FAMILIES } from "./allWriteDeclarations";
 
 export const CAPABILITY_WAYS = [
@@ -941,6 +942,8 @@ const LISTED_CAPABILITIES = {
   ),
   "automation.host.read": capability("Read the computer that runs schedules.", {
     ipc: ["readScheduleHost"],
+    mcp: { owner: ["dohc_read_automation_host"] },
+    mcpReason: OWNER_SETUP_REASON,
   }),
   "automation.host.choose": capability("Choose the computer that runs schedules.", {
     ipc: ["chooseScheduleHost"],
@@ -1919,16 +1922,13 @@ const LISTED_CAPABILITIES = {
     "List incoming webhook metadata and recent deliveries for this workspace.",
     {
       ipc: ["listIncomingWebhooks"],
-      mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+      mcp: { owner: ["dohc_list_incoming_webhooks"] },
+      mcpReason: OWNER_SETUP_REASON,
     },
   ),
   "workspace.webhooks.create": capability(
     "Create an incoming webhook URL for a private Collection in this workspace.",
-    {
-      ipc: ["createIncomingWebhook"],
-      mcpReason:
-        "Desktop UI only; local and connected agents cannot create public incoming webhook URLs.",
-    },
+    { ipc: ["createIncomingWebhook"] },
   ),
   "workspace.webhooks.update": capability(
     "Rename, pause, or resume an incoming webhook in this workspace.",

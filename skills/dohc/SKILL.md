@@ -30,6 +30,7 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 | Scaffold, stage, verify, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_publish_app` (in a workspace you own, `verifyFrontend` runs the app) | `dohc app <verb> '<JSON>'` |
 | Import CSV/JSON and query SQLite | `dohc_import_data`, `dohc_query_database` | (MCP only) |
 | Check and change Collection automations (`automations.yaml`) | `dohc_list_automations`, then edit `automations.yaml` with `dohc_write_file`. In a workspace shared with you at Edit, `dohc_switch_automation` turns one on or off | `dohc automation list\|switch` |
+| Let a website form or another service add records to a Collection | In a synced workspace you own: `dohc_read_automation_host`, `dohc_use_server_for_automations`, then `dohc_create_incoming_webhook`. `dohc_list_incoming_webhooks` before you retry. See [references/automations.md](references/automations.md) | `dohc automation host\|use-server`, `dohc webhook list\|create` |
 | Post or reply in Groups and file comments | `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat` | `dohc chat groups\|post\|reply` |
 | Try changes safely in a Version | `dohc_create_version`, `dohc_compare_version`, `dohc_merge_version` | `dohc version create\|compare\|merge` |
 

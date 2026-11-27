@@ -1,4 +1,5 @@
 import { AGENT_RUN_UNDO_WRITE_DECLARATIONS } from "./agentRunUndoWriteDeclarations";
+import { AGENT_SETUP_WRITE_DECLARATIONS } from "./agentSetupWriteDeclarations";
 import { DRAWING_WRITE_DECLARATIONS } from "./drawingWriteDeclarations";
 import { INBOX_WRITE_DECLARATIONS } from "./inboxWriteDeclarations";
 import { LIVE_NOTE_WRITE_DECLARATIONS } from "./liveNoteWriteDeclarations";
@@ -19,6 +20,7 @@ export const WRITE_DECLARATION_FAMILIES = {
   liveNote: LIVE_NOTE_WRITE_DECLARATIONS,
   memberApps: MEMBER_APPS_WRITE_DECLARATIONS,
   drawing: DRAWING_WRITE_DECLARATIONS,
+  agentSetup: AGENT_SETUP_WRITE_DECLARATIONS,
 } as const;
 
 // The type refuses these, but a cast can hide one from it.

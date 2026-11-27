@@ -405,6 +405,8 @@ interface DesktopCliServerDependencies<State> {
   notifyNoticesChanged(): void;
   // The signed-in person's Notices rows that open in one workspace.
   notices(workspaceId: string): Promise<AgentNotice[]>;
+  /** Settings' automation host and incoming webhooks, without a workspace lease (main.ts). */
+  agentSetup?: CliServerOptions["agentSetup"];
   /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
   versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
@@ -1584,6 +1586,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
         })),
       openWorkspace: openCliWorkspace,
       notices: dependencies.notices,
+      ...(dependencies.agentSetup ? { agentSetup: dependencies.agentSetup } : {}),
       // Each declared read runs in the workspace the request resolved to.
       reads: mapNamed(
         dependencies.reads,

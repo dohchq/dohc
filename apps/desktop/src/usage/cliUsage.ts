@@ -207,6 +207,8 @@ const STATIC_LEGACY_WRITES: Readonly<Record<StaticLegacyVerb, boolean>> = {
   fileChatStart: true,
   automationRuns: false,
   automationList: false,
+  automationHost: false,
+  webhookList: false,
   automationSwitch: true,
   automationRun: false,
   automationRetry: true,

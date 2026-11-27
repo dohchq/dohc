@@ -745,6 +745,16 @@ and turn each delivery into a quarantined Markdown record inside a private Colle
   account fencing, and workspace ownership before every mutation. Each workspace is capped at
   20 incoming webhooks. Raw tokens are shown once at creation or rotation and stored only as
   keyed `HMAC-SHA256(DOHC_RELAY_LINK_KEY, ...)` digests compared in constant time.
+- **Agent setup doors.** The owner's local agents can read the automation host, move it to the
+  server, list incoming webhooks, and create one through the CLI and MCP. The MCP tools are
+  owner-level only, and the socket refuses a received share. The desktop handler then refuses a
+  shared view, a workspace the caller doesn't own, and any dohc agent run (an active run's
+  `--agent-id`, a run-scoped write, or a nested agent), so an agent dohc started can't mint a
+  public address. The relay checks stay the same: these doors use the desktop owner session.
+  Moving the host checks the generation the agent read and never takes over from a computer
+  that hasn't handed over. The created address enters the agent's transcript, and the tool
+  text tells the agent it is a secret. The run refusal reads dohc's own run state, so it
+  doesn't stop another process running as the same OS user from calling the CLI.
 - **Public ingress defenses.** `POST /sync/hooks/:token` rejects non-`POST` methods with
   `405` and self-loop headers (`X-Dohc-Chain-Depth >= 4`) with `422`. Token lookup runs
   before rate limiting: unknown, malformed, paused, deleted, or fenced endpoints return an

@@ -20,6 +20,14 @@ import type {
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { DATASET_ADMIN_ACTIONS } from "@dohc/cli/dataset";
 import type { AgentNotice } from "../notices/agentNotices";
+import {
+  AUTOMATION_SERVER_INSTALL_ID,
+  type ScheduleHostResult,
+} from "@dohc/workspace-contracts/relay";
+import type {
+  IncomingWebhookCreatedResult,
+  IncomingWebhooksState,
+} from "@dohc/workspace-contracts/incoming-webhooks";
 import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import {
@@ -720,6 +728,16 @@ export interface CliServerOptions {
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
   // The signed-in person's Notices rows that open in this workspace.
   notices?(workspaceId: string): Promise<AgentNotice[]>;
+  // Settings' automation host and incoming webhooks, for the owner's own agents.
+  agentSetup?: {
+    readHost(workspaceId: string): Promise<ScheduleHostResult>;
+    useServer(workspaceId: string, generation: number): Promise<ScheduleHostResult>;
+    listWebhooks(workspaceId: string): Promise<IncomingWebhooksState>;
+    createWebhook(
+      workspaceId: string,
+      input: { name: string; collectionPath: string },
+    ): Promise<IncomingWebhookCreatedResult>;
+  };
   // The app's reader for each declared verb. A verb without one is unavailable.
   reads?: Partial<DeclaredReaders<CliRegistryWorkspace>>;
   // Messages, reactions, and decisions go through the same module renderer
@@ -895,6 +913,18 @@ function mcpFailure(error: unknown, fallback: string) {
 // A failure whose reason never names a host path. Node's own messages name
 // absolute paths, so a system error becomes `failed` and its code; dohc's own
 // refusals, which name paths as the caller spelled them, pass through.
+function ownerSetupRefusal(context: CliWorkspaceContext, options: CliServerOptions): string | null {
+  if (context.readOnly)
+    return "Only the owner's own agents can do this. Run it from your own workspace's folder.";
+  if (
+    context.run !== undefined ||
+    options.agentWriteRunId(context.workspaceId) !== null ||
+    options.agentRunDepth(context.workspaceId) > 0
+  )
+    return "Agent runs can't set up incoming webhooks or the automation host. Finish the active agent run first.";
+  return options.agentSetup ? null : "Workspace setup is unavailable here.";
+}
+
 function pathFreeFailure(error: unknown, failed: string) {
   const system = error instanceof Error && "syscall" in error && "code" in error;
   const reason = system
@@ -2654,6 +2684,8 @@ const HAND_WRITTEN_SHARE_RULES: {
   shareCopy: "owner",
   shareAgents: "owner",
   shareDisconnect: "owner",
+  automationHost: "owner",
+  webhookList: "owner",
   members: "owner",
   keptCopies: "owner",
   saveKeptCopy: "owner",
@@ -3400,6 +3432,68 @@ const DECLARED_WRITERS: {
       return pathFreeFailure(error, "dohc could not move this Inbox item.");
     }
   },
+  automationUseServer: async (request, context, options) => {
+    const refused = ownerSetupRefusal(context, options);
+    if (refused) return { ok: false as const, reason: refused };
+    const { generation } = request.args;
+    try {
+      const before = await options.agentSetup!.readHost(context.workspaceId);
+      if (before.kind !== "relay")
+        return {
+          ok: false as const,
+          reason:
+            before.kind === "note"
+              ? before.message
+              : "Automations move to the server only in a synced workspace. Turn on sync first.",
+        };
+      if (before.generation !== generation)
+        return {
+          ok: false as const,
+          reason: `The automation host is at generation ${before.generation}, not ${generation}. Read it again with dohc automation host.`,
+        };
+      const after =
+        before.hostInstallId === AUTOMATION_SERVER_INSTALL_ID
+          ? before
+          : await options.agentSetup!.useServer(context.workspaceId, generation);
+      if (after.kind !== "relay" || after.hostInstallId !== AUTOMATION_SERVER_INSTALL_ID)
+        return {
+          ok: false as const,
+          reason:
+            "Another computer changed the automation host first. Read it again with dohc automation host.",
+        };
+      const handoverFrom =
+        after.handoverFrom === null
+          ? null
+          : (after.computers.find((computer) => computer.installId === after.handoverFrom)?.label ??
+            after.handoverFrom);
+      return {
+        ok: true as const,
+        outcome:
+          handoverFrom !== null
+            ? ("handover-pending" as const)
+            : after === before
+              ? ("already-server" as const)
+              : ("moved" as const),
+        generation: after.generation,
+        handoverFrom,
+      };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not move automations to the server.");
+    }
+  },
+  webhookCreate: async (request, context, options) => {
+    const refused = ownerSetupRefusal(context, options);
+    if (refused) return { ok: false as const, reason: refused };
+    try {
+      const { webhook, endpointUrl } = await options.agentSetup!.createWebhook(
+        context.workspaceId,
+        { name: request.args.name, collectionPath: request.args.collection },
+      );
+      return { ok: true as const, webhook, endpointUrl };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not create this incoming webhook.");
+    }
+  },
   memberAppShare: (request, context) => memberAppWrite(context, "share", request.args),
   memberAppFork: (request, context) => memberAppWrite(context, "fork", request.args),
   memberAppPromote: (request, context) => memberAppWrite(context, "promote", request.args),
@@ -3548,6 +3642,14 @@ async function dispatchWorkspace(
         grantId: request.args.grantId,
         ...(request.args.cursor === undefined ? {} : { cursor: request.args.cursor }),
       });
+    case "automationHost":
+    case "webhookList": {
+      const refused = ownerSetupRefusal(context, options);
+      if (refused) throw new CliCommandError(refused);
+      return request.verb === "automationHost"
+        ? options.agentSetup!.readHost(context.workspaceId)
+        : options.agentSetup!.listWebhooks(context.workspaceId);
+    }
     case "shareDisconnect":
       if (context.readOnly || !context.shareLinkAgents)
         throw new CliCommandError("Open the owning workspace to disconnect a link's agent.");
