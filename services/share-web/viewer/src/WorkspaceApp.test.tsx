@@ -2876,6 +2876,26 @@ describe("the owner's page", () => {
     expect(wakeReads()).toHaveLength(3);
   });
 
+  it("stops reading a post's wakes once the owner deletes it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await ownerPost({ user: "kim", moderates: true, wakes: [[wake("waiting")]] });
+    const post = () =>
+      [...groupPanel().querySelectorAll(".chat-message")].find((node) =>
+        node.textContent?.includes("@claude plan it"),
+      );
+    await settle(() => post()?.querySelector(".chat-wake") != null);
+    await act(async () =>
+      post()!.querySelector<HTMLButtonElement>('button[aria-label="Delete message"]')!.click(),
+    );
+    const confirm = [...container.querySelectorAll("dialog[open] button")].find(
+      (node) => node.textContent === "Delete",
+    ) as HTMLButtonElement;
+    await act(async () => confirm.click());
+    await settle(() => post() === undefined && groupPanel().querySelector(".chat-wake") === null);
+    await act(async () => vi.advanceTimersByTime(30_000));
+    expect(wakeReads()).toHaveLength(1);
+  });
+
   it("tells the owner a post would start too many agents, with no Try again", async () => {
     await ownerPost({ user: "ana", postFails: { status: 400, code: "too_many_wakes" } });
     await settle(() =>

@@ -363,15 +363,6 @@ export async function postNamedChatMessage(
 /** Where one agent a post wakes stands, for the owner's page. */
 export type ChatWake = Pick<PhoneChatWake, "wakeId" | "state" | "agentName">;
 
-const WAKE_STATES: ReadonlySet<string> = new Set<ChatWake["state"]>([
-  "held",
-  "waiting",
-  "claimed",
-  "queued",
-  "unclaimed",
-  "unconfirmed",
-]);
-
 /** The wakes of the owner's own post. Only the owner's page asks; the relay refuses anyone else. */
 export async function readNamedChatWakes(
   place: NamedChatPlace,
@@ -393,7 +384,7 @@ export async function readNamedChatWakes(
     if (
       !record(wake) ||
       typeof wake.wakeId !== "string" ||
-      !WAKE_STATES.has(String(wake.state)) ||
+      typeof wake.state !== "string" ||
       (wake.agentName !== null && typeof wake.agentName !== "string")
     )
       throw invalid();

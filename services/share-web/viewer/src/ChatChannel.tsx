@@ -69,13 +69,19 @@ const watched = new Map<string, PostWakes>();
  * each post, then every 10 seconds while the tab shows and any is waiting or starting. A failed read keeps the last
  * lines, and the next read tries again. The lines last while the page does, kept by conversation.
  */
-function usePostWakes(read: ChatChannelClient["wakes"], key: string | undefined) {
+function usePostWakes(
+  read: ChatChannelClient["wakes"],
+  key: string | undefined,
+  deleted: (messageId: string) => boolean,
+) {
   const kept = key === undefined ? undefined : watched.get(key);
   const [posts, setPosts] = useState(kept?.posts ?? []),
     [wakes, setWakes] = useState(kept?.wakes ?? new Map<string, readonly ChatWake[]>());
   const known = useRef(wakes),
-    reader = useRef(read);
+    reader = useRef(read),
+    gone = useRef(deleted);
   reader.current = read;
+  gone.current = deleted;
   useEffect(() => {
     if (key !== undefined && posts.length > 0) watched.set(key, { posts, wakes });
   }, [key, posts, wakes]);
@@ -89,22 +95,21 @@ function usePostWakes(read: ChatChannelClient["wakes"], key: string | undefined)
       if (reading || document.visibilityState === "hidden") return;
       reading = true;
       const next = new Map(known.current);
+      const watching = () =>
+        posts.filter((post) => !gone.current(post.messageId) && !settled(next.get(post.messageId)));
       await Promise.all(
-        posts
-          .filter((post) => !settled(next.get(post.messageId)))
-          .map((post) =>
-            reader.current!(post, controller.signal).then(
-              (found) => void next.set(post.messageId, found),
-              () => undefined,
-            ),
+        watching().map((post) =>
+          reader.current!(post, controller.signal).then(
+            (found) => void next.set(post.messageId, found),
+            () => undefined,
           ),
+        ),
       );
       reading = false;
       if (controller.signal.aborted) return;
       known.current = next;
       setWakes(next);
-      if (posts.some((post) => !settled(next.get(post.messageId))))
-        timer = setTimeout(() => void tick(), WAKE_READ_MS);
+      if (watching().length > 0) timer = setTimeout(() => void tick(), WAKE_READ_MS);
     };
     const visible = () => {
       if (document.visibilityState !== "visible") return;
@@ -638,7 +643,11 @@ export function ChannelView({
     remove = client.remove;
   const [posting, setPosting] = useState(false),
     [postError, setPostError] = useState<{ text: string; retry: boolean } | null>(null);
-  const postWakes = usePostWakes(client.wakes, draftKey);
+  const postWakes = usePostWakes(client.wakes, draftKey, (messageId) =>
+    messagesRef.current.some(
+      (message) => message.messageId === messageId && message.deletedAtMs !== undefined,
+    ),
+  );
   const mounted = useRef<AbortController | null>(null),
     follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]),
