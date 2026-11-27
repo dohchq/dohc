@@ -13,6 +13,8 @@ import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
 
 const MARKER = "chat-wakes-v1";
+const MEMORY_MARKER = "chat-runner-memory-v1";
+const MEMORY_COLUMN = "memory INTEGER NOT NULL DEFAULT 0 CHECK (memory IN (0, 1))";
 const RUNNERS = "sync_relay_chat_runners";
 const WAKES = "sync_relay_chat_wakes";
 const HEADS = "sync_relay_chat_wake_heads";
@@ -23,7 +25,8 @@ export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 // Runners: each of an owner's computers declares, per owned workspace, the
 // agents it can run there. A row is one agent on one computer, keyed by the
 // install ID, so equal agent IDs on two computers stay apart. The computer's
-// label names a claim's winner. A declaration holds for CHAT_RUNNER_LEASE_MS
+// label names a claim's winner. `memory` marks an agent that remembers earlier
+// chats on that computer, which alone takes its wakes. A declaration holds for CHAT_RUNNER_LEASE_MS
 // from `updated_at_ms`, which every declaration sets, the same one again
 // included. A signed-in computer declares again about daily; one that doesn't
 // stops being a wake target when its lease ends, and its rows stay until it
@@ -55,6 +58,7 @@ const SCHEMA = {
   display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms BETWEEN 0 AND 9007199254740991),
+  ${MEMORY_COLUMN},
   PRIMARY KEY (workspace_id, account_id, install_id, agent_id)
 ) STRICT`,
   [WAKES]: `CREATE TABLE sync_relay_chat_wakes (
@@ -133,7 +137,15 @@ function assertSchema(db: SqliteDb): void {
 }
 
 export function initializeChatWakeSchema(db: SqliteDb): void {
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?");
+  if (marked.get(MARKER)) {
+    // SQLite adds the column after the last one, where SCHEMA has it.
+    if (!marked.get(MEMORY_MARKER)) {
+      db.exec(`ALTER TABLE ${RUNNERS} ADD COLUMN ${MEMORY_COLUMN}`);
+      db.prepare(
+        "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+      ).run(MEMORY_MARKER, Date.now());
+    }
     assertSchema(db);
     return;
   }
@@ -147,10 +159,10 @@ export function initializeChatWakeSchema(db: SqliteDb): void {
   }
   for (const sql of Object.values(SCHEMA)) db.exec(sql);
   assertSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
-    MARKER,
-    Date.now(),
-  );
+  for (const marker of [MARKER, MEMORY_MARKER])
+    db.prepare(
+      "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+    ).run(marker, Date.now());
 }
 
 /** How long a wake waits for a claim before it is unclaimed. */
@@ -207,6 +219,8 @@ export interface ChatRunner {
   handle: string;
   displayName: string;
   enabled: boolean;
+  /** The agent remembers earlier chats on this computer. */
+  memory?: boolean;
 }
 
 /** One of a computer's agents that dohc doesn't start: only its name. */
@@ -382,8 +396,8 @@ export function replaceChatRunners(
       )
       .run(input.workspaceId, input.accountId, input.installId);
     const insert = storage.db.prepare(
-      `INSERT INTO sync_relay_chat_runners (account_id, workspace_id, install_id, computer_label, agent_id, handle, display_name, enabled, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO sync_relay_chat_runners (account_id, workspace_id, install_id, computer_label, agent_id, handle, display_name, enabled, updated_at_ms, memory)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const runner of input.runners) {
       insert.run(
@@ -396,6 +410,7 @@ export function replaceChatRunners(
         runner.displayName,
         runner.enabled ? 1 : 0,
         input.nowMs,
+        runner.memory ? 1 : 0,
       );
     }
     if (input.agents === undefined) {
@@ -497,7 +512,7 @@ export function enabledChatRunners(
   return storage.readTx(() =>
     storage.db
       .prepare(
-        `SELECT install_id, computer_label, agent_id, handle, display_name FROM sync_relay_chat_runners
+        `SELECT install_id, computer_label, agent_id, handle, display_name, memory FROM sync_relay_chat_runners
      WHERE workspace_id = ? AND account_id = ? AND enabled = 1 AND updated_at_ms > ? ORDER BY install_id, agent_id`,
       )
       .all(input.workspaceId, input.accountId, input.nowMs - CHAT_RUNNER_LEASE_MS)
@@ -508,6 +523,7 @@ export function enabledChatRunners(
         handle: String(row.handle),
         displayName: String(row.display_name),
         enabled: true,
+        memory: Number(row.memory) === 1,
       })),
   );
 }

@@ -8,6 +8,7 @@ import {
   isChatWakeLine,
   type ChatRunnerDeclaration,
 } from "@dohc/workspace-contracts/chat-wakes";
+import { launchProfile } from "../agents/agentToolCatalog";
 import type { Agent } from "../settings/userSettings";
 
 /** Why this computer's agents can't be declared as they are. Nothing is declared then: the relay never gets part of the list. */
@@ -19,12 +20,13 @@ export type ChatRunnerRefusal =
  * The `PUT /sync/workspaces/:id/runners` body for this computer: each agent
  * dohc can start, on or off, and the name of each agent the person runs on
  * their own. No command, environment, or timeout goes. No runners and no
- * `agents` withdraws the computer.
+ * `agents` withdraws the computer. An agent that remembers says so, and the
+ * relay wakes only its computer for it.
  */
 export function chatRunnerDeclaration(input: {
   installId: string;
   computerLabel: string;
-  agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[];
+  agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch" | "memory">[];
 }): { ok: true; declaration: ChatRunnerDeclaration } | ({ ok: false } & ChatRunnerRefusal) {
   if (!isChatWakeLine(input.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS))
     return { ok: false, reason: "install-id" };
@@ -62,6 +64,9 @@ export function chatRunnerDeclaration(input: {
         agentId: agent.id,
         displayName: agent.name,
         enabled: agent.enabled,
+        ...(agent.memory !== undefined && agent.launch && launchProfile(agent.launch)
+          ? { memory: true as const }
+          : {}),
       })),
       agents: known
         ? others.map((agent) => ({ agentId: agent.id, displayName: agent.name }))

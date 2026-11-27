@@ -111,10 +111,11 @@ const agentKey = (agentId: string, displayName: string) =>
 
 /**
  * A write's wake targets. Each handle the body mentions that enabled agents
- * have is one target, with every computer whose agent has it as a candidate.
+ * have is one target, with every computer whose agent has it as a candidate,
+ * or only those whose agent remembers earlier chats when any does.
  * An agent the write answers is a target only when exactly one enabled agent
- * matches its ID and name; one already in a mention target, or a repeat, adds
- * nothing. A DM the bounded read couldn't cover freezes no implicit target and
+ * matches its ID and name, or exactly one of them remembers; one a mention
+ * matched, or a repeat, adds nothing. A DM the bounded read couldn't cover freezes no implicit target and
  * is unmatched. A reaction, or an account with no
  * enabled agents, wakes nothing.
  * Throws TooManyWakeCandidates past MAX_WAKE_CANDIDATES, rather than wake some.
@@ -128,19 +129,24 @@ export async function resolveWakeTargets(
   if (write.kind === "react" || runners.length === 0) return NO_WAKES;
   const mentions: ChatWakeTarget[] = [];
   const mentionedAgents = new Set<string>();
+  const mentioned = new Set<string>();
   for (const handle of new Set(
     chatMentionTokens(write.body).map((token) => normalizeHandle(token.handle)),
   )) {
     const matching = runners.filter((runner) => runner.handle !== "" && runner.handle === handle);
-    for (const runner of matching)
+    for (const runner of matching) {
       mentionedAgents.add(agentKey(runner.agentId, runner.displayName));
+      mentioned.add(pair(candidateOf(runner, { handle })));
+    }
+    const remembering = matching.filter((runner) => runner.memory);
     if (matching.length > 0)
       mentions.push({
         target: `mention:${handle}`,
-        candidates: matching.map((runner) => candidateOf(runner, { handle })),
+        candidates: (remembering.length > 0 ? remembering : matching).map((runner) =>
+          candidateOf(runner, { handle }),
+        ),
       });
   }
-  const mentioned = new Set(mentions.flatMap((target) => target.candidates.map(pair)));
   const implicit = new Map<string, ChatWakeTarget>();
   const answered = await answeredMessages(sources, accountId, write);
   // A DM too long for the bounded read wakes no implicit agent, even one it saw, and the message is still sent: the
@@ -152,8 +158,9 @@ export async function resolveWakeTargets(
       (runner) =>
         runner.agentId === message.authorAgentId && shownName(runner.displayName) === name,
     );
-    const [runner] = matches;
-    if (matches.length !== 1 || runner === undefined) {
+    const remembering = matches.filter((each) => each.memory);
+    const [runner] = matches.length === 1 ? matches : remembering;
+    if ((matches.length !== 1 && remembering.length !== 1) || runner === undefined) {
       if (!mentionedAgents.has(agentKey(message.authorAgentId, message.author.displayName)))
         unmatched = true;
       continue;

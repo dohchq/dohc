@@ -140,19 +140,27 @@ async function readConversation(
   };
 }
 
-// Agents on the account's computers, one per handle, since a mention of it wakes every computer that runs it; then the
-// account's active personal agents whose reach takes in the workspace, which no computer wakes; then people who wrote
-// or reacted in the conversation, newest first. A name without a handle can't be mentioned.
+// Agents on the account's computers, one per handle, with the computers a mention of it wakes: those whose agent
+// remembers, when any does, else every one that runs it; then the account's active personal agents whose reach takes
+// in the workspace, which no computer wakes; then people who wrote or reacted in the conversation, newest first. A name
+// without a handle can't be mentioned.
 function mentionCandidates(
   storage: SyncRelayStorage,
   input: { accountId: string; workspaceId: string; nowMs: number },
   shown: Conversation,
 ): PhoneMentionCandidate[] {
   const agents = new Map<string, Extract<PhoneMentionCandidate, { kind: "agent" }>>();
-  for (const runner of storage.enabledChatRunners(input)) {
+  const runners = storage.enabledChatRunners(input);
+  const remembering = new Set(
+    runners
+      .filter((runner) => runner.memory)
+      .map((runner) => normalizeHandle(handleForName(runner.displayName))),
+  );
+  for (const runner of runners) {
     const handle = handleForName(runner.displayName);
     if (handle === "") continue;
     const key = normalizeHandle(handle);
+    if (remembering.has(key) && !runner.memory) continue;
     const agent = agents.get(key);
     if (agent === undefined)
       agents.set(key, {

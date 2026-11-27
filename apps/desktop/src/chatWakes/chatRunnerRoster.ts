@@ -49,7 +49,7 @@ export interface ChatRunnerRosterDeps {
   client(session: ChatWakeSession): ChatWakeClient;
   /** The session's own synced workspaces on this computer, open in a window or not: not shares, not paused. */
   workspaces(session: ChatWakeSession): readonly string[];
-  agents(): Promise<readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[]>;
+  agents(): Promise<readonly Pick<Agent, "id" | "name" | "enabled" | "launch" | "memory">[]>;
   computerLabel(): string;
   /** A retry's backoff. Resolves after `ms`, or when `signal` aborts. */
   sleep(ms: number, signal: AbortSignal): Promise<void>;

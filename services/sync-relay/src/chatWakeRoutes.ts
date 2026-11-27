@@ -167,10 +167,10 @@ type Declaration = {
   agents: DeclaredAgent[] | null | undefined;
 };
 
-// `{installId, computerLabel, runners: [{agentId, displayName, enabled}]}`. The handle comes from the name, as the desktop derives it.
+// `{installId, computerLabel, runners: [{agentId, displayName, enabled, memory?}]}`. The handle comes from the name, as the desktop derives it.
 function parseDeclaration(body: Record<string, unknown>): Declaration {
   const shape =
-    "the body must be exactly { installId, computerLabel, runners: [{ agentId, displayName, enabled }], agents?: [{ agentId, displayName }] }";
+    "the body must be exactly { installId, computerLabel, runners: [{ agentId, displayName, enabled, memory?: true }], agents?: [{ agentId, displayName }] }";
   const keys = ["installId", "computerLabel", "runners"];
   if (
     !exactly(body, Object.hasOwn(body, "agents") ? [...keys, "agents"] : keys) ||
@@ -187,10 +187,16 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
     const runner = asRecord(value);
     if (
       runner === null ||
-      !exactly(runner, ["agentId", "displayName", "enabled"]) ||
+      !exactly(
+        runner,
+        Object.hasOwn(runner, "memory")
+          ? ["agentId", "displayName", "enabled", "memory"]
+          : ["agentId", "displayName", "enabled"],
+      ) ||
       typeof runner.agentId !== "string" ||
       !isChatRunnerAgentId(runner.agentId) ||
-      typeof runner.enabled !== "boolean"
+      typeof runner.enabled !== "boolean" ||
+      (Object.hasOwn(runner, "memory") && runner.memory !== true)
     ) {
       throw badRequest(shape);
     }
@@ -200,6 +206,7 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
       displayName,
       handle: normalizeHandle(handleForName(displayName)),
       enabled: runner.enabled,
+      memory: runner.memory === true,
     };
   });
   const handles = runners.map((runner) => runner.handle).filter((handle) => handle !== "");

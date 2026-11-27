@@ -3351,6 +3351,30 @@ describe("an account's chat writes through the server's copy", () => {
     ])
       expect(text).not.toContain(withheld);
 
+    f.storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId: "install-9f2c",
+      computerLabel: "Ana's Mac",
+      runners: [
+        {
+          agentId: "default",
+          handle: "claude",
+          displayName: "Claude",
+          enabled: true,
+          memory: true,
+        },
+      ],
+      nowMs: RETRY_NOW,
+    });
+    expect(await answer(await f.write("chatContext", { group: planning.channelId }))).toMatchObject(
+      {
+        mentions: expect.arrayContaining([
+          { kind: "agent", handle: "Claude", label: "Claude", computers: ["Ana's Mac"] },
+        ]),
+      },
+    );
+
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     for (const [type, canPost, canSend] of [
       ["posts", true, false],

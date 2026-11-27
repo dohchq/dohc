@@ -160,6 +160,7 @@ it("declares a computer's agents only where its account owns the workspace, with
         handle: "claudecode",
         displayName: "Claude Code",
         enabled: true,
+        memory: false,
       },
     ],
   );
@@ -184,6 +185,7 @@ it("declares a computer's agents only where its account owns the workspace, with
     { ...declaration, runners: [{ ...runner, agentId: "p-nova" }] },
     { ...declaration, runners: [runner, { ...runner, agentId: "second" }] },
     { ...declaration, runners: [{ ...runner, enabled: "yes" }] },
+    { ...declaration, runners: [{ ...runner, memory: false }] },
   ]) {
     const response = await call("PUT", "/sync/workspaces/trip/runners", body);
     expect(response.status, JSON.stringify(body)).toBe(400);
@@ -200,6 +202,18 @@ it("declares a computer's agents only where its account owns the workspace, with
     expect(response.status, JSON.stringify(agents)).toBe(400);
   }
   expect((await call("GET", "/sync/workspaces/trip/runners")).status).toBe(405);
+  expect(
+    (
+      await call("PUT", "/sync/workspaces/trip/runners", {
+        ...declaration,
+        runners: [{ ...runner, memory: true }],
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
+  ).toMatchObject([{ agentId: "default", memory: true }]);
+  expect((await call("PUT", "/sync/workspaces/trip/runners", declaration)).status).toBe(200);
   expect(
     storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
   ).toHaveLength(1);

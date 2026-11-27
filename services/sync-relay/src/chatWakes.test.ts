@@ -15,6 +15,7 @@ const runner = (
   agentId: string,
   displayName: string,
   handle: string,
+  memory = false,
 ): ChatRunner => ({
   installId,
   computerLabel: installId,
@@ -22,14 +23,15 @@ const runner = (
   handle,
   displayName,
   enabled: true,
+  memory,
 });
-const agentMessage = (id: string, displayName: string): ChatMessage => ({
+const agentMessage = (id: string, displayName: string, authorAgentId = "default"): ChatMessage => ({
   id,
   workspaceId: "trip",
   threadId: "thread-1",
   author: { kind: "agent", displayName },
   authorUserId: "ana",
-  authorAgentId: "default",
+  authorAgentId,
   body: "Done.",
   createdAtMs: 1,
   attachments: [],
@@ -100,6 +102,51 @@ it("keeps the hint for an agent it answers that matched several computers, unles
       reply("@claude check this", "message-claude"),
     ),
   ).toMatchObject({ targets: [{ target: "mention:claude" }], unmatched: false });
+});
+
+it("wakes only the computers whose agent remembers, for a mention and for the agent it answers", async () => {
+  const installs = (wakes: Awaited<ReturnType<typeof resolveWakeTargets>>) =>
+    wakes.targets.map((target) => [
+      target.target,
+      target.candidates.map((candidate) => candidate.installId),
+    ]);
+  const mixed = [
+    runner("mac", "default", "Nova", "nova", true),
+    runner("laptop", "default", "Nova", "nova"),
+  ];
+  expect(installs(await resolveWakeTargets(sources(mixed), "ana", reply("@nova hi")))).toEqual([
+    ["mention:nova", ["mac"]],
+  ]);
+  const plain = [
+    runner("mac", "default", "Nova", "nova"),
+    runner("laptop", "default", "Nova", "nova"),
+  ];
+  expect(installs(await resolveWakeTargets(sources(plain), "ana", reply("@nova hi")))).toEqual([
+    ["mention:nova", ["mac", "laptop"]],
+  ]);
+
+  const answered = [agentMessage("message-nova", "Nova")];
+  expect(
+    await resolveWakeTargets(sources(mixed, answered), "ana", reply("thanks", "message-nova")),
+  ).toMatchObject({ targets: [{ target: "implicit:mac:default" }], unmatched: false });
+  for (const runners of [plain, mixed.map((each) => ({ ...each, memory: true }))])
+    expect(
+      await resolveWakeTargets(sources(runners, answered), "ana", reply("thanks", "message-nova")),
+    ).toEqual({ targets: [], unmatched: true });
+
+  const apart = [
+    runner("mac", "default", "Nova", "nova", true),
+    runner("laptop", "nova-2", "Nova", "nova"),
+  ];
+  expect(
+    installs(
+      await resolveWakeTargets(
+        sources(apart, [agentMessage("message-laptop", "Nova", "nova-2")]),
+        "ana",
+        reply("@nova go on", "message-laptop"),
+      ),
+    ),
+  ).toEqual([["mention:nova", ["mac"]]]);
 });
 
 it("keeps every target up to its candidate limit, and refuses a message past it", async () => {

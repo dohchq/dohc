@@ -30,6 +30,25 @@ describe("a computer's runner declaration", () => {
     expect(JSON.stringify(answer)).not.toContain("secret-flag");
   });
 
+  it("says which Claude Code or Codex agent remembers, and no other", () => {
+    const memory = "0b7f9c1e-3c55-4b8e-9a51-2f0d8f3b6a10";
+    const profile = { tool: "codex" as const, executable: "/usr/local/bin/codex" };
+    const answer = chatRunnerDeclaration({
+      installId: "local:mac",
+      computerLabel: "Mac",
+      agents: [
+        { id: "nova", name: "Nova", enabled: true, launch: profile, memory },
+        { id: "own", name: "Own", enabled: true, launch, memory },
+        { id: "fresh", name: "Fresh", enabled: true, launch: profile },
+      ],
+    });
+    expect(answer.ok && answer.declaration.runners).toEqual([
+      { agentId: "nova", displayName: "Nova", enabled: true, memory: true },
+      { agentId: "own", displayName: "Own", enabled: true },
+      { agentId: "fresh", displayName: "Fresh", enabled: true },
+    ]);
+  });
+
   it("declares an empty list for a computer with no agents", () => {
     expect(
       chatRunnerDeclaration({ installId: "local:mac", computerLabel: "Mac", agents: [] }),
