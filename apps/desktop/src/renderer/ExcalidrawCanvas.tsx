@@ -162,6 +162,29 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     return () => doc.off("afterTransaction", onTransaction);
   }, [props.sceneDoc, readyApi, renderSceneDoc, sceneBinding]);
 
+  useEffect(() => {
+    if (!readyApi) return;
+    const fit = () => {
+      const elements = readyApi.getSceneElements();
+      if (elements.length === 0) return;
+      readyApi.scrollToContent(elements, {
+        fitToContent: true,
+        viewportZoomFactor: 0.9,
+        animate: false,
+      });
+    };
+    if (!readyApi.getAppState().isLoading) {
+      fit();
+      return;
+    }
+    const stop = readyApi.onChange(() => {
+      if (readyApi.getAppState().isLoading) return;
+      stop();
+      fit();
+    });
+    return stop;
+  }, [readyApi]);
+
   useAsyncResponseEffect(
     () => {
       hydratedFileIds.current.clear();

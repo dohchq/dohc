@@ -17,11 +17,30 @@ const excalidraw = vi.hoisted(() => {
     }
   });
   const addFiles = vi.fn();
-  const defaultApi = { updateScene, addFiles };
+  const scrollToContent = vi.fn();
+  const view = { loading: false, elements: [] as unknown[], listeners: new Set<() => void>() };
+  const fitApi = {
+    getSceneElements: () => view.elements,
+    getAppState: () => ({ isLoading: view.loading }),
+    onChange: (listener: () => void) => {
+      view.listeners.add(listener);
+      return () => {
+        view.listeners.delete(listener);
+      };
+    },
+    scrollToContent,
+  };
+  const defaultApi = { updateScene, addFiles, ...fitApi };
   let currentApi = defaultApi;
   return {
     updateScene,
     addFiles,
+    scrollToContent,
+    view,
+    fitApi,
+    notifyChange: () => {
+      for (const listener of [...view.listeners]) listener();
+    },
     get api() {
       return currentApi;
     },
@@ -172,6 +191,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
   excalidraw.updateScene.mockReset();
   excalidraw.addFiles.mockReset();
+  excalidraw.scrollToContent.mockReset();
+  excalidraw.view.loading = false;
+  excalidraw.view.elements = [];
+  excalidraw.view.listeners.clear();
   excalidraw.props = null;
   excalidraw.resetApiDelivery();
 });
@@ -269,6 +292,7 @@ it("rejects hydration once Excalidraw replaces its imperative API", async () => 
   const replacementApi = {
     updateScene: excalidraw.updateScene,
     addFiles: replacementAddFiles,
+    ...excalidraw.fitApi,
   };
   excalidraw.replaceApi(replacementApi);
   const replaceApi = excalidraw.props?.excalidrawAPI as (api: typeof replacementApi) => void;
@@ -313,6 +337,7 @@ it("ignores hydration failure from a replaced Excalidraw API", async () => {
   const replacementApi = {
     updateScene: excalidraw.updateScene,
     addFiles: vi.fn(),
+    ...excalidraw.fitApi,
   };
   excalidraw.replaceApi(replacementApi);
   const replaceApi = excalidraw.props?.excalidrawAPI as (api: typeof replacementApi) => void;
@@ -325,6 +350,39 @@ it("ignores hydration failure from a replaced Excalidraw API", async () => {
   expect(onAssetRefusedChange).not.toHaveBeenCalled();
   await waitFor(() => expect(hydrateAssets).toHaveBeenCalledTimes(2));
   expect(onAssetRefusedChange).not.toHaveBeenCalled();
+});
+
+it("fits the drawing into view once it loads and leaves the view alone after that", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  insertElementRevision(doc, rectangle(1, 10, 20));
+  excalidraw.view.loading = true;
+  excalidraw.view.elements = [{ id: "shape" }];
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+    />,
+  );
+  await waitFor(() => expect(excalidraw.view.listeners.size).toBe(1));
+  act(() => excalidraw.notifyChange());
+  expect(excalidraw.scrollToContent).not.toHaveBeenCalled();
+
+  excalidraw.view.loading = false;
+  act(() => excalidraw.notifyChange());
+  expect(excalidraw.scrollToContent).toHaveBeenCalledExactlyOnceWith(
+    [{ id: "shape" }],
+    expect.objectContaining({ fitToContent: true, animate: false }),
+  );
+
+  act(() => insertElementRevision(doc, rectangle(2, 11, 4000)));
+  act(() => excalidraw.notifyChange());
+  expect(excalidraw.updateScene).toHaveBeenCalledWith(
+    expect.objectContaining({ elements: [expect.objectContaining({ x: 4000 })] }),
+  );
+  expect(excalidraw.scrollToContent).toHaveBeenCalledOnce();
+  expect(excalidraw.view.listeners.size).toBe(0);
 });
 
 it("binds the initial scene after a production-scheduled mount", async () => {
