@@ -625,12 +625,10 @@ describe("the change feed", () => {
 
   it("keeps a view's failures through a replace, so a second failure still reports", async () => {
     const server = testServer();
-    server.on(
-      "POST",
-      "/sync/ws-a/ops/listFiles",
-      ops(files(), "0.5.2"),
-      { status: 503, body: { ok: false, code: "server_busy" } },
-    );
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"), {
+      status: 503,
+      body: { ok: false, code: "server_busy" },
+    });
     const answer = deferred<Answer>();
     server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
     server.on("GET", feedPath("ws-a", "1.0.0"), held);
