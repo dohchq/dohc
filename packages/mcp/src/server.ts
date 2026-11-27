@@ -1207,7 +1207,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
-      annotations: READ,
+      annotations: ADD,
     },
     async () => text(await listGroups(ctx)),
   );
@@ -1461,7 +1461,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         confirm: z.array(z.string().min(1).max(256)).max(64).optional(),
         requestId: requestIdSchema.optional(),
       },
-      annotations: CHANGE,
+      annotations: CHANGE_SERVER,
     },
     async (args) => text(await pressButton(ctx, args)),
   );
@@ -1475,7 +1475,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         collectionPath: z.string().min(1).max(4096),
         table: z.string().min(1).max(256).optional(),
       },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await inspectButtons(ctx, args)),
   );

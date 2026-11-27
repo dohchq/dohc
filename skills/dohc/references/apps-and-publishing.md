@@ -105,7 +105,7 @@ Every app runs in a sandboxed `srcdoc` iframe with an opaque origin (`window.ori
 
 ## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
 
-Before publishing or handing an app to a user, verify its compiled frontend inside dohc's real sandboxed document, CSP, and `dohc-app-channel` broker with `{ action: "verifyFrontend", workspaceId, appRoot }` (candidate source) or `{ action: "verifyFrontend", workspaceId, publicationId }` (active local publication). Specify exactly one of `appRoot` or `publicationId`.
+`verifyFrontend` works only in a workspace you own; in a workspace you joined, check a Personal app with `dohc_test_app`. Before publishing or handing an app to a user, verify its compiled frontend inside dohc's real sandboxed document, CSP, and `dohc-app-channel` broker with `{ action: "verifyFrontend", workspaceId, appRoot }` (candidate source) or `{ action: "verifyFrontend", workspaceId, publicationId }` (active local publication). Specify exactly one of `appRoot` or `publicationId`.
 
 - Runs completely offline against a fresh, empty ephemeral Collection database (never reads or mutates live Collection rows, uploaded files, or workspace files).
 - Catches manifest/input errors, bundle compile errors, CSP violations (inline scripts, native form submission without `event.preventDefault()`), uncaught page/console errors, broken `dohc-app-channel` handshakes, malformed broker messages, and unapproved operations.
