@@ -85,6 +85,99 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
+test("@apps keeps preview frames from loading workspace files", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      {
+        path: "secret.png",
+        contents: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAwAAi/gMJABvyA/1NQqYrAAAAAElFTkSuQmCC",
+          "base64",
+        ),
+      },
+      { path: "secret.js", contents: 'self.secret = "workspace secret";' },
+      {
+        path: "demo/index.html",
+        contents: "<!doctype html><title>Launch app</title><main>Preview ready</main>",
+      },
+      {
+        path: "demo/probe.html",
+        contents: `<!doctype html><script>
+          const url = decodeURIComponent(location.hash.slice(1));
+          const image = new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve("loaded");
+            img.onerror = () => resolve("blocked");
+            img.src = url;
+          });
+          const read = fetch(url).then((response) => response.text()).then(() => "read", () => "blocked");
+          Promise.all([image, read]).then(([image, read]) => parent.postMessage({ image, read }, "*"));
+        </script>`,
+      },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    const secretUrl = `dohc-file://${workspace.workspaceId}/secret.png`;
+    const scriptUrl = `dohc-file://${workspace.workspaceId}/secret.js`;
+
+    await openExplorerHome(page);
+    await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
+    await expect(
+      page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
+    ).toHaveText("Preview ready", { timeout: 20_000 });
+
+    const loadImage = (url: string) =>
+      new Promise<string>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve("loaded");
+        img.onerror = () => resolve("blocked");
+        img.src = url;
+      });
+    expect(await page.evaluate(loadImage, secretUrl)).toBe("loaded");
+
+    const preview = await page.getByTestId("site-preview-frame").elementHandle();
+    const fromPreview = await (await preview!.contentFrame())!.evaluate(
+      async ({ url, script }) => {
+        const own = await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve("loaded");
+          img.onerror = () => resolve("blocked");
+          img.src = url;
+        });
+        const nested = await new Promise((resolve) => {
+          const frame = document.createElement("iframe");
+          frame.setAttribute("sandbox", "allow-scripts");
+          addEventListener("message", (event) => {
+            if (event.source === frame.contentWindow) resolve(event.data);
+          });
+          frame.src = `probe.html#${encodeURIComponent(url)}`;
+          document.body.append(frame);
+        });
+        const worker = await new Promise((resolve) => {
+          const source = `try { importScripts(${JSON.stringify(script)}); postMessage(self.secret ?? "none"); } catch { postMessage("blocked"); }`;
+          const running = new Worker(
+            URL.createObjectURL(new Blob([source], { type: "text/javascript" })),
+          );
+          running.onmessage = (event) => resolve(event.data);
+        });
+        return { own, nested, worker };
+      },
+      { url: secretUrl, script: scriptUrl },
+    );
+    expect(fromPreview).toEqual({
+      own: "blocked",
+      nested: { image: "blocked", read: "blocked" },
+      worker: "blocked",
+    });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("@apps pins an app from its Home row and opens it from the keyboard", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
