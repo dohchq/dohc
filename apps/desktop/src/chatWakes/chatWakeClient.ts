@@ -132,22 +132,26 @@ export function createChatWakeClient(input: {
           "Runner declaration",
           () => new ChatWakeBadRequestError(),
         );
+      // An older relay refuses agents' memory, and an older one still the other agents too.
+      const plain = {
+        ...declaration,
+        runners: declaration.runners.map(({ memory: _memory, ...runner }) => runner),
+      };
+      const { agents: _agents, ...roster } = plain;
+      const tries = [
+        declaration,
+        ...(declaration.runners.some((runner) => runner.memory) ? [plain] : []),
+        ...(declaration.agents === undefined ? [] : [roster]),
+      ];
       let reply: unknown;
-      try {
-        reply = await put(declaration);
-      } catch (error) {
-        const older: ChatRunnerDeclaration = {
-          installId: declaration.installId,
-          computerLabel: declaration.computerLabel,
-          runners: declaration.runners.map(({ memory: _memory, ...runner }) => runner),
-        };
-        if (
-          !(error instanceof ChatWakeBadRequestError) ||
-          JSON.stringify(older) === JSON.stringify(declaration)
-        )
-          throw error;
-        // An older relay takes only the wake roster, and no agent's memory.
-        reply = await put(older);
+      for (const [index, body] of tries.entries()) {
+        try {
+          reply = await put(body);
+          break;
+        } catch (error) {
+          if (!(error instanceof ChatWakeBadRequestError) || index === tries.length - 1)
+            throw error;
+        }
       }
       const answer = ChatRunnersReply.safeParse(reply);
       if (
