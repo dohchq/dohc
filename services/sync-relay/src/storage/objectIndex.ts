@@ -267,7 +267,7 @@ export function findThreadCreateLane(
 
 /**
  * The thread's earliest admitted append still in the log, or of one message
- * when `messageId` is given, or null. A deleted message's appends are tombstones.
+ * when `messageId` is given, or undefined. A deleted message's appends are tombstones.
  */
 function earliestAppend(
   storage: StorageContext,

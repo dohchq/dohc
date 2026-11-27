@@ -2129,6 +2129,42 @@ describe("the owner's Chats and Comments in a browser", () => {
     }
   });
 
+  it("reads the wake status of the owner's comment by its file, and no other file's", async () => {
+    const { h, storage } = await commented();
+    declareClaude(storage, { laptop: true, mac: false });
+    const posted = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ path: "docs/plan.md", body: "@claude check the hotel" }),
+    );
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const { messageId, threadId } = (
+      (await json(posted)) as {
+        message: { messageId: string; threadId: string };
+      }
+    ).message;
+    const ask = { shareId: OWNER_CHAT, path: "docs/plan.md", messageId, threadId };
+    const read = async (fields: Record<string, unknown>) =>
+      ownerChat(h, "wakes", OWNER, jsonBody(fields));
+    expect(await json(await read(ask))).toEqual({
+      shareId: OWNER_CHAT,
+      path: "docs/plan.md",
+      messageId,
+      wakes: [{ wakeId: expect.any(String), state: "waiting", agentName: "Claude" }],
+    });
+    const refusal = await (await chat(h, "messages?shareId=missing", OWNER)).text();
+    for (const fields of [
+      { ...ask, path: "docs/other.md" },
+      { ...ask, threadId: "c-other" },
+      { ...ask, path: "docs/missing.md" },
+    ]) {
+      const response = await read(fields);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(refusal);
+    }
+  });
+
   it("never answers a member's wake read, through their grant or the owner's scheme", async () => {
     const { h, storage } = await seed();
     declareClaude(storage, { laptop: true, mac: false });

@@ -403,6 +403,11 @@ The share's level does not matter: a member at View still deletes their own mess
 Every refusal, including another share's recipient, receives 404, so the answer never confirms a message the caller cannot delete.
 The relay replaces the message with a tombstone and removes every Notice of it. People who already read it may keep a copy.
 
+`POST /api/named-chat/wakes` reads where the agents an owner's post woke stand. Only the owner's page (`shareId: owner:<workspace>`) sends it, with `{shareId, channelWireId | path, threadId, messageId}`.
+It answers `{shareId, channelWireId | path, messageId, wakes: [{wakeId, state, agentName}]}` and never names a computer.
+share-web refuses any other key before it calls the relay. A member, an admin, and a thread outside the named Group or file get the answer for an unknown share.
+An owner's post that would wake too many agents gets 400 `too_many_wakes`, and the relay keeps nothing.
+
 A workspace member's share reaches every Group and every current file.
 `channels` lists every Group, and the listing adds `moderates`, true for the owner and an admin. A page offers Delete on other people's messages only when it is true.
 A follow without `channelWireId` returns every Group's new messages, and each message names its `channelWireId`.
