@@ -239,10 +239,13 @@ export function agentProfileArguments(
         ...repeat,
         "--config",
         "approval_policy=never",
+        ...(memory?.resume ? ["resume", memory.sessionId] : []),
         ...runArguments,
         ...(readOnly ? ["--ignore-rules"] : []),
         "--skip-git-repo-check",
-        "--ephemeral",
+        // A remembering run keeps dohc's chats out of Codex's memories of the person's other work.
+        // Codex applies --config after --disable, and the last --config wins over the person's own.
+        ...(memory ? ["--config", "features.memories=false"] : ["--ephemeral"]),
         "--json",
         "-",
       ];

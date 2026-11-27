@@ -18,7 +18,7 @@ import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import type { AgentMemory, MemoryTurn } from "./agentMemory";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -179,7 +179,7 @@ function runFailureReason(
   nodeAvailable?: ReplyRuntimeAvailability,
 ): string {
   if (run.failureReason === MEMORY_MISSING)
-    return "Claude Code no longer had its memory of this workspace, so it starts fresh. Try again.";
+    return "Its memory of this workspace was gone, so it starts fresh. Try again.";
   if (needsNodeJs(outcome, nodeAvailable)) {
     return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
@@ -357,6 +357,8 @@ interface LiveRun {
   child: RunnerProcess;
   logPath: string;
   memory: MemoryTurn | null;
+  // Settles the session once, before the next run can take it.
+  endMemory: () => Promise<void>;
   timeoutMinutes: number;
   timeout: ReturnType<typeof setTimeout>;
   presenceHeartbeat: ReturnType<typeof setInterval> | null;
@@ -417,6 +419,19 @@ type ReplyForm = "argument" | "mcp";
 // requests are the run's.
 function runSecret(): string {
   return randomBytes(32).toString("hex");
+}
+
+async function readLogEnd(path: string, end: "start" | "end"): Promise<string> {
+  const log = await open(path, "r");
+  try {
+    const { size } = await log.stat();
+    const length = Math.min(size, 16_384);
+    const at = end === "start" ? 0 : size - length;
+    const { buffer } = await log.read(Buffer.alloc(length), 0, length, at);
+    return buffer.toString("utf8");
+  } finally {
+    await log.close();
+  }
 }
 
 function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
@@ -875,6 +890,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     if (!live.child.hasExited()) return false;
+    await live.endMemory();
     await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
@@ -886,18 +902,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function forgetMissingMemory(live: LiveRun): Promise<boolean> {
     if (!live.memory?.resume || !options.agentMemory) return false;
-    const log = await open(live.logPath, "r");
-    let tail: string;
-    try {
-      const { size } = await log.stat();
-      const length = Math.min(size, 16_384);
-      const { buffer } = await log.read(Buffer.alloc(length), 0, length, size - length);
-      tail = buffer.toString("utf8");
-    } finally {
-      await log.close();
-    }
-    // Claude Code's words for a session it no longer has.
-    if (!tail.includes(`No conversation found with session ID: ${live.memory.sessionId}`))
+    const tail = await readLogEnd(live.logPath, "end");
+    const sessionId = live.memory.sessionId;
+    // Claude Code's and Codex's words for a session they no longer have.
+    if (
+      !tail.includes(`No conversation found with session ID: ${sessionId}`) &&
+      !tail.includes(`no rollout found for thread id ${sessionId}`)
+    )
       return false;
     await options.agentMemory.forget(
       live.workspace.workspaceId,
@@ -905,6 +916,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.memory.sessionId,
     );
     return true;
+  }
+
+  async function endMemory(
+    workspaceId: string,
+    agentId: string,
+    memory: MemoryTurn,
+    codexLog: string | null,
+  ): Promise<void> {
+    const agentMemory = options.agentMemory;
+    if (!agentMemory) return;
+    if (codexLog === null || memory.resume) {
+      await agentMemory.finish(workspaceId, agentId, memory.sessionId);
+      return;
+    }
+    // Codex's first event names the thread it saved.
+    const named = /"type":"thread\.started","thread_id":"([0-9a-f-]{36})"/u.exec(
+      await readLogEnd(codexLog, "start"),
+    )?.[1];
+    await (named
+      ? agentMemory.finish(workspaceId, agentId, memory.sessionId, named)
+      : agentMemory.forget(workspaceId, agentId, memory.sessionId));
   }
 
   // An automation's run with nothing to report says so before it ends. A run
@@ -1332,11 +1364,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         throw new Error("dohc is quitting before the runner can start.");
       }
       const memory =
-        profile?.tool === "claude" && agent.memory && dohcTools === "all" && options.agentMemory
+        profile && agent.memory && dohcTools === "all" && options.agentMemory
           ? await options.agentMemory.take({
               workspaceId: workspace.workspaceId,
               agentId: agent.id,
-              memoryId: agent.memory,
+              // Codex keeps a thread's folders from its first run, so another folder or launch arguments start a new thread.
+              memoryId:
+                profile.tool === "codex"
+                  ? `${agent.memory} ${createHash("sha256")
+                      .update(JSON.stringify([workspace.rootPath, profile.arguments ?? []]))
+                      .digest("hex")}`
+                  : agent.memory,
               triggerMessageId: claim.run.triggerMessageId,
             })
           : null;
@@ -1371,6 +1409,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
       }, agent.timeoutMinutes * 60_000);
+      let memoryEnd: Promise<void> | null = null;
       const live: LiveRun = {
         workspace,
         claim,
@@ -1378,6 +1417,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         child,
         logPath,
         memory,
+        endMemory: () =>
+          (memoryEnd ??= memory
+            ? endMemory(
+                workspace.workspaceId,
+                agent.id,
+                memory,
+                profile?.tool === "codex" ? logPath : null,
+              ).catch(reportError)
+            : Promise.resolve()),
         timeoutMinutes: agent.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
@@ -1392,11 +1440,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runReservations.delete(workspace.workspaceId);
       if (memory)
         child.onExit(() => {
-          const ended = Promise.resolve(
-            options.agentMemory?.finish(workspace.workspaceId, agent.id, memory.sessionId),
-          )
-            .catch(reportError)
-            .finally(() => memoryEnds.delete(ended));
+          const ended = live.endMemory().finally(() => memoryEnds.delete(ended));
           memoryEnds.add(ended);
         });
       child.onExit((code, signal) => {

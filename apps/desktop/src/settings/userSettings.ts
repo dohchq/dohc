@@ -128,7 +128,7 @@ export const AgentSettings = z
     workspaces: z.array(SettingsWorkspaceId).max(MAX_AGENT_WORKSPACES).optional(),
     changesFiles: z.boolean().default(true),
     allowShell: z.boolean().optional(),
-    // Claude Code keeps chat runs' memory per workspace on this computer
+    // Claude Code or Codex keeps chat runs' memory per workspace on this computer
     // (agents/agentMemory.ts). A new id starts fresh.
     memory: z.uuid().optional(),
     // Pause and Resume. dohc starts, and forwards to, only an enabled agent.

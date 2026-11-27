@@ -20,7 +20,7 @@ export interface MemoryTurn {
 }
 
 /**
- * Each agent's Claude Code session per workspace, kept only on this computer.
+ * Each agent's Claude Code or Codex session per workspace, kept only on this computer.
  * A new `memory` id in the agent's settings starts a new session.
  */
 export interface AgentMemory {
@@ -31,8 +31,11 @@ export interface AgentMemory {
     memoryId: string;
     triggerMessageId: string;
   }): Promise<MemoryTurn | null>;
-  /** The session's run ended. A session still busy from an earlier dohc starts over, as its runner can outlive dohc. */
-  finish(workspaceId: string, agentId: string, sessionId: string): Promise<void>;
+  /**
+   * The session's run ended. A session still busy from an earlier dohc starts over, as its runner can outlive dohc.
+   * Codex names a session itself in its first run, so `named` replaces the id dohc made.
+   */
+  finish(workspaceId: string, agentId: string, sessionId: string, named?: string): Promise<void>;
   /** The run never started, so the session never got its message. */
   release(
     workspaceId: string,
@@ -111,8 +114,10 @@ export function createAgentMemory(
           { sessionId: memory.sessionId, resume: memory.given.length > 0 },
         ];
       }),
-    finish: (workspaceId, agentId, sessionId) =>
-      withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [memory]),
+    finish: (workspaceId, agentId, sessionId, named) =>
+      withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [
+        { ...memory, sessionId: named ?? memory.sessionId },
+      ]),
     release: (workspaceId, agentId, sessionId, triggerMessageId) =>
       withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [
         { ...memory, given: memory.given.filter((given) => given !== triggerMessageId) },

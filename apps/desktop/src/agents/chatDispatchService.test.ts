@@ -1106,15 +1106,28 @@ describe("chatDispatchService", () => {
         ? call.args.slice(at, at + 1)
         : call.args.slice(at, at + 2);
     };
-    const memoryFixture = (options: FixtureOptions = {}) =>
+    const memoryFixture = (options: FixtureOptions = {}, tool: "claude" | "codex" = "claude") =>
       createFixture({
         ...options,
         runner: {
           command: "",
-          profile: { tool: "claude", executable: resolve("test-claude.exe") },
+          profile: { tool, executable: resolve(`test-${tool}.exe`) },
           memory: MEMORY_ID,
         },
       });
+    const codexFlags = (call: SpawnCall) => {
+      const at = call.args.indexOf("resume");
+      return [
+        ...(at === -1 ? [] : call.args.slice(at, at + 2)),
+        ...call.args.filter((arg) => arg === "--ephemeral"),
+      ];
+    };
+    const codexStarted = (fixture: Fixture, runId: string, thread: string) =>
+      writeFile(
+        join(fixture.stateRoot, "run-logs", `${runId}.log`),
+        `${JSON.stringify({ type: "thread.started", thread_id: thread })}
+`,
+      );
     async function answer(fixture: Fixture, body: string, replies = true) {
       const asked = await createAgentThread(fixture, { body, authorUserId: "user_local" });
       const count = fixture.spawnCalls.length;
@@ -1245,6 +1258,87 @@ describe("chatDispatchService", () => {
       expect(next!.sessionId).not.toBe(sessionId);
     });
 
+    it("resumes the thread Codex named in its first run", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.");
+      expect(codexFlags(first.call)).toEqual([]);
+      const thread = "01a21c8a-fe95-7b20-ae5b-b869bed0ee78";
+      await codexStarted(fixture, first.run.run.runId, thread);
+      await end(fixture, first.call, 0);
+      const second = await answer(fixture, "Pack the bags.", false);
+      expect(codexFlags(second.call)).toEqual(["resume", thread]);
+      await writeFile(
+        join(fixture.stateRoot, "run-logs", `${second.run.run.runId}.log`),
+        `Error: thread/resume: thread/resume failed: no rollout found for thread id ${thread} (code -32600)
+`,
+      );
+      await end(fixture, second.call, 1);
+      await vi.waitFor(async () =>
+        expect(
+          (await fixture.service.dispatchStateForThread(WORKSPACE_ID, second.asked.threadId))
+            .failedRun?.words,
+        ).toBe(
+          "Nova did not reply. Its memory of this workspace was gone, so it starts fresh. Try again.",
+        ),
+      );
+      const third = await answer(fixture, "Book the hotel.", false);
+      expect(codexFlags(third.call)).toEqual([]);
+    });
+
+    it("resumes Codex's thread for a request that waited on its first run", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.");
+      await createAgentThread(fixture, { body: "Pack the bags.", authorUserId: "user_local" });
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      const thread = "01a21c8a-fe95-7b20-ae5b-b869bed0ee78";
+      await codexStarted(fixture, first.run.run.runId, thread);
+      first.call.process.emitExit(0);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+      expect(codexFlags(fixture.spawnCalls[1]!)).toEqual(["resume", thread]);
+    });
+
+    it("resumes Codex's thread after a stopped first run that a scan ends", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.", false);
+      await createAgentThread(fixture, { body: "Pack the bags.", authorUserId: "user_local" });
+      const thread = "01a21c8a-fe95-7b20-ae5b-b869bed0ee78";
+      await codexStarted(fixture, first.run.run.runId, thread);
+      await expect(fixture.service.stopAgentRun(WORKSPACE_ID, first.run.run.runId)).resolves.toBe(
+        true,
+      );
+      first.call.process.markExitedSilently();
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+      expect(codexFlags(fixture.spawnCalls[1]!)).toEqual(["resume", thread]);
+    });
+
+    it("starts a new Codex thread when its launch arguments change", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.");
+      await codexStarted(fixture, first.run.run.runId, "01a21c8a-fe95-7b20-ae5b-b869bed0ee78");
+      await end(fixture, first.call, 0);
+      fixture.runner.profile = {
+        tool: "codex",
+        executable: resolve("test-codex.exe"),
+        arguments: ["--add-dir", "/trip"],
+      };
+      const second = await answer(fixture, "Pack the bags.", false);
+      expect(codexFlags(second.call)).toEqual([]);
+    });
+
+    it("starts a new Codex thread when the first run named none", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.");
+      await end(fixture, first.call, 1);
+      const second = await answer(fixture, "Pack the bags.", false);
+      expect(codexFlags(second.call)).toEqual([]);
+    });
+
     it("starts fresh, once, when Claude Code no longer has the session", async () => {
       const fixture = await memoryFixture();
       await activate(fixture);
@@ -1263,7 +1357,7 @@ describe("chatDispatchService", () => {
           (await fixture.service.dispatchStateForThread(WORKSPACE_ID, resumed.asked.threadId))
             .failedRun?.words,
         ).toBe(
-          "Nova did not reply. Claude Code no longer had its memory of this workspace, so it starts fresh. Try again.",
+          "Nova did not reply. Its memory of this workspace was gone, so it starts fresh. Try again.",
         ),
       );
       await expect(
