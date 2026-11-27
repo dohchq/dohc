@@ -377,6 +377,7 @@ describe("owner live document enrollment", () => {
     ["live-edit-unadmitted", true],
     ["live-history-over-budget", true],
     ["conflict-parent-withheld", false],
+    ["note-format-off", false],
   ] as const)("offers Resume for a deferred Stop with %s: %s", async (reason, canResume) => {
     const h = harness();
     h.localStops.mockResolvedValue([

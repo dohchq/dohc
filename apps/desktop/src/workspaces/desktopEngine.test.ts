@@ -2477,6 +2477,7 @@ describe("server owner peer lifecycle", () => {
     const edited = { path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted" };
     const held = { path: "held.md", status: "unavailable", reason: "conflict-parent-withheld" };
     const long = { path: "long.md", status: "unavailable", reason: "live-history-over-budget" };
+    const formatOff = { path: "off.md", status: "unavailable", reason: "note-format-off" };
     const failing = {
       path: "failing.md",
       status: "unavailable",
@@ -2547,6 +2548,13 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"),
       );
+      // A note whose format the server turned off needs its operator, so it outranks every reason its owner can act on.
+      rows = [...others, failing, long, refused, unopened, edited, held, formatOff];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() =>
+        expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("note-format-off"),
+      );
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       rows = [...others, refused];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>

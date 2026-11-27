@@ -333,6 +333,11 @@ describe("sync status surface", () => {
     },
     {
       delivery: "retrying" as const,
+      reason: "note-format-off" as const,
+      label: "Live editing stopped",
+    },
+    {
+      delivery: "retrying" as const,
       reason: "live-document-without-lineage" as const,
       label: "Live editing cannot start",
     },

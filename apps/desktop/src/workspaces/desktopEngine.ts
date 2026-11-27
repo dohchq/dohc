@@ -173,6 +173,7 @@ type OwnerLiveDeliveryReason =
   | "conflict-parent-withheld"
   | "live-history-over-budget"
   | "live-start-failing"
+  | "note-format-off"
   | "restart-required"
   | "unsent-edits-limit";
 
@@ -1289,25 +1290,28 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     const reason =
                       diverged === true || unavailableFor("session-host-diverged")
                         ? "session-host-diverged"
-                        : unavailableFor("live-document-without-lineage")
-                          ? "live-document-without-lineage"
-                          : unavailableFor("session-host-refused")
-                            ? "session-host-refused"
-                            : unavailableFor("live-edit-unadmitted")
-                              ? "live-edit-unadmitted"
-                              : unavailableFor("conflict-parent-withheld")
-                                ? "conflict-parent-withheld"
-                                : unavailableFor("live-history-over-budget")
-                                  ? "live-history-over-budget"
-                                  : unavailableFor("live-start-failing")
-                                    ? "live-start-failing"
-                                    : unavailableFor("workspace-changed")
-                                      ? "workspace-changed"
-                                      : unavailableFor("document-unavailable")
-                                        ? "document-unavailable"
-                                        : undefined;
+                        : unavailableFor("note-format-off")
+                          ? "note-format-off"
+                          : unavailableFor("live-document-without-lineage")
+                            ? "live-document-without-lineage"
+                            : unavailableFor("session-host-refused")
+                              ? "session-host-refused"
+                              : unavailableFor("live-edit-unadmitted")
+                                ? "live-edit-unadmitted"
+                                : unavailableFor("conflict-parent-withheld")
+                                  ? "conflict-parent-withheld"
+                                  : unavailableFor("live-history-over-budget")
+                                    ? "live-history-over-budget"
+                                    : unavailableFor("live-start-failing")
+                                      ? "live-start-failing"
+                                      : unavailableFor("workspace-changed")
+                                        ? "workspace-changed"
+                                        : unavailableFor("document-unavailable")
+                                          ? "document-unavailable"
+                                          : undefined;
                     const ownerMustAct =
                       reason === "session-host-diverged" ||
+                      reason === "note-format-off" ||
                       reason === "live-document-without-lineage" ||
                       reason === "session-host-refused" ||
                       reason === "live-edit-unadmitted" ||

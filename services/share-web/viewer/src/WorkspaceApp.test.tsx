@@ -2816,6 +2816,10 @@ describe("the owner's page", () => {
       "session-host-diverged",
       "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
     ],
+    [
+      "note-format-off",
+      "This server turned off the newer note format this page uses. Contact the server's operator.",
+    ],
   ])("tells the owner why a page refused with %s", async (code, sentence) => {
     server({ level: "edit", session: OWNER_SESSION });
     vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code });

@@ -963,6 +963,7 @@ export function createOwnerLiveDocumentActions<
             (!row.movedTo || row.canResume) &&
             row.reason !== "session-host-diverged" &&
             row.reason !== "conflict-parent-withheld" &&
+            row.reason !== "note-format-off" &&
             row.reason !== "live-document-too-large";
           if (deferred) Object.assign(row, { deferredStop: deferred, canResume: startable });
           // A note the server paused stays enrolled until Resume ends its pause.

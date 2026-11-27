@@ -1,7 +1,7 @@
 import {
   createLiveBufferBudget,
+  forwardedLiveClose,
   LIVE_CONNECTION_LIMIT_CLOSE_CODE,
-  liveConnectionLimitMessage,
   type LiveConnectionLimitCode,
 } from "@dohc/live-session-contract/live-connection";
 import { randomBytes } from "node:crypto";
@@ -301,7 +301,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     let draining = false,
       closingForLimit = false;
     let refusalCode: LiveConnectionLimitCode | undefined;
-    function refuseLimit(code: LiveConnectionLimitCode) {
+    function refuseClose(closeCode: number, reason: string) {
       if (done) return;
       if (!browser)
         server.handleUpgrade(request, socket, Buffer.alloc(0), (accepted) => {
@@ -310,7 +310,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         });
       if (browser) {
         closingForLimit = true;
-        browser.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code);
+        browser.close(closeCode, reason);
         socket.resume();
         const deadline = setTimeout(() => browser?.terminate(), limits.drainTimeoutMs);
         deadline.unref();
@@ -400,9 +400,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       }
       route = { socket: opened.socket, invalidated: opened.invalidated };
       route.socket.once("close", (code, reason) => {
-        const limit = reason.toString();
-        if (code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(limit))
-          refuseLimit(limit as LiveConnectionLimitCode);
+        if (forwardedLiveClose(code, reason.toString())) refuseClose(code, reason.toString());
         else stop();
       });
       if (route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
@@ -462,7 +460,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (typeof reserved === "string") refusalCode = reserved;
       else release = reserved;
       if (refusalCode) {
-        refuseLimit(refusalCode);
+        refuseClose(LIVE_CONNECTION_LIMIT_CLOSE_CODE, refusalCode);
         return;
       }
       const bufferScopes: [string, number][] = [
@@ -516,7 +514,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
             try {
               releaseBytes = buffers.reserve(2 * size, bufferScopes);
             } catch {
-              refuseLimit("live_buffer_limit");
+              refuseClose(LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit");
               return;
             }
             try {

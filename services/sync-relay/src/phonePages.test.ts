@@ -1,3 +1,4 @@
+import { seededNote } from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -460,4 +461,13 @@ it("holds the account's bound on its owner's documents across its phone and its 
   expect(await f.browserOpen("docs/b.md")).toEqual(refused("live_host_full"));
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toBeNull();
   expect(await f.browserOpen(binding.currentPath)).toEqual(preparing);
+});
+
+it("refuses a format-2 page while the relay's switch is off, for the phone and the owner's browser, and mints nothing", async () => {
+  const f = await phone();
+  f.ready();
+  f.raw.prepare("UPDATE sync_relay_live_documents SET baseline_bytes = ?").run(seededNote());
+  expect(await f.open(binding.currentPath)).toEqual(refused("note-format-off"));
+  expect(await f.browserOpen(binding.currentPath)).toEqual(refused("note-format-off"));
+  expect(f.mint).not.toHaveBeenCalled();
 });

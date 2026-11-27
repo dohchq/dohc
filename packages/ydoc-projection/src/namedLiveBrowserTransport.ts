@@ -1,6 +1,8 @@
 import {
   LIVE_CONNECTION_LIMIT_CLOSE_CODE,
   liveConnectionLimitMessage,
+  NOTE_FORMAT_OFF,
+  TRY_AGAIN_LATER_CLOSE_CODE,
 } from "@dohc/live-session-contract/live-connection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
@@ -38,6 +40,7 @@ export const NAMED_LIVE_NO_AUTOMATIC_RETRY: readonly string[] = [
   "paused",
   "live-stopped",
   "document-gone",
+  "note-format-off",
 ];
 /** How often a page whose note is off checks, while it is visible, whether its owner started it again. */
 export const NAMED_LIVE_OFF_CHECK_MS = 30_000;
@@ -362,11 +365,15 @@ export function createNamedLiveBrowserTransport<
           held.controller.signal.removeEventListener("abort", abort);
         };
         const onClose = (event: CloseEvent) => {
-          if (
+          const reason =
             event.code === LIVE_CONNECTION_LIMIT_CLOSE_CODE &&
             liveConnectionLimitMessage(event.reason)
-          ) {
-            fail(held, "disconnected", event.reason);
+              ? event.reason
+              : event.code === TRY_AGAIN_LATER_CLOSE_CODE && event.reason === NOTE_FORMAT_OFF
+                ? "note-format-off"
+                : undefined;
+          if (reason) {
+            fail(held, "disconnected", reason);
             finish();
             reject(new Error(event.reason));
           } else disconnected();

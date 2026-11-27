@@ -1810,3 +1810,30 @@ it("opens the owner's page live on the binding the relay's owner socket sends, a
   expect(edit(opened.session, " draft")).toBe(true);
   await peer.submitted();
 });
+
+it("stops on a socket the server closed because it turned off the note's format, and never reconnects by itself", async () => {
+  vi.useFakeTimers();
+  const f = fixture(),
+    connecting = f.value.reconnect(),
+    socket = await f.socketAt(0);
+  socket.open();
+  await connecting;
+  const event = new Event("close");
+  Object.assign(event, { code: 1013, reason: "note_format_off" });
+  socket.dispatchEvent(event);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "note-format-off" });
+  expect(socket.listenerCount).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("still reconnects after a try-again close with any other reason", async () => {
+  const f = fixture(),
+    connecting = f.value.reconnect(),
+    socket = await f.socketAt(0);
+  socket.open();
+  await connecting;
+  const event = new Event("close");
+  Object.assign(event, { code: 1013, reason: "personal_agent_unavailable" });
+  socket.dispatchEvent(event);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "transport-closed" });
+});

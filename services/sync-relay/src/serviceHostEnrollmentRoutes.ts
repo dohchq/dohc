@@ -500,6 +500,8 @@ export function serviceHostReadiness(options: {
       actor: { kind: "owner", userId: row.ownerUserId },
     });
     if (current.kind !== "current" || !host.ready(document)) return starting();
+    if (storage.liveNoteFormatOff(current.binding))
+      return { ...base, status: "unavailable", reason: "note-format-off" };
     return {
       ...base,
       path: current.binding.currentPath,

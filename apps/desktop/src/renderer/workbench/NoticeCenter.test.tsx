@@ -803,6 +803,11 @@ describe("notice center", () => {
       icon: "refresh-cw",
     },
     {
+      reason: "note-format-off" as const,
+      title: "Live editing stopped",
+      body: "The server turned off the newer note format a document in this workspace uses, so others cannot edit it live. Your copy and its History are unchanged. Trying again is refused the same way until the server's operator turns the format back on. Contact the server's operator.",
+    },
+    {
       reason: "conflict-parent-withheld" as const,
       title: "Live editing cannot resume",
       body: "A conflict was resolved in a document, so live editing cannot resume for it. People with the link can still read the last shared version, but your edits may not reach them. Open Live documents to make a copy that can go live.",

@@ -3543,6 +3543,7 @@ describe("sync status IPC contract", () => {
       "live-edit-unadmitted",
       "live-history-over-budget",
       "live-start-failing",
+      "note-format-off",
     ] as const) {
       expect(
         SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason })

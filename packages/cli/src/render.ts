@@ -511,6 +511,7 @@ const LIVE_REASON_WORDS = {
   "conflict-parent-withheld": "can't resume",
   "live-history-over-budget": "history too long",
   "live-start-failing": "can't start",
+  "note-format-off": "note format off on the server",
 } as const;
 const LIVE_STATUS_WORDS = {
   ready: "live",

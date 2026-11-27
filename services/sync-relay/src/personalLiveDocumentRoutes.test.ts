@@ -1,3 +1,4 @@
+import { seededNote } from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport.js";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   AGENT_ONLY_MAX_DOCUMENTS,
@@ -633,4 +634,18 @@ it("answers 503 while Postgres can't read the agent's fence, and opens once it c
   expect(f.read()).toBeNull();
   f.fence.down = false;
   expect(await body(await a.open(), 200)).toEqual(ready);
+});
+
+it("refuses an agent's open of a format-2 document while the relay's switch is off, and says who can turn it back on", async () => {
+  const f = await fixture(),
+    a = f.agent("editor");
+  f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  f.ready();
+  f.raw.prepare("UPDATE sync_relay_live_documents SET baseline_bytes = ?").run(seededNote());
+  expect(await body(await a.open(), 409)).toEqual({
+    ok: false,
+    code: "note-format-off",
+    error:
+      "This server turned off the newer note format this document uses. Ask the server's operator to turn it back on.",
+  });
 });

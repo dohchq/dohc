@@ -686,6 +686,8 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
     "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume tries again now.",
   "live-start-failing":
     "The server can't start live editing and keeps trying. failure.word is the server's reason, and failure.since is when it began. Resume tries now.",
+  "note-format-off":
+    "The server turned off the newer note format this document uses. Resume can't help. Contact the server's operator.",
 } as const;
 const liveDocumentReasonSchema = z.enum(
   Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [

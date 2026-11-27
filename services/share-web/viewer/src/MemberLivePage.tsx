@@ -33,6 +33,8 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
     "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
   "session-host-diverged":
     "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
+  "note-format-off":
+    "This server turned off the newer note format this page uses. Contact the server's operator.",
 };
 const READ_ONLY = "live_hosting_unsupported";
 

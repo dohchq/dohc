@@ -464,3 +464,32 @@ it("shows no notice when the page itself refused a change to a note in format 2"
   expect(yDocToMarkdown(live.doc)).toBe(written);
   expect(textbox()?.textContent).toBe("One");
 });
+
+it.each([
+  [false, ""],
+  [true, " You can still read and comment here."],
+])(
+  "says the server turned off the note's format and who can turn it on, with no retry (link: %s)",
+  async (link, suffix) => {
+    const live = session("Body");
+    const off: NamedLiveBrowserState = {
+      ...live.state(),
+      status: "disconnected",
+      reason: "note-format-off",
+    };
+    await act(async () =>
+      root.render(
+        <NamedDocumentEditor
+          session={{ ...live, state: () => off }}
+          path="docs/a.md"
+          link={link}
+          onState={() => {}}
+        />,
+      ),
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      `Live editing of this file is off on this server, because the server turned off the newer note format this file uses. Contact the server's operator.${suffix}`,
+    );
+    expect(container.querySelector("button")).toBeNull();
+  },
+);

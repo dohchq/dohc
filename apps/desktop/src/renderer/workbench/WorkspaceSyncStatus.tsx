@@ -97,6 +97,7 @@ function liveDeliveryLabel(
   if (
     reason === "session-host-refused" ||
     reason === "session-host-diverged" ||
+    reason === "note-format-off" ||
     reason === "live-edit-unadmitted"
   )
     return "Live editing stopped";
