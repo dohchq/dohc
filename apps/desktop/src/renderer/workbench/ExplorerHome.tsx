@@ -273,7 +273,24 @@ export function ExplorerHome(props: ExplorerHomeProps) {
         ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> }
         : {}),
       ...(appsStatus === "loading" ? { body: holdRow } : {}),
-      ...(appsStatus === "ready" && appList.length === 0 ? { empty: "No apps yet." } : {}),
+      ...(apps?.onNewApp ? { add: { label: "New app", onClick: apps.onNewApp } } : {}),
+      ...(appsStatus === "ready" && appList.length === 0
+        ? apps?.onNewApp
+          ? {
+              body: (
+                <button
+                  type="button"
+                  data-testid="explorer-apps-new"
+                  onClick={apps.onNewApp}
+                  className="dohc-focus-row flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+                >
+                  <Plus size={13} aria-hidden />
+                  New app
+                </button>
+              ),
+            }
+          : { empty: "No apps yet." }
+        : {}),
     });
   }
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });

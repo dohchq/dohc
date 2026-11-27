@@ -16,7 +16,7 @@ import {
   shareSenderLabel,
 } from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { generateAppSource } from "@dohc/workspace-core/app-source";
+import { appTitleFromRoot, planNewApp } from "@dohc/workspace-core/app-source";
 import { isRecord } from "@dohc/workspace-core/records";
 import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
@@ -99,7 +99,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, posix, relative, sep } from "node:path";
+import { isAbsolute, join, posix, relative, sep } from "node:path";
 
 type DeclaredTool = DeclaredOperation["mcp"]["tool"];
 export const DECLARED_TOOLS = byName(
@@ -1394,14 +1394,6 @@ function isIgnoredSitePath(path: string): boolean {
     .some((segment) => SITE_SCAN_IGNORED_NAMES.has(segment.toLowerCase()));
 }
 
-function siteTitleFromPath(root: string): string {
-  const name = basename(root) || "App";
-  return name
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
-    .trim();
-}
-
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
@@ -1788,7 +1780,7 @@ async function detectSiteAt(
   return {
     site: {
       root,
-      title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
+      title: configuredTitle ?? packageTitle ?? appTitleFromRoot(root),
       kind,
       confidence,
       ...(entry ? { entry } : {}),
@@ -1881,30 +1873,20 @@ export async function createApp(
 ) {
   const root = await safeResolve(ctx, args.appRoot);
   if (!root.ok) return { ok: false as const, reason: root.reason };
-  if (!root.normalized) return { ok: false as const, reason: "appRoot must name a folder" };
-
   const existing = await lstat(root.absolute).catch(() => null);
-  if (existing && !existing.isDirectory()) {
-    return { ok: false as const, reason: `appRoot is not a directory: ${root.normalized}` };
-  }
-  if (existing) {
-    const entries = await readdir(root.absolute);
-    if (entries.length > 0) {
-      return {
-        ok: false as const,
-        reason: `app folder already exists and is not empty: ${root.normalized}`,
-      };
-    }
-  }
-
-  const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const files = generateAppSource({ title }).map((file) => ({
-    ...file,
-    path: relativeJoin(root.normalized, file.path),
-  }));
+  const plan = planNewApp({
+    appRoot: root.normalized,
+    title: args.title,
+    folder: !existing
+      ? "missing"
+      : existing.isDirectory()
+        ? { entryCount: (await readdir(root.absolute)).length }
+        : "file",
+  });
+  if (!plan.ok) return { ok: false as const, reason: plan.reason };
 
   const resolvedFiles = [];
-  for (const file of files) {
+  for (const file of plan.files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
     if (

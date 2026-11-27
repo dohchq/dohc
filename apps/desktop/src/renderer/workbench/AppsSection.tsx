@@ -139,4 +139,5 @@ export interface ExplorerApps extends WorkspaceApps {
   // focus, then onRevealed clears the request.
   reveal: boolean;
   onRevealed: () => void;
+  onNewApp?: (() => void) | undefined;
 }

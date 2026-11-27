@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generateAppSource } from "./appSource";
+import { generateAppSource, planNewApp } from "./appSource";
 import { discoverSites } from "./sites";
 
 const options = { title: "Ledger", appRoot: "finance/ledger" };
@@ -36,5 +36,31 @@ describe("app source generation", () => {
     first[0]!.content = "changed by a caller";
     expect(generateAppSource(input)).toEqual(second);
     expect(input).toEqual(options);
+  });
+});
+
+describe("new app plan", () => {
+  it("places the starter files in a new folder, titled from its name", () => {
+    expect(planNewApp({ appRoot: "trips/new_trip-app", folder: "missing" })).toEqual({
+      ok: true,
+      appRoot: "trips/new_trip-app",
+      files: generateAppSource({ title: "New Trip App" }).map((file) => ({
+        ...file,
+        path: `trips/new_trip-app/${file.path}`,
+      })),
+    });
+  });
+
+  it.each([
+    ["", "missing", "appRoot must name a folder"],
+    ["app", "file", "appRoot is not a directory: app"],
+    ["app", { entryCount: 1 }, "app folder already exists and is not empty: app"],
+  ] as const)("refuses %j in a %j folder", (appRoot, folder, reason) => {
+    expect(planNewApp({ appRoot, folder })).toEqual({ ok: false, reason });
+  });
+
+  it("accepts an empty folder and a given title", () => {
+    const plan = planNewApp({ appRoot: "app", folder: { entryCount: 0 }, title: " Ledger " });
+    expect(plan.ok && plan.files[1]!.content).toContain('title={"Ledger"}');
   });
 });

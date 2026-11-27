@@ -23,6 +23,7 @@ import {
 } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
+import { planNewApp } from "@dohc/workspace-core/app-source";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import { ChevronRight, Eye, RefreshCw, Send, X } from "lucide-react";
 import {
@@ -624,21 +625,22 @@ function ancestorDirs(path: string): string[] {
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
 }
 
-function uniqueUntitledPath(
+function uniqueNewPath(
   files: WorkspaceFileEntry[],
   folders: string[],
-  extension: string,
+  stem: string,
+  extension = "",
 ): string {
   const occupied = new Set(
     [...files.map((file) => file.path), ...folders].map((path) => path.toLowerCase()),
   );
-  const base = `Untitled.${extension}`;
+  const base = `${stem}${extension}`;
   if (!occupied.has(base.toLowerCase())) return base;
   for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `Untitled ${index}.${extension}`;
+    const candidate = `${stem} ${index}${extension}`;
     if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
-  return `Untitled ${Date.now()}.${extension}`;
+  return `${stem} ${Date.now()}${extension}`;
 }
 
 // A new page someone gave a title, an icon or a body. One that has none, or
@@ -6259,7 +6261,7 @@ function WorkspaceShell(props: {
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
-        relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
+        relativePath: uniqueNewPath(files, folders, "Untitled", ".excalidraw"),
         // The engine's absent-head contract admits a new path only while its
         // artifact is empty. The scene session initializes its own Y.Doc;
         // DrawingView supplies portable JSON when the engine is unavailable.
@@ -6271,6 +6273,34 @@ function WorkspaceShell(props: {
       reportShellError("dohc could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const creatingApp = useRef(false);
+  const createNewApp = useCallback(async () => {
+    if (creatingApp.current) return;
+    creatingApp.current = true;
+    try {
+      const { path: appRoot } = await bridge().createWorkspaceFolder({
+        workspaceId,
+        relativePath: uniqueNewPath(files, folders, "New app"),
+        exclusive: true,
+      });
+      const plan = planNewApp({ appRoot, folder: { entryCount: 0 } });
+      if (!plan.ok) throw new Error(plan.reason);
+      for (const file of plan.files) {
+        await bridge().createWorkspaceFile({
+          workspaceId,
+          relativePath: file.path,
+          initialText: file.content,
+          exclusive: true,
+        });
+      }
+      await refreshFiles();
+      openAppTab(plan.appRoot);
+    } catch (error) {
+      reportShellError("dohc could not create an app.", error);
+    } finally {
+      creatingApp.current = false;
+    }
+  }, [files, folders, openAppTab, refreshFiles, reportShellError, workspaceId]);
   // Add an app here… opens the Explorer with its Apps section open and its
   // first row focused. The request belongs to one workspace, like a reveal.
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
@@ -6279,16 +6309,6 @@ function WorkspaceShell(props: {
     mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
     setAppsReveal(workspaceId);
   }, [mutateWb, workspaceId]);
-  const explorerApps = useMemo<ExplorerApps>(
-    () => ({
-      ...workspaceApps,
-      pinnedApps: pinnedRoots,
-      onSetPinned: setAppPinned,
-      reveal: appsReveal === workspaceId,
-      onRevealed: clearAppsReveal,
-    }),
-    [appsReveal, clearAppsReveal, pinnedRoots, setAppPinned, workspaceApps, workspaceId],
-  );
   // Stable identities for the memoized explorer and inspector. Inline
   // arrows here would hand every shell render a fresh prop set, which
   // re-renders every TreeRow and re-runs FileInspector for renders that
@@ -6980,8 +7000,10 @@ function WorkspaceShell(props: {
   }, [commandContext, runCommand]);
   // The start surface's tiles: each kind's existing create action, where the
   // workspace allows it.
+  const createsApps = commandContext.shareView === null;
   const startActions = useMemo(
     () => ({
+      ...(createsApps ? { app: createNewApp } : {}),
       ...(isCommandAvailable("new-file", commandContext)
         ? { markdown: commandHandlers["new-file"] }
         : {}),
@@ -6992,7 +7014,27 @@ function WorkspaceShell(props: {
         ? { drawing: createUntitledDrawing }
         : {}),
     }),
-    [commandContext, commandHandlers, createUntitledDrawing],
+    [commandContext, commandHandlers, createNewApp, createUntitledDrawing, createsApps],
+  );
+  const explorerApps = useMemo<ExplorerApps>(
+    () => ({
+      ...workspaceApps,
+      pinnedApps: pinnedRoots,
+      onSetPinned: setAppPinned,
+      reveal: appsReveal === workspaceId,
+      onRevealed: clearAppsReveal,
+      onNewApp: createsApps ? () => void createNewApp() : undefined,
+    }),
+    [
+      appsReveal,
+      clearAppsReveal,
+      createNewApp,
+      createsApps,
+      pinnedRoots,
+      setAppPinned,
+      workspaceApps,
+      workspaceId,
+    ],
   );
   const resolveDroppedPaths = useCallback(
     (dropped: File[]) => bridge().getDroppedFilePaths(dropped),
@@ -9959,6 +10001,9 @@ function WorkspaceShell(props: {
                                                         recent={wb.recentFiles}
                                                         files={fileListingCommit ? files : null}
                                                         onOpen={openFile}
+                                                        onConnectAgent={
+                                                          commandHandlers["settings-agents"]
+                                                        }
                                                         onDropFiles={
                                                           isCommandAvailable(
                                                             "import-files",
