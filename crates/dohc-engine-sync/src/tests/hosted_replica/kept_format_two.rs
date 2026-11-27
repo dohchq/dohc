@@ -244,22 +244,8 @@ fn a_kept_base_of_a_returning_note_waits_while_another_spelling_holds_its_path()
     assert!(text.contains('z'), "{text}");
 }
 
-fn kept_reasons_of(store: &EngineStore, object_id: &str) -> Vec<String> {
-    store
-        .read_with(|conn| {
-            conn.prepare(
-                "SELECT k.reason FROM replication_refused_ydoc_blobs k \
-                 JOIN replication_log l USING (workspace_id, origin_id, origin_seq) \
-                 WHERE json_extract(l.payload_json,'$.objectId')=?1 ORDER BY k.relay_seq",
-            )?
-            .query_map([object_id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap()
-}
-
 #[test]
-fn a_hosted_kept_base_refused_for_its_size_keeps_its_claim_and_refuses_a_later_edit() {
+fn a_hosted_pull_lands_a_kept_base_past_the_text_cap_and_the_edit_after_it() {
     let (_scratch, _path, mut store) = hosted_store();
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -285,30 +271,17 @@ fn a_hosted_kept_base_refused_for_its_size_keeps_its_claim_and_refuses_a_later_e
     assert_eq!(kept_of(&store, "doc-a"), 1);
     replay_reading(&mut store);
     reading_body_sequence_here(|| sync(&client, &mut store));
-    let reasons = kept_reasons_of(&store, "doc-a");
-    let marker =
-        dohc_engine_collab::read_marker(&store, &DocKey::new("ws", "main", "doc-a").unwrap())
-            .unwrap()
-            .and_then(|marker| marker.lineage_claim_id);
-    let pending = store
-        .read_with(|conn| {
-            conn.prepare(
-                "SELECT 'refusal '||origin_id||'/'||origin_seq||' '||substr(reason_message,1,80) \
-                   FROM replication_pending_refusals \
-                 UNION ALL SELECT 'kept '||origin_id||'/'||origin_seq||' '||replayed||' '||substr(reason,1,80) \
-                   FROM replication_refused_ydoc_blobs \
-                 UNION ALL SELECT 'log '||origin_id||'/'||origin_seq||' '||op_kind||' '||COALESCE(apply_disposition,'-') \
-                   FROM replication_log \
-                 UNION ALL SELECT 'deferred '||origin_id||'/'||origin_seq FROM ydoc_deferred_updates",
-            )?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap();
-    assert!(
-        marker.is_none() && reasons.len() == 1 && reasons[0].contains("projection exceeds"),
-        "{marker:?} {reasons:?} {pending:?}"
+    let key = DocKey::new("ws", "main", "doc-a").unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .and_then(|marker| marker.lineage_claim_id);
+    assert_eq!(marker.as_deref(), Some(claim.as_str()));
+    assert_eq!(kept_of(&store, "doc-a"), 0);
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM replication_pending_refusals"),
+        0
     );
+    assert!(note_text(&store, "doc-a").len() > MAX_TEXT_BYTES);
     ydoc_row(
         client.transport(),
         ("writer", 0),
@@ -321,14 +294,5 @@ fn a_hosted_kept_base_refused_for_its_size_keeps_its_claim_and_refuses_a_later_e
         count(&store, "SELECT COUNT(*) FROM ydoc_deferred_updates"),
         0
     );
-    let refused: String = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id=?1",
-                ["writer"],
-                |row| row.get(0),
-            )
-        })
-        .unwrap();
-    assert_eq!(refused, reasons[0]);
+    assert!(note_text(&store, "doc-a").contains('q'));
 }
