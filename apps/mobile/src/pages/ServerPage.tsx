@@ -23,6 +23,7 @@ import { pageTitle } from "../home/homeModel";
 import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
+import { TOUCH } from "../touch";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
@@ -51,6 +52,7 @@ const pageScript = (path: string, markdown: string, live: boolean) =>
     editable: false,
     live,
     textScale: PixelRatio.getFontScale(),
+    touchSize: TOUCH,
   })}; true;`;
 
 // A page opened from a Notice names its workspace. It shows only while that workspace is the one open, so it never
@@ -264,8 +266,9 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const typing = useKeyboardState((keyboard) => keyboard.isVisible);
   const keyboardHeight = useKeyboardState((keyboard) => (keyboard.isVisible ? keyboard.height : 0));
   useEffect(() => {
+    if (!painted) return;
     web.current?.injectJavaScript(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
-  }, [keyboardHeight]);
+  }, [keyboardHeight, painted]);
   const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
 
   // No workspace open, as when another device hid the last one: the page says why, as Home and Chats do.

@@ -15,10 +15,26 @@ const hoisted = vi.hoisted(() => ({
     unwritten?(why: BodySequenceUnwritten): void;
     destroy: ReturnType<typeof vi.fn>;
     refresh: ReturnType<typeof vi.fn>;
+    unsubscribeToolbar: ReturnType<typeof vi.fn>;
   }[],
   readDoc: null as Y.Doc | null,
   adapter: null as Parameters<typeof createLiveAdapter>[0] | null,
 }));
+
+const EMPTY_TOOLBAR = {
+  bold: false,
+  italic: false,
+  strike: false,
+  code: false,
+  heading: 0 as const,
+  bulletList: false,
+  orderedList: false,
+  taskList: false,
+  blockquote: false,
+  codeBlock: false,
+  canUndo: false,
+  canRedo: false,
+};
 
 vi.mock("../../editor/bridge", () => ({
   post: (kind: string, payload?: { markdown?: unknown }) => {
@@ -32,7 +48,26 @@ vi.mock("@dohc/ydoc-projection/browser-editor", () => ({
     _element: unknown,
     options: { doc: Y.Doc; canEdit(): boolean; edit(change: () => void): boolean },
   ) => {
-    const editor = { ...options, destroy: vi.fn(), refresh: vi.fn() };
+    const unsubscribeToolbar = vi.fn();
+    const editor = {
+      ...options,
+      destroy: vi.fn(),
+      refresh: vi.fn(),
+      unsubscribeToolbar,
+      subscribeToolbar: (listener: (state: typeof EMPTY_TOOLBAR) => void) => {
+        listener(EMPTY_TOOLBAR);
+        return unsubscribeToolbar;
+      },
+      toggleMark: vi.fn(() => true),
+      setHeading: vi.fn(() => true),
+      toggleBulletList: vi.fn(() => true),
+      toggleOrderedList: vi.fn(() => true),
+      toggleTaskList: vi.fn(() => true),
+      toggleBlockquote: vi.fn(() => true),
+      toggleCodeBlock: vi.fn(() => true),
+      undo: vi.fn(() => true),
+      redo: vi.fn(() => true),
+    };
     hoisted.mounted.push(editor);
     return editor;
   },
@@ -57,13 +92,37 @@ class FakeElement {
   className = "";
   textContent: string | null = null;
   hidden = false;
-  readonly style = { setProperty: () => undefined };
+  disabled = false;
+  type = "";
+  offsetHeight = 0;
+  clientHeight = 0;
+  readonly siblings: FakeElement[] = [];
+  readonly attrs = new Map<string, string>();
+  readonly props = new Map<string, string>();
+  readonly scrolled: [number, number][] = [];
+  readonly style: { paddingBottom: string; setProperty(name: string, value: string): void } = {
+    paddingBottom: "",
+    setProperty: (name: string, value: string) => {
+      this.props.set(name, value);
+    },
+  };
+  setAttribute(name: string, value: string) {
+    this.attrs.set(name, value);
+  }
   append() {}
-  after() {}
+  after(...nodes: FakeElement[]) {
+    this.siblings.push(...nodes);
+  }
   remove() {}
   replaceChildren() {}
   addEventListener() {}
   scrollTo() {}
+  scrollBy(x: number, y: number) {
+    this.scrolled.push([x, y]);
+  }
+  getBoundingClientRect() {
+    return { height: this.offsetHeight };
+  }
 }
 
 function note(format?: number, words = "Packing list") {
@@ -102,20 +161,29 @@ const page = {
   textScale: 1,
 };
 
+let rootEl: FakeElement;
+let docEl: FakeElement;
+
 beforeEach(() => {
   hoisted.posted.length = 0;
   hoisted.payloads.length = 0;
   hoisted.copied.length = 0;
   hoisted.mounted.length = 0;
   hoisted.adapter = null;
-  const root = new FakeElement();
+  rootEl = new FakeElement();
+  docEl = new FakeElement();
+  docEl.clientHeight = 740;
   vi.stubGlobal("document", {
-    getElementById: () => root,
+    getElementById: () => rootEl,
     createElement: () => new FakeElement(),
-    documentElement: new FakeElement(),
+    createElementNS: () => new FakeElement(),
+    documentElement: docEl,
+    activeElement: null,
     addEventListener: () => undefined,
   });
-  vi.stubGlobal("window", {});
+  vi.stubGlobal("window", {
+    getSelection: () => null,
+  });
   vi.stubGlobal("requestAnimationFrame", () => 0);
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -300,5 +368,114 @@ describe("a newer read of the page", () => {
     expect(hoisted.posted).toContain("unsupportedFormat");
     expect(app().__dohcCopyMarkdown).toBeUndefined();
     expect(app().__dohcSetEditable).toBeUndefined();
+  });
+});
+
+describe("the formatting toolbar and keyboard caret reveal", () => {
+  const keyboard = () =>
+    window as unknown as {
+      __dohcKeyboard(height: number): void;
+      __dohcSetEditable?(value: boolean): void;
+    };
+
+  function stubCaret(bottom: number) {
+    (
+      document as unknown as { activeElement: { closest(sel: string): object | null } }
+    ).activeElement = {
+      closest: (sel: string) => (sel === ".markdown" ? {} : null),
+    };
+    (window as unknown as { getSelection(): unknown }).getSelection = () => ({
+      rangeCount: 1,
+      focusNode: null,
+      focusOffset: 0,
+      getRangeAt: () => ({
+        getBoundingClientRect: () => ({ bottom, height: 20 }),
+      }),
+    });
+  }
+
+  it("keeps the toolbar hidden on read-only pages and excludes toolbar height from caret scroll", () => {
+    hoisted.readDoc = note(1);
+    mountDocument({ ...page, editable: false, live: false, touchSize: 48 });
+    const bar = rootEl.siblings[0]!;
+    bar.offsetHeight = 57;
+    expect(docEl.props.get("--touch")).toBe("48px");
+
+    stubCaret(380);
+    keyboard().__dohcKeyboard(336);
+    expect(bar.hidden).toBe(true);
+    expect(rootEl.style.paddingBottom).toBe("max(40vh, 384px)");
+    // visibleBottom = 740 - 336 = 404, bottom = 392, caret.bottom = 380 <= 392 -> no scroll.
+    expect(rootEl.scrolled).toEqual([]);
+  });
+
+  it("shows the toolbar only once a live page is live with keyboard visible, and includes its height in caret reveal", () => {
+    hoisted.readDoc = note(1);
+    mountDocument({ ...page, editable: false, live: true, touchSize: 44 });
+    const bar = rootEl.siblings[0]!;
+    bar.offsetHeight = 53;
+
+    // While the live session has not opened yet, the toolbar stays hidden even if the keyboard is up.
+    keyboard().__dohcKeyboard(336);
+    expect(bar.hidden).toBe(true);
+
+    // Once the live session becomes live, the toolbar appears and caret reveal clears both keyboard and toolbar.
+    let status = "live";
+    const subscribers: (() => void)[] = [];
+    const liveDoc = note(1);
+    const liveProvider = {
+      doc: liveDoc,
+      state: () => ({ status }),
+      subscribe: (fn: () => void) => {
+        subscribers.push(fn);
+        return () => undefined;
+      },
+    } as unknown as LiveProvider;
+
+    stubCaret(380);
+    hoisted.adapter!.changed(liveProvider);
+    expect(bar.hidden).toBe(false);
+    expect(bar.props.get("--keyboard")).toBe("336px");
+    expect(rootEl.style.paddingBottom).toBe("max(40vh, 437px)");
+    // visibleBottom = 740 - 336 = 404, toolbar = 53, margin = 12 -> bottom = 339 -> scrolls by 380 - 339 = 41.
+    expect(rootEl.scrolled).toEqual([[0, 41]]);
+
+    // Losing live status hides the toolbar immediately and drops toolbar height from paddingBottom.
+    status = "disconnected";
+    for (const fn of subscribers) fn();
+    expect(bar.hidden).toBe(true);
+    expect(rootEl.style.paddingBottom).toBe("max(40vh, 384px)");
+  });
+
+  it("falls back to the focused block element when a collapsed caret rect has zero height", () => {
+    hoisted.readDoc = note(1);
+    mountDocument({ ...page, editable: true, live: false, touchSize: 44 });
+    const bar = rootEl.siblings[0]!;
+    bar.offsetHeight = 53;
+
+    const block = Object.assign(new FakeElement(), {
+      textContent: "Last paragraph",
+      childNodes: [],
+      getBoundingClientRect: () => ({ bottom: 390, height: 24 }),
+    });
+    vi.stubGlobal("Element", FakeElement);
+    vi.stubGlobal("HTMLBRElement", class FakeBR {});
+    (
+      document as unknown as { activeElement: { closest(sel: string): object | null } }
+    ).activeElement = {
+      closest: (sel: string) => (sel === ".markdown" ? {} : null),
+    };
+    (window as unknown as { getSelection(): unknown }).getSelection = () => ({
+      rangeCount: 1,
+      focusNode: block,
+      focusOffset: 1,
+      getRangeAt: () => ({
+        getBoundingClientRect: () => ({ bottom: 0, height: 0 }),
+      }),
+    });
+
+    keyboard().__dohcKeyboard(336);
+    // visibleBottom = 740 - 336 = 404, toolbar = 53, margin = 12 -> bottom = 339 -> scrolls by 390 - 339 = 51.
+    expect(rootEl.scrolled).toEqual([[0, 51]]);
   });
 });

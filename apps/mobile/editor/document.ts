@@ -5,6 +5,7 @@ import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";
 import { opensFormat, refuseFormat } from "./format";
 import { followLive } from "./live";
+import { createEditorToolbar, type EditorToolbar } from "./toolbar";
 
 export interface PageProperty {
   readonly name: string;
@@ -23,6 +24,8 @@ export interface PageConfig {
   readonly live?: boolean;
   /** Dynamic Type, as it is when the page opens. */
   readonly textScale: number;
+  /** Platform minimum touch target in CSS px (44 on iOS, 48 on Android). */
+  readonly touchSize?: number;
   /** Design review only: type a sentence and report keystroke-to-paint. */
   readonly autotype?: boolean;
 }
@@ -44,6 +47,8 @@ export function mountDocument(page: PageConfig) {
   root.className = "page";
   // Text sizes are in rem, so Dynamic Type scales the whole page from here.
   document.documentElement.style.setProperty("--text-scale", String(page.textScale));
+  if (page.touchSize !== undefined)
+    document.documentElement.style.setProperty("--touch", `${page.touchSize}px`);
   // A status-bar tap, from the app's page host: the page scrolls in this element, not the document.
   (window as Window & { __dohcScrollToTop?: () => void }).__dohcScrollToTop = () =>
     root.scrollTo({ top: 0, behavior: "instant" });
@@ -77,11 +82,19 @@ export function mountDocument(page: PageConfig) {
     },
     { capture: true },
   );
+  let revealCaret = () => {};
+  let syncKeyboardLayout = () => {};
+  const toolbar = createEditorToolbar({
+    root,
+    onLayout: () => syncKeyboardLayout(),
+    onCommand: () => requestAnimationFrame(revealCaret),
+  });
   let readOnly: ReturnType<typeof mountLiveBodyEditor> | null = null;
   const showRead = (markdown: string) => {
     const app = window as Window & { __dohcCopyMarkdown?: unknown; __dohcSetEditable?: unknown };
     delete app.__dohcCopyMarkdown;
     delete app.__dohcSetEditable;
+    toolbar.detach();
     readOnly?.destroy();
     readOnly = null;
     body.replaceChildren();
@@ -110,12 +123,14 @@ export function mountDocument(page: PageConfig) {
       },
     });
     readOnly = editor;
+    if (!page.live) toolbar.attach(editor, () => editable);
     // The app turns editing off when the page goes read-only (offline, deleted, access ended).
     (window as Window & { __dohcSetEditable?: (value: boolean) => void }).__dohcSetEditable = (
       value,
     ) => {
       editable = value;
       editor.refresh();
+      toolbar.refresh();
     };
   };
   showRead(page.markdown);
@@ -128,6 +143,7 @@ export function mountDocument(page: PageConfig) {
         readOnly: { destroy: () => readOnly?.destroy() },
         label: page.title,
         endEditing,
+        toolbar,
       });
     // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
     if (page.autotype) autotype(body, samples);
@@ -139,7 +155,9 @@ export function mountDocument(page: PageConfig) {
     // Typing done through the keyboard reports its keystroke-to-paint times when editing ends.
     if (typed.length > 0) post("typing", typingSummary(typed));
   };
-  followCaretAboveKeyboard();
+  const keyboard = followCaretAboveKeyboard(toolbar);
+  revealCaret = keyboard.reveal;
+  syncKeyboardLayout = keyboard.syncLayout;
   // First text on screen: after the frame that paints it.
   requestAnimationFrame(() => setTimeout(() => post("painted", { at: Date.now() }), 0));
 }
@@ -178,8 +196,22 @@ function autotype(body: HTMLElement, samples: number[]) {
 // The page scrolls inside #editor, so the focus scroll in WebKit can't move it, and the app tells the page how
 // much of it the keyboard covers. The page scrolls only when the caret would be hidden: when the keyboard comes up
 // and while typing. A caret already in view leaves the page where it is.
-function followCaretAboveKeyboard() {
+function followCaretAboveKeyboard(toolbar: EditorToolbar) {
   let covered = 0;
+  const keyboardTop = () => {
+    // WebKit may already shrink the visual viewport for the keyboard; take whichever edge is higher, so the
+    // keyboard is never counted twice.
+    const viewport = window.visualViewport;
+    return Math.min(
+      document.documentElement.clientHeight - covered,
+      viewport ? viewport.offsetTop + viewport.height : Number.POSITIVE_INFINITY,
+    );
+  };
+  const keyboardInset = () => {
+    if (covered === 0) return 0;
+    const clientHeight = document.documentElement.clientHeight;
+    return clientHeight > 0 ? Math.max(covered, clientHeight - keyboardTop()) : covered;
+  };
   const reveal = () => {
     if (covered === 0) return;
     const selection = window.getSelection();
@@ -192,26 +224,33 @@ function followCaretAboveKeyboard() {
     if (caret.height === 0 && node instanceof Element) {
       const after = node.childNodes[selection.focusOffset];
       if (after instanceof HTMLBRElement) caret = after.getBoundingClientRect();
-      if (caret.height === 0 && node.textContent === "" && node !== document.activeElement)
+      if (caret.height === 0 && node !== document.activeElement)
         caret = node.getBoundingClientRect();
     }
-    // WebKit may already shrink the visual viewport for the keyboard; take whichever edge is higher, so the
-    // keyboard is never counted twice. A small margin keeps the caret clear of it. The scroll is instant, so it
-    // reads the same under Reduce Motion.
-    const viewport = window.visualViewport;
-    const visibleBottom = Math.min(
-      document.documentElement.clientHeight - covered,
-      viewport ? viewport.offsetTop + viewport.height : Number.POSITIVE_INFINITY,
-    );
-    const bottom = visibleBottom - 12;
+    const bottom = keyboardTop() - toolbar.height() - 12;
     if (caret.bottom > bottom)
       document.getElementById("editor")?.scrollBy(0, caret.bottom - bottom);
   };
-  (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
-    covered = height;
+  const syncLayout = () => {
     const editor = document.getElementById("editor");
-    if (editor) editor.style.paddingBottom = height > 0 ? `max(40vh, ${height + 48}px)` : "";
+    const barHeight = toolbar.height();
+    if (editor)
+      editor.style.paddingBottom =
+        covered > 0 ? `max(40vh, ${keyboardInset() + barHeight + 48}px)` : "";
     reveal();
   };
+  const syncViewport = () => {
+    if (covered === 0) return;
+    toolbar.setKeyboard(covered, keyboardInset());
+    syncLayout();
+  };
+  (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
+    covered = Number.isFinite(height) && height > 0 ? height : 0;
+    toolbar.setKeyboard(covered, keyboardInset());
+    syncLayout();
+  };
   document.addEventListener("selectionchange", () => requestAnimationFrame(reveal));
+  window.visualViewport?.addEventListener("resize", syncViewport);
+  window.visualViewport?.addEventListener("scroll", syncViewport);
+  return { reveal, syncLayout };
 }
