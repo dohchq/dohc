@@ -85,10 +85,19 @@ export function CollectionList(props: {
   useEffect(() => {
     const controller = new AbortController();
     setFailed(false);
-    call(props.grantId, "collections", {}, controller.signal).then(
-      (result) => setCollections(result.collections as Collection[]),
-      () => !controller.signal.aborted && setFailed(true),
-    );
+    void (async () => {
+      const all: Collection[] = [];
+      for (let cursor: unknown; ;) {
+        const page = await call(
+          props.grantId,
+          "collections",
+          cursor ? { cursor } : {},
+          controller.signal,
+        );
+        all.push(...(page.collections as Collection[]));
+        if (!(cursor = page.nextCursor)) return setCollections(all);
+      }
+    })().catch(() => !controller.signal.aborted && setFailed(true));
     return () => controller.abort();
   }, [props.grantId, attempt]);
   if (failed)
@@ -175,15 +184,15 @@ export function CollectionTable(props: {
     void load();
     return () => reads.current?.abort();
   }, [collection.datasetId]);
+  const editField = table?.fields.find((field) => field.fieldId === editing?.fieldId),
+    editRow = rows?.find((row) => row.id === editing?.rowId);
   const dirty =
-    editing !== null &&
+    !!editing &&
+    !!editField &&
+    !!editRow &&
     (editing.saving === true ||
       editing.notice !== undefined ||
-      (() => {
-        const field = table?.fields.find((field) => field.fieldId === editing.fieldId);
-        const row = rows?.find((row) => row.id === editing.rowId);
-        return !field || !row || toDraft(field, row.values[field.fieldId]) !== editing.draft;
-      })());
+      toDraft(editField, editRow.values[editField.fieldId]) !== editing.draft);
   useEffect(() => {
     props.onDirty(dirty);
     return () => props.onDirty(false);
@@ -228,7 +237,7 @@ export function CollectionTable(props: {
       setRows(
         (rows) =>
           rows?.map((each) =>
-            each.id === edit.rowId
+            each.id === edit.rowId && version >= each.version
               ? { ...each, version, values: { ...each.values, [field.fieldId]: attempt.value } }
               : each,
           ) ?? null,
@@ -271,7 +280,11 @@ export function CollectionTable(props: {
       const current = (page.rows as Row[] | undefined)?.[0];
       if (!current) return setEditing({ ...edit, notice: "gone" });
       setRows((rows) => rows?.map((row) => (row.id === current.id ? current : row)) ?? null);
-      setEditing({ ...edit, version: current.version, attempt: undefined, notice: undefined });
+      setEditing((open) =>
+        open?.rowId === edit.rowId && open.fieldId === edit.fieldId
+          ? { ...open, version: current.version, attempt: undefined, notice: undefined }
+          : open,
+      );
     } catch {
       setEditing({ ...edit, notice: "dohc could not load the current row. Try again." });
     }
@@ -309,9 +322,10 @@ export function CollectionTable(props: {
         event.preventDefault();
       }
     };
-    const submit = (event: FormEvent) => {
+    const submit = (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (!edit.saving) void save(edit, field);
+      if (!edit.saving)
+        void save(edit, field, edit.notice === "uncertain" ? edit.attempt?.value : undefined);
     };
     const label = `${field.name}, ${shown(row.values[table!.fields[0]?.fieldId ?? ""]) || "this row"}`;
     const notice = edit.notice && (NOTICES[edit.notice] ?? edit.notice);
@@ -337,11 +351,19 @@ export function CollectionTable(props: {
               <option key={option}>{option}</option>
             ))}
           </select>
+        ) : field.type === "text" ? (
+          <textarea
+            aria-label={label}
+            autoFocus
+            rows={2}
+            value={String(edit.draft)}
+            onChange={(event) => set(event.target.value)}
+          />
         ) : (
           <input
             aria-label={label}
             autoFocus
-            type={["number", "date", "url"].includes(field.type) ? field.type : "text"}
+            type={field.type}
             step="any"
             value={String(edit.draft)}
             onChange={(event) => set(event.target.value)}
@@ -379,7 +401,11 @@ export function CollectionTable(props: {
           <select
             aria-label="Table"
             value={tableId ?? ""}
-            onChange={(event) => void load(undefined, event.target.value)}
+            disabled={dirty}
+            onChange={(event) => {
+              setSaved(null);
+              void load(undefined, event.target.value);
+            }}
           >
             {described.tables.map((table) => (
               <option key={table.tableId} value={table.tableId}>
@@ -388,7 +414,7 @@ export function CollectionTable(props: {
             ))}
           </select>
         )}
-        <button className="handoff-button secondary" onClick={() => void load()}>
+        <button className="handoff-button secondary" disabled={dirty} onClick={() => void load()}>
           <Icon name="refresh" size={15} />
           Refresh
         </button>

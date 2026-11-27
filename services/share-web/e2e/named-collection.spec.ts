@@ -403,6 +403,17 @@ test("a teammate invited by name edits a Collection's records in the browser, an
     await page.keyboard.press("Escape");
     await expect(table.getByRole("button", { name: "Edit Item: Museum passes" })).toBeFocused();
 
+    await table.getByRole("button", { name: "Edit Amount: 1010" }).click();
+    await input.selectText();
+    await page.keyboard.type("1-2");
+    await page.keyboard.press("Enter");
+    expect(await input.evaluate((control: HTMLInputElement) => control.validity.badInput)).toBe(
+      true,
+    );
+    await expect(input).toBeFocused();
+    expect(await amountOf("Hotel")).toBe(1010);
+    await page.keyboard.press("Escape");
+
     await table.getByRole("button", { name: "Edit Amount: 2560" }).click();
     await table.getByRole("spinbutton", { name: "Amount, Flights" }).fill("2400");
     const flights = (await ownerRows()).find((row) => row.values[ITEM] === "Flights")!;
