@@ -1,6 +1,7 @@
 import { relayPathSegments } from "./requestInputs";
 import { isLinkEndpointPath } from "./linkEndpointPath";
 import type { LiveNoteState } from "./storage/serviceHostEnrollment";
+import type { ServiceHostDocumentState } from "./serviceHostEnrollmentRoutes";
 import {
   LINK_REFUSALS,
   NAMED_LIVE_STOPPED,
@@ -30,16 +31,29 @@ export function linkRefusal(code: LinkRefusalCode): Response {
  */
 export type SessionHostBlock = "held" | "stopped";
 
-/** Where a note stands in going live, as its record says, while it is not live. */
+/** Where a note stands in going live, as its record and its host say, while it is not live. */
 export type LiveNoteStanding = "starting" | "off";
 
-/** Where a note stands, from its record's state. No record, or a live note, gives no answer. */
-export function liveNoteStanding(state: LiveNoteState | undefined): LiveNoteStanding | undefined {
-  return state === "starting"
+const OWNER_CLEARED_REASONS = new Set([
+  "session-host-refused",
+  "live-document-without-lineage",
+  "live-edit-unadmitted",
+]);
+
+/** Where a note stands, from its record's state and its owner's readiness. No record, or a note its host serves, gives no answer. */
+export function liveNoteStanding(
+  state: LiveNoteState | undefined,
+  readiness?: () => { status: ServiceHostDocumentState["status"]; reason?: string },
+): LiveNoteStanding | undefined {
+  if (state === "off" || state === "stopping") return "off";
+  if (state === undefined) return undefined;
+  const ready = readiness?.();
+  if (ready?.reason !== undefined && OWNER_CLEARED_REASONS.has(ready.reason)) return "off";
+  return state === "starting" ||
+    ready?.status === "preparing" ||
+    ready?.reason === "live-start-failing"
     ? "starting"
-    : state === "off" || state === "stopping"
-      ? "off"
-      : undefined;
+    : undefined;
 }
 
 /** What a link holder is told about a blocked document. */
@@ -47,13 +61,21 @@ export function sessionHostRefusal(block: SessionHostBlock): Response {
   return linkRefusal(block === "held" ? "link_live_stopped" : "link_live_unavailable");
 }
 
+export function liveNoteRefusal(
+  note: LiveNoteStanding | undefined,
+  block: SessionHostBlock | undefined,
+): Response | undefined {
+  if (note === "starting" && block !== "held") return linkRefusal("link_live_starting");
+  if (note === "off") return sessionHostRefusal("held");
+  return block ? sessionHostRefusal(block) : undefined;
+}
+
 /** What a link holder is told about a document with no binding. */
 export function unboundLinkRefusal(
   note: LiveNoteStanding | undefined,
   block: SessionHostBlock | undefined,
 ): Response {
-  if (note === "starting" && block !== "held") return linkRefusal("link_live_starting");
-  return sessionHostRefusal(note === "off" ? "held" : (block ?? "stopped"));
+  return liveNoteRefusal(note, block) ?? sessionHostRefusal("stopped");
 }
 
 /** What an invited editor is told about a held document. */

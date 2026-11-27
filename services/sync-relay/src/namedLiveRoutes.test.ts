@@ -331,6 +331,37 @@ it.each([true, false])(
   },
 );
 
+// A note whose record says live before its host serves it waits, and one its host won't start is off. Only a caller
+// who reaches the note learns either.
+it.each([true, false])(
+  "tells a caller who reaches a bound note whether it is still starting or off before minting; link=%s",
+  async (link) => {
+    const f = await fixture(limits, link);
+    const ask = async () => {
+      const response = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      });
+      return [response.status, await response.json()];
+    };
+    f.liveNote.mockReturnValue("starting");
+    expect(await ask()).toEqual([503, linkRefusalBody("link_live_starting")]);
+    f.liveNote.mockReturnValue("off");
+    expect(await ask()).toEqual(
+      link ? [503, linkRefusalBody("link_live_stopped")] : [404, NAMED_LIVE_STOPPED],
+    );
+    f.liveNote.mockReturnValue(undefined);
+    expect((await ask())[0]).toBe(200);
+    f.liveNote.mockReturnValue("starting");
+    f.raw
+      .prepare("UPDATE sync_relay_shares SET selector_json=?")
+      .run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    f.liveNote.mockClear();
+    expect(await ask()).toEqual([404, { ok: false, error: "not found" }]);
+    expect(f.liveNote).not.toHaveBeenCalled();
+  },
+);
+
 it("says in the server log why a link holder was told to try again, once for each reason and with no id of the note, workspace or link", async () => {
   const f = await fixture(limits, true);
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});

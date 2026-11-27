@@ -913,6 +913,22 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  if (reason === "live-hosting-unavailable") {
+    return {
+      title: "Live editing unavailable",
+      body: "This server doesn't host live editing for this workspace, so others can't edit its files live. Your edits are saved on this computer and keep syncing.",
+      recovery: "retry",
+      Icon: AlertTriangle,
+    };
+  }
+  if (reason === "server-unreachable") {
+    return {
+      title: "Live editing retrying",
+      body: "dohc can't reach the server's live editing. Your edits are saved on this computer, and dohc keeps trying.",
+      recovery: "retry",
+      Icon: RefreshCw,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",
@@ -932,6 +948,9 @@ function liveDeliveryCopy(
 // A retry dohc is still fixing by itself toasts and adds a row only once its
 // ring has shown in the title bar this long.
 const QUIET_RETRY_MS = 15_000;
+function quietLiveRetry(reason: SyncStatusResult["ownerLiveDeliveryReason"]): boolean {
+  return reason === "server-unreachable" || reason === "live-hosting-unavailable";
+}
 
 // Whether `key` has stayed the same, and not null, for `ms`. A key that
 // changes or clears starts the wait again.
@@ -1704,17 +1723,18 @@ export function NoticeCenter(props: {
   // failure, so the same failure in another workspace is still news. While
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
-  // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
-  // shows; a named reason stays until someone acts, so it shows at once.
+  // A retry with no reason, or a quiet one, waits QUIET_RETRY_MS, counted
+  // from when its ring shows; another named reason stays until someone acts,
+  // so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
-      ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
+      ? `${props.workspaceId}:retrying:${liveDeliveryReason && !quietLiveRetry(liveDeliveryReason) ? liveDeliveryReason : "transient"}`
       : null;
   const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
   const liveDeliveryKey = useLasted(
     serverNamed ? null : liveRetryKey,
-    liveDeliveryReason ? 0 : QUIET_RETRY_MS,
+    liveDeliveryReason && !quietLiveRetry(liveDeliveryReason) ? 0 : QUIET_RETRY_MS,
   )
     ? liveRetryKey
     : null;

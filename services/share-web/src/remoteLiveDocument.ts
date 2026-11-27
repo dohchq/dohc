@@ -46,7 +46,9 @@ class LiveDocumentRefusal extends Error {
 async function refusalError(response: Response, signal: AbortSignal): Promise<Error> {
   try {
     const code = parseLinkRefusal(await readBoundedJson(response, 4096, signal), response.status);
-    return new Error(code ? LINK_REFUSALS[code].error : "not found");
+    if (code === "link_live_starting")
+      return new LiveDocumentRefusal("preparing", LIVE_DOCUMENT_PREPARING);
+    return code ? new LiveDocumentRefusal(code, LINK_REFUSALS[code].error) : new Error("not found");
   } catch {
     return new Error("not found");
   } finally {

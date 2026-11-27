@@ -892,6 +892,39 @@ describe("notice center", () => {
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
+  // A server that can't be reached for live editing, or doesn't host it, can be a moment's answer, so it waits as a
+  // retry with no reason does. Once it lasts, its row says why.
+  it.each([
+    ["server-unreachable", "dohc can't reach the server's live editing."],
+    ["live-hosting-unavailable", "This server doesn't host live editing for this workspace"],
+  ] as const)("names a lasting %s retry only after 15 s", (reason, words) => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying", reason) });
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain(words);
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+  });
+
+  it("counts a lasting live retry from its start while its cause changes", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(5_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying", "server-unreachable") }));
+    act(() => vi.advanceTimersByTime(5_000));
+    rerender(
+      noticeElement({ syncStatus: liveDeliveryStatus("retrying", "live-hosting-unavailable") }),
+    );
+    act(() => vi.advanceTimersByTime(4_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain(
+      "This server doesn't host live editing for this workspace",
+    );
+  });
+
   // A healthy recovery tries again within about 10 s of the server coming
   // back, so it never toasts or adds a row.
   it("never announces a live retry that recovers within 15 s of the server coming back", () => {
