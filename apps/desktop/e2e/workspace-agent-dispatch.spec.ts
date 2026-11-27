@@ -83,7 +83,6 @@ test("Add an agent in Chats opens the Settings sheet, each installed tool replie
     expect(log).toContain('"type":"thread.started"');
     expect(log).not.toContain("check the exports");
 
-    // Claude Code, asked in chat, writes an app's source through dohc's MCP server.
     await page.keyboard.press("Escape");
     await page.getByTestId("chats-thread-back").click();
     await page.getByTestId("chats-new-thread-composer").fill("@Ada Make the hello app");

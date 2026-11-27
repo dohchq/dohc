@@ -380,8 +380,6 @@ function replyThroughMcp(args, body) {
     launch.readOnly === replyOnly &&
     names.includes("dohc_reply_to_chat") &&
     replyOnly === (names.length === 1);
-  // Asked to make an app, a run that may write saves its source through the
-  // same server before it replies.
   const makesApp = !launch.readOnly && prompt.includes("Make the hello app");
   callMcpTools(
     launch,
