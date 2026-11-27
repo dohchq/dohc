@@ -2568,6 +2568,13 @@ export function ChatsView(props: {
       channel.wireId ? (joinedByWire.get(channel.wireId) ?? null) : null,
     [joinedByWire],
   );
+  // A Group shared with you carries its owner's folder path, not one on this
+  // computer. Like channelIsLocked, a wire id the share lookup hasn't answered
+  // yet (undefined) counts as shared until it does.
+  const folderIsLocal = (channel: ChatChannelRecord) =>
+    inJoinedWorkspace ||
+    !channel.wireId ||
+    (channelShares !== null && joinedByWire.get(channel.wireId) === null);
   // The owner, and an admin in a joined workspace, choose who among the
   // members sees a Group. General, direct messages and agents' chats follow
   // the member level, and a Group shared with you is its owner's to set. The
@@ -5044,8 +5051,7 @@ export function ChatsView(props: {
                 !inJoinedWorkspace && channelShares !== null && joined === null && !!channel.wireId,
               canLeave: joined !== null,
               hasSettings: groupSettingsWireId(channel) !== null,
-              // A shared Group's folder path is its owner's, not this computer's.
-              hasFolder: joined === null && !!channel.folderPath,
+              hasFolder: !!channel.folderPath && folderIsLocal(channel),
             },
           })}
           trailing={

@@ -11,6 +11,7 @@ import {
   thread,
   shareListing,
   emitCloudSessionChanged,
+  emitWorkspaceActivity,
   renderView,
   navigatorView,
 } from "./ChatsView.testHarness";
@@ -932,6 +933,58 @@ describe("ChatsView Group access marks", () => {
       }),
     );
     await waitFor(() => expect(screen.queryByTestId("chats-group-settings-dialog")).toBeNull());
+  });
+
+  // An activity refresh shows a Group it just learned of before the share
+  // lookup says whether it's shared with you.
+  it("offers Show folder on a new Group only once the share lookup says it's this computer's", async () => {
+    const team = channel({
+      id: "channel-team",
+      name: "Team",
+      wireId: "wire-team",
+      folderPath: "Team",
+    });
+    let withTeam = false;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({ channels: withTeam ? [channel(), team] : [channel()], fileThreads: [] }),
+    );
+    renderView(vi.fn(), vi.fn(), { onShowFolder: vi.fn() });
+    await screen.findByTestId("chats-channel");
+
+    const joinedRead = deferred<{ joined: unknown[] }>();
+    bridgeMock.listJoinedSharedChannels.mockReturnValue(joinedRead.promise);
+    withTeam = true;
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
+    const openTeamMenu = async () => {
+      const row = screen
+        .getAllByTestId("chats-channel")
+        .find((entry) => entry.textContent?.startsWith("Team"))!;
+      fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+      await screen.findByTestId("chat-row-menu-archive");
+    };
+    await openTeamMenu();
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("chat-row-menu-archive")).toBeNull());
+
+    await act(async () => {
+      joinedRead.resolve({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    await screen.findByTestId("chats-channel-shared");
+    await openTeamMenu();
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
   });
 
   it("offers only Close in Group settings when the workspace never synced", async () => {
