@@ -208,23 +208,34 @@ const betweenCells = ($pos: ResolvedPos) =>
 function keptInOrder(
   before: ProseMirrorNode,
   after: ProseMirrorNode,
-  [oldStart, oldEnd, newStart, newEnd]: Range,
+  range: Range,
 ): Range[] | null {
-  if (oldStart === oldEnd || newStart === newEnd || !betweenCells(before.resolve(oldStart)))
-    return null;
-  if (before.resolve(oldEnd).parent.isTextblock) return null;
+  const [start, end] = [before.resolve(range[0]), before.resolve(range[1])];
+  if (range[0] === range[1] || range[2] === range[3] || !betweenCells(start)) return null;
+  if (end.parent.isTextblock) return null;
+  let [oldStart, oldEnd, newStart, newEnd] = trimRange(before, after, range);
+  const [$start, $end] = [before.resolve(oldStart), before.resolve(oldEnd)];
+  const back = $start.parent.isTextblock ? oldStart - $start.before() : 0;
+  const on = $end.parent.isTextblock ? $end.after() - oldEnd : 0;
+  [oldStart, oldEnd, newStart, newEnd] = [
+    oldStart - back,
+    oldEnd + on,
+    newStart - back,
+    newEnd + on,
+  ];
   const was = leavesBetween(before, oldStart, oldEnd);
   const now = leavesBetween(after, newStart, newEnd);
   const kept = inOrder(was, now);
   if (kept.length === 0) return null;
   const ranges: Range[] = [];
+  let [lastOne, lastOther] = [-1, -1];
   for (const [one, other] of [...kept, [was.length, now.length]]) {
     const [oldTo, newTo] = [was[one]?.from ?? oldEnd, now[other]?.from ?? newEnd];
-    if (!before.slice(oldStart, oldTo).eq(after.slice(newStart, newTo)))
-      ranges.push([oldStart, oldTo, newStart, newTo]);
+    if (one > lastOne + 1 || other > lastOther + 1) ranges.push([oldStart, oldTo, newStart, newTo]);
     [oldStart, newStart] = [was[one]?.to ?? oldEnd, now[other]?.to ?? newEnd];
+    [lastOne, lastOther] = [one, other];
   }
-  return ranges;
+  return ranges.length > 0 ? ranges : null;
 }
 
 function rangesOf(
@@ -282,10 +293,19 @@ function handedOnAsOne(transaction: Transform): Transform | null {
     }
   }
   const { before, doc } = transaction;
-  const from = before.content.findDiffStart(doc.content);
-  if (!handedOn || from === null) return null;
+  const differs = before.content.findDiffStart(doc.content);
+  if (!handedOn || differs === null) return null;
   const { a, b } = before.content.findDiffEnd(doc.content)!;
-  return asOneStep(transaction, from, b + Math.max(0, from - Math.min(a, b)));
+  const $from = before.resolve(differs);
+  const $until = before.resolve(a + Math.max(0, differs - Math.min(a, b)));
+  const from = $from.parent.isTextblock ? $from.before() : differs;
+  const on = ($until.parent.isTextblock ? $until.after() : $until.pos) - a;
+  const was = leavesBetween(before, from, a + on);
+  const now = leavesBetween(doc, from, b + on);
+  const stays = new Set(was.map(({ node }) => node).filter((node) => !deleted.has(node)));
+  const keeps = inOrder(was, now).filter(([one]) => stays.has(was[one]!.node)).length;
+  const kept = now.filter(({ node }) => stays.has(node)).length;
+  return keeps === kept ? asOneStep(transaction, from, b + on) : null;
 }
 
 function tokensBetween(doc: ProseMirrorNode, from: number, to: number): Token[] {

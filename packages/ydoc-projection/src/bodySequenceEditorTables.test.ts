@@ -382,6 +382,48 @@ describe("a table change keeps the cells it does not move", () => {
     expect(a.view.state.doc.child(0).childCount).toBe(was.child(0).childCount);
     a.expectMirror();
   });
+
+  it.each<
+    [name: string, rows: string[][], spans: Record<string, number>, act: Act, lines: string[]]
+  >([
+    [
+      "a deleted row hands down a cell that comes after it",
+      [["a", "TALL"], ["SAFE"]],
+      { TALL: 2 },
+      (a) => (caretIn(a, "a"), run(deleteRow)(a, () => 0)),
+      ["SA!FE", "TALL"],
+    ],
+    [
+      "cells merged around it",
+      [
+        ["A", "SAFE", "C"],
+        ["D", "E", "F"],
+      ],
+      {},
+      (a) => {
+        const cellAt = (text: string) => (
+          caretIn(a, text),
+          cellAround(a.view.state.selection.$from)!
+        );
+        const cells = new CellSelection(cellAt("SAFE"), cellAt("F"));
+        return mergeCells(a.view.state.apply(a.view.state.tr.setSelection(cells)), a.view.dispatch);
+      },
+      ["A", "SA!FE", "C", "E", "F", "D"],
+    ],
+  ])(
+    "keeps what someone types in a cell that stays where it is when %s",
+    (_name, rows, spans, act, lines) => {
+      const note = grid(rows, spans);
+      const a = person(note, 10);
+      const b = person(note, 20);
+      b.typeAt(b.lines().indexOf("SAFE"), 2, "!");
+      expect(act(a, () => 0)).toBe(true);
+      exchange(a, b);
+      expect(a.lines()).toEqual(lines);
+      expect(b.view.state.doc.eq(a.view.state.doc)).toBe(true);
+      a.expectMirror();
+    },
+  );
 });
 
 const ROWS = 1_000;
