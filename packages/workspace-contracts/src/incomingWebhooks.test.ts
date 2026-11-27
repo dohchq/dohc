@@ -43,6 +43,23 @@ describe("incomingWebhooks contracts", () => {
     });
   });
 
+  it("titles a website signup form's record with its email", () => {
+    const record = (bodyText: string) =>
+      formatIncomingWebhookRecord({
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        deliveryId: "whd_1234567890abcdef",
+        webhookName: "Waitlist",
+        contentType: "application/x-www-form-urlencoded",
+        headers: {},
+        bodyText,
+        receivedAtMs: Date.UTC(2026, 10, 27),
+      }).title;
+    expect(record("email=ada%40example.com&source=Drive+waitlist")).toBe(
+      "Waitlist: ada@example.com",
+    );
+    expect(record("email=ada%40example.com&name=Ada")).toBe("Waitlist: Ada");
+  });
+
   it("quarantines untrusted webhook payloads with safe YAML frontmatter and dynamic code fences", () => {
     const { title, filename, markdown } = formatIncomingWebhookRecord({
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",

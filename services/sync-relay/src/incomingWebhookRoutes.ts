@@ -743,7 +743,11 @@ export function createIncomingWebhookRoutes(options: {
   }
 
   return {
-    respondToPublicIngress,
+    async respondToPublicIngress(request: Request, token: string): Promise<Response> {
+      const response = await respondToPublicIngress(request, token);
+      response.headers.set("access-control-allow-origin", "*");
+      return response;
+    },
     respondToOwnerManagement,
   };
 }
