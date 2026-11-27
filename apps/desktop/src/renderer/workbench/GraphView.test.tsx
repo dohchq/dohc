@@ -1180,6 +1180,7 @@ describe("structural kind hues and approval surge", () => {
     const onError = vi.fn();
     stubPages(["note.md"], [], {
       linksConnections,
+      chatFileMentionsPage: vi.fn(async () => ({ entries: [] })),
       onLocalAppsChanged: vi.fn((cb: (event: { workspaceId: string }) => void) => {
         localAppsListener = cb;
         return () => {
@@ -1262,6 +1263,25 @@ describe("structural kind hues and approval surge", () => {
     expect(frames.pending).toBe(0);
     expect(steps).toBeGreaterThan(40);
     expect(arcCalls.some((args) => args[2] === 2.2)).toBe(true);
+
+    arcCalls.length = 0;
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="3"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+        chatMentionsAvailable
+      />,
+    );
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toBeTruthy());
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+    expect(arcCalls.some((args) => args[2] === 2.2)).toBe(false);
 
     view.rerender(
       <GraphView

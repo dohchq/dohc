@@ -37,14 +37,9 @@ import { bridge } from "../bridge";
 import { isChatMentionPageChanged, refusalCode } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { EmptyState, IconButton, RetryRow } from "../ui/controls";
-import {
-  GROUP_HUES,
-  GraphCanvas,
-  LINK_STYLE,
-  type ApprovalSurge,
-  type CanvasNode,
-  type GraphLink,
-} from "./GraphCanvas";
+import { GROUP_HUES, GraphCanvas, LINK_STYLE } from "./GraphCanvas";
+import type { ApprovalSurge, CanvasNode, GraphLink } from "./GraphCanvas";
+import { APPROVAL_SURGE_MS } from "./graphVisuals";
 import {
   DEFAULT_SETTINGS,
   GRAPH_KINDS,
@@ -155,19 +150,18 @@ const linkStyle = (edge: GraphEdge) =>
         ? LINK_STYLE.prose
         : LINK_STYLE.structural;
 
-export function detectApprovedEdges(
-  previousRequested: ReadonlySet<string>,
+export const detectApprovedEdges = (
+  prev: ReadonlySet<string>,
   edges: LinksConnectionsResult["edges"],
-): [string, string][] {
-  return edges
+): [string, string][] =>
+  edges
     .filter(
-      (edge) =>
-        edge.kind === "app-uses-data" &&
-        edge.approval === "approved" &&
-        previousRequested.has(JSON.stringify([edge.source, edge.target])),
+      (e) =>
+        e.kind === "app-uses-data" &&
+        e.approval === "approved" &&
+        prev.has(JSON.stringify([e.source, e.target])),
     )
-    .map((edge) => [edge.source, edge.target]);
-}
+    .map((e) => [e.source, e.target]);
 
 function buildModel(
   graph: GraphData,
@@ -529,7 +523,10 @@ function GraphSearch(props: {
                 activeMatch?.index === index ? "bg-selected text-ink" : "text-muted"
               }`}
             >
-              <ShapeMark shape={node.shape} className={markTone(props.groups[index] ?? -1)} />
+              <ShapeMark
+                shape={node.shape}
+                className={markTone(props.groups[index] ?? -1, activeMatch?.index === index)}
+              />
               <span className="min-w-0 flex-1 truncate">{node.title}</span>
               <span className="text-[12px] tabular-nums text-subtle">
                 {node.degree.toLocaleString()}
@@ -843,32 +840,29 @@ export function GraphView(props: {
     if (freshConnections)
       holdConnections({ workspaceId: props.workspaceId, value: freshConnections });
   }, [freshConnections, props.workspaceId]);
-  const approvalEventPendingRef = useRef(false);
-  const prevRequestedRef = useRef<Set<string> | null>(null);
-  const surgeNonceRef = useRef(0);
+  const surgeRef = useRef({ armed: false, prev: null as Set<string> | null, nonce: 0 });
   const [approvalSurge, setApprovalSurge] = useState<ApprovalSurge | null>(null);
   useEffect(() => {
-    approvalEventPendingRef.current = false;
-    prevRequestedRef.current = null;
+    surgeRef.current.armed = false;
+    surgeRef.current.prev = null;
     setApprovalSurge(null);
     return bridge().onLocalAppsChanged((event) => {
-      if (event.workspaceId === props.workspaceId) approvalEventPendingRef.current = true;
+      if (event.workspaceId === props.workspaceId) surgeRef.current.armed = true;
     });
   }, [props.workspaceId]);
   useEffect(() => {
     if (!freshConnections || freshConnections.scope !== "workspace") return;
     const requested = new Set(
       freshConnections.edges
-        .filter((edge) => edge.kind === "app-uses-data" && edge.approval === "requested")
-        .map((edge) => JSON.stringify([edge.source, edge.target])),
+        .filter((e) => e.kind === "app-uses-data" && e.approval === "requested")
+        .map((e) => JSON.stringify([e.source, e.target])),
     );
-    const prev = prevRequestedRef.current;
-    const armed = approvalEventPendingRef.current;
-    approvalEventPendingRef.current = false;
-    prevRequestedRef.current = requested;
+    const { armed, prev } = surgeRef.current;
+    surgeRef.current.armed = false;
+    surgeRef.current.prev = requested;
     if (!armed || !prev) return;
     const edges = detectApprovedEdges(prev, freshConnections.edges);
-    if (edges.length > 0) setApprovalSurge({ nonce: ++surgeNonceRef.current, edges });
+    if (edges.length > 0) setApprovalSurge({ nonce: ++surgeRef.current.nonce, edges });
   }, [freshConnections, props.workspaceId]);
   const connections =
     freshConnections ??
@@ -876,14 +870,13 @@ export function GraphView(props: {
   const connectionsError = connectionsQuery.error;
   const retryConnections = connectionsQuery.retry;
   useEffect(() => {
-    if (connectionsError) {
-      approvalEventPendingRef.current = false;
+    if (connectionsError) surgeRef.current.armed = false;
+    if (connectionsError)
       reportError.current?.(
         "dohc could not load how Collections and apps connect.",
         connectionsError,
         () => void retryConnections(),
       );
-    }
   }, [connectionsError, retryConnections]);
 
   const settingsKey = `${props.workspaceId}\0${variant}`;
@@ -972,6 +965,12 @@ export function GraphView(props: {
   const counts = `${itemCount} · ${linkCount}`;
   const notice = coverageNotice(graph);
   const empty = !loadingBlank && graph.nodes.length === 0 && scopedState.status !== "error";
+  useEffect(() => {
+    if (!approvalSurge) return;
+    if (loadingBlank || empty) return setApprovalSurge(null);
+    const timer = setTimeout(() => setApprovalSurge(null), APPROVAL_SURGE_MS + 100);
+    return () => clearTimeout(timer);
+  }, [approvalSurge, loadingBlank, empty]);
 
   const canvas = (
     <GraphCanvas

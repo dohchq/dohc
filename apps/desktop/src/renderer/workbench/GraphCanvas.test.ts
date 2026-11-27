@@ -14,7 +14,6 @@ import {
   shortTitle,
 } from "./GraphCanvas";
 import {
-  BUBBLE_OUTER_FACTOR,
   REST_GLOW,
   isCurvedEdge,
   outerRadius,
@@ -163,7 +162,7 @@ describe("graphVisuals helpers", () => {
   });
 
   it("computes exact outer radii including the Group bubble tail", () => {
-    expect(outerRadius("bubble", 10)).toBeCloseTo(BUBBLE_OUTER_FACTOR * 10);
+    expect(outerRadius("bubble", 10)).toBeCloseTo(Math.hypot(0.95, 1.1) * 10);
     expect(outerRadius("square", 10)).toBeCloseTo(14.1);
     expect(outerRadius("triangle", 10)).toBeCloseTo(13.5);
     expect(outerRadius("diamond", 10)).toBeCloseTo(12.5);
@@ -674,6 +673,94 @@ describe("createGraphRenderer visual behaviours", () => {
     const pillBottom = (pill!.args[1] as number) + (pill!.args[3] as number);
     const ringTop = (activeAfter!.args[1] as number) - (activeAfter!.args[2] as number);
     expect(pillBottom).toBeLessThanOrEqual(ringTop);
+    renderer.destroy();
+  });
+
+  it("draws Group bubble clockwise, skips glowLayer for prose-only graphs, and falls back to non-pill title when hemmed in above and below", () => {
+    const env = setupRendererEnv();
+    const { canvas, calls, fire } = env.makeCanvas();
+    const renderer = createGraphRenderer(canvas, "bg", { open: vi.fn(), settled: vi.fn() });
+    renderer.resize(500, 400);
+
+    renderer.setModel({
+      nodes: [
+        { path: "a.md", title: "Alpha", kind: "Page", shape: "circle", degree: 1 },
+        { path: "b.md", title: "Beta", kind: "Page", shape: "circle", degree: 1 },
+      ],
+      links: [[0, 1, LINK_STYLE.prose]],
+    });
+    env.drain();
+    expect(calls.some((c) => c.op === "drawImage")).toBe(false);
+
+    calls.length = 0;
+    renderer.setModel({
+      nodes: [
+        {
+          path: "group:ops",
+          title: "Ops",
+          kind: "Group",
+          shape: "bubble",
+          degree: 2,
+          structural: true,
+        },
+        {
+          path: "collection:a",
+          title: "Above",
+          kind: "Collection",
+          shape: "square",
+          degree: 1,
+          structural: true,
+        },
+        {
+          path: "collection:b",
+          title: "Below",
+          kind: "Collection",
+          shape: "square",
+          degree: 1,
+          structural: true,
+        },
+      ],
+      links: [
+        [0, 1, LINK_STYLE.structural],
+        [0, 2, LINK_STYLE.structural],
+      ],
+    });
+    renderer.setGroups(Int16Array.from([0, 0, 0]));
+    env.drain();
+    const bubbleArc = calls.find(
+      (c) =>
+        c.op === "arc" &&
+        c.state.fillStyle === identityHues.dark.teal &&
+        (c.args[3] as number) > 2 &&
+        (c.args[4] as number) < 2,
+    );
+    expect(bubbleArc).toBeDefined();
+    expect(bubbleArc!.args[5]).toBe(false);
+
+    const cx = bubbleArc!.args[0] as number;
+    const cy = bubbleArc!.args[1] as number;
+    const squares = calls.filter(
+      (c) => c.op === "roundRect" && c.state.fillStyle === identityHues.dark.teal,
+    );
+    const s0x = (squares[0]!.args[0] as number) + (squares[0]!.args[2] as number) / 2;
+    const s0y = (squares[0]!.args[1] as number) + (squares[0]!.args[3] as number) / 2;
+    const s1x = (squares[1]!.args[0] as number) + (squares[1]!.args[2] as number) / 2;
+    const s1y = (squares[1]!.args[1] as number) + (squares[1]!.args[3] as number) / 2;
+    fire("pointerdown", { button: 0, pointerId: 1, clientX: s0x, clientY: s0y });
+    fire("pointermove", { pointerId: 1, clientX: cx, clientY: cy - 22 });
+    fire("pointerup", { pointerId: 1 });
+    fire("pointerdown", { button: 0, pointerId: 2, clientX: s1x, clientY: s1y });
+    fire("pointermove", { pointerId: 2, clientX: cx, clientY: cy + 22 });
+    fire("pointerup", { pointerId: 2 });
+    env.drain();
+
+    calls.length = 0;
+    renderer.setFocus(0);
+    env.drain();
+    expect(calls.some((c) => c.op === "roundRect" && c.state.fillStyle === palette.dark.bg)).toBe(
+      false,
+    );
+    expect(calls.some((c) => c.op === "fillText" && c.args[0] === "Ops")).toBe(true);
     renderer.destroy();
   });
 

@@ -124,7 +124,7 @@ function readPalette(canvas: HTMLCanvasElement, surface: "bg" | "panel"): Palett
     line: token("line"),
     dark: theme === "dark",
     groups,
-    glowSprites: visuals.createGlowSprites(groups),
+    glowSprites: [],
     font: style.getPropertyValue("--font-sans").trim() || "system-ui, sans-serif",
     edgeAlpha: theme === "dark" ? 0.2 : 0.16,
     nodeDim: NODE_DIM[theme],
@@ -214,9 +214,8 @@ function addShape(
     }
     case "bubble":
       ctx.moveTo(x - 0.62 * r, y + 0.79 * r);
+      ctx.arc(x, y, r, Math.atan2(0.79, -0.62), Math.atan2(0.98, -0.2), false);
       ctx.lineTo(x - 0.95 * r, y + 1.1 * r);
-      ctx.lineTo(x - 0.2 * r, y + 0.98 * r);
-      ctx.arc(x, y, r, Math.atan2(0.98, -0.2), Math.atan2(0.79, -0.62), true);
       ctx.closePath();
       return;
     default:
@@ -372,8 +371,9 @@ export function createGraphRenderer(
     style = new Uint8Array(next.links.length);
     hasPending = new Uint8Array(count);
     pathIndex = new Map(next.nodes.map((node, i) => [node.path, i]));
-    useGlow = next.nodes.filter((node) => node.structural).length <= visuals.MAX_GLOW_STRUCTURAL;
-    let curved = 0;
+    let structuralNodes = 0,
+      curved = 0;
+    for (let i = 0; i < count; i++) if (next.nodes[i]!.structural) structuralNodes++;
     next.links.forEach(([s, t, kind = LINK_STYLE.prose], l) => {
       source[l] = s;
       target[l] = t;
@@ -383,6 +383,7 @@ export function createGraphRenderer(
       degree[s]!++;
       degree[t]!++;
     });
+    useGlow = structuralNodes > 0 && structuralNodes <= visuals.MAX_GLOW_STRUCTURAL;
     useCurved = curved <= visuals.MAX_CURVED_LINKS;
     if (count === 0) surgeEdges = [];
     offsets = new Uint32Array(count + 1);
@@ -496,26 +497,12 @@ export function createGraphRenderer(
     }
     if (surge.nonce === lastSurgeNonce) return;
     lastSurgeNonce = surge.nonce;
-    if (reduced || !visible || !ctx || !surge.edges.length) return;
+    const hasEdge = surge.edges.some(([s, t]) => pathIndex.has(s) && pathIndex.has(t));
+    if (reduced || !visible || !ctx || !hasEdge) return;
     surgeEdges = surge.edges;
     surgeStart = -1;
     wake();
   }
-
-  const collectHoverEdges = (nodeIndex: number) => {
-    const edges = new Set<number>();
-    for (let l = 0; l < source.length && edges.size < 24; l++) {
-      const s = source[l]!,
-        t = target[l]!;
-      if (s !== nodeIndex && t !== nodeIndex) continue;
-      if (
-        style[l] === LINK_STYLE.pending ||
-        (style[l] === LINK_STYLE.structural && !model.nodes[s]?.paused && !model.nodes[t]?.paused)
-      )
-        edges.add(l);
-    }
-    return edges;
-  };
 
   function relight(): void {
     const next = hover >= 0 ? hover : focus;
@@ -532,24 +519,30 @@ export function createGraphRenderer(
       for (let a = offsets[next]!; a < offsets[next + 1]!; a++) litSet[adjacency[a]!] = 1;
       lit = next;
       litPath = nextPath;
-      hoverFlowEdges = collectHoverEdges(next);
-      const hasMotion =
-        !reduced && ctx !== null && (hasPending[next] === 1 || hoverFlowEdges.size > 0);
-      if (!sameNode) {
-        hoverFlowActive = hasMotion;
-        hoverFlowStart = -1;
-      } else if (!hasMotion) {
-        hoverFlowActive = false;
+      hoverFlowEdges = new Set();
+      for (let l = 0; l < source.length && hoverFlowEdges.size < 24; l++) {
+        const s = source[l]!,
+          d = target[l]!;
+        if (s !== next && d !== next) continue;
+        if (
+          style[l] === LINK_STYLE.pending ||
+          (style[l] === LINK_STYLE.structural && !model.nodes[s]?.paused && !model.nodes[d]?.paused)
+        )
+          hoverFlowEdges.add(l);
+      }
+      const hasMotion = !reduced && ctx !== null && hoverFlowEdges.size > 0;
+      if (!sameNode || !hasMotion) {
+        hoverFlowActive = sameNode ? false : hasMotion;
         hoverFlowStart = -1;
       }
     }
-    const target = next >= 0 ? 1 : 0;
+    const goal = next >= 0 ? 1 : 0;
     if (reduced) {
-      mix = mixTo = target;
-      if (target === 0) lit = -1;
-    } else if (target !== mixTo) {
+      mix = mixTo = goal;
+      if (goal === 0) lit = -1;
+    } else if (goal !== mixTo) {
       mixFrom = mix;
-      mixTo = target;
+      mixTo = goal;
       mixStart = performance.now();
     }
     canvas.dataset.hovered = next >= 0 ? model.nodes[next]!.path : "";
@@ -611,25 +604,17 @@ export function createGraphRenderer(
       fading = t < 1;
       if (!fading && mixTo === 0) lit = -1;
     }
-    const advance = (active: boolean, start: number, ms: number): [number, number] => {
-      if (!active || reduced || !ctx) return [-1, -1];
-      const s = start < 0 ? now : start;
-      const elapsed = Math.max(0, now - s);
-      return elapsed >= ms ? [-1, -1] : [s, elapsed / ms];
+    const tick = (on: boolean, start: number, ms: number): [number, number] => {
+      if (!on || reduced || !ctx) return [-1, -1];
+      const s = start < 0 ? now : start,
+        dt = Math.max(0, now - s);
+      return dt >= ms ? [-1, -1] : [s, dt / ms];
     };
-    let hoverProgress = -1,
-      surgeProgress = -1;
-    [hoverFlowStart, hoverProgress] = advance(
-      hoverFlowActive && lit >= 0,
-      hoverFlowStart,
-      visuals.HOVER_FLOW_MS,
-    );
+    const [hs, hoverProgress] = tick(hoverFlowActive && lit >= 0, hoverFlowStart, 1400);
+    hoverFlowStart = hs;
     if (hoverProgress < 0) hoverFlowActive = false;
-    [surgeStart, surgeProgress] = advance(
-      surgeEdges.length > 0,
-      surgeStart,
-      visuals.APPROVAL_SURGE_MS,
-    );
+    const [ss, surgeProgress] = tick(surgeEdges.length > 0, surgeStart, 950);
+    surgeStart = ss;
     if (surgeProgress < 0) surgeEdges = [];
     const labelsFading = draw(now, hoverProgress, surgeProgress);
     const coreDone = !fading && !easing && !labelsFading;
@@ -666,28 +651,30 @@ export function createGraphRenderer(
     const ringR = (i: number) =>
       outerR(i) + (i === active ? (hasPending[i] ? 6.5 : 4) : hasPending[i] ? 3.5 : 0);
 
-    if (useGlow && mix < 1 && (glowLayer = visuals.ensureGlowLayer(glowLayer, width, height))) {
-      const mode = palette.dark ? "screen" : "source-over";
-      glowLayer.ctx.globalCompositeOperation = mode;
-      let anyGlow = false;
-      for (let i = 0; i < count; i++) {
-        const sprite =
-          model.nodes[i]!.structural && group(i) >= 0 ? palette.glowSprites[group(i)] : null;
-        if (!sprite) continue;
-        const gr = visuals.GLOW_RADIUS_FACTOR * screenR(i),
-          x = sx(i),
-          y = sy(i);
-        if (x < -gr || y < -gr || x > width + gr || y > height + gr) continue;
-        glowLayer.ctx.drawImage(sprite, (x - gr) / 2, (y - gr) / 2, gr, gr);
-        anyGlow = true;
-      }
-      if (anyGlow) {
-        ctx.save();
-        ctx.globalCompositeOperation = mode;
-        ctx.globalAlpha =
-          (palette.dark ? visuals.REST_GLOW.dark : visuals.REST_GLOW.light) * (1 - mix);
-        ctx.drawImage(glowLayer.canvas, 0, 0, width, height);
-        ctx.restore();
+    if (useGlow && mix < 1) {
+      if (!palette.glowSprites.length)
+        palette.glowSprites = visuals.createGlowSprites(palette.groups);
+      glowLayer = visuals.ensureGlowLayer(glowLayer, width, height);
+      if (glowLayer) {
+        const mode = palette.dark ? "screen" : "source-over";
+        glowLayer.ctx.globalCompositeOperation = mode;
+        let anyGlow = false;
+        for (let i = 0; i < count; i++) {
+          const sprite = model.nodes[i]!.structural ? palette.glowSprites[group(i)] : null;
+          const gr = 2.6 * screenR(i),
+            x = sx(i),
+            y = sy(i);
+          if (!sprite || x < -gr || y < -gr || x > width + gr || y > height + gr) continue;
+          glowLayer.ctx.drawImage(sprite, (x - gr) / 2, (y - gr) / 2, gr, gr);
+          anyGlow = true;
+        }
+        if (anyGlow) {
+          ctx.save();
+          ctx.globalCompositeOperation = mode;
+          ctx.globalAlpha = visuals.REST_GLOW[palette.dark ? "dark" : "light"] * (1 - mix);
+          ctx.drawImage(glowLayer.canvas, 0, 0, width, height);
+          ctx.restore();
+        }
       }
     }
 
@@ -700,19 +687,19 @@ export function createGraphRenderer(
     );
     const strokeWidth = (links: number, wide: number) =>
       links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide;
-    const linkColor = (s: number, edgeStyle: number, fallback: string) =>
-      edgeStyle === LINK_STYLE.pending
-        ? palette.warning
-        : group(s) >= 0
-          ? palette.groups[group(s)]!
-          : fallback;
+    const linkColor = (s: number, kind: number, fallback: string) =>
+      kind === LINK_STYLE.pending ? palette.warning : (palette.groups[group(s)] ?? fallback);
     const drawCurved = (litOnly: boolean) => {
+      const litW = lineWidth * (1 + 0.4 * mix);
       for (let l = 0; l < source.length; l++) {
-        const edgeStyle = style[l]!,
+        const kind = style[l]!,
           s = source[l]!,
           t = target[l]!;
-        if (!visuals.isCurvedEdge(useCurved, edgeStyle)) continue;
-        if ((highlight && (s === lit || t === lit)) !== litOnly) continue;
+        if (
+          !visuals.isCurvedEdge(useCurved, kind) ||
+          (highlight && (s === lit || t === lit)) !== litOnly
+        )
+          continue;
         const x1 = sx(s),
           y1 = sy(s),
           x2 = sx(t),
@@ -726,35 +713,26 @@ export function createGraphRenderer(
             Math.min(y1, y2, cy) > height)
         )
           continue;
-        const stroke = () => {
-          ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.quadraticCurveTo(cx, cy, x2, y2);
-          ctx.stroke();
-        };
-        ctx.strokeStyle = linkColor(s, edgeStyle, litOnly ? palette.match : palette.edge);
+        const restA = palette.edgeAlpha * (kind === LINK_STYLE.pending ? 2.4 : 2.2);
+        ctx.strokeStyle = linkColor(s, kind, litOnly ? palette.match : palette.edge);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.quadraticCurveTo(cx, cy, x2, y2);
         if (litOnly) {
-          const litW = lineWidth * (1 + 0.4 * mix);
           ctx.setLineDash([]);
           ctx.lineDashOffset = 0;
           ctx.globalAlpha = 0.2 * mix;
           ctx.lineWidth = litW * 2.5;
-          stroke();
-          ctx.setLineDash(LINK_DASH[edgeStyle]!);
-          ctx.lineDashOffset =
-            edgeStyle === LINK_STYLE.pending && hoverProgress >= 0 && hoverFlowEdges.has(l)
-              ? -hoverProgress * 36
-              : 0;
-          ctx.globalAlpha = palette.edgeAlpha + (0.9 - palette.edgeAlpha) * mix;
-          ctx.lineWidth = litW;
-          stroke();
-        } else {
-          ctx.setLineDash(LINK_DASH[edgeStyle]!);
-          ctx.globalAlpha =
-            palette.edgeAlpha * linkRest * (edgeStyle === LINK_STYLE.pending ? 2.4 : 2.2);
-          ctx.lineWidth = lineWidth;
-          stroke();
+          ctx.stroke();
         }
+        ctx.setLineDash(LINK_DASH[kind]!);
+        ctx.lineDashOffset =
+          litOnly && kind === LINK_STYLE.pending && hoverProgress >= 0 && hoverFlowEdges.has(l)
+            ? -hoverProgress * 36
+            : 0;
+        ctx.globalAlpha = litOnly ? restA + (0.9 - restA) * mix : restA * linkRest;
+        ctx.lineWidth = litOnly ? litW : lineWidth;
+        ctx.stroke();
       }
       ctx.lineDashOffset = 0;
     };
@@ -840,64 +818,63 @@ export function createGraphRenderer(
       }
       ctx.fill();
       if (useCurved) {
+        const restArrow = Math.min(0.65, palette.edgeAlpha * 2.8);
         for (let l = 0; l < source.length; l++) {
-          const edgeStyle = style[l]!,
+          const kind = style[l]!,
             s = source[l]!,
             t = target[l]!;
-          if (!visuals.isCurvedEdge(useCurved, edgeStyle)) continue;
+          if (!visuals.isCurvedEdge(useCurved, kind)) continue;
           const x1 = sx(s),
             y1 = sy(s),
             x2 = sx(t),
             y2 = sy(t),
-            r = outerR(t);
-          const dist = Math.hypot(x2 - x1, y2 - y1);
+            r = outerR(t),
+            dist = Math.hypot(x2 - x1, y2 - y1);
           if (x2 < -20 || y2 < -20 || x2 > width + 20 || y2 > height + 20 || dist < r + size * 2)
             continue;
-          ctx.fillStyle = linkColor(s, edgeStyle, palette.edge);
+          ctx.fillStyle = linkColor(s, kind, palette.edge);
           ctx.globalAlpha =
             highlight && (s === lit || t === lit)
-              ? 0.9
-              : Math.min(0.65, palette.edgeAlpha * 2.8) * linkRest;
+              ? restArrow + (0.9 - restArrow) * mix
+              : restArrow * linkRest;
+          const pt = visuals.quadAt([x1, y1, x2, y2], Math.max(0.15, 1 - (r + 2) / dist));
           ctx.beginPath();
-          visuals.drawArrowhead(
-            ctx,
-            visuals.quadAt([x1, y1, x2, y2], Math.max(0.15, 1 - (r + 2) / dist)),
-            size,
-          );
+          visuals.drawArrowhead(ctx, pt, size);
           ctx.fill();
         }
       }
     }
+    const drawEdgeComet = (s: number, t: number, p: number, c: string) =>
+      visuals.drawComet(
+        ctx,
+        [sx(s), sy(s), sx(t), sy(t)],
+        p,
+        useCurved,
+        c,
+        palette.dark ? palette.ink : c,
+      );
     if (hoverProgress >= 0 && lit >= 0) {
       for (const l of hoverFlowEdges) {
         if (style[l] !== LINK_STYLE.structural) continue;
         const s = source[l]!,
           t = target[l]!;
-        const color = linkColor(s, LINK_STYLE.structural, palette.match);
-        visuals.drawComet(ctx, [sx(s), sy(s), sx(t), sy(t)], hoverProgress, {
-          curved: useCurved,
-          color,
-          head: palette.dark ? palette.ink : color,
-        });
+        drawEdgeComet(s, t, hoverProgress, linkColor(s, LINK_STYLE.structural, palette.match));
       }
     }
     if (surgeProgress >= 0 && surgeEdges.length > 0) {
       const rippleMax = 26 * Math.min(1.5, Math.max(0.6, k));
+      const p0 = surgeProgress / 0.75,
+        p1 = (surgeProgress - 0.25) / 0.75;
+      const ring = (i: number, p: number, c: string) =>
+        visuals.drawRipple(ctx, sx(i), sy(i), outerR(i) + (1 - (1 - p) ** 3) * rippleMax, p, c);
       for (const [srcPath, dstPath] of surgeEdges) {
         const s = pathIndex.get(srcPath),
           t = pathIndex.get(dstPath);
         if (s === undefined || t === undefined) continue;
         const color = linkColor(s, LINK_STYLE.structural, palette.match);
-        visuals.drawComet(ctx, [sx(s), sy(s), sx(t), sy(t)], surgeProgress, {
-          curved: useCurved,
-          color,
-          head: palette.dark ? palette.ink : color,
-        });
-        const p0 = surgeProgress / 0.75,
-          p1 = (surgeProgress - 0.25) / 0.75;
-        visuals.drawRipple(ctx, sx(s), sy(s), outerR(s), rippleMax, p0, color);
-        const dstColor = group(t) >= 0 ? palette.groups[group(t)]! : color;
-        visuals.drawRipple(ctx, sx(t), sy(t), outerR(t), rippleMax, p1, dstColor);
+        drawEdgeComet(s, t, surgeProgress, color);
+        ring(s, p0, color);
+        ring(t, p1, palette.groups[group(t)] ?? color);
       }
     }
 
@@ -1023,8 +1000,6 @@ export function createGraphRenderer(
       taken.fill(0, 0, cols * rows);
       dots.fill(0, 0, cols * rows);
     }
-    // The grid cells a node's dot covers, out to a diamond's tips, the widest
-    // shape, and the hovered node's larger dot.
     const dotR = (i: number) =>
       Math.max(1.25 * screenR(i) * (highlight && i === lit ? 1 + 0.15 * mix : 1), ringR(i) + 1);
     const dotCol = (i: number, side: number) =>
@@ -1048,7 +1023,8 @@ export function createGraphRenderer(
       const isPill = highlight && i === lit;
       const shown = (i === active && options.local) || k * Math.sqrt(radius[i]! / 4) >= fadeAt;
       let fits = (shown || own || labelAlpha[i]! > 0) && drawn < LABEL_LIMIT && visibleNode(i);
-      let title = "",
+      let drawPill = false,
+        title = "",
         left = 0,
         top = 0,
         w = 0,
@@ -1060,39 +1036,45 @@ export function createGraphRenderer(
       if (fits) {
         title = shortTitle(model.nodes[i]!.title);
         w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
-        const pillPad = isPill ? 4 : 0;
-        const vPad = isPill ? 1 : 0;
-        left = sx(i) - w / 2 - pillPad;
-        boxW = w + pillPad * 2;
         const a0 = dotCol(i, -1),
           a1 = dotCol(i, 1),
           b0 = dotRow(i, -1),
           b1 = dotRow(i, 1);
-        const avoidDots = isPill || (!own && i !== active);
-        const tryTop = (candidate: number) => {
+        const tryTop = (candidate: number, clearDots: boolean, pill: boolean) => {
+          const pad = pill ? 4 : 0,
+            vPad = pill ? 1 : 0;
+          left = sx(i) - w / 2 - pad;
+          boxW = w + pad * 2;
+          top = candidate;
           if (
             left < 2 ||
-            candidate < vPad ||
+            top < vPad ||
             left + boxW > width - 2 ||
-            candidate + LABEL_HEIGHT + vPad > height
+            top + LABEL_HEIGHT + vPad > height
           )
             return false;
           c0 = Math.floor(left / CELL);
           c1 = Math.floor((left + boxW) / CELL);
-          r0 = Math.max(0, Math.floor((candidate - vPad) / CELL));
-          r1 = Math.min(rows - 1, Math.floor((candidate + LABEL_HEIGHT + vPad) / CELL));
+          r0 = Math.max(0, Math.floor((top - vPad) / CELL));
+          r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT + vPad) / CELL));
           for (let r = r0; r <= r1; r++) {
             for (let c = c0; c <= c1; c++) {
               const mine = r >= b0 && r <= b1 && c >= a0 && c <= a1 ? 1 : 0;
-              if (taken[r * cols + c] || (avoidDots && dots[r * cols + c]! > mine)) return false;
+              if (taken[r * cols + c] || (clearDots && dots[r * cols + c]! > mine)) return false;
             }
           }
-          top = candidate;
+          drawPill = pill;
           return true;
         };
         const below =
           sy(i) + (i === lit || i === active || hasPending[i] ? ringR(i) : screenR(i)) + 3;
-        fits = tryTop(below) || (isPill && tryTop(sy(i) - ringR(i) - LABEL_HEIGHT - 3));
+        const above = sy(i) - ringR(i) - LABEL_HEIGHT - 3;
+        fits = isPill
+          ? tryTop(below, true, true) ||
+            tryTop(above, true, true) ||
+            tryTop(below, false, false) ||
+            tryTop(above, false, false)
+          : tryTop(below, !own && i !== active, false);
       }
       if (!fits) {
         labelAlpha[i] = 0;
@@ -1109,7 +1091,7 @@ export function createGraphRenderer(
       if (alpha < 0.03) return;
       for (let r = r0; r <= r1; r++) taken.fill(1, r * cols + c0, r * cols + c1 + 1);
       ctx.globalAlpha = alpha;
-      if (isPill) {
+      if (drawPill) {
         ctx.fillStyle = palette.bg;
         ctx.beginPath();
         ctx.roundRect(left, top - 1, boxW, LABEL_HEIGHT + 2, 5);
@@ -1119,13 +1101,11 @@ export function createGraphRenderer(
         ctx.stroke();
         ctx.lineWidth = 3;
         ctx.strokeStyle = palette.bg;
-        ctx.fillStyle = palette.ink;
-        ctx.fillText(title, sx(i), top + 1);
       } else {
-        ctx.fillStyle = own || i === active ? palette.ink : palette.label;
         ctx.strokeText(title, sx(i), top + 1);
-        ctx.fillText(title, sx(i), top + 1);
       }
+      ctx.fillStyle = drawPill || own || i === active ? palette.ink : palette.label;
+      ctx.fillText(title, sx(i), top + 1);
       drawn++;
     };
     if (highlight) label(lit);

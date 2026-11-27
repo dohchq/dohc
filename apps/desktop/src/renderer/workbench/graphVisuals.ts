@@ -1,25 +1,25 @@
 export const REST_GLOW = { light: 0.08, dark: 0.16 } as const;
-export const GLOW_RADIUS_FACTOR = 2.6;
-export const BUBBLE_OUTER_FACTOR = Math.hypot(0.95, 1.1);
 export const MAX_GLOW_STRUCTURAL = 100;
 export const MAX_CURVED_LINKS = 120;
-export const HOVER_FLOW_MS = 1400;
 export const APPROVAL_SURGE_MS = 950;
+export type EdgeCoords = readonly [number, number, number, number];
+type Ctx = CanvasRenderingContext2D;
+export type GlowLayer = { canvas: HTMLCanvasElement; ctx: Ctx };
 
-const OUTER_FACTOR: Record<string, number> = {
-  bubble: BUBBLE_OUTER_FACTOR,
+const OUTER: Record<string, number> = {
+  bubble: Math.hypot(0.95, 1.1),
   square: 1.41,
   triangle: 1.35,
   diamond: 1.25,
   hexagon: 1.15,
 };
-export const outerRadius = (shape: string, r: number) => (OUTER_FACTOR[shape] ?? 1) * r;
+export const outerRadius = (shape: string, r: number) => (OUTER[shape] ?? 1) * r;
 export const isCurvedEdge = (curved: boolean, style: number) =>
   curved && (style === 1 || style === 2);
 
 export function withAlpha(color: string, alpha: number): string {
-  const a = Math.max(0, Math.min(1, alpha));
-  const s = color.trim();
+  const a = Math.max(0, Math.min(1, alpha)),
+    s = color.trim();
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s)?.[1];
   if (hex) {
     const n = parseInt(hex.length === 3 ? hex.replace(/./g, "$&$&") : hex, 16);
@@ -34,14 +34,11 @@ export const quadControl = (x1: number, y1: number, x2: number, y2: number): [nu
   (y1 + y2) / 2 + (x2 - x1) * 0.12,
 ];
 
-export function quadAt(
-  [x1, y1, x2, y2]: readonly [number, number, number, number],
-  t: number,
-): [number, number, number, number] {
-  const [cx, cy] = quadControl(x1, y1, x2, y2);
-  const mt = 1 - t;
-  const dx = 2 * mt * (cx - x1) + 2 * t * (x2 - cx);
-  const dy = 2 * mt * (cy - y1) + 2 * t * (y2 - cy);
+export function quadAt([x1, y1, x2, y2]: EdgeCoords, t: number): EdgeCoords {
+  const [cx, cy] = quadControl(x1, y1, x2, y2),
+    mt = 1 - t;
+  const dx = 2 * mt * (cx - x1) + 2 * t * (x2 - cx),
+    dy = 2 * mt * (cy - y1) + 2 * t * (y2 - cy);
   const len = Math.hypot(dx, dy) || 1;
   return [
     mt * mt * x1 + 2 * mt * t * cx + t * t * x2,
@@ -59,19 +56,14 @@ export function createGlowSprites(colors: readonly string[]): (HTMLCanvasElement
     const g = c.getContext("2d");
     if (!g) return null;
     const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    for (const [stop, a] of [
-      [0, 1],
-      [0.5, 0.35],
-      [1, 0],
-    ] as const)
-      grad.addColorStop(stop, withAlpha(color, a));
+    grad.addColorStop(0, withAlpha(color, 1));
+    grad.addColorStop(0.5, withAlpha(color, 0.35));
+    grad.addColorStop(1, withAlpha(color, 0));
     g.fillStyle = grad;
     g.fillRect(0, 0, 64, 64);
     return c;
   });
 }
-
-export type GlowLayer = { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D };
 
 export function ensureGlowLayer(layer: GlowLayer | null, w: number, h: number): GlowLayer | null {
   const canvas =
@@ -80,19 +72,12 @@ export function ensureGlowLayer(layer: GlowLayer | null, w: number, h: number): 
   if (!canvas || !ctx) return null;
   const cw = Math.max(1, Math.ceil(w / 2)),
     ch = Math.max(1, Math.ceil(h / 2));
-  if (canvas.width !== cw || canvas.height !== ch) {
-    canvas.width = cw;
-    canvas.height = ch;
-  }
+  if (canvas.width !== cw || canvas.height !== ch) Object.assign(canvas, { width: cw, height: ch });
   ctx.clearRect(0, 0, cw, ch);
   return { canvas, ctx };
 }
 
-export function drawArrowhead(
-  ctx: CanvasRenderingContext2D,
-  [x, y, ux, uy]: readonly [number, number, number, number],
-  s: number,
-): void {
+export function drawArrowhead(ctx: Ctx, [x, y, ux, uy]: EdgeCoords, s: number) {
   ctx.moveTo(x, y);
   ctx.lineTo(x - ux * s - uy * s * 0.55, y - uy * s + ux * s * 0.55);
   ctx.lineTo(x - ux * s + uy * s * 0.55, y - uy * s - ux * s * 0.55);
@@ -100,19 +85,21 @@ export function drawArrowhead(
 }
 
 export function drawComet(
-  ctx: CanvasRenderingContext2D,
-  e: readonly [number, number, number, number],
+  ctx: Ctx,
+  e: EdgeCoords,
   t: number,
-  opts: { curved: boolean; color: string; head: string },
-): void {
+  curved: boolean,
+  color: string,
+  head: string,
+) {
   const fade = Math.sin(t * Math.PI);
   if (fade <= 0.02 || Math.hypot(e[2] - e[0], e[3] - e[1]) < 1) return;
   const at = (u: number) =>
-    opts.curved ? quadAt(e, u) : [e[0] + (e[2] - e[0]) * u, e[1] + (e[3] - e[1]) * u];
+    curved ? quadAt(e, u) : [e[0] + (e[2] - e[0]) * u, e[1] + (e[3] - e[1]) * u];
   const [hx, hy] = at(t),
     [tx, ty] = at(Math.max(0, t - 0.18));
   ctx.save();
-  ctx.strokeStyle = opts.color;
+  ctx.strokeStyle = color;
   ctx.globalAlpha = fade * 0.85;
   ctx.lineWidth = 2.2;
   ctx.lineCap = "round";
@@ -120,7 +107,7 @@ export function drawComet(
   ctx.moveTo(tx!, ty!);
   ctx.lineTo(hx!, hy!);
   ctx.stroke();
-  ctx.fillStyle = opts.head;
+  ctx.fillStyle = head;
   ctx.globalAlpha = fade;
   ctx.beginPath();
   ctx.arc(hx!, hy!, 2.2, 0, Math.PI * 2);
@@ -128,22 +115,14 @@ export function drawComet(
   ctx.restore();
 }
 
-export function drawRipple(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  baseR: number,
-  maxR: number,
-  t: number,
-  color: string,
-): void {
+export function drawRipple(ctx: Ctx, x: number, y: number, r: number, t: number, color: string) {
   if (t <= 0 || t >= 1) return;
   ctx.save();
   ctx.strokeStyle = color;
   ctx.globalAlpha = (1 - t) * 0.65;
   ctx.lineWidth = 2 * (1 - t * 0.6);
   ctx.beginPath();
-  ctx.arc(x, y, baseR + (1 - (1 - t) ** 3) * maxR, 0, Math.PI * 2);
+  ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
