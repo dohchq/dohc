@@ -271,6 +271,10 @@ export function CollectionTable(props: {
   };
   const reloadRow = async (edit: Editing) => {
     if (!table) return;
+    const update = (change: Partial<Editing>) =>
+      setEditing((open) =>
+        open?.rowId === edit.rowId && open.fieldId === edit.fieldId ? { ...open, ...change } : open,
+      );
     try {
       const page = await call(grantId, "collectionRecords", {
         datasetId: collection.datasetId,
@@ -278,15 +282,11 @@ export function CollectionTable(props: {
         recordId: edit.rowId,
       });
       const current = (page.rows as Row[] | undefined)?.[0];
-      if (!current) return setEditing({ ...edit, notice: "gone" });
+      if (!current) return update({ notice: "gone" });
       setRows((rows) => rows?.map((row) => (row.id === current.id ? current : row)) ?? null);
-      setEditing((open) =>
-        open?.rowId === edit.rowId && open.fieldId === edit.fieldId
-          ? { ...open, version: current.version, attempt: undefined, notice: undefined }
-          : open,
-      );
+      update({ version: current.version, attempt: undefined, notice: undefined });
     } catch {
-      setEditing({ ...edit, notice: "dohc could not load the current row. Try again." });
+      update({ notice: "dohc could not load the current row. Try again." });
     }
   };
   if (state === "loading" || state === "slow")
@@ -316,6 +316,9 @@ export function CollectionTable(props: {
       } else if (
         event.key === "Enter" &&
         (event.target instanceof HTMLSelectElement ||
+          (event.target instanceof HTMLTextAreaElement &&
+            !event.shiftKey &&
+            !event.nativeEvent.isComposing) ||
           (event.target instanceof HTMLInputElement && event.target.type === "checkbox"))
       ) {
         event.currentTarget.requestSubmit();

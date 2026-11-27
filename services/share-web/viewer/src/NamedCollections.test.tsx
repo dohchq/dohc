@@ -229,12 +229,36 @@ it("holds the value being saved until dohc answers", async () => {
   expect(edits.map(({ value }) => value)).toEqual([1010]);
 });
 
-it("keeps line breaks in a text field", async () => {
+it("keeps line breaks in a text field, adds one with Shift+Enter, and saves with Enter", async () => {
   await open();
   answers.push(saved(5));
-  await change("Late check-in\nRoom 5", "Edit Notes: Late check-in\nRoom 4");
+  act(() => button("Edit Notes: Late check-in\nRoom 4")!.click());
+  setControlValue(control(), "Late check-in\nRoom 5");
+  const press = (shiftKey: boolean) =>
+    act(() => {
+      control().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", shiftKey, bubbles: true }),
+      );
+    });
+  press(true);
+  expect(edits).toEqual([]);
+  press(false);
   await settle(() => edits.length === 1);
   expect(edits[0]!.value).toBe("Late check-in\nRoom 5");
+});
+
+it("keeps what the person typed when the current row can't be loaded", async () => {
+  await open();
+  answers.push(refused("stale_record"));
+  await change("1010");
+  await settle(() => button("Load current row") !== undefined);
+  let fail!: () => void;
+  rowRead = new Promise((_resolve, reject) => (fail = () => reject(new Error("reset"))));
+  act(() => button("Load current row")!.click());
+  setControlValue(control(), "1050");
+  act(() => fail());
+  await settle(() => host.textContent!.includes("dohc could not load the current row"));
+  expect(control().value).toBe("1050");
 });
 
 it("lists every Collection an invitation reaches, page by page", async () => {

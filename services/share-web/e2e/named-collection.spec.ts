@@ -402,6 +402,13 @@ test("a teammate invited by name edits a Collection's records in the browser, an
     await page.keyboard.type(" and tours");
     await page.keyboard.press("Escape");
     await expect(table.getByRole("button", { name: "Edit Item: Museum passes" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("End");
+    await page.keyboard.type(" and tours");
+    await page.keyboard.press("Enter");
+    await expect(
+      table.getByRole("button", { name: "Edit Item: Museum passes and tours" }),
+    ).toBeFocused();
 
     await table.getByRole("button", { name: "Edit Amount: 1010" }).click();
     await input.selectText();
