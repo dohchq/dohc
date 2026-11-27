@@ -91,7 +91,7 @@ globalThis.operations = {
 
 ### `dohc_dataset` action cheat sheet
 
-Pass `{ request: { action, ... } }` to `dohc_dataset`:
+Pass `{ request: { action, ... } }` to `dohc_dataset`. Through MCP, leave out `workspaceId` and dohc fills in the workspace the server serves. `expectedDatasetId` (the `datasetId` from `describe`) refuses a request when the path now names another Collection.
 
 | Action | Required fields | Notes |
 | --- | --- | --- |
@@ -107,3 +107,13 @@ Pass `{ request: { action, ... } }` to `dohc_dataset`:
 | `prepareRelationChoices` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `fieldId`, `labelFieldId` | Adds a public read operation returning only key + `labelFieldId` for a relation field. Returns `boundApps` and, if checks were incomplete or paginated, `boundAppsIncomplete: true`. |
 | `approveMigration` | `workspaceId`, `preparationId`, `revisionSha256`, `approvalDigest` | Applies a prepared schema change, migration, or relation choices. Do not pass `datasetPath`. |
 | `createForm` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `createOperationId`, `appRoot`, `fieldIds` | Optional `title`, `relationChoices: [{ fieldId, operationId, labelFieldId }]`. Generated `app.publish.json` omits `revision` and `revisionSha256` so re-preparing picks up later approved revisions automatically. |
+| `types` | `workspaceId`, `datasetPath` | Writes a `.d.ts` file under `.dohc/types/` with TypeScript types for the approved tables and operations, and returns its workspace-relative `path`. An app imports that file with `import type`, using a path relative to the importing source file. |
+| `sql` | `workspaceId`, `datasetPath`, `sql` | Owner only. Runs one read-only SQL query under the SQLite authorizer, or `EXPLAIN QUERY PLAN` with `explain: true`. |
+| `trace` | `workspaceId`, `datasetPath` | Lists recent in-memory operation timings and SQL metrics. |
+| `history`, `historyRevision` | `workspaceId`, `datasetPath`; `revisionSha256` for `historyRevision` | `history` shows record edits and schema and rule revisions. `historyRevision` reads one revision's saved source. |
+| `prepareHistoryRestore` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `targetRevisionSha256`, `changedRevisionSha256` | Prepares a reviewed forward change back to a past revision against current records, keeping current access. Apply it with `approveMigration`. Restoring source files alone never activates rules. |
+| `approval`, `confirmApproval` | `workspaceId`, `datasetPath`; `revisionSha256` for `confirmApproval` | `approval` says who approved the rules the Collection runs. When `needsOwnerConfirmation` is true, the Admin who approved them no longer is one: `confirmApproval` with that `revisionSha256` records the Owner as their approver without changing the rules. |
+| `export` | `workspaceId`, `datasetPath`, `savePath` | Streams a private recovery archive, with private records, files, history, and retry credentials. `savePath` is absolute, outside the workspace, and ends in `.dohc-recovery`. |
+| `prepareRecovery` | `workspaceId`, `sourcePath` | Reads an archive at `sourcePath` (relative to the MCP server folder, or absolute) and returns `recovery`. |
+| `claimRecovery` | `workspaceId`, `transferId`, `manifestSha256`, `sourceCursor`, `oldHostStopped` | Copy `recovery.sourceCursor.workspaceId`, `recovery.transferId`, `recovery.manifestSha256`, and `recovery.sourceCursor` from `prepareRecovery`. Stop the old host first, then pass `oldHostStopped: true`. |
+| `discardRecovery` | `workspaceId`, `transferId` | Cancels a prepared recovery before it installs. Copy `recovery.transferId` from `prepareRecovery`. |

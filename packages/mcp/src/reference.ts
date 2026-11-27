@@ -26,6 +26,7 @@ import {
   type CliVerb as CliSocketVerb,
 } from "@dohc/cli/protocol";
 import { distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
+import { GUIDES } from "./guides";
 import { createDohcMcpServer } from "./server";
 import { DECLARED_TOOLS, DECLARED_WRITE_TOOLS } from "./tools";
 
@@ -891,6 +892,14 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
 
   const indexTable = [
     "New to building in dohc with an agent? Start with [Build with agents](../how-to/build-with-agents.md) and the public agent skill at [`skills/dohc/SKILL.md`](../../skills/dohc/SKILL.md). The table below separates everyday building tools from internal sync and recovery tools.",
+    "",
+    `When an agent connects, the server sends short instructions and serves the skill and its references as resources: ${Object.keys(
+      GUIDES,
+    )
+      .map((name) => `\`dohc://guides/${name}\``)
+      .join(
+        ", ",
+      )}. \`dohc://workspace/info\` returns \`{ workspaceId, name, rootPath, shareAccess }\` for the served folder. Every tool carries the MCP hints \`readOnlyHint\`, \`destructiveHint\`, \`idempotentHint\`, and \`openWorldHint\`. A tool that can both read and change data is marked as one that changes it.`,
     "",
     "| Category | Tools |",
     "| --- | --- |",

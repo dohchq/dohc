@@ -57,8 +57,12 @@ export function affectedPackages(files, packages, references = []) {
   if (!files.length) return null;
   const owners = new Set();
   for (const file of files) {
-    // docs/reference holds generated references that package tests compare against, so it is not documentation here.
-    if ((file.startsWith("docs/") || file.endsWith(".md")) && !file.startsWith("docs/reference/"))
+    // docs/reference and skills hold Markdown that package tests compare against, so it is not documentation here.
+    if (
+      (file.startsWith("docs/") || file.endsWith(".md")) &&
+      !file.startsWith("docs/reference/") &&
+      !file.startsWith("skills/")
+    )
       continue;
     const owner = packages
       .filter((pkg) => file.startsWith(`${pkg.path}/`))

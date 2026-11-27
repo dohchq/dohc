@@ -105,7 +105,7 @@ Every app runs in a sandboxed `srcdoc` iframe with an opaque origin (`window.ori
 
 ## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
 
-Before publishing or handing an app to a user, verify its compiled frontend inside dohc's real sandboxed document, CSP, and `dohc-app-channel` broker with `{ action: "verifyFrontend", workspaceId, appRoot }` (candidate source) or `{ action: "verifyFrontend", workspaceId, publicationId }` (active local publication). Specify exactly one of `appRoot` or `publicationId`.
+`verifyFrontend` works only in a workspace you own; in a workspace you joined, check a Personal app's source with `checkLocal` and its `appRoot` from `personalFolder`. Before publishing or handing an app to a user, verify its compiled frontend inside dohc's real sandboxed document, CSP, and `dohc-app-channel` broker with `{ action: "verifyFrontend", workspaceId, appRoot }` (candidate source) or `{ action: "verifyFrontend", workspaceId, publicationId }` (active local publication). Specify exactly one of `appRoot` or `publicationId`.
 
 - Runs completely offline against a fresh, empty ephemeral Collection database (never reads or mutates live Collection rows, uploaded files, or workspace files).
 - Catches manifest/input errors, bundle compile errors, CSP violations (inline scripts, native form submission without `event.preventDefault()`), uncaught page/console errors, broken `dohc-app-channel` handshakes, malformed broker messages, and unapproved operations.
@@ -155,6 +155,12 @@ Pass `{ request: { action, ... } }` to `dohc_publish_app`:
 2. **Prepare**: `{ action: "prepare", workspaceId, appRoot, shareId, grantId }` -> returns `approvalId`, `candidateDigest`.
 3. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId` and `appQuery` (`?app=<publicationId>`).
 4. Append `appQuery` before the `#` fragment of the share link URL. Keep the share link secret out of workspace files and dohc requests.
+
+A share link URL is a bearer credential at its stated access level: anyone holding it can use it. An app for members returns no `appQuery`. Rotating a link stays in the desktop. `agentLabel` values are what the agent declares, shown as provenance.
+
+## Personal apps in a workspace you joined
+
+In a workspace you joined, only Personal apps work. `personalFolder` returns your Personal app folder on this computer. `prepareLocal`, `listLocal`, and `checkLocal` take one of its subfolders as `appRoot`, and `approve`, `cancel`, `launchLocal`, and `withdraw` work as they do in a workspace you own. A Personal app never syncs and runs only the Collection actions your own access allows.
 
 ## Publishing to workspace members (`dohc_publish_app`)
 

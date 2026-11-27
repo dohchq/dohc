@@ -7,6 +7,7 @@
 // validation; this file is only registration + transport.
 
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -16,6 +17,7 @@ import {
   ShareLinkAgentDisconnectInput,
   ShareLinkAgentsInput,
 } from "@dohc/workspace-contracts/share-link-agents";
+import { GUIDE_TEXT, GUIDES } from "./guides";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { AgentMembersRequest } from "@dohc/cli/members";
@@ -116,6 +118,7 @@ import {
   testApp,
   writeWorkspaceFile,
   workspaceStatus,
+  servedWorkspace,
   stopWorkspaceSync,
   type ToolContext,
 } from "./tools";
@@ -232,21 +235,137 @@ function text(structuredContent: Record<string, unknown> | null) {
   };
 }
 
+const READ = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const satisfies ToolAnnotations;
+const READ_SERVER = { ...READ, openWorldHint: true } as const satisfies ToolAnnotations;
+const ADD = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const satisfies ToolAnnotations;
+const ADD_SERVER = { ...ADD, openWorldHint: true } as const satisfies ToolAnnotations;
+const CHANGE = { ...ADD, destructiveHint: true } as const satisfies ToolAnnotations;
+const CHANGE_SERVER = { ...CHANGE, openWorldHint: true } as const satisfies ToolAnnotations;
+
+const DECLARED_WRITE_ANNOTATIONS: Record<keyof typeof DECLARED_WRITE_TOOLS, ToolAnnotations> = {
+  dohc_retry_chat_run: ADD,
+  dohc_restore_protected_copy: CHANGE,
+  dohc_inbox_add: ADD,
+  dohc_inbox_archive: CHANGE,
+  dohc_inbox_move: CHANGE,
+  dohc_resume_live_editing: CHANGE,
+  dohc_share_member_app: CHANGE_SERVER,
+  dohc_fork_member_app: ADD,
+  dohc_promote_member_app: ADD,
+  dohc_withdraw_member_app: CHANGE_SERVER,
+  dohc_set_member_app_sharing: CHANGE_SERVER,
+};
+
+export const MCP_INSTRUCTIONS = [
+  "dohc serves one workspace folder: files, live Markdown documents, Collections, apps, automations, and chat, with History and Versions.",
+  "- Markdown files are live documents. Create them with dohc_create_document, read them with dohc_read_document, and change them with dohc_edit_document. dohc_write_file writes every other file and refuses Markdown.",
+  "- A document Collection is a folder of Markdown records with collection.yaml: use dohc_query_collection, dohc_create_record, and dohc_set_record_fields. A transactional Collection (a dataset) has dataset.json, SQLite tables, and approved operations: use dohc_dataset.",
+  "- An app is a folder with app.publish.json. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs it in dohc's sandbox; dohc_test_app only checks the folder. Then prepareLocal, approve, and launchLocal.",
+  "- dohc_dataset, dohc_collection_access, and dohc_publish_app fill in workspaceId for this workspace when you leave it out.",
+  `- Read a guide before you author: ${Object.keys(GUIDES)
+    .map((name) => `dohc://guides/${name}`)
+    .join(", ")}. dohc://workspace/info names this workspace.`,
+].join("\n");
+
+const SAID_IN_TOOL_DESCRIPTION = new Set(["datasetPath", "expectedDatasetId"]);
+
+function forServedWorkspace<
+  Union extends z.ZodDiscriminatedUnion<readonly z.ZodObject<z.ZodRawShape, z.core.$strict>[]>,
+>(union: Union): Union {
+  const options = union.options.map((option) =>
+    option.safeExtend(
+      Object.fromEntries(
+        Object.entries(option.shape as Record<string, z.ZodType>).flatMap(([key, field]) =>
+          key === "workspaceId"
+            ? [[key, field.optional()]]
+            : SAID_IN_TOOL_DESCRIPTION.has(key)
+              ? [[key, field.meta({ description: undefined })]]
+              : [],
+        ),
+      ),
+    ),
+  ) as unknown as [z.ZodObject, ...z.ZodObject[]];
+  return z.discriminatedUnion("action", options, {
+    error: union._zod.def.error as z.core.$ZodErrorMap,
+  }) as never;
+}
+
+async function inServedWorkspace<Result>(
+  ctx: ToolContext,
+  request: Record<string, unknown>,
+  run: (request: Record<string, unknown>) => Promise<Result>,
+) {
+  if (request.workspaceId !== undefined) return run(request);
+  const { workspaceId } = await servedWorkspace(ctx);
+  if (workspaceId === null)
+    return {
+      ok: false as const,
+      reason:
+        "This folder is not a workspace in dohc's list. Pass workspaceId from dohc_list_workspaces.",
+    };
+  return run({ ...request, workspaceId });
+}
+
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: "dohc", version: "0.3.0" });
+  const server = new McpServer(
+    { name: "dohc", version: "0.3.0" },
+    { instructions: MCP_INSTRUCTIONS },
+  );
+
+  for (const [name, { description }] of Object.entries(GUIDES) as [
+    keyof typeof GUIDES,
+    (typeof GUIDES)[keyof typeof GUIDES],
+  ][]) {
+    server.registerResource(
+      `guide-${name}`,
+      `dohc://guides/${name}`,
+      { description, mimeType: "text/markdown" },
+      (uri) => ({
+        contents: [{ uri: uri.href, mimeType: "text/markdown", text: GUIDE_TEXT[name] }],
+      }),
+    );
+  }
+  server.registerResource(
+    "workspace-info",
+    "dohc://workspace/info",
+    {
+      description:
+        "This workspace's workspaceId, name, folder, and the share level this server offers.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(await servedWorkspace(ctx)),
+        },
+      ],
+    }),
+  );
 
   let waits = 0;
   const level = ctx.shareAccess ?? "owner";
   function register<InputArgs extends z.ZodRawShape>(
     name: keyof typeof MCP_TOOL_CAPABILITIES,
-    config: { description: string; inputSchema: InputArgs },
+    config: { description: string; inputSchema: InputArgs; annotations: ToolAnnotations },
     handler: ToolCallback<ReturnType<typeof strictArguments<InputArgs>>>,
   ) {
     if (MCP_TOOL_LEVELS[name].includes(level) && (ctx.tools?.has(name) ?? true)) {
       const inputSchema = strictArguments(config.inputSchema);
       server.registerTool<z.ZodRawShape, typeof inputSchema>(
         name,
-        { description: config.description, inputSchema },
+        { description: config.description, inputSchema, annotations: config.annotations },
         handler,
       );
     }
@@ -258,6 +377,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
       inputSchema: ShareCopyInput.shape,
+      annotations: READ_SERVER,
     },
     async (args) => text(await getShareCopyDetails(ctx, args)),
   );
@@ -268,6 +388,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the agents signed in through one share link, 50 a page. Requires the original workspace and its signed-in owner account. Find the link's shareId and grantId with `dohc access sharing granted`. reportedName is the name the agent's client reported; dohc cannot check it. Pass nextCursor as cursor until it is null.",
       inputSchema: ShareLinkAgentsInput.shape,
+      annotations: READ_SERVER,
     },
     async (args) => text(await listLinkAgents(ctx, args)),
   );
@@ -278,6 +399,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "End one agent's connection through a share link. The link and its other agents keep working. Requires the original workspace and its signed-in owner account. Find connectionId with dohc_list_link_agents.",
       inputSchema: ShareLinkAgentDisconnectInput.shape,
+      annotations: CHANGE_SERVER,
     },
     async (args) => text(await disconnectLinkAgent(ctx, args)),
   );
@@ -288,6 +410,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",
       inputSchema: { collectionPath: z.string().min(1).max(4096) },
+      annotations: READ_SERVER,
     },
     async (args) => text(await listAutomations(ctx, args)),
   );
@@ -304,6 +427,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         reformat: z.boolean().optional(),
         submitId: requestIdSchema,
       },
+      annotations: CHANGE_SERVER,
     },
     async (args) => text(await switchAutomation(ctx, args)),
   );
@@ -312,10 +436,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_publish_app",
     {
       description:
-        "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
-      inputSchema: { request: OwnerAppPublicationRequest },
+        "Verify, approve, launch, and publish a local app, a folder with app.publish.json, as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId, then compiles and runs the app in dohc's offline sandbox against an empty ephemeral Collection without changing live data; run it before you approve or hand over an app. Local: prepareLocal, approve, then launchLocal. Share link: createLink with a stable operationId, so a retry returns the same link, then prepare and approve; these need a workspace that syncs with a server (see dohc_workspace_status). A link URL is a bearer credential: keep its secret yourself, never send it to dohc, and append the returned appQuery before the URL's fragment. In a workspace you joined, only Personal apps work. dohc://guides/apps lists every action, staging with Collection changes, apps for members, and Personal apps.",
+      inputSchema: { request: forServedWorkspace(OwnerAppPublicationRequest) },
+      annotations: CHANGE_SERVER,
     },
-    async ({ request }) => text(await publishApp(ctx, request)),
+    async ({ request }) =>
+      text(await inServedWorkspace(ctx, request, (filled) => publishApp(ctx, filled))),
   );
 
   register(
@@ -324,6 +450,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc emails them an invitation when the server sends email, and inviting the same address again emails it again; they join when they sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; end membership for everyone; or delete a message in a Group or a file's Comments (deleteMessage, with its threadId and messageId). The server decides what your role allows: members see names and roles and delete their own messages; admins also invite, remove members, let them back in, set the level and folder or Group access, manage the invite link, and delete any message in a Group or Comments; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Deleting a message can't be undone. It shows as deleted everywhere it syncs, but people who already read it may keep a copy. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, end membership, or delete someone else's message.",
       inputSchema: { request: AgentMembersRequest },
+      annotations: CHANGE_SERVER,
     },
     async ({ request }) => {
       // A Members page the relay does not list is a failure, as the CLI reports it.
@@ -339,10 +466,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_dataset",
     {
       description:
-        'Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. approval says who approved the rules the Collection runs; when needsOwnerConfirmation is true, an Admin who approved them is no longer one, and confirmApproval with that revisionSha256 records the Owner as their approver without changing them. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.',
-      inputSchema: { request: DatasetRequest },
+        "Create, prepare, approve, inspect, and use transactional Collections (dataset.json, SQLite tables, and approved operations) in the owning workspace. Address one with datasetPath, its dataset.json path relative to the MCP server folder, such as tracker/dataset.json, never a folder or datasetId; list returns these paths, and a move changes them. expectedDatasetId refuses the request when the path now names another Collection. create takes definition, a dataset.json descriptor object (formatVersion 1 or 2), and approves revision 1. prepare takes descriptorPath; approve takes its preparationId and revisionSha256. invoke runs an approved operation with its described revision and revisionSha256 and a stable idempotencyKey. Generated create operations take input { values: { <fieldId>: value } }, and edit operations add id and expectedVersion; field ids come from describe. Apps bind to these Collections and have no separate store. export writes a private recovery archive, with private records and retry credentials, to an absolute savePath outside the workspace. dohc://guides/collections lists every action's fields, migrations, history restore, permissions, and recovery.",
+      inputSchema: { request: forServedWorkspace(DatasetRequest) },
+      annotations: CHANGE_SERVER,
     },
-    async ({ request }) => text(await dataset(ctx, request)),
+    async ({ request }) =>
+      text(await inServedWorkspace(ctx, request, (filled) => dataset(ctx, filled))),
   );
 
   register(
@@ -350,14 +479,20 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     {
       description:
         "As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.",
-      inputSchema: { request: DatasetAdminRequest },
+      inputSchema: { request: forServedWorkspace(DatasetAdminRequest) },
+      annotations: CHANGE_SERVER,
     },
-    async ({ request }) => text(await dataset(ctx, request)),
+    async ({ request }) =>
+      text(await inServedWorkspace(ctx, request, (filled) => dataset(ctx, filled))),
   );
 
   register(
     "dohc_list_workspaces",
-    { description: "List the local dohc workspaces in the desktop registry.", inputSchema: {} },
+    {
+      description: "List the local dohc workspaces in the desktop registry.",
+      inputSchema: {},
+      annotations: READ,
+    },
     async () => text(await listWorkspaces(ctx)),
   );
 
@@ -367,6 +502,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare, and new notes shared by a link or with a person, which the server has no file for yet, as pendingShareWhileOpen.",
       inputSchema: {},
+      annotations: READ,
     },
     async () => text(await workspaceStatus(ctx)),
   );
@@ -377,19 +513,28 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.",
       inputSchema: {},
+      annotations: CHANGE,
     },
     async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
   for (const { mcp, input } of Object.values(DECLARED_TOOLS)) {
-    register(mcp.tool, { description: mcp.description, inputSchema: input.shape }, async (args) =>
-      text(await requestDeclaredTool(ctx, mcp.tool, args)),
+    register(
+      mcp.tool,
+      { description: mcp.description, inputSchema: input.shape, annotations: READ },
+      async (args) => text(await requestDeclaredTool(ctx, mcp.tool, args)),
     );
   }
   for (const { mcp, socket } of Object.values(DECLARED_WRITE_TOOLS)) {
     const schema = "input" in mcp && mcp.input ? mcp.input : socket.input;
-    register(mcp.tool, { description: mcp.description, inputSchema: schema.shape }, async (args) =>
-      text(await requestDeclaredWriteTool(ctx, mcp.tool, args)),
+    register(
+      mcp.tool,
+      {
+        description: mcp.description,
+        inputSchema: schema.shape,
+        annotations: DECLARED_WRITE_ANNOTATIONS[mcp.tool],
+      },
+      async (args) => text(await requestDeclaredWriteTool(ctx, mcp.tool, args)),
     );
   }
   register(
@@ -398,6 +543,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.",
       inputSchema: { path: z.string() },
+      annotations: ADD,
     },
     async (args) => text(await duplicateWorkspaceFile(ctx, args, agentName())),
   );
@@ -407,6 +553,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.",
       inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
+      annotations: READ,
     },
     async (args) => text(await readOperation(ctx, args)),
   );
@@ -416,6 +563,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
       inputSchema: { operationId: HistoryOperationId },
+      annotations: CHANGE,
     },
     async (args) => text(await undoOperation(ctx, args, agentName())),
   );
@@ -425,6 +573,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the workspace's versions and which one is active. Archived versions are hidden unless includeArchived is true. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
       inputSchema: { includeArchived: z.boolean().optional() },
+      annotations: READ,
     },
     async (args) => text(await listVersions(ctx, args)),
   );
@@ -437,6 +586,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         version: z.string().min(1).max(200),
         afterPath: z.string().min(1).max(4096).optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await compareVersion(ctx, args)),
   );
@@ -446,6 +596,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
       inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
+      annotations: READ,
     },
     async (args) => text(await listVersionConflicts(ctx, args)),
   );
@@ -455,6 +606,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
       inputSchema: { name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) },
+      annotations: CHANGE,
     },
     async (args) => text(await createVersion(ctx, args)),
   );
@@ -464,6 +616,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.",
       inputSchema: { version: z.string().min(1).max(200) },
+      annotations: CHANGE,
     },
     async (args) => text(await switchVersion(ctx, args)),
   );
@@ -473,6 +626,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
       inputSchema: { version: z.string().min(1).max(200) },
+      annotations: CHANGE,
     },
     async (args) => text(await mergeVersion(ctx, args)),
   );
@@ -482,6 +636,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Bring Main's changes into a version made from Main, named by its name or id from dohc_list_versions. Returns the merged and conflict counts, the count of protected files both sides changed (left as the version has them), and the first page of open conflicts. In an update's conflicts, current is the version and incoming is Main. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
       inputSchema: { version: z.string().min(1).max(200) },
+      annotations: CHANGE,
     },
     async (args) => text(await updateVersion(ctx, args)),
   );
@@ -491,6 +646,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Archive a version, named by its name or id from dohc_list_versions, or restore it with restore: true. An archived version keeps its files, leaves the version menu, and can't be switched to or merged until restored. Main, the active version, and versions with open conflicts can't be archived. Owner workspace only.",
       inputSchema: { version: z.string().min(1).max(200), restore: z.boolean().optional() },
+      annotations: CHANGE,
     },
     async (args) => text(await archiveVersion(ctx, args)),
   );
@@ -500,6 +656,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in an update, current is the version and incoming is Main; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
       inputSchema: { conflictId: z.string().min(1).max(200), resolution: versionResolutionSchema },
+      annotations: CHANGE,
     },
     async (args) => text(await resolveVersionConflict(ctx, args)),
   );
@@ -518,6 +675,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         includeFiles: z.boolean().optional(),
         path: z.string().min(1).max(4096).optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await listChanges(ctx, args)),
   );
@@ -528,6 +686,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it is read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing does not change whether rows are read.",
       inputSchema: {},
+      annotations: READ,
     },
     async () => text(await listNotices(ctx)),
   );
@@ -538,6 +697,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path. Changes to protected files such as `.env` that a sync replaced or deleted are listed in `protectedCopies` as [path, id, keptAtMs] entries, kept on this computer only; use dohc_restore_protected_copy or dohc_discard_protected_copy.",
       inputSchema: {},
+      annotations: READ,
     },
     async () => text(await listKeptCopies(ctx)),
   );
@@ -548,6 +708,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
       inputSchema: { id: z.number().int() },
+      annotations: ADD,
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
   );
@@ -558,6 +719,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.",
       inputSchema: { id: z.string() },
+      annotations: CHANGE,
     },
     async (args) => text(await discardProtectedCopy(ctx, args)),
   );
@@ -571,6 +733,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().min(1).max(4096),
         incident: z.string().min(1).max(1024).optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await saveRecoveryCopy(ctx, args)),
   );
@@ -581,6 +744,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
+      annotations: CHANGE,
     },
     async (args) => text(await retryKeptEdits(ctx, args)),
   );
@@ -591,6 +755,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Stop live editing again for a document whose Stop kept its edits, as Try again does on its row in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `not-written`, where dohc writes the kept edits into the file, or `stopping`, where it asks the server again to stop live editing. `keptEdits` is `recovered` once the file holds the edits, `kept` while dohc still keeps them, and `none` when it kept none. dohc refuses while the document is open in an editor. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
+      annotations: CHANGE,
     },
     async (args) => text(await stopAgain(ctx, args)),
   );
@@ -601,6 +766,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Keep a live note's outside change, as Keep a copy does in dohc. Take `path` from dohc_list_outside_changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text back into the file. `kept` is false when the file no longer holds an outside change. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096) },
+      annotations: CHANGE,
     },
     async (args) => text(await keepOutsideChange(ctx, args)),
   );
@@ -617,6 +783,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         " `record` is the server's record of the note: `state` (`off`, `starting`, `live`, or `stopping`), `reason` and `cause` for an off note, `generation`, `since`, and `changedBy`. `movedTo` is the path a note moved to; once stopped, pass `movedTo` to dohc_resume_live_editing to resume directly at that path." +
         " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       inputSchema: { cursor: z.string().min(1).max(4096).optional() },
+      annotations: READ,
     },
     async (args) => text(await listLiveDocuments(ctx, args)),
   );
@@ -630,6 +797,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().min(1).max(4096),
         objectId: z.string().min(1).max(512).optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await stopLiveEditing(ctx, args)),
   );
@@ -640,6 +808,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
       inputSchema: {},
+      annotations: READ,
     },
     async () => text(await listRetainedCopies(ctx)),
   );
@@ -655,6 +824,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .max(100),
         acceptLateWriteRisk: z.literal(true),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await deleteRetainedCopies(ctx, args)),
   );
@@ -667,6 +837,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         id: z.string().min(1).max(500),
       },
+      annotations: READ,
     },
     async (args) => text(await readChange(ctx, args)),
   );
@@ -680,6 +851,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().max(4096).optional(),
         recursive: z.boolean().optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await listWorkspaceFiles(ctx, args)),
   );
@@ -700,6 +872,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .optional(),
         offsetBytes: z.number().int().nonnegative().optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await readWorkspaceFile(ctx, args)),
   );
@@ -723,6 +896,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .max(10 * 1024 * 1024)
           .optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
@@ -735,6 +909,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         path: z.string().min(1).max(4096),
       },
+      annotations: READ,
     },
     async (args) => text(await readDocument(ctx, args)),
   );
@@ -747,6 +922,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         path: z.string().min(1).max(4096),
       },
+      annotations: READ,
     },
     async (args) => text(await readHeldChange(ctx, args)),
   );
@@ -776,6 +952,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .regex(/^[0-9a-f]{64}$/u)
           .optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await heldNoteChange(ctx, args)),
   );
@@ -795,6 +972,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         replacement: documentEditTextSchema,
         requestId: requestIdSchema.optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await editDocument(ctx, args, agentName())),
   );
@@ -808,6 +986,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().min(1).max(4096),
         markdown: documentEditTextSchema.optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await createDocument(ctx, args, agentName())),
   );
@@ -824,6 +1003,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         expectedSha256: z.string().length(64).optional(),
         summary: z.string().max(500).optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await writeWorkspaceFile(ctx, args, agentName())),
   );
@@ -837,6 +1017,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await createWorkspaceDirectory(ctx, args)),
   );
@@ -853,6 +1034,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         confirmNotVersioned: z.boolean().optional(),
         summary: z.string().max(500).optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await moveWorkspacePath(ctx, args, agentName())),
   );
@@ -867,6 +1049,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         confirmNotVersioned: z.boolean().optional(),
         summary: z.string().max(500).optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await deleteWorkspacePath(ctx, args, agentName())),
   );
@@ -880,6 +1063,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         path: z.string().max(4096).optional(),
         maxDepth: z.number().int().nonnegative().max(12).optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await detectApps(ctx, args)),
   );
@@ -888,12 +1072,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_app",
     {
       description:
-        "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
+        "Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       inputSchema: {
         appRoot: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),
-        withDohcJson: z.boolean().optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await createApp(ctx, args, agentName())),
   );
@@ -902,10 +1086,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_test_app",
     {
       description:
-        "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
+        "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       inputSchema: {
         appRoot: z.string().min(1).max(4096),
       },
+      annotations: READ,
     },
     async (args) => text(await testApp(ctx, args)),
   );
@@ -920,6 +1105,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         databasePath: z.string().min(1).max(4096),
         tableName: z.string().min(1).max(256),
       },
+      annotations: ADD,
     },
     async (args) => text(await importData(ctx, args, agentName())),
   );
@@ -936,6 +1122,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .min(1)
           .max(64 * 1024),
       },
+      annotations: READ,
     },
     async (args) => text(await queryDatabase(ctx, args)),
   );
@@ -948,6 +1135,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         path: z.string().min(1).max(4096),
       },
+      annotations: READ_SERVER,
     },
     async (args) => text(await listFileChats(ctx, args)),
   );
@@ -958,6 +1146,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Wait for this agent's unread requests without marking them read. In a run dohc started, they are the run's own requests, including replies in threads its agent posted in, and the ones it returns start no new run. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Otherwise, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
       inputSchema: chatWatchInputSchema.shape,
+      annotations: ADD_SERVER,
     },
     async (args, extra) => {
       if (waits >= 4)
@@ -985,6 +1174,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         message: z.string().min(1).max(200).optional(),
         path: z.string().min(1).max(4096).optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await makeLink(ctx, args)),
   );
@@ -1007,6 +1197,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .optional(),
         limit: z.number().int().min(1).max(100).optional(),
       },
+      annotations: READ_SERVER,
     },
     async (args) => text(await readChat(ctx, args)),
   );
@@ -1017,6 +1208,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
+      annotations: ADD_SERVER,
     },
     async () => text(await listGroups(ctx)),
   );
@@ -1032,6 +1224,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         type: z.enum(["posts", "chat", "both"]).optional(),
         level: z.enum(["comment", "view", "none"]).optional(),
       },
+      annotations: ADD_SERVER,
     },
     async (args) => text(await createGroup(ctx, args)),
   );
@@ -1057,6 +1250,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
+      annotations: ADD_SERVER,
     },
     async ({ model, ...args }) =>
       text(await startGroupChat(ctx, args, agentName(), reported(model))),
@@ -1075,6 +1269,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         runId: chatWriteInput.runId,
         model: chatWriteInput.model,
       },
+      annotations: ADD_SERVER,
     },
     async ({ model, ...args }) =>
       text(await startFileChat(ctx, args, agentName(), reported(model))),
@@ -1094,6 +1289,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         body: chatWriteInput.body.optional(),
         nothingToReport: z.literal(true).optional(),
       },
+      annotations: CHANGE_SERVER,
     },
     async ({ model, body, nothingToReport, ...args }) => {
       if (nothingToReport) {
@@ -1149,6 +1345,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         limit: z.number().int().positive().max(500).optional(),
         cursor: z.unknown().optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await queryCollection(ctx, args)),
   );
@@ -1164,6 +1361,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         historyLimit: z.number().int().positive().max(500).optional(),
         beforeHistoryId: z.number().int().nonnegative().optional(),
       },
+      annotations: READ,
     },
     async (args) => text(await readRecord(ctx, args)),
   );
@@ -1177,6 +1375,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         recordPath: z.string().min(1).max(4096),
         fields: z.record(z.string().min(1).max(200), z.unknown()),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await setRecordFields(ctx, args, agentName())),
   );
@@ -1195,6 +1394,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .optional(),
         fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
       },
+      annotations: ADD,
     },
     async (args) => text(await createRecord(ctx, args, agentName())),
   );
@@ -1214,6 +1414,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         page: z.string().min(1).max(512).optional(),
         server: z.boolean().optional(),
       },
+      annotations: READ_SERVER,
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
@@ -1228,6 +1429,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         run: z.string().min(1).max(256),
         server: z.boolean().optional(),
       },
+      annotations: READ_SERVER,
     },
     async (args) => text(await readAutomationRun(ctx, args)),
   );
@@ -1242,6 +1444,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         run: z.string().min(1).max(256),
         startOver: z.boolean().optional(),
       },
+      annotations: CHANGE,
     },
     async (args) => text(await retryAutomationRun(ctx, args)),
   );
@@ -1259,6 +1462,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         confirm: z.array(z.string().min(1).max(256)).max(64).optional(),
         requestId: requestIdSchema.optional(),
       },
+      annotations: CHANGE_SERVER,
     },
     async (args) => text(await pressButton(ctx, args)),
   );
@@ -1272,6 +1476,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         collectionPath: z.string().min(1).max(4096),
         table: z.string().min(1).max(256).optional(),
       },
+      annotations: READ_SERVER,
     },
     async (args) => text(await inspectButtons(ctx, args)),
   );

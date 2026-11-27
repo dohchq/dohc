@@ -23,6 +23,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -73,6 +79,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -99,6 +111,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -126,11 +144,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
       "name": "dohc_create_app",
-      "description": "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
+      "description": "Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -142,19 +166,22 @@
           "title": {
             "type": "string",
             "maxLength": 200
-          },
-          "withDohcJson": {
-            "type": "boolean"
           }
         },
         "required": [
           "appRoot"
         ],
-        "additionalProperties": false,
-        "$schema": "http://json-schema.org/draft-07/schema#"
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -181,6 +208,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -206,6 +239,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -248,6 +287,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -289,6 +334,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -311,11 +362,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
       "name": "dohc_dataset",
-      "description": "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { \"<fieldId>\": value } }; generated edit operations take input: { id, expectedVersion, values: { \"<fieldId>\": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. approval says who approved the rules the Collection runs; when needsOwnerConfirmation is true, an Admin who approved them is no longer one, and confirmApproval with that revisionSha256 records the Owner as their approver without changing them. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+      "description": "Create, prepare, approve, inspect, and use transactional Collections (dataset.json, SQLite tables, and approved operations) in the owning workspace. Address one with datasetPath, its dataset.json path relative to the MCP server folder, such as tracker/dataset.json, never a folder or datasetId; list returns these paths, and a move changes them. expectedDatasetId refuses the request when the path now names another Collection. create takes definition, a dataset.json descriptor object (formatVersion 1 or 2), and approves revision 1. prepare takes descriptorPath; approve takes its preparationId and revisionSha256. invoke runs an approved operation with its described revision and revisionSha256 and a stable idempotencyKey. Generated create operations take input { values: { <fieldId>: value } }, and edit operations add id and expectedVersion; field ids come from describe. Apps bind to these Collections and have no separate store. export writes a private recovery archive, with private records and retry credentials, to an absolute savePath outside the workspace. dohc://guides/collections lists every action's fields, migrations, history restore, permissions, and recovery.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -340,7 +397,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action"
                 ],
                 "additionalProperties": false
@@ -414,7 +470,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "transferId",
                   "manifestSha256",
@@ -442,7 +497,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "transferId"
                 ],
@@ -459,14 +513,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -484,7 +536,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -517,7 +568,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action"
                 ],
                 "additionalProperties": false
@@ -533,14 +583,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -551,7 +599,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -568,14 +615,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -583,7 +628,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -600,14 +644,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -645,7 +687,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "sql"
@@ -663,14 +704,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -683,7 +722,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -700,14 +738,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -725,7 +761,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -742,14 +777,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -767,7 +800,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -784,14 +816,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -849,7 +879,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "expected",
@@ -869,14 +898,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -884,7 +911,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -901,14 +927,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -916,7 +940,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -933,14 +956,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -958,7 +979,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -975,14 +995,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -998,7 +1016,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "reference",
@@ -1017,14 +1034,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1040,7 +1055,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "reference",
@@ -1059,14 +1073,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1084,7 +1096,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -1101,14 +1112,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1155,7 +1164,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "grantId",
@@ -1174,14 +1182,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1238,7 +1244,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "defaults"
@@ -1256,14 +1261,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1276,7 +1279,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "principalKey"
@@ -1294,14 +1296,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1309,7 +1309,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -1326,14 +1325,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1349,7 +1346,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -1366,14 +1362,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "revision": {
                     "type": "integer",
@@ -1413,7 +1407,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "revision",
                   "revisionSha256",
@@ -1437,14 +1430,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "revision": {
                     "type": "integer",
@@ -1487,7 +1478,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "revision",
                   "revisionSha256",
@@ -1507,14 +1497,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1591,7 +1579,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "revision",
@@ -1614,14 +1601,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "revision": {
                     "type": "integer",
@@ -1653,7 +1638,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "revision",
                   "revisionSha256",
@@ -1679,7 +1663,6 @@
                   "definition": {}
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "definition"
                 ],
@@ -1704,7 +1687,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "descriptorPath"
                 ],
@@ -1738,7 +1720,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "preparationId",
                   "revisionSha256"
@@ -1764,7 +1745,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "preparationId"
                 ],
@@ -1781,26 +1761,23 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
-                  },
-                  "revisionSha256": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
                     "const": "confirmApproval"
+                  },
+                  "revisionSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "revisionSha256"
@@ -1818,14 +1795,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1837,7 +1812,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "revisionSha256"
@@ -1855,14 +1829,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "revision": {
                     "type": "integer",
@@ -1887,7 +1859,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "revision",
                   "revisionSha256",
@@ -1908,14 +1879,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1935,7 +1904,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -1952,14 +1920,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -1984,7 +1950,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -2019,7 +1984,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "preparationId"
                 ],
@@ -2036,14 +2000,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "revision": {
                     "type": "integer",
@@ -2275,7 +2237,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "revision",
                   "revisionSha256",
@@ -2321,7 +2282,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "preparationId",
                   "revisionSha256",
@@ -2348,7 +2308,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "preparationId"
                 ],
@@ -2365,14 +2324,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -2405,7 +2362,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "operationId",
@@ -2435,7 +2391,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "action",
                   "invocationId"
                 ],
@@ -2452,6 +2407,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -2481,6 +2442,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2527,6 +2494,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2550,6 +2523,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -2570,6 +2549,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2604,6 +2589,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -2624,6 +2615,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2664,6 +2661,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2691,6 +2694,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2726,6 +2735,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2760,6 +2775,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2796,6 +2817,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2818,6 +2845,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2845,6 +2878,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -2872,6 +2911,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2899,6 +2944,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -2920,6 +2971,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -2942,6 +2999,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2976,6 +3039,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -2989,6 +3058,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3007,6 +3082,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3060,6 +3141,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3108,6 +3195,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3144,6 +3237,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -3166,6 +3265,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -3198,6 +3303,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3220,6 +3331,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -3241,6 +3358,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3254,6 +3377,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -3267,6 +3396,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3300,6 +3435,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -3319,6 +3460,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3337,6 +3484,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3350,6 +3503,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3363,6 +3522,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3376,6 +3541,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3395,6 +3566,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3412,6 +3589,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3425,6 +3608,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3862,6 +4051,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -3884,6 +4079,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -3922,6 +4123,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -3944,6 +4151,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -3998,6 +4211,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -4025,11 +4244,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
       "name": "dohc_publish_app",
-      "description": "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
+      "description": "Verify, approve, launch, and publish a local app, a folder with app.publish.json, as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId, then compiles and runs the app in dohc's offline sandbox against an empty ephemeral Collection without changing live data; run it before you approve or hand over an app. Local: prepareLocal, approve, then launchLocal. Share link: createLink with a stable operationId, so a retry returns the same link, then prepare and approve; these need a workspace that syncs with a server (see dohc_workspace_status). A link URL is a bearer credential: keep its secret yourself, never send it to dohc, and append the returned appQuery before the URL's fragment. In a workspace you joined, only Personal apps work. dohc://guides/apps lists every action, staging with Collection changes, apps for members, and Personal apps.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4217,8 +4442,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -4271,7 +4495,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot",
                   "operationId"
                 ],
@@ -4294,8 +4517,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -4324,7 +4546,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4354,7 +4575,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4384,7 +4604,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4427,7 +4646,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4451,8 +4669,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -4485,7 +4702,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId",
                   "reviewDigest"
                 ],
@@ -4511,7 +4727,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId"
                 ],
                 "additionalProperties": false
@@ -4535,7 +4750,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -4564,7 +4778,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4603,7 +4816,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -4665,7 +4877,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId",
                   "candidateDigest"
                 ],
@@ -4691,7 +4902,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId"
                 ],
                 "additionalProperties": false
@@ -4720,7 +4930,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -4750,7 +4959,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -4775,7 +4983,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -4791,6 +4998,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -4877,6 +5090,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -4905,6 +5124,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -4942,6 +5167,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -4964,6 +5195,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5021,6 +5258,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -5043,6 +5286,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5082,6 +5331,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5104,6 +5359,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5131,6 +5392,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5155,6 +5422,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5193,6 +5466,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5221,6 +5500,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -5319,6 +5604,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -5379,6 +5670,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5399,6 +5696,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5421,6 +5724,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5458,6 +5767,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5480,6 +5795,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5508,6 +5829,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5530,6 +5857,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5557,6 +5890,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5607,6 +5946,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5661,6 +6006,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -5681,6 +6032,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -5713,6 +6070,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5739,6 +6102,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -5788,6 +6157,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -5873,6 +6248,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -5901,6 +6282,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5928,6 +6315,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5941,6 +6334,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -5963,11 +6362,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
       "name": "dohc_test_app",
-      "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5985,6 +6390,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6006,6 +6417,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -6028,6 +6445,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -6062,6 +6485,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -6083,6 +6512,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -6096,6 +6531,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6138,6 +6579,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     }
   ],
@@ -6190,6 +6637,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6216,6 +6669,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6237,14 +6696,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -6262,7 +6719,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -6279,14 +6735,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -6333,7 +6787,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "grantId",
@@ -6352,14 +6805,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -6416,7 +6867,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "defaults"
@@ -6434,14 +6884,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -6454,7 +6902,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "principalKey"
@@ -6472,14 +6919,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -6487,7 +6932,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -6504,6 +6948,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -6527,6 +6977,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6554,6 +7010,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -6581,6 +7043,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -6602,6 +7070,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6615,6 +7089,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6633,6 +7113,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6686,6 +7172,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6734,6 +7226,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6756,6 +7254,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -6788,6 +7292,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6810,6 +7320,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -6831,6 +7347,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6844,6 +7366,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -6857,6 +7385,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6875,6 +7409,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6888,6 +7428,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -6901,6 +7447,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -7338,6 +7890,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -7392,11 +7950,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_publish_app",
-      "description": "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
+      "description": "Verify, approve, launch, and publish a local app, a folder with app.publish.json, as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId, then compiles and runs the app in dohc's offline sandbox against an empty ephemeral Collection without changing live data; run it before you approve or hand over an app. Local: prepareLocal, approve, then launchLocal. Share link: createLink with a stable operationId, so a retry returns the same link, then prepare and approve; these need a workspace that syncs with a server (see dohc_workspace_status). A link URL is a bearer credential: keep its secret yourself, never send it to dohc, and append the returned appQuery before the URL's fragment. In a workspace you joined, only Personal apps work. dohc://guides/apps lists every action, staging with Collection changes, apps for members, and Personal apps.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -7584,8 +8148,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -7638,7 +8201,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot",
                   "operationId"
                 ],
@@ -7661,8 +8223,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -7691,7 +8252,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -7721,7 +8281,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -7751,7 +8310,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -7794,7 +8352,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -7818,8 +8375,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -7852,7 +8408,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId",
                   "reviewDigest"
                 ],
@@ -7878,7 +8433,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId"
                 ],
                 "additionalProperties": false
@@ -7902,7 +8456,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -7931,7 +8484,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -7970,7 +8522,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -8032,7 +8583,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId",
                   "candidateDigest"
                 ],
@@ -8058,7 +8608,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId"
                 ],
                 "additionalProperties": false
@@ -8087,7 +8636,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -8117,7 +8665,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -8142,7 +8689,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -8158,6 +8704,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -8244,6 +8796,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8272,6 +8830,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8294,6 +8858,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8351,6 +8921,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -8373,6 +8949,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8412,6 +8994,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8439,6 +9027,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8477,6 +9071,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8527,6 +9127,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8547,6 +9153,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -8573,11 +9185,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_test_app",
-      "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -8595,6 +9213,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8616,6 +9240,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -8629,6 +9259,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     }
   ],
@@ -8681,6 +9317,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8707,6 +9349,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -8728,14 +9376,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -8753,7 +9399,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -8770,14 +9415,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -8824,7 +9467,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "grantId",
@@ -8843,14 +9485,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -8907,7 +9547,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "defaults"
@@ -8925,14 +9564,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -8945,7 +9582,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "principalKey"
@@ -8963,14 +9599,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -8978,7 +9612,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -8995,6 +9628,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -9018,6 +9657,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9045,6 +9690,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -9072,6 +9723,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -9093,6 +9750,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9106,6 +9769,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9124,6 +9793,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9177,6 +9852,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9225,6 +9906,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9247,6 +9934,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -9279,6 +9972,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9301,6 +10000,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -9322,6 +10027,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9335,6 +10046,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -9348,6 +10065,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9366,6 +10089,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9379,6 +10108,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9392,6 +10127,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9829,6 +10570,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -9883,11 +10630,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_publish_app",
-      "description": "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
+      "description": "Verify, approve, launch, and publish a local app, a folder with app.publish.json, as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId, then compiles and runs the app in dohc's offline sandbox against an empty ephemeral Collection without changing live data; run it before you approve or hand over an app. Local: prepareLocal, approve, then launchLocal. Share link: createLink with a stable operationId, so a retry returns the same link, then prepare and approve; these need a workspace that syncs with a server (see dohc_workspace_status). A link URL is a bearer credential: keep its secret yourself, never send it to dohc, and append the returned appQuery before the URL's fragment. In a workspace you joined, only Personal apps work. dohc://guides/apps lists every action, staging with Collection changes, apps for members, and Personal apps.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -10075,8 +10828,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -10129,7 +10881,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot",
                   "operationId"
                 ],
@@ -10152,8 +10903,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -10182,7 +10932,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10212,7 +10961,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10242,7 +10990,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10285,7 +11032,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10309,8 +11055,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -10343,7 +11088,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId",
                   "reviewDigest"
                 ],
@@ -10369,7 +11113,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId"
                 ],
                 "additionalProperties": false
@@ -10393,7 +11136,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -10422,7 +11164,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10461,7 +11202,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -10523,7 +11263,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId",
                   "candidateDigest"
                 ],
@@ -10549,7 +11288,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId"
                 ],
                 "additionalProperties": false
@@ -10578,7 +11316,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -10608,7 +11345,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -10633,7 +11369,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -10649,6 +11384,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -10735,6 +11476,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10763,6 +11510,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10785,6 +11538,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10842,6 +11601,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -10864,6 +11629,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10903,6 +11674,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10930,6 +11707,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -10968,6 +11751,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11066,6 +11855,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11116,6 +11911,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11136,6 +11937,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11162,6 +11969,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11211,6 +12024,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11296,11 +12115,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_test_app",
-      "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -11318,6 +12143,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11339,6 +12170,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11352,6 +12189,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     }
   ],
@@ -11404,6 +12247,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11430,6 +12279,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11451,14 +12306,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -11476,7 +12329,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -11493,14 +12345,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -11547,7 +12397,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "grantId",
@@ -11566,14 +12415,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -11630,7 +12477,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "defaults"
@@ -11648,14 +12494,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -11668,7 +12512,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action",
                   "principalKey"
@@ -11686,14 +12529,12 @@
                   "datasetPath": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024,
-                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                    "maxLength": 1024
                   },
                   "expectedDatasetId": {
                     "type": "string",
                     "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
                   "action": {
                     "type": "string",
@@ -11701,7 +12542,6 @@
                   }
                 },
                 "required": [
-                  "workspaceId",
                   "datasetPath",
                   "action"
                 ],
@@ -11718,6 +12558,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11743,6 +12589,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -11785,6 +12637,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -11826,6 +12684,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -11849,6 +12713,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11889,6 +12759,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -11916,6 +12792,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -11943,6 +12825,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -11964,6 +12852,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11977,6 +12871,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -11995,6 +12895,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12048,6 +12954,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12096,6 +13008,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12118,6 +13036,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -12150,6 +13074,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12172,6 +13102,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -12193,6 +13129,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12206,6 +13148,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -12219,6 +13167,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12237,6 +13191,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12250,6 +13210,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12263,6 +13229,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12700,6 +13672,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -12754,11 +13732,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_publish_app",
-      "description": "Verify a candidate or approved local app frontend (verifyFrontend), create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId and runs the compiled app in dohc's offline sandbox against an empty ephemeral Collection without mutating live data (unlike dohc_test_app, which checks folder detection only). createLink requires a stable operationId; retries return the existing grant, never another link. createLink, prepare, and approve need a workspace that syncs with a server; otherwise they fail with \"Sync this workspace before sharing.\" Check the sync state with dohc_workspace_status. After approve, link holders' reads and writes run on that server, so the app works while this computer is off. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance. In a workspace you joined, only Personal apps work: personalFolder shows your Personal app folder on this computer, prepareLocal, listLocal, and checkLocal take one of its subfolders as appRoot, and approve, cancel, launchLocal, and withdraw work as they do in the owning workspace. A Personal app never syncs and runs only the Collection actions your own access allows.",
+      "description": "Verify, approve, launch, and publish a local app, a folder with app.publish.json, as its owner on this computer. verifyFrontend takes exactly one of appRoot or publicationId, then compiles and runs the app in dohc's offline sandbox against an empty ephemeral Collection without changing live data; run it before you approve or hand over an app. Local: prepareLocal, approve, then launchLocal. Share link: createLink with a stable operationId, so a retry returns the same link, then prepare and approve; these need a workspace that syncs with a server (see dohc_workspace_status). A link URL is a bearer credential: keep its secret yourself, never send it to dohc, and append the returned appQuery before the URL's fragment. In a workspace you joined, only Personal apps work. dohc://guides/apps lists every action, staging with Collection changes, apps for members, and Personal apps.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -12946,8 +13930,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -13000,7 +13983,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot",
                   "operationId"
                 ],
@@ -13023,8 +14005,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -13053,7 +14034,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13083,7 +14063,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13113,7 +14092,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13156,7 +14134,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13180,8 +14157,7 @@
                   }
                 },
                 "required": [
-                  "action",
-                  "workspaceId"
+                  "action"
                 ],
                 "additionalProperties": false
               },
@@ -13214,7 +14190,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId",
                   "reviewDigest"
                 ],
@@ -13240,7 +14215,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "stageId"
                 ],
                 "additionalProperties": false
@@ -13264,7 +14238,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -13293,7 +14266,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13332,7 +14304,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "appRoot"
                 ],
                 "additionalProperties": false
@@ -13394,7 +14365,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId",
                   "candidateDigest"
                 ],
@@ -13420,7 +14390,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "approvalId"
                 ],
                 "additionalProperties": false
@@ -13449,7 +14418,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -13479,7 +14447,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId",
                   "expectedAuthorityRevision"
                 ],
@@ -13504,7 +14471,6 @@
                 },
                 "required": [
                   "action",
-                  "workspaceId",
                   "publicationId"
                 ],
                 "additionalProperties": false
@@ -13520,6 +14486,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -13606,6 +14578,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13634,6 +14612,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13656,6 +14640,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13713,6 +14703,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
     {
@@ -13735,6 +14731,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13774,6 +14776,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13801,6 +14809,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13839,6 +14853,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -13937,6 +14957,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -13987,6 +15013,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -14007,6 +15039,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -14039,6 +15077,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -14065,6 +15109,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -14114,6 +15164,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -14199,6 +15255,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -14246,11 +15308,17 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "dohc_test_app",
-      "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
+      "description": "Check an app folder without running it: detector diagnostics and entry presence. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs the app in dohc's sandbox.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -14268,6 +15336,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -14289,6 +15363,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
@@ -14302,6 +15382,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     }
   ]

@@ -94,7 +94,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, join, posix } from "node:path";
+import { basename, isAbsolute, join, posix, relative, sep } from "node:path";
 
 type DeclaredTool = DeclaredOperation["mcp"]["tool"];
 export const DECLARED_TOOLS = byName(
@@ -1227,6 +1227,36 @@ export async function listWorkspaces(ctx: ToolContext) {
   return { workspaces };
 }
 
+async function enclosingWorkspaceEntry(ctx: ToolContext) {
+  const served = await realpath(ctx.root).catch(() => ctx.root);
+  let found: { entry: RegistryWorkspace; root: string } | null = null;
+  for (const entry of (await readRegistry(ctx))?.workspaces ?? []) {
+    const root = await realpath(entry.rootPath).catch(() => entry.rootPath);
+    const inside = relative(root, served);
+    if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) continue;
+    if (!found || root.length > found.root.length) found = { entry, root };
+  }
+  return found?.entry ?? null;
+}
+
+export async function servedWorkspace(ctx: ToolContext) {
+  const entry = await enclosingWorkspaceEntry(ctx);
+  const rootPath = entry?.rootPath ?? ctx.root;
+  const subjectName = entry?.shareView?.subjectName;
+  return {
+    workspaceId: entry?.workspaceId ?? null,
+    name:
+      typeof subjectName === "string" && subjectName
+        ? subjectName
+        : rootPath
+            .replace(/[\\/]+$/, "")
+            .split(/[\\/]/)
+            .pop() || "Workspace",
+    rootPath,
+    shareAccess: ctx.shareAccess ?? "owner",
+  };
+}
+
 function removedShareStatus(workspace: RegistryWorkspace | null) {
   const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
     shareId,
@@ -1845,7 +1875,7 @@ export async function detectApps(
 
 export async function createApp(
   ctx: ToolContext,
-  args: { appRoot: string; title?: string; withDohcJson?: boolean },
+  args: { appRoot: string; title?: string },
   agent?: string,
 ) {
   const root = await safeResolve(ctx, args.appRoot);
@@ -1867,11 +1897,10 @@ export async function createApp(
   }
 
   const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const files = generateAppSource({
-    title,
-    appRoot: root.normalized,
-    withDohcJson: args.withDohcJson !== false,
-  }).map((file) => ({ ...file, path: relativeJoin(root.normalized, file.path) }));
+  const files = generateAppSource({ title }).map((file) => ({
+    ...file,
+    path: relativeJoin(root.normalized, file.path),
+  }));
 
   const resolvedFiles = [];
   for (const file of files) {

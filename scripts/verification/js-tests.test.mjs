@@ -1116,6 +1116,11 @@ test("a change affects its own packages and every package that depends on them",
     "a generated reference that tests compare against is not documentation",
   );
   assert.equal(
+    affectedPackages(["skills/dohc/SKILL.md"], packages),
+    null,
+    "the skill that packages/mcp bundles is not documentation",
+  );
+  assert.equal(
     affectedPackages([], packages),
     null,
     "with nothing to attribute, every package runs",
