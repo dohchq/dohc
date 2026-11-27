@@ -31,7 +31,10 @@ mod note_format_two;
 pub(crate) use note_format_two::{
     CONVERSION_BASE_PENDING, CONVERSION_ID_PREFIX, CONVERSION_PENDING,
 };
-pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
+pub use note_format_two::{
+    FormatTwoConversion, FormatTwoPass, convert_note_to_format_two_in_tx,
+    convert_notes_to_format_two,
+};
 
 const FORMAT_VERSION: i64 = 1;
 

@@ -1,5 +1,6 @@
 use super::*;
 use dohc_engine_collab::ydoc::without_final_markdown_newline;
+use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatTwoConversion {
@@ -303,4 +304,120 @@ pub(super) fn received(
     } else {
         Received::Conversion
     })
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FormatTwoPass {
+    pub off: bool,
+    pub converted: usize,
+    pub unchanged: usize,
+    pub skipped: Vec<(DocKey, String, &'static str)>,
+    pub does_not_fit: Vec<(DocKey, String)>,
+    pub resume_after: Option<DocKey>,
+}
+
+/// Convert up to `budget` of a workspace's notes after `after` to format 2,
+/// skipping notes `live` holds. `resume_after` is where the next call starts.
+pub fn convert_notes_to_format_two(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    after: Option<&DocKey>,
+    budget: usize,
+    live: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<FormatTwoPass, SyncError> {
+    use FormatTwoConversion::{Converted, DoesNotFit, NotNow, NothingToConvert};
+    let mut pass = FormatTwoPass::default();
+    if dohc_engine_collab::new_note_schema_version(ContentKind::Richdoc) != 2 {
+        pass.off = true;
+        return Ok(pass);
+    }
+    let budget = budget.max(1);
+    let (version, object) = after.map_or(("", ""), |key| {
+        (key.version_id.as_str(), key.object_id.as_str())
+    });
+    let (notes, offline) = store.read_with(|conn| {
+        let notes = conn
+            .prepare(
+                "SELECT d.version_id, d.object_id, COALESCE(s.path, d.path, d.object_id), \
+                 d.regime='local-only' AND d.lineage_claim_status='unclaimed' FROM ydoc_docs d \
+                 LEFT JOIN snapshots s ON s.workspace_id=d.workspace_id \
+                 AND s.version_id=d.version_id AND s.object_id=d.object_id \
+                 WHERE d.workspace_id=?1 AND d.content_kind='richdoc' \
+                 AND (d.version_id, d.object_id) > (?2, ?3) \
+                 ORDER BY d.version_id, d.object_id LIMIT ?4",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        params![
+                            workspace_id,
+                            version,
+                            object,
+                            i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1)
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )?
+                    .collect::<Result<Vec<(String, String, String, bool)>, _>>()
+            })
+            .map_err(SyncError::corrupt)?;
+        Ok::<_, SyncError>((
+            notes,
+            !crate::workspace_replicates_with_relay(conn, workspace_id)?,
+        ))
+    })?;
+    for (version_id, object_id, path, local) in notes.iter().take(budget) {
+        let key =
+            DocKey::new(workspace_id, version_id, object_id).map_err(map_local_collab_error)?;
+        let outcome = if *local && offline {
+            drop_local_format_one(store, &key, live, faults, now_ms)?
+        } else {
+            match store.write_with(faults, |tx| {
+                convert_note_to_format_two_in_tx(tx, &key, live, now_ms)
+            })? {
+                TxnOutcome::Committed(outcome) => outcome,
+                TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+            }
+        };
+        match outcome {
+            Converted => pass.converted += 1,
+            NothingToConvert => pass.unchanged += 1,
+            NotNow(reason) => pass.skipped.push((key.clone(), path.clone(), reason)),
+            DoesNotFit => pass.does_not_fit.push((key.clone(), path.clone())),
+        }
+        pass.resume_after = Some(key);
+    }
+    if notes.len() <= budget {
+        pass.resume_after = None;
+    }
+    Ok(pass)
+}
+
+fn drop_local_format_one(
+    store: &mut EngineStore,
+    key: &DocKey,
+    live: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<FormatTwoConversion, SyncError> {
+    if live.is_live(key) {
+        return Ok(FormatTwoConversion::NotNow("ydoc-session-live"));
+    }
+    let format_one = dohc_engine_collab::load_persisted(store, key)
+        .map_err(map_local_collab_error)?
+        .is_some_and(|persisted| {
+            persisted.marker.head_update_seq > 0 && persisted.doc.note_schema_version() == 1
+        });
+    if !format_one {
+        return Ok(FormatTwoConversion::NothingToConvert);
+    }
+    match dohc_engine_collab::close_session(store, key, false, None, faults, now_ms) {
+        Ok(TxnOutcome::Committed(_)) => Ok(FormatTwoConversion::Converted),
+        Ok(TxnOutcome::Crashed { .. }) => Err(SyncError::FaultCrash),
+        Err(dohc_engine_collab::CollabError::UnsettledClose) => {
+            Ok(FormatTwoConversion::NotNow("ydoc-unsettled"))
+        }
+        Err(error) => Err(map_local_collab_error(error)),
+    }
 }
