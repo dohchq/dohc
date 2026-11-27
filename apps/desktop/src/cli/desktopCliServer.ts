@@ -168,7 +168,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  reads: DeclaredReaders<RegistryEntry>;
+  reads: DeclaredReaders<PhysicalWorkspace<RegistryEntry>>;
   heldChanges: import("../workspaces/workspaceHeldChanges").WorkspaceHeldChanges;
   stopWorkspaceSync?(
     operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
@@ -1542,7 +1542,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
 
   const readLinks = <T>(
     requested: CliRegistryWorkspace,
-    run: (workspace: RegistryEntry) => Promise<T>,
+    run: (workspace: PhysicalWorkspace<RegistryEntry>) => Promise<T>,
   ) =>
     withPhysicalWorkspaceOperation(requested.workspaceId, (operation) => {
       if (resolve(operation.workspace.rootPath) !== resolve(requested.rootPath))
@@ -1573,7 +1573,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           readLinks(workspace, (current) =>
             (
               dependencies.reads[verb] as (
-                workspace: RegistryEntry,
+                workspace: PhysicalWorkspace<RegistryEntry>,
                 input: object,
               ) => Promise<unknown>
             )(current, input),

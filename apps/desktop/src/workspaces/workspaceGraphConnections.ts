@@ -19,6 +19,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isDatasetDescriptor } from "./datasetAddress";
 import { parseAppPublicationDeclaration } from "./ownerAppPublication";
+import type { CollectionReadSource } from "./receivedShareCollections";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 
@@ -52,6 +53,8 @@ const STRUCTURAL = new Set([
 ]);
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const join = (folder: string, name: string) => (folder === "." ? name : `${folder}/${name}`);
+const edgeKey = (edge: LinksConnectionEdge) =>
+  JSON.stringify([edge.source, edge.target, edge.kind, edge.approval]);
 
 async function eachLimited<T, R>(items: readonly T[], work: (item: T) => Promise<R>) {
   const results: R[] = new Array(items.length);
@@ -95,8 +98,78 @@ export function fitConnections(result: LinksConnectionsResult): LinksConnections
   return { ...result, nodes, edges, records, complete };
 }
 
+async function collectionGraph(adapter: Adapter, selected: (path: string) => boolean) {
+  let complete = true;
+  let failed = false;
+  const missing = () => {
+    failed = true;
+    complete = false;
+    return null;
+  };
+  const listed = (await adapter.listCollections()).collections
+    .filter((entry) => !isSharedWithMePath(entry.path) && selected(`${entry.path}/collection.yaml`))
+    .sort((a, b) => byText(a.path, b.path));
+  if (listed.length > CONNECTION_LIMITS.collections) complete = false;
+  const collections = listed.slice(0, CONNECTION_LIMITS.collections);
+  const ids = new Set(collections.map((entry) => `collection:${entry.path}`));
+  const details = await eachLimited(collections, async (summary) => {
+    const [collection, query] = await Promise.all([
+      adapter.getCollection({ collectionPath: summary.path }).catch(missing),
+      adapter
+        .queryCollectionRecords({ collectionPath: summary.path, limit: CONNECTION_LIMITS.records })
+        .catch(missing),
+    ]);
+    return { summary, collection, query };
+  });
+  const nodes: LinksConnectionNode[] = [];
+  const edges = new Map<string, LinksConnectionEdge>();
+  const records: LinksConnectionsResult["records"] = [];
+  for (const { summary, collection, query } of details) {
+    const id = `collection:${summary.path}`;
+    const paths = (query?.records ?? [])
+      .map((record) => record.path)
+      .filter(selected)
+      .sort(byText);
+    nodes.push({
+      id,
+      kind: "document-collection",
+      path: summary.path,
+      title: collection?.schema.name || posix.basename(summary.path),
+      recordCount: selected(summary.path) ? (collection?.recordCount ?? 0) : paths.length,
+    });
+    if (query?.nextCursor && selected(query.nextCursor.recordPath)) complete = false;
+    if (paths.length) records.push({ collection: id, paths });
+    for (const field of collection?.schema.fields ?? []) {
+      if (field.type !== "relation") continue;
+      const relation: LinksConnectionEdge = {
+        source: id,
+        target: `collection:${field.collection}`,
+        kind: "relation",
+      };
+      if (relation.target !== id && ids.has(relation.target))
+        edges.set(edgeKey(relation), relation);
+    }
+  }
+  return { collections, nodes, edges: [...edges.values()], records, complete, failed };
+}
+
+const finished = (result: Omit<LinksConnectionsResult, "scope">): LinksConnectionsResult =>
+  fitConnections({
+    scope: "workspace",
+    ...result,
+    nodes: result.nodes
+      .map((node) => ({ ...node, title: cutText(node.title, 200) }))
+      .sort((a, b) => byText(a.id, b.id)),
+    edges: result.edges.sort((a, b) => byText(edgeKey(a), edgeKey(b))),
+    records: result.records.sort((a, b) => byText(a.collection, b.collection)),
+  });
+
 export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
-  withAdapter<T>(workspace: W, run: (adapter: Adapter) => Promise<T>): Promise<T | null>;
+  withAdapter<T>(
+    workspace: W | CollectionReadSource["workspace"],
+    run: (adapter: Adapter) => Promise<T>,
+  ): Promise<T | null>;
+  receivedCollections(workspace: W): CollectionReadSource | null;
   apps(workspace: W): Promise<GraphApp[]>;
   approvals(workspace: W): Promise<GraphApproval[]>;
   groups(workspace: W): Promise<GraphGroup[]>;
@@ -135,19 +208,12 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
     const edges = new Map<string, LinksConnectionEdge>();
     const records: LinksConnectionsResult["records"] = [];
     let complete = true;
-    let failed = false;
-    const missing = () => {
-      failed = true;
-      complete = false;
-      return null;
-    };
     const capped = <T>(items: T[], limit: number) => {
       if (items.length > limit) complete = false;
       return items.slice(0, limit);
     };
     const edge = (value: LinksConnectionEdge) => {
-      if (value.source !== value.target)
-        edges.set(JSON.stringify([value.source, value.target, value.kind, value.approval]), value);
+      if (value.source !== value.target) edges.set(edgeKey(value), value);
     };
     const readText = async (path: string) => {
       if (!shas.has(path)) return null;
@@ -159,48 +225,17 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       });
       return file && "text" in file && typeof file.text === "string" ? file.text : null;
     };
-    const owners = new Map<string, { id: string; engineId: string | null }>();
-
-    const collections = capped(
-      (await adapter.listCollections()).collections
-        .filter((entry) => !isSharedWithMePath(entry.path))
-        .sort((a, b) => byText(a.path, b.path)),
-      CONNECTION_LIMITS.collections,
+    const graph = await collectionGraph(adapter, () => true);
+    if (!graph.complete) complete = false;
+    for (const node of graph.nodes) nodes.set(node.id, node);
+    for (const value of graph.edges) edge(value);
+    records.push(...graph.records);
+    const owners = new Map<string, { id: string; engineId: string | null }>(
+      graph.collections.map(({ path, objectId }) => [
+        path,
+        { id: `collection:${path}`, engineId: objectId },
+      ]),
     );
-    const details = await eachLimited(collections, async (summary) => {
-      const [collection, query] = await Promise.all([
-        adapter.getCollection({ collectionPath: summary.path }).catch(missing),
-        adapter
-          .queryCollectionRecords({
-            collectionPath: summary.path,
-            limit: CONNECTION_LIMITS.records,
-          })
-          .catch(missing),
-      ]);
-      return { summary, collection, query };
-    });
-    for (const { summary, collection, query } of details) {
-      const id = `collection:${summary.path}`;
-      nodes.set(id, {
-        id,
-        kind: "document-collection",
-        path: summary.path,
-        title: collection?.schema.name || posix.basename(summary.path),
-        recordCount: collection?.recordCount ?? 0,
-      });
-      owners.set(summary.path, { id, engineId: summary.objectId });
-      if (query?.nextCursor) complete = false;
-      const paths = (query?.records ?? []).map((record) => record.path).sort(byText);
-      if (paths.length) records.push({ collection: id, paths });
-    }
-    for (const { summary, collection } of details)
-      for (const field of collection?.schema.fields ?? [])
-        if (field.type === "relation")
-          edge({
-            source: `collection:${summary.path}`,
-            target: `collection:${field.collection}`,
-            kind: "relation",
-          });
 
     const datasetIds = new Map<string, string>();
     const descriptors = capped(
@@ -348,24 +383,33 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         edge({ source: id, target, kind: "app-uses-data", approval: "requested" });
     });
 
-    const value = fitConnections({
-      scope: "workspace",
-      nodes: [...nodes.values()]
-        .map((node) => ({ ...node, title: cutText(node.title, 200) }))
-        .sort((a, b) => byText(a.id, b.id)),
-      edges: [...edges].sort(([a], [b]) => byText(a, b)).map(([, value]) => value),
-      records: records.sort((a, b) => byText(a.collection, b.collection)),
+    const value = finished({
+      nodes: [...nodes.values()],
+      edges: [...edges.values()],
+      records,
       complete,
       mountsCovered,
     });
-    if (!failed) cache.set(workspaceId, { key, value });
+    if (!graph.failed) cache.set(workspaceId, { key, value });
     return value;
   }
 
   return {
     async connections(workspace: W): Promise<LinksConnectionsResult> {
-      if (shareViewIsPresent(workspace.shareView)) return SHARE_OMITTED_CONNECTIONS;
-      const result = await deps.withAdapter(workspace, (adapter) => read(workspace, adapter));
+      const share = shareViewIsPresent(workspace.shareView)
+        ? deps.receivedCollections(workspace)
+        : undefined;
+      if (share === null) return SHARE_OMITTED_CONNECTIONS;
+      const result = share
+        ? await deps.withAdapter(share.workspace, async (adapter) => {
+            const { nodes, edges, records, complete } = await collectionGraph(
+              adapter,
+              share.selected,
+            );
+            const mountsCovered = !workspace.shareMounts?.length;
+            return finished({ nodes, edges, records, complete, mountsCovered });
+          })
+        : await deps.withAdapter(workspace, (adapter) => read(workspace, adapter));
       if (!result) throw new Error("Workspace engine is unavailable.");
       return result;
     },

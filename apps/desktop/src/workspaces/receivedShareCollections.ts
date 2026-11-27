@@ -106,6 +106,20 @@ export function collectionListSources(
   ];
 }
 
+export function standaloneShareCollectionSource(
+  workspace: Workspace,
+  shareEngine: ShareEngine,
+): CollectionReadSource | null {
+  const target = resolveRegisteredShareViewFilesTarget(workspace, {
+    kind: "standalone",
+    workspaceId: workspace.workspaceId,
+  });
+  const grant = recordedShareSelector(target?.grantedSelector);
+  return target && !target.ended && grant && !grant.wholeWorkspace
+    ? receivedSource(workspace, shareEngine)
+    : null;
+}
+
 export function mountedCollectionSchema(
   schema: CollectionSchema,
   prefix: string,
