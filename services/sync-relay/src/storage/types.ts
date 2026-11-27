@@ -1571,6 +1571,7 @@ export interface SyncRelayStorage {
     messageId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    wakes?: import("./chatWakes").BrowserPostWakes;
   }): AppendLogBatchResult;
   appendLinkChatPost(
     input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1],
@@ -2059,6 +2060,11 @@ export interface SyncRelayStorage {
   }[];
   findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
   findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined;
+  ownerComputerMessage(
+    workspaceId: string,
+    threadId: string,
+    messageId: string,
+  ): ReturnType<typeof import("./objectIndex").ownerComputerMessage>;
   findChannelChatThread(workspaceId: string, channelWireId: string): string | null;
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason

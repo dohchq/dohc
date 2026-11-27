@@ -3,7 +3,9 @@ import { type SyncRelayLogRow, type ThreadFileBinding, type ObjectMomentRow } fr
 import { SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow, rowToObjectMomentRow } from "./rows";
 import { asRecord } from "@dohc/workspace-core";
-import { firstDeletedInThread } from "./messageDeletes";
+import type { ChatMessage } from "@dohc/workspace-contracts/engine";
+import { isOwnerLogOrigin } from "../relayLogInputs";
+import { firstDeletedInThread, messageDeleted } from "./messageDeletes";
 import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 export function listObjectMomentLogRowsByBlob(
@@ -296,6 +298,44 @@ export function findThreadFirstMessageId(
   const deleted = firstDeletedInThread(storage, workspaceId, threadId);
   if (deleted && (!live || deleted.relaySeq < live.relaySeq)) return deleted.messageId;
   return typeof live?.messageId === "string" ? live.messageId : undefined;
+}
+
+/**
+ * A thread's message as wake resolution reads it: its earliest admitted
+ * append, when one of the owner's computers wrote it and it isn't deleted.
+ * Any other message, a person's or agent's from a share, a link, a browser or
+ * a personal agent, is null, so it never names an agent to wake.
+ */
+export function ownerComputerMessage(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+  messageId: string,
+): Pick<ChatMessage, "author" | "authorUserId" | "authorAgentId"> | null {
+  const row = storage.db
+    .prepare(
+      `SELECT origin_id, payload_json FROM sync_relay_log INDEXED BY idx_push_message_identity
+     WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
+       AND op_kind = 'chat.message.append' AND json_valid(payload_json) AND relay_admission IS NULL
+       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
+     ORDER BY relay_seq LIMIT 1`,
+    )
+    .get(workspaceId, threadId, messageId);
+  if (
+    !row ||
+    !isOwnerLogOrigin(String(row.origin_id)) ||
+    messageDeleted(storage, workspaceId, threadId, messageId)
+  )
+    return null;
+  const payload = asRecord(JSON.parse(String(row.payload_json)));
+  const kind = payload?.authorKind,
+    displayName = payload?.authorDisplayName;
+  if ((kind !== "human" && kind !== "agent") || typeof displayName !== "string") return null;
+  return {
+    author: { kind, displayName },
+    ...(typeof payload?.authorUserId === "string" ? { authorUserId: payload.authorUserId } : {}),
+    ...(typeof payload?.authorAgentId === "string" ? { authorAgentId: payload.authorAgentId } : {}),
+  };
 }
 
 /** A Group's chat: the earliest chat-lane thread bound to it, or null before anyone chats. */

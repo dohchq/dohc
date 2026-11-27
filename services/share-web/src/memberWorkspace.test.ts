@@ -539,3 +539,44 @@ it("reads, follows and posts on a file's Comments for a member, and keeps them r
   });
   expect(refused.status).toBe(403);
 });
+
+it("wakes the owner's remembering computer when the owner names an agent from the browser, and never for a member", async () => {
+  const f = await fixture();
+  for (const [installId, memory] of [
+    ["laptop", true],
+    ["mac", false],
+  ] as const)
+    f.storage.replaceChatRunners({
+      accountId: OWNER,
+      workspaceId: WORKSPACE,
+      installId,
+      computerLabel: installId,
+      runners: [
+        { agentId: "claude", handle: "claude", displayName: "Claude", enabled: true, memory },
+      ],
+      nowMs: 2_000,
+    });
+  const waiting = (installId: string) =>
+    f.storage.listWaitingChatWakes({ accountId: OWNER, installId, since: 0, nowMs: 2_000 }).wakes;
+  const post = (user: string, shareId: string, id: string) =>
+    f.chat("messages", user, {
+      method: "POST",
+      body: JSON.stringify({
+        shareId,
+        channelWireId: "wire-plans",
+        id,
+        lane: "posts",
+        body: "@claude plan the route",
+        authorKind: "human",
+      }),
+    });
+  const member = await post("sam", f.shareId, "member-1");
+  expect(member.status, await member.clone().text()).toBe(200);
+  expect(JSON.stringify(await member.json())).not.toContain("wake");
+  expect(waiting("laptop")).toEqual([]);
+
+  const owner = await post(OWNER, `owner:${WORKSPACE}`, "owner-1");
+  expect(owner.status, await owner.clone().text()).toBe(200);
+  expect(waiting("laptop")).toHaveLength(1);
+  expect(waiting("mac")).toEqual([]);
+});
