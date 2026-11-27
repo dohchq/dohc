@@ -23,7 +23,6 @@ function unsent(made: LiveProvider) {
   return state.pendingUpdates > 0 || (ended && made.unsentText() !== null);
 }
 
-/** The binding to reopen on: the relay replaced the note's lineage and nothing is unsent. */
 const successorOf = (made: LiveProvider) => (unsent(made) ? null : made.replacement());
 
 export function createLiveAdapter(options: {
