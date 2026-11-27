@@ -1397,22 +1397,39 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
-  it("reads and edits a note whose body is one sequence", async () => {
-    const root = await mkdtemp(join(tmpdir(), "dohc-cli-sequence-"));
-    const note = markdownToYDoc("# Plan\n\nDay one.\n\nDay two.", { bodySequence: true });
+  const PLAN = "# Plan\n\nDay one.\n\nDay two.";
+
+  async function sequenceContext(prefix: string, note: Y.Doc) {
+    const root = await mkdtemp(join(tmpdir(), prefix));
+    expect(readsBodySequence(note)).toBe(true);
+    await writeFile(join(root, "plan.md"), `${PLAN}\n`);
+    const f = fixture(root);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    vi.mocked(f.dependencies.liveDocuments.readDocument).mockResolvedValueOnce({
+      path: "plan.md",
+      state: Y.encodeStateAsUpdate(note),
+    });
+    return { root, f, context };
+  }
+
+  it("reads a note whose body is one sequence", async () => {
+    const note = markdownToYDoc(PLAN, { bodySequence: true });
+    const { root, context } = await sequenceContext("dohc-cli-sequence-read-", note);
     try {
-      expect(readsBodySequence(note)).toBe(true);
-      await writeFile(join(root, "plan.md"), "# Plan\n\nDay one.\n\nDay two.\n");
-      const f = fixture(root);
-      const context = await f.create().openCliWorkspace(f.workspace);
-      vi.mocked(f.dependencies.liveDocuments.readDocument).mockResolvedValueOnce({
-        path: "plan.md",
-        state: Y.encodeStateAsUpdate(note),
-      });
       expect(await context.documents!.read("plan.md")).toEqual({
         path: "plan.md",
-        markdown: "# Plan\n\nDay one.\n\nDay two.\n",
+        markdown: `${PLAN}\n`,
       });
+    } finally {
+      note.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("edits a note whose body is one sequence", async () => {
+    const note = markdownToYDoc(PLAN, { bodySequence: true });
+    const { root, f, context } = await sequenceContext("dohc-cli-sequence-edit-", note);
+    try {
       await context.documents!.edit({
         path: "plan.md",
         edit: { find: "Day one.\n\nDay two.", replacement: "## Day one and two." },

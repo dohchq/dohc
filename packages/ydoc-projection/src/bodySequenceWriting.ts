@@ -1780,7 +1780,6 @@ const ROOM_ITEMS = bodySequenceRoomPolicy(WORKER_LIVE_VALIDATION_POLICY).maxStru
 
 function passesTheRoom(change: Uint8Array, apart: number, longer: number): boolean {
   if (change.byteLength + RANGE_BYTES * apart <= BODY_SEQUENCE_CHANGE_MAX_VALUES) return true;
-  if (bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) !== undefined) return false;
   const { structs, deletes, elements } = bodySequenceChangeSize(change);
   const items = structs + 2 * (deletes + apart);
   return (
@@ -1790,10 +1789,13 @@ function passesTheRoom(change: Uint8Array, apart: number, longer: number): boole
   );
 }
 
-/** The limit of a live note's room one change is past, as a sentence that names it, its unit and the use. */
-export function roomLimitPast(change: Uint8Array): string | undefined {
-  const limit = bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY);
-  if (limit !== undefined || change.byteLength <= LIVE_UPDATE_MAX_BYTES) return limit;
+function roomLimitPast(change: Uint8Array): string | undefined {
+  return bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) ?? sizeLimitPast(change);
+}
+
+/** The sentence that names a live note's limit on one change's bytes, when `change` is past it. */
+export function sizeLimitPast(change: Uint8Array): string | undefined {
+  if (change.byteLength <= LIVE_UPDATE_MAX_BYTES) return undefined;
   const said = (count: number) => count.toLocaleString("en-US");
   return `One change to a note takes at most ${said(LIVE_UPDATE_MAX_BYTES)} bytes. This one takes ${said(change.byteLength)}.`;
 }

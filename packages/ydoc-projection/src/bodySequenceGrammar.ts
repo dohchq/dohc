@@ -151,7 +151,7 @@ const sameValue = (left: unknown, right: unknown): boolean =>
 
 const attrSpecs = new WeakMap<NodeType | MarkType, [string, unknown][]>();
 
-function keepsAttrs(type: NodeType | MarkType, attrs: Attrs): boolean {
+export function keepsAttrs(type: NodeType | MarkType, attrs: Attrs): boolean {
   let specs = attrSpecs.get(type);
   if (!specs) {
     specs = Object.entries(type.spec.attrs ?? {}).map(([key, spec]) => [

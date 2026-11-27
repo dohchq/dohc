@@ -12,6 +12,7 @@ import {
   documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
+  documentMarkdownOf,
   settledDocumentMarkdown,
   type DocumentEdit,
 } from "./document-edit.js";
@@ -465,6 +466,17 @@ describe("an edit to a note whose body is one sequence", () => {
       { find: "and c", replacement: "and d" },
     ],
     ["edits beside a bold link", "**[[Wiki]]** and c", { find: "and c", replacement: "and d" }],
+    ["deletes the last list item", "- first\n- last", { find: "\n- last", replacement: "" }],
+    [
+      "deletes the last table row",
+      "| a | b |\n| - | - |\n| c | d |",
+      { find: "\n| c   | d   |", replacement: "" },
+    ],
+    [
+      "turns multiline code into text with a hard break",
+      "```\nA\nB\n```",
+      { find: "```\nA\nB\n```", replacement: "A  \nB" },
+    ],
   ])("%s, as the first format does", (_case, markdown, edit) => {
     const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
     expect(markdownOf(editedNote(sequenceNote(markdown), edit))).toBe(expected);
@@ -574,6 +586,41 @@ describe("an edit to a note whose body is one sequence", () => {
   ])("refuses an edit where %s half of a character", (_case, edit) => {
     const doc = sequenceNote("Smile 😀 now");
     expect(() => documentEditUpdate(state(doc), edit, open)).toThrow("half of a character");
+  });
+
+  test.each([
+    ["ends", { find: "\uDE00 now", replacement: "later" }],
+    ["starts", { find: "Smile \uD83D", replacement: "Hi" }],
+  ])("refuses a find that %s inside a character, in either format", (_case, edit) => {
+    for (const doc of [sequenceNote("Smile 😀 now"), markdownToYDoc("Smile 😀 now")])
+      expect(() => documentEditUpdate(state(doc), edit, open)).toThrow("half of a character");
+  });
+
+  test("finds the match in a note that holds the letter it probes with", () => {
+    const M = "";
+    const doc = sequenceNote(`${M}${M}x${M}${M}`);
+    const letters = () => tokens(doc).filter((token) => token.kind === "letter");
+    const before = letters().map((token) => token.id);
+    editedNote(doc, { find: `x${M}`, replacement: "" });
+    const kept = new Set(letters().map((token) => token.id));
+    expect(before.filter((id) => !kept.has(id))).toEqual([before[2], before[3]]);
+    expect(markdownOf(doc)).toBe(`${M}${M}${M}\n`);
+  });
+
+  test("refuses an attribute a note can't hold instead of dropping it", () => {
+    const doc = sequenceNote("```js\nx\n```");
+    expect(() =>
+      documentEditUpdate(state(doc), { find: "js", replacement: "foo bar" }, open),
+    ).toThrow("a value a note can't hold");
+    editedNote(doc, { find: "js", replacement: "foo bar" });
+    expect(markdownOf(doc)).toBe("```foo bar\nx\n```\n");
+  });
+
+  test("reads a note in the newer format without declaring the older body", () => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, state(sequenceNote("Hi")));
+    expect(documentMarkdownOf(doc)).toBe("Hi\n");
+    expect(doc.share.has("body")).toBe(false);
   });
 
   test("refuses a block nested deeper than a note holds", () => {

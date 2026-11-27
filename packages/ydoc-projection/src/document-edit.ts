@@ -3,6 +3,7 @@ import { ReplaceAroundStep, ReplaceStep, Transform, type Step } from "@tiptap/pm
 import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { keepsAttrs } from "./bodySequenceGrammar.js";
 import { createBodyReader } from "./bodySequenceReading.js";
 import {
   BODY_CONTAINERS_FIELD,
@@ -15,7 +16,7 @@ import { LONE_HALF, writeNewBody } from "./bodySequenceWriter.js";
 import {
   giveBoundaries,
   howToWriteOrWhy,
-  roomLimitPast,
+  sizeLimitPast,
   writeTransaction,
   type BodyWriting,
 } from "./bodySequenceWriting.js";
@@ -70,7 +71,6 @@ const UNLIKE_REFUSAL =
 const MIXED_REFUSAL =
   "dohc can't edit this note: it is marked as written in the newer note format, but its text " +
   "is still in the older one. Nothing changed.";
-const MARKER = "";
 const limitRefusal = (limit: string) => `${UNSAVED}. ${limit} Split it into smaller edits.`;
 
 export interface DocumentEdit {
@@ -93,7 +93,7 @@ interface Layout {
   frontmatter: string;
   root: ProseMirrorNode;
   writing?: BodyWriting;
-  fragment: Y.XmlFragment;
+  fragment?: Y.XmlFragment;
   /** The fragment's top-level elements, and the block each one reads as. */
   elements: Y.XmlElement[];
   blocks: ProseMirrorNode[];
@@ -230,13 +230,13 @@ function layoutOf(doc: Y.Doc, read?: ProseMirrorNode): Layout {
   const values = getDohcYDocFrontmatter(doc);
   const frontmatter =
     Object.keys(values).length > 0 ? `---\n${frontmatterYaml(values)}---\n\n` : "";
-  const fragment = getDohcYDocBodyFragment(doc);
-  const root = read ?? yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema());
+  const fragment = read ? undefined : getDohcYDocBodyFragment(doc);
+  const root = read ?? yXmlFragmentToProseMirrorRootNode(fragment!, getDohcProseMirrorSchema());
   const blocks: ProseMirrorNode[] = [];
   root.forEach((block) => {
     blocks.push(block);
   });
-  const elements = read ? [] : fragment.toArray();
+  const elements = fragment?.toArray() ?? [];
   if (
     elements.length !== (read ? 0 : blocks.length) ||
     elements.some(
@@ -313,7 +313,7 @@ function uniqueMatch(markdown: string, find: string): number {
 }
 
 const splitsPair = (text: string, at: number) =>
-  /^[\uD800-\uDBFF][\uDC00-\uDFFF]$/u.test(text.slice(at - 1, at + 1));
+  (text.charCodeAt(at - 1) & 0xfc00) === 0xd800 && (text.charCodeAt(at) & 0xfc00) === 0xdc00;
 
 // Rewrites the blocks that the body range [start, end) touches, counting a
 // block that only meets the range at one edge. A match in a nonempty body
@@ -370,13 +370,14 @@ function blockChange(
     blocks.length > 0 ? blocks : [schema.nodes.paragraph!.create()],
   );
   const { writing } = layout;
+  if (writing && !replacement.every(holdsAttrs)) throw new Error(SHAPE_REFUSAL);
   if (writing) return () => writeSequenceEdit(writing, layout, target, { first, last, start, end });
   const mapping = new Map<Y.XmlElement, ProseMirrorNode>();
   layout.elements.forEach((element, index) => {
     if (index < first || index > last) mapping.set(element, layout.blocks[index]!);
   });
   return (doc) => {
-    updateYFragment(doc, layout.fragment, target, { mapping, isOMark: new Map() });
+    updateYFragment(doc, layout.fragment!, target, { mapping, isOMark: new Map() });
   };
 }
 
@@ -391,7 +392,9 @@ function writeSequenceEdit(
   const wanted = unitsOf(target);
   const kept = middleOf(before, wanted, ...edgesOf(layout, before, match));
   if (!kept) throw new Error(OUTSIDE_REFUSAL);
-  const transform = stepsTo(layout.root, target, before, wanted, kept);
+  const transform =
+    stepsTo(layout.root, target, before, wanted, kept, false) ??
+    stepsTo(layout.root, target, before, wanted, kept, true);
   const how = transform && howToWriteOrWhy(writing, [transform]);
   if (!how) throw new Error(UNLIKE_REFUSAL);
   if ("refused" in how)
@@ -414,10 +417,10 @@ function refuseWhatTheRoomRefuses(state: Uint8Array, update: Uint8Array): void {
   try {
     declareBodySequence(copy);
     Y.applyUpdate(copy, state);
+    const past = sizeLimitPast(update);
+    if (past) throw new Error(limitRefusal(past));
     const refusal = bodySequenceEditRefusal(copy, update);
-    const limit = roomLimitPast(update) ?? refusal?.limit;
-    if (limit) throw new Error(limitRefusal(limit));
-    if (refusal) throw new Error(UNLIKE_REFUSAL);
+    if (refusal) throw new Error(refusal.limit ? limitRefusal(refusal.limit) : UNLIKE_REFUSAL);
   } finally {
     copy.destroy();
   }
@@ -478,14 +481,19 @@ function edgesOf(layout: Layout, units: Unit[], match: Match): [number, number] 
     return at < 0 ? units.length : at;
   };
   if (match.start < 0) return [base(match.first), base(match.first)];
+  let code = 0xe000;
+  while (layout.body.includes(String.fromCharCode(code))) code += 1;
+  const marker = String.fromCharCode(code);
   const marked = (unit: Unit, from: number, to: number) => {
     const text = layout.root.type.schema.text(
-      MARKER,
+      marker,
       unit.letter === undefined ? [] : unit.node.marks,
     );
     const root = layout.root.replace(from, to, new Slice(Fragment.from(text), 0, 0));
     const markdown = blockMarkdown(root.child(unit.block), unit.block === 0);
-    return layout.chunks[unit.block]!.start + markdown.indexOf(MARKER);
+    const at = markdown.indexOf(marker);
+    if (at < 0 || at !== markdown.lastIndexOf(marker)) throw new Error(OUTSIDE_REFUSAL);
+    return layout.chunks[unit.block]!.start + at;
   };
   const gap = (at: number): number => {
     const unit = units[at - 1]!;
@@ -542,10 +550,18 @@ function middleOf(before: Unit[], wanted: Unit[], from: number, to: number): Kep
 const tried = (transform: Transform, step: Step) =>
   unlessRangeError(() => !transform.maybeStep(step).failed, false);
 
-const linesOf = (root: ProseMirrorNode) =>
-  unitsOf(root)
-    .filter((unit) => unit.node.isBlock)
-    .map((unit) => unit.node);
+function linesOf(root: ProseMirrorNode): ProseMirrorNode[] {
+  const lines: ProseMirrorNode[] = [];
+  root.descendants((node) => {
+    if (node.isBlock && (node.isTextblock || node.isLeaf)) lines.push(node);
+    return !node.isTextblock;
+  });
+  return lines;
+}
+
+const holdsAttrs = (node: ProseMirrorNode): boolean =>
+  [node, ...node.marks].every((each) => keepsAttrs(each.type, each.attrs)) &&
+  node.children.every(holdsAttrs);
 
 function withLines(node: ProseMirrorNode, lines: ProseMirrorNode[], at = { next: 0 }) {
   if (node.isTextblock || node.isLeaf) return lines[at.next++]!;
@@ -554,12 +570,21 @@ function withLines(node: ProseMirrorNode, lines: ProseMirrorNode[], at = { next:
   return node.type.createChecked(node.attrs, children, node.marks);
 }
 
+function widened(root: ProseMirrorNode, from: number, to: number): number {
+  const $from = root.resolve(from);
+  let depth = $from.depth;
+  for (; depth > 0 && from === $from.start(depth) && $from.after(depth) <= to; depth--)
+    from = $from.before(depth);
+  return from;
+}
+
 function stepsTo(
   root: ProseMirrorNode,
   target: ProseMirrorNode,
   before: Unit[],
   wanted: Unit[],
   { p, s }: Kept,
+  early: boolean,
 ): Transform | null {
   const transform = new Transform(root);
   const [n, m] = [before.length, wanted.length];
@@ -567,24 +592,35 @@ function stepsTo(
     isLine(before, p) && isLine(wanted, p) && isLine(before, n - s) && isLine(wanted, m - s);
   const at = (units: Unit[], doc: ProseMirrorNode, gap: number) =>
     whole ? (units[gap]?.pos ?? doc.content.size) : gap === 0 ? 0 : after(units[gap - 1]!);
-  const slice = target.slice(at(wanted, target, p), at(wanted, target, m - s));
-  transform.replace(at(before, root, p), at(before, root, n - s), slice);
-  const now = unitsOf(transform.doc);
-  if (now.length !== m || now.some((unit, index) => !same(unit, wanted[index]!))) return null;
   const lines = linesOf(target);
+  const kind = (node: ProseMirrorNode, pos: number, want: ProseMirrorNode | undefined) => {
+    if (!want || node.isLeaf || node.sameMarkup(want) || !want.type.validContent(node.content))
+      return;
+    const wrap = Fragment.from(want.type.create(want.attrs, null, want.marks));
+    const end = pos + node.nodeSize;
+    tried(
+      transform,
+      new ReplaceAroundStep(pos, end, pos + 1, end - 1, new Slice(wrap, 0, 0), 1, true),
+    );
+  };
   const kinds = () =>
     unitsOf(transform.doc)
       .filter((unit) => unit.node.isBlock)
-      .forEach(({ node, pos }, index) => {
-        const want = lines[index]!;
-        if (node.isLeaf || node.sameMarkup(want) || !want.type.validContent(node.content)) return;
-        const kind = Fragment.from(want.type.create(want.attrs, null, want.marks));
-        const end = pos + node.nodeSize;
-        tried(
-          transform,
-          new ReplaceAroundStep(pos, end, pos + 1, end - 1, new Slice(kind, 0, 0), 1, true),
-        );
-      });
+      .forEach(({ node, pos }, index) => kind(node, pos, lines[index]));
+  if (early) {
+    const shift = lines.length - linesOf(root).length;
+    let line = 0;
+    before.forEach(({ node, pos }, index) => {
+      if (!node.isBlock) return;
+      kind(node, pos, index < p ? lines[line] : index >= n - s ? lines[line + shift] : undefined);
+      line += 1;
+    });
+  }
+  const slice = target.slice(at(wanted, target, p), at(wanted, target, m - s));
+  const [from, to] = [at(before, root, p), at(before, root, n - s)];
+  transform.replace(whole && slice.size === 0 ? widened(root, from, to) : from, to, slice);
+  const now = unitsOf(transform.doc);
+  if (now.length !== m || now.some((unit, index) => !same(unit, wanted[index]!))) return null;
   kinds();
   const rebuilt = unlessRangeError(() => withLines(target, linesOf(transform.doc)), null);
   if (!rebuilt) return null;
