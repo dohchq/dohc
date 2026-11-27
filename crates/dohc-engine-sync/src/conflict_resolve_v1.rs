@@ -26,6 +26,11 @@ use crate::{
     ReplicationEnvelope, SyncError,
 };
 
+mod note_format_two;
+
+pub(crate) use note_format_two::CONVERSION_ID_PREFIX;
+pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
+
 const FORMAT_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Copy)]
@@ -1405,6 +1410,18 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     }
     require_imported_roots(tx, &validated)?;
     let payload = &validated.payload;
+    let conversion = match note_format_two::received(tx, payload)? {
+        note_format_two::Received::NotAConversion => false,
+        note_format_two::Received::Conversion => true,
+        note_format_two::Received::NothingToInstall => {
+            return Ok(ConflictApplyResult {
+                conflict_id: payload.conflict_id.clone(),
+                inserted: None,
+                matched: true,
+                record_facts: None,
+            });
+        }
+    };
     let (mut disposition, live) = classify_imported_head(tx, payload)?;
 
     let key = payload
@@ -1594,15 +1611,16 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            if (payload
-                .lineage_transition
-                .as_ref()
-                .is_some_and(|transition| transition.successor.is_some())
-                || (payload.exported_before.is_some()
-                    && payload
-                        .effects
-                        .last()
-                        .is_some_and(|effect| effect.kind == EffectKindV1::Write)))
+            if !conversion
+                && (payload
+                    .lineage_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.successor.is_some())
+                    || (payload.exported_before.is_some()
+                        && payload
+                            .effects
+                            .last()
+                            .is_some_and(|effect| effect.kind == EffectKindV1::Write)))
                 && let Some(result) = payload.result.present()
                 && let Some(current) = live.present()
                 && current.latest_moment_id != result.latest_moment_id
