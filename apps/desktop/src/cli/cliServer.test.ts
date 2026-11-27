@@ -2591,6 +2591,8 @@ describe("CLI socket server", () => {
 
       agentSetup.anyAgentRun.mockReturnValue(true);
       for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
+      for (const reply of await Promise.all(reads()))
+        expect(reply).toMatchObject({ ok: false, error: `dohc: ${RUN_REFUSAL}` });
       expect(
         await send("webhookCreate", {
           agentId: "terminal",
