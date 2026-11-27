@@ -2808,17 +2808,24 @@ impl EngineService {
             session.owner_draft = owner_draft.clone();
         }
         if owner_draft.is_none() && session.restore_generation.is_none() {
-            open.actor
-                .ydoc_write_owed(
-                    session.key,
-                    YdocCloseMaterialization {
-                        root_dir: open.root.clone(),
-                        self_writes: Arc::new(self.self_writes.scoped(&open.root)),
-                    },
-                    now_ms()?,
-                )
-                .await
-                .map_err(map_runtime)?;
+            let written = match now_ms() {
+                Ok(now) => open
+                    .actor
+                    .ydoc_write_owed(
+                        session.key,
+                        YdocCloseMaterialization {
+                            root_dir: open.root.clone(),
+                            self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+                        },
+                        now,
+                    )
+                    .await
+                    .map_err(map_runtime),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = written {
+                eprintln!("engine: resync file write deferred: {error}");
+            }
         }
         // The resync committed the document's pulled edits, so it runs to its
         // answer, its blob included. If the blob cannot have its egress budget

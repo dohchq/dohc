@@ -53,6 +53,7 @@ pub(crate) struct PendingCursor {
     /// itself: they reconcile once this cursor commits, after the page's files
     /// landed, as a capture pass reconciles after it applies what it scanned.
     pub(super) reconcile_collections: bool,
+    pub(super) notify_editors: bool,
     /// A hosted pass's `departedAfter`, which its commit lists departed
     /// documents after too.
     pub(super) departed_after: Option<String>,
@@ -1125,6 +1126,7 @@ impl EngineService {
                     materialization_paths: Vec::new(),
                     materialized: false,
                     reconcile_collections: false,
+                    notify_editors: false,
                     departed_after: None,
                     issue,
                 },
@@ -1606,17 +1608,14 @@ impl EngineService {
         // Every terminal page asks, whether or not it applied anything: an
         // earlier request may have been dropped, and the parked updates are the
         // debt, which only the editor's resync clears.
-        if !passive
+        let notify_editors = !passive
             && matches!(
                 &outcome,
                 RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                     has_more: false,
                     ..
                 })
-            )
-        {
-            self.notify_editors_behind(ctx, open).await;
-        }
+            );
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -1648,11 +1647,17 @@ impl EngineService {
                 })?;
                 entry.materialization_paths = materialization_paths;
                 entry.reconcile_collections = reconcile_at_commit;
+                entry.notify_editors = notify_editors;
             }
             result["pendingCursor"] = issued;
-        } else if reconcile_at_commit {
-            // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_changed(ctx, open).await;
+        } else {
+            if notify_editors {
+                self.notify_editors_behind(ctx, open).await;
+            }
+            if reconcile_at_commit {
+                // Nothing to materialize or commit: the page's changes are in place.
+                self.collections_changed(ctx, open).await;
+            }
         }
         Ok(result)
     }
@@ -1827,6 +1832,7 @@ impl EngineService {
         let consumed =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let reconcile_collections = consumed.reconcile_collections;
+        let notify_editors = consumed.notify_editors;
         let departed_after = consumed.departed_after.clone();
         let share_view = matches!(&consumed.cursor, IssuedCursor::ShareView(_));
         let hosted = matches!(&consumed.cursor, IssuedCursor::Hosted(_));
@@ -1866,6 +1872,9 @@ impl EngineService {
             }
             executed => executed?,
         };
+        if notify_editors {
+            self.notify_editors_behind(ctx, &open).await;
+        }
         // A hosted replica takes no part in enrollment. A pass fetched under
         // a scope that has since moved commits nothing. A commit that kept a
         // document held for the pass that writes its files has more to pull,
@@ -2303,9 +2312,7 @@ impl EngineService {
         for facts in std::mem::take(&mut pass.record_facts) {
             emit_record_events(&self.events, &open.workspace_id, &facts);
         }
-        if !pass.has_more {
-            self.notify_editors_behind(ctx, &open).await;
-        }
+        let notify_editors = !pass.has_more;
         let pending_cursor = match pass.pending_cursor.take() {
             Some(cursor) => {
                 let issued =
@@ -2319,10 +2326,16 @@ impl EngineService {
                 })?;
                 entry.materialization_paths = pass.changed_paths.clone();
                 entry.departed_after = params.departed_after.clone();
+                entry.notify_editors = notify_editors;
                 drop(pending);
                 issued
             }
-            None => Value::Null,
+            None => {
+                if notify_editors {
+                    self.notify_editors_behind(ctx, &open).await;
+                }
+                Value::Null
+            }
         };
         hosted_pass_json(
             request_id,
