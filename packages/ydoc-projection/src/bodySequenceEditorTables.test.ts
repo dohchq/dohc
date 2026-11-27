@@ -310,6 +310,80 @@ describe("table changes the editor writes", () => {
   });
 });
 
+const grid = (rows: string[][], spans: Record<string, number> = {}) =>
+  noteIn(
+    [
+      ["TB", "table"],
+      ...rows.flatMap((row, at): Frame[] => [
+        [`R${String(at)}`, "tableRow"],
+        ...row.map((text): Frame => [text, "tableCell", { rowspan: spans[text] ?? 1 }]),
+      ]),
+    ],
+    rows.flatMap((row, at) => row.map((text): Row => [["TB", `R${String(at)}`, text], text])),
+  );
+
+const KEPT: [name: string, rows: string[][], act: Act, gone: string, lines: string[]][] = [
+  [
+    "a column moved",
+    [
+      ["a", "b", "KEEP"],
+      ["c", "d", "SAFE"],
+    ],
+    moved("column", () => 1),
+    "bd",
+    ["b", "a", "KE!EP", "d", "c", "SA!FE"],
+  ],
+  [
+    "a row moved",
+    [
+      ["a", "b"],
+      ["KEEP", "SAFE"],
+      ["c", "d"],
+    ],
+    moved("row", () => 2),
+    "ab",
+    ["KE!EP", "SA!FE", "c", "d", "a", "b"],
+  ],
+];
+
+describe("a table change keeps the cells it does not move", () => {
+  it.each(KEPT)(
+    "keeps what someone types in the cells %s leaves in order",
+    (_name, rows, act, gone, lines) => {
+      const note = grid(rows);
+      const a = person(note, 10);
+      const b = person(note, 20);
+      for (const cell of ["KEEP", "SAFE"]) b.typeAt(b.lines().indexOf(cell), 2, "!");
+      caretIn(a, "a");
+      expect(a.effects(() => expect(act(a, () => 0)).toBe(true)).goneLetters).toBe(gone);
+      exchange(a, b);
+      expect(a.lines()).toEqual(lines);
+      expect(b.view.state.doc.eq(a.view.state.doc)).toBe(true);
+      a.expectMirror();
+      b.expectMirror();
+    },
+  );
+
+  it("keeps what someone types in a cell that a deleted row hands down to the row under it", () => {
+    const note = grid([["TALL", "a"], ["b"]], { TALL: 2 });
+    const was = person(note, 30).view.state.doc;
+    const a = person(note, 10);
+    const b = person(note, 20);
+    b.typeAt(b.lines().indexOf("TALL"), 2, "!");
+    caretIn(a, "a");
+    expect(a.effects(() => expect(run(deleteRow)(a, () => 0)).toBe(true)).goneLetters).toBe("a");
+    exchange(a, b);
+    expect(a.lines()).toEqual(["TA!LL", "b"]);
+    expect(a.view.state.doc.child(0).child(0).child(0).attrs.rowspan).toBe(1);
+    expect(b.view.state.doc.eq(a.view.state.doc)).toBe(true);
+    a.expectMirror();
+    while (a.undo());
+    expect(a.lines()).toEqual(["TA!LL", "a", "b"]);
+    expect(a.view.state.doc.child(0).childCount).toBe(was.child(0).childCount);
+    a.expectMirror();
+  });
+});
+
 const ROWS = 1_000;
 const DEEP = 61;
 
@@ -352,7 +426,7 @@ describe("a table change the room would refuse", () => {
     refusedWhole(a, told, lines);
   });
 
-  it("refuses moving a row whose cells hold more letters than one change can carry", () => {
+  it("refuses moving a row past two others when its cells hold more letters than one change can carry", () => {
     const long = "x".repeat(2_200_000);
     const told: BodySequenceUnwritten[] = [];
     const a = editorOn(
@@ -364,7 +438,7 @@ describe("a table change the room would refuse", () => {
     );
     const lines = a.lines();
     a.select([0, 0]);
-    expect(moveTableRow({ from: 0, to: 1 })(a.view.state, a.view.dispatch)).toBe(true);
+    expect(moveTableRow({ from: 0, to: 2 })(a.view.state, a.view.dispatch)).toBe(true);
     refusedWhole(a, told, lines);
   });
 });
