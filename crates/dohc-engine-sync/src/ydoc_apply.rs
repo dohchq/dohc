@@ -3472,6 +3472,8 @@ pub fn retire_ydoc_lineage_in_tx(
 
 /// A destructive History restore must account for canonical live state, not
 /// only the file snapshot. Drafts can hold edits with no later History moment.
+/// A local-only lineage that closed was pruned to its bare marker, so it holds
+/// no live state and its file is the artifact.
 pub fn current_ydoc_content_matches_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -3517,14 +3519,22 @@ pub fn current_ydoc_content_matches_in_tx(
     let Some((marker, doc)) = complete else {
         return Ok(draft.is_none() && !has_outbox);
     };
-    let settled: bool = tx
+    let (settled, pruned_to_marker): (bool, bool) = tx
         .query_row(
-            "SELECT settled_update_seq IS head_update_seq AND settle_prior_update_seq IS NULL FROM ydoc_docs \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            "SELECT settled_update_seq IS head_update_seq AND settle_prior_update_seq IS NULL, \
+             settled_update_seq IS NULL AND head_update_seq=0 AND head_snapshot_seq=0 \
+             AND NOT EXISTS (SELECT 1 FROM ydoc_updates u WHERE u.workspace_id=d.workspace_id \
+               AND u.version_id=d.version_id AND u.object_id=d.object_id) \
+             AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=d.workspace_id \
+               AND s.version_id=d.version_id AND s.object_id=d.object_id) \
+             FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(SyncError::corrupt)?;
+    if pruned_to_marker && marker.regime == dohc_engine_collab::Regime::LocalOnly {
+        return Ok(draft.is_none() && !has_outbox);
+    }
     if !settled || marker.path.as_deref() != Some(path) {
         return Ok(false);
     }
