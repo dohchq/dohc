@@ -970,36 +970,34 @@ export function AgentPage(props: {
                     </span>
                   </PageRow>
                 ) : null}
-                {tool.id === "claude" ? (
-                  <PageRow icon={<Brain size={14} />} label="Memory">
-                    <span className={VALUE}>
-                      {agent.memory ? (
-                        <button
-                          type="button"
-                          className={LINK}
-                          data-testid="agent-memory-fresh"
-                          onClick={() => setConfirmMemory("fresh")}
-                        >
-                          Start fresh
-                        </button>
-                      ) : null}
-                      <SwitchControl
-                        label={`Let ${agent.name} remember earlier chats`}
-                        tooltip={
-                          agent.memory
-                            ? "Remembers earlier chats in each workspace"
-                            : "Reads only the chat it answers"
-                        }
-                        checked={agent.memory !== undefined}
-                        onChange={(on) =>
-                          on
-                            ? setConfirmMemory("on")
-                            : onChange(({ memory: _off, ...current }) => current)
-                        }
-                      />
-                    </span>
-                  </PageRow>
-                ) : null}
+                <PageRow icon={<Brain size={14} />} label="Memory">
+                  <span className={VALUE}>
+                    {agent.memory ? (
+                      <button
+                        type="button"
+                        className={LINK}
+                        data-testid="agent-memory-fresh"
+                        onClick={() => setConfirmMemory("fresh")}
+                      >
+                        Start fresh
+                      </button>
+                    ) : null}
+                    <SwitchControl
+                      label={`Let ${agent.name} remember earlier chats`}
+                      tooltip={
+                        agent.memory
+                          ? "Remembers earlier chats in each workspace"
+                          : "Reads only the chat it answers"
+                      }
+                      checked={agent.memory !== undefined}
+                      onChange={(on) =>
+                        on
+                          ? setConfirmMemory("on")
+                          : onChange(({ memory: _off, ...current }) => current)
+                      }
+                    />
+                  </span>
+                </PageRow>
                 <PageRow icon={<Workflow size={14} />} label="When an automation wakes it">
                   <span className={VALUE}>Replies only</span>
                 </PageRow>
@@ -1064,7 +1062,7 @@ export function AgentPage(props: {
               </p>
             </ConfirmDialog>
           ) : null}
-          {confirmMemory ? (
+          {confirmMemory && tool ? (
             <ConfirmDialog
               title={
                 confirmMemory === "on"
@@ -1084,13 +1082,16 @@ export function AgentPage(props: {
             >
               {confirmMemory === "on" ? (
                 <p>
-                  Claude Code saves each chat it answers, including other people's messages, in its
+                  {tool.name} saves each chat it answers, including other people's messages, in its
                   folder on this computer. What it reads in one chat carries into the workspace's
-                  other chats, and it keeps earlier command output after you turn off Commands.
+                  other chats
+                  {tool.id === "claude"
+                    ? ", and it keeps earlier command output after you turn off Commands."
+                    : ", with the output of the commands it ran."}
                 </p>
               ) : (
                 <p>
-                  It forgets earlier chats in every workspace. Claude Code keeps what it saved in
+                  It forgets earlier chats in every workspace. {tool.name} keeps what it saved in
                   its folder on this computer.
                 </p>
               )}

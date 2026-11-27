@@ -68,6 +68,42 @@ describe("agent launch profiles", () => {
     expect(launchCommand(profile)).toBe('"C:\\Program Files\\Codex\\codex.exe"');
     expect(AgentLaunch.parse(profile)).toEqual(profile);
   });
+  it("keeps a Codex session that remembers, and resumes it by its thread id", () => {
+    const profile = { tool: "codex", executable: "/usr/local/bin/codex" } as const;
+    const thread = "01a21c8a-fe95-7b20-ae5b-b869bed0ee78";
+    expect(
+      agentProfileArguments(profile, ["--config", "x=1"], false, false, {
+        sessionId: thread,
+        resume: false,
+      }),
+    ).toEqual([
+      "exec",
+      "--config",
+      "approval_policy=never",
+      "--config",
+      "x=1",
+      "--skip-git-repo-check",
+      "--json",
+      "-",
+    ]);
+    expect(
+      agentProfileArguments(profile, ["--config", "x=1"], false, false, {
+        sessionId: thread,
+        resume: true,
+      }),
+    ).toEqual([
+      "exec",
+      "--config",
+      "approval_policy=never",
+      "resume",
+      thread,
+      "--config",
+      "x=1",
+      "--skip-git-repo-check",
+      "--json",
+      "-",
+    ]);
+  });
   it("allows workspace edits and chat replies while denying unattended prompts", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
     expect(agentProfileArguments(profile)).toEqual([

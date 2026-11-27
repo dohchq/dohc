@@ -239,10 +239,11 @@ export function agentProfileArguments(
         ...repeat,
         "--config",
         "approval_policy=never",
+        ...(memory?.resume ? ["resume", memory.sessionId] : []),
         ...runArguments,
         ...(readOnly ? ["--ignore-rules"] : []),
         "--skip-git-repo-check",
-        "--ephemeral",
+        ...(memory ? [] : ["--ephemeral"]),
         "--json",
         "-",
       ];
