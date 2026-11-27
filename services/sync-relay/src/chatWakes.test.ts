@@ -134,7 +134,6 @@ it("wakes only the computers whose agent remembers, for a mention and for the ag
       await resolveWakeTargets(sources(runners, answered), "ana", reply("thanks", "message-nova")),
     ).toEqual({ targets: [], unmatched: true });
 
-  // The laptop's own Nova, answered and mentioned at once, wakes only the computer that remembers.
   const apart = [
     runner("mac", "default", "Nova", "nova", true),
     runner("laptop", "nova-2", "Nova", "nova"),

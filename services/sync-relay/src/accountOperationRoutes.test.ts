@@ -3351,7 +3351,6 @@ describe("an account's chat writes through the server's copy", () => {
     ])
       expect(text).not.toContain(withheld);
 
-    // Once the Mac's Claude remembers, a mention wakes only the Mac, and the phone says so.
     f.storage.replaceChatRunners({
       accountId: "ana",
       workspaceId: "trip",

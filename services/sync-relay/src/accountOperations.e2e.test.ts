@@ -1056,7 +1056,6 @@ it.skipIf(engine.missing)(
     ]);
     await owner.sync();
 
-    // The Mac has no wake to claim, and the phone reads a wait that names no computer.
     expect(
       (
         await client.waitWakes(
@@ -1074,7 +1073,6 @@ it.skipIf(engine.missing)(
       ],
     });
 
-    // The laptop comes online and takes it.
     const laptop = wakeConsumer({
       client,
       intents: createChatWakeIntents(join(await tempRoot("chat-wakes-laptop"), "chat-wakes.json")),

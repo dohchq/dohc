@@ -212,29 +212,4 @@ describe("the chat wake client", () => {
     await expect(again.client.replaceRunners("ws", runners, again.signal)).rejects.toThrow();
     expect(again.sent).toHaveLength(1);
   });
-
-  it("declares again without agents' memory, keeping the other agents, when an older relay refuses it", async () => {
-    const plain = { agentId: "default", displayName: "Claude", enabled: true };
-    const agents = [{ agentId: "mine", displayName: "Mine" }];
-    const declaration = {
-      installId: "mac",
-      computerLabel: "Mac",
-      runners: [{ ...plain, memory: true as const }],
-      agents,
-    };
-    const refused = { status: 400, body: { ok: false } };
-    const accepted = { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 } };
-    const sent = async (...replies: Parameters<typeof world>) => {
-      const w = world(...replies);
-      await w.client.replaceRunners("ws", declaration, w.signal);
-      return w.sent.map((each) => JSON.parse(String(each.init.body)));
-    };
-    const roster = { installId: "mac", computerLabel: "Mac", runners: [plain] };
-    expect(await sent(refused, accepted)).toEqual([declaration, { ...roster, agents }]);
-    expect(await sent(refused, refused, accepted)).toEqual([
-      declaration,
-      { ...roster, agents },
-      roster,
-    ]);
-  });
 });
