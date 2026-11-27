@@ -318,7 +318,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // A hosted replica receives each origin sparsely, so the journal alone
         // says whether a coordinate applied, and its ack never moves.
         let hosted = crate::hosted::is_hosted(tx, &envelope.workspace_id)?;
-        let kept = crate::kept_replay::kept_candidate(tx, envelope)?;
+        let kept = crate::kept_replay::kept_candidate(tx, envelope, hosted)?;
         if kept {
             let row = journaled_coordinate(tx, envelope)?.ok_or(SyncError::CoordinateDiverged)?;
             if !coordinate_matches(&row, envelope)? {
@@ -508,7 +508,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     crate::kept_replay::refuse_claim_in_tx(tx, envelope, refusal.reason.message())?;
                 }
             }
-            _ if kept => crate::kept_replay::mark_replayed_in_tx(tx, envelope)?,
+            _ if kept => crate::kept_replay::mark_replayed_in_tx(tx, envelope, hosted)?,
             _ => {}
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;

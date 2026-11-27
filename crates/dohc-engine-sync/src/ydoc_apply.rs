@@ -3350,8 +3350,14 @@ fn kept_base_refusal(
                  AND json_extract(l.payload_json,'$.targetVersionId')=?2 \
                  AND json_extract(l.payload_json,'$.transition.result.objectId')=?3 \
                  AND json_extract(l.payload_json,'$.lineageTransition.successor.lineageClaimId')=?4)) \
-               AND k.replayed=0 ORDER BY k.reason IS NULL LIMIT 1",
-            params![key.workspace_id, key.version_id, key.object_id, claim],
+               AND k.replayed=0 ORDER BY k.reason IS NULL, k.reason IS ?5 LIMIT 1",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                claim,
+                LIVE_UNADMITTED_UPDATE
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
