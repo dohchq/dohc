@@ -1729,6 +1729,9 @@ impl EngineService {
             state.initial_update = draft.initial_update;
             draft.descriptor
         });
+        if owner_draft.is_none() && state.restore_generation.is_none() {
+            self.ydoc_write_owed(&open, state.key.clone(), "open").await;
+        }
         let conversion_consent = if let Some(source) = params.allow_lossy_source_sha256 {
             Some(
                 open.actor
@@ -2319,7 +2322,7 @@ impl EngineService {
             .actor
             .ydoc_settle(
                 open.root.clone(),
-                session.key,
+                session.key.clone(),
                 session.path.clone(),
                 session.content_kind,
                 session.lineage_claim_id.clone(),
@@ -2344,6 +2347,9 @@ impl EngineService {
             dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
                 for facts in &record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
+                }
+                if session.owner_draft.is_none() && session.restore_generation.is_none() {
+                    self.ydoc_write_owed(&open, session.key, "settle").await;
                 }
                 return Err(WireError::new(
                     ErrorCode::InvalidParams,
@@ -2808,24 +2814,7 @@ impl EngineService {
             session.owner_draft = owner_draft.clone();
         }
         if owner_draft.is_none() && session.restore_generation.is_none() {
-            let written = match now_ms() {
-                Ok(now) => open
-                    .actor
-                    .ydoc_write_owed(
-                        session.key,
-                        YdocCloseMaterialization {
-                            root_dir: open.root.clone(),
-                            self_writes: Arc::new(self.self_writes.scoped(&open.root)),
-                        },
-                        now,
-                    )
-                    .await
-                    .map_err(map_runtime),
-                Err(error) => Err(error),
-            };
-            if let Err(error) = written {
-                eprintln!("engine: resync file write deferred: {error}");
-            }
+            self.ydoc_write_owed(&open, session.key, "resync").await;
         }
         // The resync committed the document's pulled edits, so it runs to its
         // answer, its blob included. If the blob cannot have its egress budget
@@ -2873,6 +2862,29 @@ impl EngineService {
                 byte_permit: Some(byte_permit),
             },
         ))
+    }
+
+    /// Replay the writes a live note owes its file. One that does not land
+    /// stays owed, and the editor's settle or close reports it.
+    async fn ydoc_write_owed(&self, open: &OpenWorkspace, key: DocKey, after: &str) {
+        let written = match now_ms() {
+            Ok(now) => open
+                .actor
+                .ydoc_write_owed(
+                    key,
+                    YdocCloseMaterialization {
+                        root_dir: open.root.clone(),
+                        self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+                    },
+                    now,
+                )
+                .await
+                .map_err(map_runtime),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = written {
+            eprintln!("engine: {after} file write deferred: {error}");
+        }
     }
 
     pub(super) fn ydoc_session(
@@ -4306,6 +4318,24 @@ mod tests {
             .expect("count parked updates")
         }
 
+        fn file_and_owed_writes(&self) -> (String, i64) {
+            let owed = rusqlite::Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count owed writes");
+            let file =
+                std::fs::read_to_string(self._scratch.path().join(PARKED_PATH)).expect("the file");
+            (file, owed)
+        }
+
         async fn open_document(
             &self,
             ctx: &RequestContext,
@@ -4403,23 +4433,49 @@ mod tests {
             .expect("the editor resyncs");
         shows_the_pulled_edit(&egress);
         assert_eq!(parked.parked(), 0, "the resync took the pulled edit");
-        let owed: i64 = rusqlite::Connection::open_with_flags(
-            &parked.db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("engine db")
-        .query_row(
-            "SELECT COUNT(*) FROM materialization_jobs \
-             WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("count owed writes");
-        let file =
-            std::fs::read_to_string(parked._scratch.path().join(PARKED_PATH)).expect("the file");
         assert_eq!(
-            (file.as_str(), owed),
-            ("before parked", 0),
+            parked.file_and_owed_writes(),
+            ("before parked".to_owned(), 0),
+            "the file holds the pulled edit and owes no write"
+        );
+        parked.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_open_writes_the_pulled_edit_it_took_to_its_file() {
+        let parked = ParkedEdit::new("open-pulled-write", false).await;
+        let (_, egress) = parked
+            .open_document(&RequestContext::unbounded())
+            .await
+            .expect("the open");
+        shows_the_pulled_edit(&egress);
+        assert_eq!(parked.parked(), 0, "the open took the pulled edit");
+        assert_eq!(
+            parked.file_and_owed_writes(),
+            ("before parked".to_owned(), 0),
+            "the file holds the pulled edit and owes no write"
+        );
+        parked.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_settle_that_takes_a_pulled_edit_writes_it_to_the_file() {
+        let parked = ParkedEdit::new("settle-pulled-write", true).await;
+        let session = parked.session.clone().expect("the editor's session");
+        let refused = parked
+            .service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(parked.handle.clone()),
+                json!({ "sessionId": session }),
+            )
+            .await
+            .expect_err("the settle asks the editor to resync");
+        assert_eq!(refused.message, "ydoc-remote-updates-pending");
+        assert_eq!(parked.parked(), 0, "the settle took the pulled edit");
+        assert_eq!(
+            parked.file_and_owed_writes(),
+            ("before parked".to_owned(), 0),
             "the file holds the pulled edit and owes no write"
         );
         parked.close().await;

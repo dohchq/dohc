@@ -3082,6 +3082,42 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     }
   });
 
+  it("keeps the newer text a settle writes between a pulled page's check and its write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    const head = (text: string) =>
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        objectId: "note-object",
+        path: "n.md",
+        text,
+        origin: "sync",
+      });
+    head("A\n");
+    await writeFile(join(root, "n.md"), "A\n");
+    head("B\n");
+    let settled = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, undefined, undefined, async (request) => {
+        if (settled || request.method !== "files.resolve") return;
+        settled = true;
+        head("C\n");
+        await writeFile(join(root, "n.md"), "C\n");
+      }),
+    });
+    try {
+      await engine.runRelaySync((page) =>
+        page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]),
+      );
+      expect(settled).toBe(true);
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("C\n");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

@@ -59,6 +59,7 @@ export const WORKSPACE_METHOD = {
   captureDuplicateFile: "capture.duplicateFile",
   captureMoveFile: "capture.moveFile",
   filesReplace: "files.replace",
+  filesMaterializeHeads: "files.materializeHeads",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsReleaseGroups: "automations.releaseGroups",
@@ -548,6 +549,10 @@ export type WorkspaceMethodParamsMap = {
     path: string;
     temporary: string;
     bytesBase64: string;
+  };
+  /** `diskSha256` is the file's digest the caller approved, or null for no file. */
+  [WORKSPACE_METHOD.filesMaterializeHeads]: WorkspaceJsonObject & {
+    files: { path: string; diskSha256: string | null }[];
   };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
@@ -1550,6 +1555,7 @@ const WorkspaceResultSchemas = {
     }),
   ]),
   [WORKSPACE_METHOD.filesReplace]: mutableStruct({ replaced: Schema.Literal(true) }),
+  [WORKSPACE_METHOD.filesMaterializeHeads]: mutableStruct({ materialized: Schema.Literal(true) }),
   /** True when the call inserted the pair or replaced its filter. */
   [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
     subscribed: Schema.Boolean,

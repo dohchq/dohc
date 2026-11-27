@@ -1452,6 +1452,45 @@ impl ActorHandle {
         .await
     }
 
+    /// Bring each text file to its head in the active version, but only
+    /// where the disk still holds the state the caller approved: absent, or
+    /// the digest it read. A file already at its head stays; any other change
+    /// since, or a head that is gone, refuses.
+    pub async fn materialize_approved_heads(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        approved: HashMap<String, Preimage>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            let active = VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)?
+                .version_id;
+            let changes = approved
+                .keys()
+                .map(|path| dohc_engine_sync::MomentMaterializationChange {
+                    version_id: active.clone(),
+                    path: path.clone(),
+                    operation: "write",
+                    content_kind: "text",
+                })
+                .collect();
+            materialize_page_on_store(
+                store,
+                &workspace_id,
+                &root_dir,
+                changes,
+                Some(&approved),
+                self_writes.as_ref(),
+                now_ms,
+                &CancellationToken::new(),
+            )
+        })
+        .await
+    }
+
     /// End the projection writes a pull page queued at the paths a desktop
     /// page wrote itself.
     pub async fn end_relay_page_projection_writes(
@@ -1498,6 +1537,29 @@ pub(super) fn materialize_relay_page_on_store(
     workspace_id: &str,
     root_dir: &std::path::Path,
     changes: Vec<dohc_engine_sync::MomentMaterializationChange>,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    token: &CancellationToken,
+) -> Result<(), RuntimeError> {
+    materialize_page_on_store(
+        store,
+        workspace_id,
+        root_dir,
+        changes,
+        None,
+        self_writes,
+        now_ms,
+        token,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_page_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    root_dir: &std::path::Path,
+    changes: Vec<dohc_engine_sync::MomentMaterializationChange>,
+    approved: Option<&HashMap<String, Preimage>>,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
     token: &CancellationToken,
@@ -1658,6 +1720,17 @@ pub(super) fn materialize_relay_page_on_store(
             )
         };
         let head = relay_head(store, workspace_id, &active, &change, &mut secret_key)?;
+        if let Some(approved) = approved {
+            let Some(head) = head.as_ref() else {
+                return Err(DomainError::ConflictStaleTarget.into());
+            };
+            if approved.get(&change.path) != projection_preimage(&state).as_ref() {
+                if head.current(&state, secret) {
+                    continue;
+                }
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+        }
         // A path with no head needs no file there, and a folder is none.
         if head.is_none() && is_folder(root_dir, &change.path) {
             continue;
@@ -2023,7 +2096,8 @@ fn invalid_relay_kind() -> RuntimeError {
 #[cfg(test)]
 pub(super) mod tests {
     use super::{
-        ensure_mutation_version_on_store, is_inside, materialize_relay_page_on_store, path_key,
+        DomainError, Preimage, RuntimeError, ensure_mutation_version_on_store, is_inside,
+        materialize_page_on_store, materialize_relay_page_on_store, path_key,
         reaches_other_spelling, relay_delete_precedes_write,
     };
     use dohc_engine_domain::{VersionedTextStore, WriteText};
@@ -2060,6 +2134,95 @@ pub(super) mod tests {
                 held.set((now - 1, most));
             });
         }
+    }
+
+    /// The caller approved what each file held when it checked. A file
+    /// still holding that gets its head, one already holding its head stays,
+    /// and any other change to the file since, or a head that is gone,
+    /// refuses the page. It never deletes a file.
+    #[test]
+    fn approved_heads_write_only_over_the_file_the_caller_approved() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let sha = |text: &str| Preimage::Present(dohc_engine_storage::hex_sha256(text.as_bytes()));
+        let paths = [
+            "approved.md",
+            "current.md",
+            "absent.md",
+            "edited.md",
+            "appeared.md",
+            "gone.md",
+        ];
+        for (index, path) in paths.into_iter().enumerate() {
+            write_head(&mut store, &format!("doc-{index}"), path, "old\n", 2);
+            write_head(&mut store, &format!("doc-{index}"), path, "head\n", 3);
+        }
+        delete_head(&mut store, "gone.md", 4);
+        for (path, disk) in [
+            ("approved.md", "old\n"),
+            ("current.md", "head\n"),
+            ("edited.md", "edited\n"),
+            ("appeared.md", "outside\n"),
+            ("gone.md", "head\n"),
+        ] {
+            std::fs::write(scratch.join(path), disk).unwrap();
+        }
+        let mut run = |approved: &[(&str, Preimage)]| {
+            let approved: std::collections::HashMap<String, Preimage> = approved
+                .iter()
+                .map(|(path, preimage)| ((*path).to_owned(), preimage.clone()))
+                .collect();
+            let changes = approved
+                .keys()
+                .map(|path| MomentMaterializationChange {
+                    version_id: "main".to_owned(),
+                    path: path.clone(),
+                    operation: "write",
+                    content_kind: "text",
+                })
+                .collect();
+            materialize_page_on_store(
+                &mut store,
+                "ws",
+                &scratch,
+                changes,
+                Some(&approved),
+                &(),
+                20,
+                &CancellationToken::new(),
+            )
+        };
+        run(&[
+            ("approved.md", sha("old\n")),
+            ("current.md", sha("old\n")),
+            ("absent.md", Preimage::Absent),
+        ])
+        .unwrap();
+        for (path, approved) in [
+            ("edited.md", sha("old\n")),
+            ("appeared.md", Preimage::Absent),
+            ("gone.md", sha("head\n")),
+        ] {
+            assert!(
+                matches!(
+                    run(&[(path, approved)]),
+                    Err(RuntimeError::Domain(DomainError::ConflictStaleTarget))
+                ),
+                "{path}"
+            );
+        }
+        let read = |path: &str| std::fs::read_to_string(scratch.join(path)).unwrap();
+        assert_eq!(
+            paths.map(read),
+            [
+                "head\n",
+                "head\n",
+                "head\n",
+                "edited\n",
+                "outside\n",
+                "head\n"
+            ]
+        );
     }
 
     /// A page whose files already match holds one head's body at a time,

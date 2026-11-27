@@ -228,6 +228,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     toPath: string;
   }): Promise<CaptureMoveFileResult>;
   replaceFile?: VersionedLiveAdapter["replaceFile"];
+  materializeHeads: VersionedLiveAdapter["materializeHeads"];
 };
 
 export interface CaptureLiveStores {
@@ -1626,6 +1627,7 @@ export function createCaptureLiveStores(
     moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
       await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
     replaceFile: (input) => runMutation((adapter) => adapter.replaceFile(input)),
+    materializeHeads: (files) => runMutation((adapter) => adapter.materializeHeads(files)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

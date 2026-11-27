@@ -310,17 +310,22 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
       incoming: Uint8Array | null,
       admitCopy: (path: string) => void,
       isRecorded: (path: string, sha256: string) => Promise<boolean>,
-    ): Promise<boolean> {
+    ): Promise<{ kept: boolean; outside: boolean; diskSha256: string | null }> {
       return enqueue(async () => {
         const source = await readSource(path).catch((cause) => copyFailure(path, cause));
-        if (source === null) return false;
+        if (source === null) return { kept: false, outside: false, diskSha256: null };
+        const diskSha256 = source.sha256;
         // History failures stop the write without suggesting a folder-access fix.
         if (
-          (incoming !== null && hash(incoming) === source.sha256) ||
-          (await isRecorded(path, source.sha256))
+          (incoming !== null && hash(incoming) === diskSha256) ||
+          (await isRecorded(path, diskSha256))
         )
-          return false;
-        return keepCopy(path, source, admitCopy).catch((cause) => copyFailure(path, cause));
+          return { kept: false, outside: false, diskSha256 };
+        return {
+          kept: await keepCopy(path, source, admitCopy).catch((cause) => copyFailure(path, cause)),
+          outside: true,
+          diskSha256,
+        };
       });
     },
   };

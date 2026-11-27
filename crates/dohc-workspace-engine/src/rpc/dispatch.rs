@@ -39,6 +39,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "files.materializeHeads"
                 | "workReferences.make"
                 | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
@@ -459,6 +460,10 @@ impl EngineService {
             }
             "files.replace" => {
                 self.files_replace(request.workspace, request.params)
+                    .await?
+            }
+            "files.materializeHeads" => {
+                self.files_materialize_heads(&ctx, request.workspace, request.params)
                     .await?
             }
             "workReferences.make" => {
@@ -1867,6 +1872,7 @@ mod tests {
             "documents.keepRetainedVersion",
             "documents.heldChange",
             "engine.ping",
+            "files.materializeHeads",
             "files.replace",
             "history.page",
             "keptCopies.list",

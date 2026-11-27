@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
@@ -80,6 +81,39 @@ export async function replaceFileOnScratchDisk(
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, Buffer.from(String(params.bytesBase64), "base64"));
   return { id: request.id, result: { replaced: true } };
+}
+
+/**
+ * Answers `files.materializeHeads` as the daemon does: a file gets its head
+ * only where the disk still holds the digest the caller approved. A file that
+ * changed to anything but its head, or a head that is gone, refuses the
+ * request.
+ */
+export async function materializeHeadsOnScratchDisk(
+  rootPath: string,
+  loopback: Pick<VersionedLoopbackEngine, "sendRequest">,
+  request: Request,
+): Promise<Response> {
+  const files = (request.params as { files: { path: string; diskSha256: string | null }[] }).files;
+  const ask = async (method: string, params: JsonObject) =>
+    (await loopback.sendRequest({ id: request.id, method, workspace: request.workspace, params }))
+      .result as { id?: string; text?: string } | null;
+  const versionId = (await ask(VERSIONED_METHOD.versionsActive, {}))?.id ?? "main";
+  const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+  for (const file of files) {
+    const target = join(rootPath, file.path);
+    const disk = await lstat(target).then(
+      async (info) => (info.isFile() ? sha256(await readFile(target)) : "not-a-file"),
+      () => null,
+    );
+    const head = await ask(VERSIONED_METHOD.textRead, { versionId, path: file.path });
+    if (typeof head?.text !== "string") throw new Error("conflict-stale-target");
+    if (disk === sha256(head.text)) continue;
+    if (disk !== file.diskSha256) throw new Error("conflict-stale-target");
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, head.text);
+  }
+  return { id: request.id, result: { materialized: true } };
 }
 
 export function createFakeDaemonCapture(input: {
@@ -455,6 +489,8 @@ export function createFakeDaemonCapture(input: {
         }
         case "files.replace":
           return replaceFileOnScratchDisk(rootPath, request);
+        case "files.materializeHeads":
+          return materializeHeadsOnScratchDisk(rootPath, loopback, request);
         case "ydoc.open": {
           if (!ydoc) return null;
           const response = await ydoc.sendRequest(request);

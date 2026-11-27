@@ -476,7 +476,7 @@ describe("materialization keeps outside bytes before replacement", () => {
       await Promise.all([listing, replacing]);
     }
     expect(await listing).toEqual([other]);
-    expect(await replacing).toBe(true);
+    expect((await replacing).kept).toBe(true);
     const rows = await copies.list();
     expect(rows).toHaveLength(2);
     expect(rows).toContainEqual(other);
@@ -493,7 +493,11 @@ describe("materialization keeps outside bytes before replacement", () => {
     }
     const isRecorded = vi.fn();
     const admit = vi.fn();
-    expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toBe(false);
+    expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toEqual({
+      kept: false,
+      outside: false,
+      diskSha256: null,
+    });
     expect(isRecorded).not.toHaveBeenCalled();
     expect(admit).not.toHaveBeenCalled();
   });

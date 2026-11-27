@@ -8,7 +8,11 @@ import {
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { createFakeDaemonCapture, replaceFileOnScratchDisk } from "./fakeDaemonCapture";
+import {
+  createFakeDaemonCapture,
+  materializeHeadsOnScratchDisk,
+  replaceFileOnScratchDisk,
+} from "./fakeDaemonCapture";
 
 // A type alias, not an interface: only aliases get an implicit index signature,
 // which is what makes this assignable to the wire's `JsonValue`.
@@ -192,6 +196,8 @@ function loopbackSessions(
       const root = roots.get(String(request.workspace));
       if (request.method === "files.replace" && root !== undefined)
         return replaceFileOnScratchDisk(root, request);
+      if (request.method === "files.materializeHeads" && root !== undefined)
+        return materializeHeadsOnScratchDisk(root, loopback, request);
       const lifecycle = daemonCaptureLifecycleAnswer(request, captureFlushResult);
       if (lifecycle) return lifecycle;
       const response = await loopback.sendRequest(request);
