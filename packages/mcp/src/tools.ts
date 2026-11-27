@@ -2630,7 +2630,6 @@ export function reportedAgent(
   };
 }
 
-// The CLI takes a poll's labels and explanations as parallel lists.
 function pollArgs(options: ChatWriteInput["options"]) {
   if (options === undefined) return {};
   const labels = options.map((option) => (typeof option === "string" ? option : option.label));

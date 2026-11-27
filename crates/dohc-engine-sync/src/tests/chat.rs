@@ -416,8 +416,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
 
 #[test]
 fn a_poll_keeps_its_explanations_whichever_snapshot_arrives_first() {
-    // A peer on a build without explanations answers the poll: its resolved
-    // snapshot is newer and carries the same choices but no explanations.
     let opened = envelope(
         "asker",
         0,

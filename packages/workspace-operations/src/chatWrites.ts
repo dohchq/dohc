@@ -199,8 +199,6 @@ export function checkedContent(input: MessageInput): ChatMessageContent {
   };
 }
 
-// One explanation per choice, each one line. A blank one is none, and a poll
-// whose explanations are all none has none.
 function checkedDetails(
   options: readonly string[],
   details: readonly (string | null)[],

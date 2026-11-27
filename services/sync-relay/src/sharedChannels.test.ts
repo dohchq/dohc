@@ -809,8 +809,6 @@ describe("shared channels (MU-C4)", () => {
       ),
     );
     expect(bom.status).toBe(200);
-    // The engine's rules for explanations: one per choice, each one line of
-    // at most 300 characters.
     for (const optionDetails of [
       ["only one"],
       ["x".repeat(301), null],

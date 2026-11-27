@@ -2286,9 +2286,6 @@ fn apply_decision(
         params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq, options_json, chosen_option, option_details_json],
     )
     .map_err(SyncError::persist)?;
-    // Explanations belong to the choices they were written for. A snapshot
-    // without them, such as an answer from a build that predates them, keeps
-    // them (above), and an older snapshot that carries them still fills them.
     let filled = match option_details_json {
         Some(details) => tx
             .execute(

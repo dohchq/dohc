@@ -1283,8 +1283,6 @@ function withheldLinks(
   for (const field of CHAT_TEXT_FIELDS[opKind]!) {
     if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
   }
-  // A withheld link's words can run longer than the link, and the engine
-  // refuses a poll with an explanation over its limit, so that one goes.
   if (Array.isArray(payload.optionDetails)) {
     payload.optionDetails = payload.optionDetails.map((detail: unknown) =>
       typeof detail === "string" && trimLikeEngine(detail).length > MAX_POLL_OPTION_DETAIL_UNITS
@@ -1690,8 +1688,6 @@ function shareReadDecision(
 // replica, so it is refused here instead.
 const MAX_POLL_OPTIONS = 12;
 const MAX_POLL_OPTION_UNITS = 200;
-// `normalize_poll_option_details`: none, or one per choice, each null or one
-// line of at most 300 UTF-16 units once trimmed.
 const MAX_POLL_OPTION_DETAIL_UNITS = 300;
 function pollDetailsValid(details: unknown, optionCount: number): boolean {
   if (details === undefined || details === null) return true;
