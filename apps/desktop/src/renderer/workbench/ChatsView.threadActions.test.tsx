@@ -176,10 +176,11 @@ describe("ChatsView decisions", () => {
         "Friday",
         "MondayAfter the release check",
       ]);
-      // The explanation describes its choice, and the answer stays the label.
-      expect(options[0]!.getAttribute("aria-describedby")).toBeNull();
-      const about = options[1]!.getAttribute("aria-describedby");
-      expect(about && document.getElementById(about)?.textContent).toBe("After the release check");
+      // A choice is named by its label, and its explanation describes it.
+      expect(screen.getByRole("button", { name: "Friday" })).toBe(options[0]);
+      expect(
+        screen.getByRole("button", { name: "Monday", description: "After the release check" }),
+      ).toBe(options[1]);
       expect(screen.queryByTestId("chats-message-decision-resolve")).toBeNull();
       if (pick === "click") {
         await user.click(options[1]!);

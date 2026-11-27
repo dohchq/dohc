@@ -143,6 +143,7 @@ export function PollOptions(props: {
               disabled={!choose}
               aria-pressed={taken}
               aria-keyshortcuts={key}
+              aria-labelledby={detail ? `${id}-label-${index}` : undefined}
               aria-describedby={detail ? `${id}-about-${index}` : undefined}
               onClick={() => choose?.(option)}
               className={`dohc-focus-row flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-[13px] leading-5 transition-colors duration-75 ${
@@ -163,7 +164,7 @@ export function PollOptions(props: {
                 </span>
               </span>
               <span className="flex min-w-0 flex-1 flex-col [overflow-wrap:anywhere]">
-                {option}
+                <span id={`${id}-label-${index}`}>{option}</span>
                 {detail ? (
                   <span
                     id={`${id}-about-${index}`}
@@ -676,6 +677,19 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     ? NO_ATTACHMENTS
     : (attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS);
   const openingDecision = openingDeleted ? undefined : decisionsByMessage.get(openingMessage.id);
+  // A poll's card gets its own row; a bare question stays beside work and runs.
+  const openingStatus = openingDecision ? (
+    <DecisionStatus
+      decision={openingDecision}
+      onResolve={
+        !threadLocked && openingDecision.state === "open"
+          ? (option) => beginResolve(openingMessage, option)
+          : undefined
+      }
+      testIdPrefix="chats-message"
+    />
+  ) : null;
+  const openingPoll = (openingDecision?.options?.length ?? 0) > 0;
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = isAgentAuthor(openingMessage);
   // A live post shows no heading, so a deleted one shows none either; its
@@ -1111,20 +1125,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 ))}
               </div>
             ) : null}
-            {!openingDeleted && openingDecision ? (
-              <div className="mt-2 flex">
-                <DecisionStatus
-                  decision={openingDecision}
-                  onResolve={
-                    !threadLocked && openingDecision.state === "open"
-                      ? (option) => beginResolve(openingMessage, option)
-                      : undefined
-                  }
-                  testIdPrefix="chats-message"
-                />
-              </div>
-            ) : null}
-            {!openingDeleted && (openingMessage.work || runRecords[openingMessage.id]) ? (
+            {openingPoll ? <div className="mt-2 flex">{openingStatus}</div> : null}
+            {!openingDeleted &&
+            (openingMessage.work ||
+              (openingDecision && !openingPoll) ||
+              runRecords[openingMessage.id]) ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {openingMessage.work ? (
                   <WorkStatus
@@ -1133,6 +1138,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                     className="mt-0"
                   />
                 ) : null}
+                {openingPoll ? null : openingStatus}
                 {runRecords[openingMessage.id] ? (
                   <RunOpening
                     run={runRecords[openingMessage.id]}
