@@ -86,7 +86,6 @@ function page(limits = liveLimits()) {
       toPage,
       frames,
       submissions,
-      /** Welcomes the page and sends it `doc` on `selected`: the page is then live, or stopped. */
       async sync(doc: Y.Doc, selected = binding) {
         await vi.waitFor(() => expect(frames.some((frame) => frame.kind === "credit")).toBe(true));
         send({ kind: "welcome", hostEpoch: parseHostEpoch(epoch), receivePolicy: policy.receive });
