@@ -17,6 +17,7 @@ import {
   Pause,
   Pencil,
   Send,
+  SquareTerminal,
   Trash2,
   TriangleAlert,
   Workflow,
@@ -39,6 +40,7 @@ import {
 } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
@@ -755,6 +757,7 @@ export function AgentPage(props: {
   const { agent, onChange } = props;
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState<"timeout" | "command" | null>(null);
+  const [confirmShell, setConfirmShell] = useState(false);
   const runLabelId = useId();
   const launched = agent.launch !== undefined;
   // dohc forwards to this agent's own thread and never starts it.
@@ -945,6 +948,26 @@ export function AgentPage(props: {
                     Edits without asking
                   </span>
                 </PageRow>
+                {tool.id === "claude" ? (
+                  <PageRow icon={<SquareTerminal size={14} />} label="Commands">
+                    <span className={VALUE}>
+                      <SwitchControl
+                        label={`Let ${agent.name} run any command`}
+                        tooltip={
+                          agent.allowShell
+                            ? "Runs any command without asking"
+                            : "Runs only the commands your Claude settings allow"
+                        }
+                        checked={agent.allowShell === true}
+                        onChange={(on) =>
+                          on
+                            ? setConfirmShell(true)
+                            : onChange(({ allowShell: _off, ...current }) => current)
+                        }
+                      />
+                    </span>
+                  </PageRow>
+                ) : null}
                 <PageRow icon={<Workflow size={14} />} label="When an automation wakes it">
                   <span className={VALUE}>Replies only</span>
                 </PageRow>
@@ -989,6 +1012,26 @@ export function AgentPage(props: {
               </span>
             </PageRow>
           </div>
+          {confirmShell ? (
+            <ConfirmDialog
+              title={`Let ${agent.name} run any command?`}
+              icon={SquareTerminal}
+              confirmLabel="Allow commands"
+              onCancel={() => setConfirmShell(false)}
+              onConfirm={() => {
+                setConfirmShell(false);
+                onChange((current) => ({ ...current, allowShell: true }));
+              }}
+              testId="allow-shell-dialog"
+              cancelTestId="allow-shell-cancel"
+              confirmTestId="allow-shell-confirm"
+            >
+              <p>
+                It runs them without asking, with your access to this computer. What it reads in
+                chats and files can steer them, and dohc cannot undo them.
+              </p>
+            </ConfirmDialog>
+          ) : null}
         </>
       ) : (
         <>

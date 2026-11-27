@@ -453,6 +453,7 @@ export function createChatRunnerProcess(
     profile?: AgentLaunchProfile;
     // The dohc MCP tools a profile's run gets. A custom command uses the CLI.
     dohcTools: RunDohcTools;
+    shell?: boolean;
     prompt: string;
     runSecret: string;
     // Throws unless the runner may still start, such as when the workspace
@@ -548,7 +549,10 @@ export function createChatRunnerProcess(
         ]
       : [];
     const commandParts = input.profile
-      ? [input.profile.executable, ...agentProfileArguments(input.profile, runArguments, readOnly)]
+      ? [
+          input.profile.executable,
+          ...agentProfileArguments(input.profile, runArguments, readOnly, input.shell === true),
+        ]
       : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered

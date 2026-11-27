@@ -440,6 +440,7 @@ describe("desktop user settings model", () => {
       ],
       ["agent-b", { ...testAgent(), enabled: "yes" }, "`enabled` must be true or false."],
       ["agent-b", { ...testAgent(), changesFiles: 1 }, "`changesFiles` must be true or false."],
+      ["agent-b", { ...testAgent(), allowShell: "yes" }, "`allowShell` must be true or false."],
       [
         "agent-b",
         { ...unlaunched, enabled: true },
