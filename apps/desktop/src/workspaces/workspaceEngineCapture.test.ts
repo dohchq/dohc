@@ -3118,6 +3118,43 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     }
   });
 
+  it.each(["an empty folder it replaces", "a folder link in the workspace"])(
+    "pulls a text file over %s",
+    async (shape) => {
+      const root = await createTestScratch("dohc-engine-capture-");
+      await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+      const folder = shape === "an empty folder it replaces";
+      const path = folder ? "d" : "docs/new.md";
+      await mkdir(join(root, folder ? "d/sub" : "real-docs"), { recursive: true });
+      if (!folder)
+        await symlink(
+          join(root, "real-docs"),
+          join(root, "docs"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      const loopback = new VersionedLoopbackEngine();
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        objectId: "note-object",
+        path,
+        text: "pulled\n",
+        origin: "sync",
+      });
+      const engine = liveCapture(root, loopback);
+      try {
+        await engine.runRelaySync((page) =>
+          page([{ versionId: "main", path, operation: "write", contentKind: "text" }]),
+        );
+        expect(await readFile(join(root, folder ? "d" : "real-docs/new.md"), "utf8")).toBe(
+          "pulled\n",
+        );
+      } finally {
+        await engine.stop();
+      }
+    },
+  );
+
   it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

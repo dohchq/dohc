@@ -495,8 +495,7 @@ describe("materialization keeps outside bytes before replacement", () => {
     const admit = vi.fn();
     expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toEqual({
       kept: false,
-      outside: false,
-      diskSha256: null,
+      engine: null,
     });
     expect(isRecorded).not.toHaveBeenCalled();
     expect(admit).not.toHaveBeenCalled();

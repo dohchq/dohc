@@ -4940,8 +4940,8 @@ export function createWorkspaceEngineCapture(
             async (path, sha256) => copy === "unrecorded" && isRecorded(operation, path, sha256),
           );
           copied = checked.kept;
-          if (engineHeads && operation.kind === "write" && !checked.outside) {
-            engineHeads.push({ path: operation.path, diskSha256: checked.diskSha256 });
+          if (engineHeads && operation.kind === "write" && checked.engine) {
+            engineHeads.push({ path: operation.path, diskSha256: checked.engine.diskSha256 });
             continue;
           }
         } else {

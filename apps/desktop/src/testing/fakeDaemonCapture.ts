@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -86,8 +86,8 @@ export async function replaceFileOnScratchDisk(
 /**
  * Answers `files.materializeHeads` as the daemon does: a file gets its head
  * only where the disk still holds the digest the caller approved. A file that
- * changed to anything but its head, or a head that is gone, refuses the
- * request.
+ * changed to anything but its head, a head that is gone, or a folder link on
+ * the way to the file refuses the request.
  */
 export async function materializeHeadsOnScratchDisk(
   rootPath: string,
@@ -111,6 +111,8 @@ export async function materializeHeadsOnScratchDisk(
     if (disk === sha256(head.text)) continue;
     if (disk !== file.diskSha256) throw new Error("conflict-stale-target");
     await mkdir(dirname(target), { recursive: true });
+    if ((await realpath(dirname(target))) !== join(await realpath(rootPath), dirname(file.path)))
+      throw new Error("symlink-target");
     await writeFile(target, head.text);
   }
   return { id: request.id, result: { materialized: true } };
