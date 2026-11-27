@@ -4367,6 +4367,44 @@ mod tests {
         assert_eq!(doc.plaintext_string(), "before parked");
     }
 
+    #[tokio::test]
+    async fn an_editors_resync_writes_the_pulled_edit_to_its_file() {
+        let parked = ParkedEdit::new("resync-pulled-write", true).await;
+        let session = parked.session.clone().expect("the editor's session");
+        let (_, egress) = parked
+            .service
+            .ydoc_resync(
+                &RequestContext::unbounded(),
+                Some(parked.handle.clone()),
+                json!({ "sessionId": session }),
+                2,
+            )
+            .await
+            .expect("the editor resyncs");
+        shows_the_pulled_edit(&egress);
+        assert_eq!(parked.parked(), 0, "the resync took the pulled edit");
+        let owed: i64 = rusqlite::Connection::open_with_flags(
+            &parked.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("engine db")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count owed writes");
+        let file =
+            std::fs::read_to_string(parked._scratch.path().join(PARKED_PATH)).expect("the file");
+        assert_eq!(
+            (file.as_str(), owed),
+            ("before parked", 0),
+            "the file holds the pulled edit and owes no write"
+        );
+        parked.close().await;
+    }
+
     /// An open or resync is cancelled after it committed the document's
     /// pulled edit, while its blob waits for egress budget. It answers with
     /// the document, edit included, and its blob ignores the cancellation.
