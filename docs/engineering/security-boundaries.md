@@ -743,10 +743,13 @@ and turn each delivery into a quarantined Markdown record inside a private Colle
   `application/x-www-form-urlencoded`), a streaming 256 KiB body cap with a 10 s read timeout,
   header allowlisting (`Content-Type`, `Idempotency-Key`, `X-Webhook-Delivery`,
   `X-Event-Type`, `X-GitHub-Event`, `User-Agent`), and 7-day idempotency (`202` deduplicated
-  on matching SHA-256 body hash, `409` on mismatch). Every public ingress answer sends
-  `Access-Control-Allow-Origin: *`, so a form's script on another website can read whether
-  its delivery was accepted. Ingress reads no cookies or credentials, and its answers hold
-  only the status, an error, and the delivery ID. There is no `OPTIONS` handler, so only
+  on matching SHA-256 body hash, `409` on mismatch). Every answer from the ingress handler
+  sends `Access-Control-Allow-Origin: *`, so a form's script on another website can read whether
+  its delivery was accepted. A script that knows the address can read what any HTTP client
+  already gets: the status, which tells an unknown token from a paused host or a full queue,
+  the error text, and the delivery ID. Ingress reads no cookies or credentials. Answers the relay makes
+  outside that handler, such as `503` while relay storage is unavailable, carry no CORS
+  header, and the browser reports a network failure. There is no `OPTIONS` handler, so only
   CORS simple requests (a form-encoded or plain-text body without custom headers) work from
   a browser. Owner management routes send no CORS headers.
 - **Queue-only ingress, server-host requirement, and fenced drain.** Incoming webhooks require
