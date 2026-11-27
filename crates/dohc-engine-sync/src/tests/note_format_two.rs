@@ -1193,3 +1193,203 @@ fn a_peer_with_the_note_open_holds_the_conversion_until_it_closes() {
     assert_eq!(claim(&peer, &key), Some(successor_claim(&carrier)));
     assert_eq!(note(&peer, &key), (2, NOTE.to_owned()));
 }
+
+fn convert_all(
+    store: &mut EngineStore,
+    after: Option<&DocKey>,
+    budget: usize,
+    live: &dyn LeaseProbe,
+) -> FormatTwoPass {
+    on(|| convert_notes_to_format_two(store, "ws", after, budget, live, &NoFaults, 21).unwrap())
+}
+
+fn changes(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| conn.query_row("SELECT total_changes()", [], |row| row.get(0)))
+        .unwrap()
+}
+
+#[test]
+fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
+    let (_scratch, _path, mut store) = open_store();
+    let keys: Vec<DocKey> = (1..=5)
+        .map(|n| {
+            let text = format!("Note {n}.\n");
+            let (object, path) = (format!("note-{n}"), format!("note-{n}.md"));
+            seed_at(
+                &mut store,
+                (&object, &path),
+                &text,
+                &format!("moment-{n}"),
+                Some(&base_of(&[&text])),
+            )
+        })
+        .collect();
+    let off = reading_body_sequence_here(|| {
+        convert_notes_to_format_two(&mut store, "ws", None, 2, &NoLiveLeases, &NoFaults, 21)
+    })
+    .unwrap();
+    assert!(off.off);
+    assert_eq!(off.converted, 0);
+    let first = convert_all(&mut store, None, 2, &NoLiveLeases);
+    assert_eq!(
+        (first.converted, first.resume_after.as_ref()),
+        (2, Some(&keys[1]))
+    );
+    let second = convert_all(&mut store, first.resume_after.as_ref(), 2, &NoLiveLeases);
+    assert_eq!(
+        (second.converted, second.resume_after.as_ref()),
+        (2, Some(&keys[3]))
+    );
+    let third = convert_all(&mut store, second.resume_after.as_ref(), 2, &NoLiveLeases);
+    assert_eq!((third.converted, third.resume_after), (1, None));
+    for (n, key) in keys.iter().enumerate() {
+        assert_eq!(note(&store, key), (2, format!("Note {}.\n", n + 1)));
+    }
+    assert_eq!(carriers(&store).len(), 5);
+    let before = changes(&store);
+    let again = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((again.converted, again.unchanged), (0, 5));
+    assert_eq!(changes(&store), before);
+    assert_eq!(carriers(&store).len(), 5);
+}
+
+#[test]
+fn the_pass_skips_an_open_note_and_converts_it_on_the_next_run() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = seed_note(&mut store, NOTE, "moment-a", Some(&base_of(&[NOTE])));
+    let other = seed_at(
+        &mut store,
+        OTHER,
+        OTHER_NOTE,
+        "moment-b",
+        Some(&base_of(&[OTHER_NOTE])),
+    );
+    let held = convert_all(&mut store, None, 10, &OpenNote("object-a"));
+    assert_eq!(held.converted, 1);
+    assert_eq!(
+        held.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "ydoc-session-live")]
+    );
+    assert_eq!(note(&store, &key).0, 1);
+    assert_eq!(note(&store, &other).0, 2);
+    let closed = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((closed.converted, closed.unchanged), (1, 1));
+    assert!(closed.skipped.is_empty());
+    assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
+}
+
+#[test]
+fn the_pass_skips_a_note_with_an_unsent_edit_or_an_open_review() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES ('ws','local',5,'moment.append',?1,1,0)",
+                [json!({"versionId": "main", "objectId": "object-a"}).to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let unsent = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(
+        unsent.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "unsent-edit")]
+    );
+    assert_eq!(note(&store, &key).0, 1);
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_peer_scratch, mut peer, key) = owner(&base_of(&["A draft.\n", NOTE]));
+    receive(&owner_store, &mut peer, &carrier, "owner").unwrap();
+    assert_eq!(open_reviews(&peer), 1);
+    let reviewed = convert_all(&mut peer, None, 10, &NoLiveLeases);
+    assert_eq!(
+        reviewed.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "open-conflict")]
+    );
+    assert_eq!(note(&peer, &key).0, 1);
+}
+
+#[test]
+fn the_pass_names_a_note_too_large_for_format_two_and_leaves_it() {
+    let large = vec!["p"; 50_000].join("\n\n") + "\n";
+    let (_scratch, _path, mut store) = open_store();
+    let key = seed_note(
+        &mut store,
+        &large,
+        "moment-large",
+        Some(&base_of(&[&large])),
+    );
+    let before = (claim(&store, &key), changes(&store));
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
+    assert_eq!(pass.converted, 0);
+    assert_eq!((claim(&store, &key), changes(&store)), before);
+    assert_eq!(note(&store, &key).0, 1);
+    assert!(carriers(&store).is_empty());
+}
+
+#[test]
+fn a_local_only_workspace_drops_its_format_one_cache_offline() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = seed_note(&mut store, NOTE, "moment-local", None);
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &key,
+        &base_of(&[NOTE]),
+        LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("doc.md"),
+                content_kind: ContentKind::Richdoc,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        12,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    let projected = on(|| {
+        dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+    });
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET last_settled_sha=?1, pending_authors_json='[]'",
+                [hex_sha256(projected.as_bytes())],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(note(&store, &key), (1, NOTE.to_owned()));
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(pass.skipped, Vec::new());
+    assert_eq!(pass.converted, 1);
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!((marker.head_update_seq, marker.head_snapshot_seq), (0, 0));
+    assert_eq!(text(&mut store), NOTE);
+    assert!(carriers(&store).is_empty());
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
+        })
+        .unwrap();
+    assert_eq!(journaled, 0);
+    let before = changes(&store);
+    let again = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((again.converted, again.unchanged), (0, 1));
+    assert_eq!(changes(&store), before);
+}
