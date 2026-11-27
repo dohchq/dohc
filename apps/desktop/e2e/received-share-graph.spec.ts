@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { activityPin } from "../src/testPins";
-import { launchDesktopApp } from "./helpers/desktopApp";
+import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -37,8 +37,15 @@ function connections(page: Page, workspaceId: string) {
   );
 }
 
-async function mcpConnections(command: string, args: string[]): Promise<unknown> {
-  const server = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+async function mcpConnections(configArgs: string[]): Promise<unknown> {
+  const server = spawn(
+    process.execPath,
+    [
+      join(desktopRoot, "../../packages/mcp/bin/dohc-mcp.js"),
+      ...configArgs.slice(configArgs.indexOf("--workspace")),
+    ],
+    { stdio: ["pipe", "pipe", "inherit"], windowsHide: true },
+  );
   const lines = createInterface({ input: server.stdout });
   const replies = new Map<number, (value: { result?: unknown; error?: unknown }) => void>();
   lines.on("line", (line) => {
@@ -189,7 +196,7 @@ test("a standalone received share's Graph shows its Collections and Relations at
     );
     if ("unavailable" in mcp) throw new Error(mcp.message);
     expect(mcp.args.join(" ")).toContain("--share-access view");
-    expect(await mcpConnections(mcp.command, mcp.args)).toEqual(desktopAnswer);
+    expect(await mcpConnections(mcp.args)).toEqual(desktopAnswer);
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.getByTestId(activityPin("graph")).click();
@@ -239,6 +246,8 @@ test("a standalone received share's Graph shows its Collections and Relations at
       edges: [],
       records: [],
     });
+    await expect(row("collection:trip/Tasks")).toHaveCount(0, { timeout: 60_000 });
+    await expect(row("collection:trip/People")).toHaveCount(0);
   } finally {
     await desktop?.close();
     await relay?.stop();

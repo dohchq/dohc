@@ -7883,7 +7883,7 @@ function WorkspaceShell(props: {
     [workspaceId],
   );
   const graphKey = shareView
-    ? graphRefreshKey
+    ? `${graphRefreshKey}\0${shareView.ended === true}`
     : `${graphRefreshKey}\0${latestMomentOrder}\0${appsRevision}`;
 
   const joinedWorkspaceOffers = commandContext.shareView
