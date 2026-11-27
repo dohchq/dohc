@@ -10,6 +10,8 @@ pub enum FormatTwoConversion {
 }
 
 pub(crate) const CONVERSION_ID_PREFIX: &str = "note-format-two-";
+pub(crate) const CONVERSION_BASE_PENDING: &str = "note-format-two-base-pending";
+pub(crate) const CONVERSION_PENDING: &str = "note-format-two-pending";
 
 const WAITS: [(&str, &str); 5] = [
     (
@@ -285,6 +287,11 @@ pub(super) fn received(
     let Some(marker) =
         dohc_engine_collab::read_marker_in(tx, &key).map_err(map_local_collab_error)?
     else {
+        if crate::deferred::base_retained(tx, &key, &transition.predecessor_claim_id)? {
+            return Err(SyncError::RetryableState {
+                reason: CONVERSION_BASE_PENDING,
+            });
+        }
         return Ok(Received::NothingToInstall);
     };
     let here = marker.lineage_claim_status == LineageClaimStatus::Exact

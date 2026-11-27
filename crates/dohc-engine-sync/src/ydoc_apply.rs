@@ -8604,6 +8604,17 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         return Ok(outcome);
     }
     if leases.is_live(&key) {
+        if !payload.is_base_state
+            && dohc_engine_collab::read_marker(store, &key)
+                .map_err(map_collab_hard_error)?
+                .and_then(|marker| marker.lineage_claim_id)
+                .as_deref()
+                != Some(payload.lineage_claim_id.as_str())
+        {
+            store.read_with(|conn| {
+                crate::deferred::wait_for_conversion(conn, &key, &payload.lineage_claim_id)
+            })?;
+        }
         // Full durable validation before admission: byte caps, abort-safe
         // prevalidation, and the replay-parity gate — replayed on top of the
         // ALREADY-QUEUED deferred predecessors, because a later update can
@@ -9207,6 +9218,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     {
                         return Err(SyncError::BaseRefused { reason });
                     }
+                    crate::deferred::wait_for_conversion(
+                        tx,
+                        &deferred_key,
+                        &payload.lineage_claim_id,
+                    )?;
                     if inactive_lineage_exists(tx, &deferred_key, &payload.lineage_claim_id)? {
                         hold_archived_lineage(
                             tx,
@@ -9303,6 +9319,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     if let Some(reason) = kept_base_refusal(tx, &key, &payload.lineage_claim_id)? {
                         return Err(SyncError::BaseRefused { reason });
                     }
+                    crate::deferred::wait_for_conversion(tx, &key, &payload.lineage_claim_id)?;
                     if let Some(lineage) = marker.lineage_claim_id.as_deref() {
                         hold_released_lineage(
                             tx,
