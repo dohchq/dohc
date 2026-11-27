@@ -240,8 +240,11 @@ export function createPageLive(options: {
       case "state": {
         const facts = message.facts;
         set({ facts, unsent: facts.unsent, shown: state.shown || facts.status === "live" });
-        // A quarantined provider never reconnects; its edits stay on screen to copy.
-        if (facts.status === "quarantined") refuse(facts.reason ?? "quarantined");
+        // A quarantined provider never reconnects; its edits stay on screen to copy. On a replaced lineage with nothing
+        // unsent, the page opens a fresh one.
+        if (facts.status !== "quarantined") return;
+        if (facts.reason === "lineage-replaced" && !facts.unsent) void begin();
+        else refuse(facts.reason ?? "quarantined");
       }
     }
   }
