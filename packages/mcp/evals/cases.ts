@@ -517,7 +517,7 @@ export const CASES: readonly EvalCase[] = [
         { tool: "dohc_test_app", args: { appRoot: "apps/rsvp" } },
       ],
       order: ["dohc_create_app", "dohc_test_app"],
-      files: { "apps/rsvp/index.html": { contains: ["<"] } },
+      files: { "apps/rsvp/src/App.tsx": { contains: ["dohc/ui"] } },
     },
     solution: {
       calls: [

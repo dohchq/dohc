@@ -1959,13 +1959,21 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
     });
   }
 
-  if (app.entry) {
-    const entry = await safeResolve(ctx, app.entry, "read");
+  const manifest = app.entry
+    ? null
+    : await readJsonDetailed<{ entryPath?: unknown }>(join(root.absolute, "app.publish.json"));
+  const entryPath =
+    app.entry ??
+    (manifest?.ok && isRecord(manifest.value) && typeof manifest.value.entryPath === "string"
+      ? relativeJoin(root.normalized, manifest.value.entryPath)
+      : undefined);
+  if (entryPath) {
+    const entry = await safeResolve(ctx, entryPath, "read");
     const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
     checks.push({
       name: "entry-file",
       ok: exists,
-      path: app.entry,
+      path: entryPath,
       message: exists ? "Entry file exists." : "Entry file is missing.",
     });
   } else if (!app.scripts.dev && !app.scripts.start && !app.scripts.build) {
@@ -1973,7 +1981,7 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
       name: "entry-or-script",
       ok: false,
       path: root.normalized,
-      message: "App needs an index.html entry or a package script.",
+      message: "App needs an index.html entry, an app.publish.json entryPath, or a package script.",
     });
   }
 
