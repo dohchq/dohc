@@ -452,6 +452,8 @@ export function cachedList<T>(
 export interface WorkspaceData {
   readonly workspaceId: string;
   readonly role: WorkspaceRole;
+  /** False once the store has stopped, as when the workspace opens afresh: answers for it no longer count. */
+  isOpen(): boolean;
   /** The account joined this workspace rather than owns it, so the phone only reads it: it marks nothing read. */
   readonly joined: boolean;
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
@@ -512,7 +514,10 @@ export function createWorkspaceData(options: {
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** The server answered 404 for the workspace: the store has stopped and cleared. */
   readonly onGone?: () => void;
-  /** Try again on a store that has gone, and the feed's `replace`: the account opens the workspace in a new store. */
+  /**
+   * Try again on a store that has gone, and the feed's `replace` in a workspace the account joined: the account opens
+   * the workspace in a new store.
+   */
   readonly reopen?: () => void;
   /** A read from the server that still counts showed these messages. */
   readonly onMessages?: (messages: readonly ChatMessage[]) => void;
@@ -828,7 +833,7 @@ export function createWorkspaceData(options: {
         forget(target);
         entries.delete(id);
       }
-      options.reopen?.();
+      if (role !== "owner") options.reopen?.();
       return;
     }
     const known: Known = {
@@ -852,6 +857,7 @@ export function createWorkspaceData(options: {
     workspaceId,
     role,
     joined: role !== "owner",
+    isOpen: () => !stopped,
     instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
     subscribe(view, listener) {

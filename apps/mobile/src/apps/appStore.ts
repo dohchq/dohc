@@ -188,6 +188,8 @@ export function createWorkspaceApps(options: {
   /** This build may run apps (src/apps/canOpenApps.ts). */
   readonly canOpen: boolean;
   readonly role?: WorkspaceRole;
+  /** Whether the workspace's store this one belongs to is still open. */
+  readonly open?: () => boolean;
 }): WorkspaceApps {
   const { signIn, workspaceId, runner } = options;
   const controller = new AbortController();
@@ -197,7 +199,7 @@ export function createWorkspaceApps(options: {
   const listeners = new Set<() => void>();
   const saved = cachedList(options.cache, signIn, workspaceId, views.apps, options.role);
   let state: AppsState = { apps: saved.value(), problem: null, failures: 0 };
-  const isLive = () => !signal.aborted && signIn.isCurrent();
+  const isLive = () => !signal.aborted && signIn.isCurrent() && (options.open?.() ?? true);
   const mine = (publicationId?: string) => (scope: AppScope) =>
     scope.signIn === signIn &&
     scope.workspaceId === workspaceId &&

@@ -163,6 +163,7 @@ export function createWorkspaceCollections(
   ends: Pick<ScopedEnds, "add">,
   cache: ReadCache,
   role: WorkspaceRole = "owner",
+  open: () => boolean = () => true,
 ): WorkspaceCollections {
   let controller = new AbortController();
   let operations = collectionOperations(signIn.client, workspaceId, controller.signal);
@@ -178,7 +179,7 @@ export function createWorkspaceCollections(
   let described: string | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
-  const isLive = () => !stopped && signIn.isCurrent();
+  const isLive = () => !stopped && signIn.isCurrent() && open();
   const busy = (key: string) => {
     const action = actions.get(key)?.state.kind;
     return action === "saving" || action === "saved" || changes.get(key)?.state.kind === "saving";

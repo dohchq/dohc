@@ -167,6 +167,30 @@ describe("the Collections list", () => {
     expect(cache.get(scope, "collections")).toBeUndefined();
   });
 
+  it("neither shows nor saves a read that lands after its workspace's store stopped", async () => {
+    const cache = createReadCache();
+    const server = testServer();
+    let open = true;
+    const collections = createWorkspaceCollections(
+      signedIn(server),
+      "ws-1",
+      createScopedEnds(),
+      cache,
+      "member",
+      () => open,
+    );
+    const late = deferred<Answer>();
+    server.on("POST", `${OPS}/collections`, () => late.promise);
+    const reading = collections.refresh();
+    open = false;
+    late.resolve(ok({ collections: [{ datasetId: D, name: "Registrations" }], nextCursor: null }));
+    await reading;
+    expect(collections.state().collections).toBeNull();
+    expect(
+      cache.get(cacheScope(signedIn(server), "ws-1", "member"), "collections"),
+    ).toBeUndefined();
+  });
+
   it("shows the list read last at once in the workspace's next store", async () => {
     const cache = createReadCache();
     const { server, collections } = setup(() => true, cache);

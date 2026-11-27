@@ -674,24 +674,32 @@ describe("the change feed", () => {
     data.stop();
   });
 
-  it("opens the workspace afresh on replace", async () => {
-    const server = testServer();
-    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));
-    const answer = deferred<Answer>();
-    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
-    let reopened = 0;
-    const data = createWorkspaceData({
-      signIn: signInTo(server),
-      workspaceId: "ws-a",
-      cache: createReadCache(),
-      reopen: () => void reopened++,
-    });
-    data.resume();
-    data.subscribe(views.files, () => {});
-    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
-    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
-    await vi.waitFor(() => expect(reopened).toBe(1));
-    data.stop();
+  it("opens a joined workspace afresh on replace, and refreshes the owner's in place", async () => {
+    for (const [role, opens] of [
+      ["member", 1],
+      ["owner", 0],
+    ] as const) {
+      const server = testServer();
+      server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));
+      const answer = deferred<Answer>();
+      server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+      server.on("GET", feedPath("ws-a", "1.0.0"), held);
+      let reopened = 0;
+      const data = createWorkspaceData({
+        signIn: signInTo(server),
+        workspaceId: "ws-a",
+        role,
+        cache: createReadCache(),
+        reopen: () => void reopened++,
+      });
+      data.resume();
+      data.subscribe(views.files, () => {});
+      await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+      answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+      await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(2));
+      expect(reopened, role).toBe(opens);
+      data.stop();
+    }
   });
 
   it("drops a closed view's read that a change overtakes, and reads it again when it opens", async () => {
