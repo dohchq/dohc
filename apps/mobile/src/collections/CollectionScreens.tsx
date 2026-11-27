@@ -196,6 +196,9 @@ function Records({
     <Stack.Screen
       options={{
         title: description?.name ?? "",
+        headerTransparent: false,
+        headerStyle: { backgroundColor: theme.bg },
+        headerShadowVisible: false,
         headerRight:
           showSort || showCreate
             ? () => (

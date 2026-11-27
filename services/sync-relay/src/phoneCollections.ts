@@ -36,7 +36,7 @@ export const PHONE_COLLECTION_PAGE = 50;
 const RELATION_LABEL_LIMIT = 100;
 const RELATION_LABEL_PAGES = 5;
 const RELATION_LABEL_MAX = 500;
-const RELATION_KEY_FALLBACK_MAX = 100;
+const RELATION_KEY_FALLBACK_MAX = 200;
 const RELATION_KEY_BATCH = 8;
 
 const OPERATIONS = new Set([
@@ -968,6 +968,7 @@ export function createPhoneCollections(options: {
         first = await tryTarget({ limit: pageLimit });
       }
       let nextCursor = first.ok ? collect(first.result) : null;
+      let hasMore = first.ok ? nextCursor !== null : first.code === "resource_limit";
       const seenCursors = new Set<string>();
       for (
         let p = 1;
@@ -981,12 +982,13 @@ export function createPhoneCollections(options: {
         seenCursors.add(ck);
         const more = await tryTarget({ limit: pageLimit, after: nextCursor });
         if (!more.ok) {
-          nextCursor = null;
+          hasMore = more.code === "resource_limit";
           break;
         }
         nextCursor = collect(more.result);
+        hasMore = nextCursor !== null;
       }
-      if (nextCursor !== null && Object.keys(labels).length < group.wanted.size) {
+      if (hasMore && Object.keys(labels).length < group.wanted.size) {
         const missing = [...group.wanted.entries()]
           .filter(([encoded]) => !Object.hasOwn(labels, encoded))
           .slice(0, RELATION_KEY_FALLBACK_MAX);

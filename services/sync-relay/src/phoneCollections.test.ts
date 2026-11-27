@@ -2555,4 +2555,38 @@ CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,tag_ids TEXT
   expect((page2.body.result as { rows: Array<{ id: string }> }).rows.map((r) => r.id)).toEqual([
     `i-${PHONE_COLLECTION_PAGE}`,
   ]);
+  // If a scan page hits resource_limit (e.g. bulky rows on page 2), per-key filter fallback still resolves labels.
+  const bulk = "X".repeat(10_000);
+  for (let i = 126; i < 156; i++) {
+    const tid = `t-${String(i).padStart(3, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: TAG_CREATE,
+      input: { values: { [TAG_ID]: tid, [TAG_LABEL]: `${tid} ${bulk}` } },
+      idempotencyKey: `bt-${i}`,
+    });
+  }
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: ITEM_CREATE,
+    input: { values: { [ITEM_ID]: "i-bulk", [ITEM_TITLE]: "000-bulk", [ITEM_TAGS]: ["t-155"] } },
+    idempotencyKey: "bi-bulk",
+  });
+  const bulkPage = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    recordId: "i-bulk",
+  });
+  expect(bulkPage.status).toBe(200);
+  expect(
+    (bulkPage.body.result as { relations: Record<string, Record<string, string>> }).relations[
+      ITEM_TAGS
+    ]?.['"t-155"'],
+  ).toBe(`t-155 ${bulk}`.slice(0, 500));
 });
