@@ -150,6 +150,7 @@ describe("ChatsView decisions", () => {
         state: "open" as const,
         atMs: NOW,
         options: ["Friday", "Monday"],
+        optionDetails: [null, "After the release check"],
       };
       bridgeMock.listChannelThreads.mockResolvedValue({
         threads: [thread({ openDecisionCount: 1 })],
@@ -171,7 +172,14 @@ describe("ChatsView decisions", () => {
       await user.click(await screen.findByTestId("chats-channel"));
       await user.click(await screen.findByTestId("chats-thread"));
       const options = await screen.findAllByTestId("chats-message-poll-option");
-      expect(options.map((node) => node.textContent)).toEqual(["Friday", "Monday"]);
+      expect(options.map((node) => node.textContent)).toEqual([
+        "Friday",
+        "MondayAfter the release check",
+      ]);
+      // The explanation describes its choice, and the answer stays the label.
+      expect(options[0]!.getAttribute("aria-describedby")).toBeNull();
+      const about = options[1]!.getAttribute("aria-describedby");
+      expect(about && document.getElementById(about)?.textContent).toBe("After the release check");
       expect(screen.queryByTestId("chats-message-decision-resolve")).toBeNull();
       if (pick === "click") {
         await user.click(options[1]!);

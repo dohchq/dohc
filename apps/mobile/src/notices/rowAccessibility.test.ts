@@ -13,7 +13,7 @@ import type { NoticeAnswerView, PhoneNotice } from "./phoneNotice";
 /** A row's answer, collapsed, at `state`. */
 const view = (state: DecisionState): NoticeAnswerView => ({
   question: { id: "q1", authorName: "Nova", body: "Which return train?" },
-  decision: { options: [], state },
+  decision: { options: [], details: [], state },
   marks: [],
   editing: null,
   current: true,

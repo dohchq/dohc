@@ -299,6 +299,7 @@ const message = (id: string, extra: Partial<ChatMessage> = {}): ChatMessage => (
   needsDecision: false,
   decisionState: null,
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   reactions: [],

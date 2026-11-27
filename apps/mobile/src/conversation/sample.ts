@@ -456,6 +456,7 @@ const asked = (id: string, fields: Partial<Asked>): Asked => ({
   parentMessageId: null,
   decisionState: "open",
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   ...fields,

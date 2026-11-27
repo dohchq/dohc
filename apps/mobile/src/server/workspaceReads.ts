@@ -187,6 +187,8 @@ export interface ChatMessage {
   readonly decisionState: "open" | "resolved" | null;
   /** A poll's choices. A question has none. */
   readonly options: readonly string[];
+  /** One explanation per choice, or null for a choice without one. Empty when the poll has none. */
+  readonly optionDetails: readonly (string | null)[];
   readonly chosenOption: string | null;
   readonly resolvedByMessageId: string | null;
   readonly reactions: readonly ChatReaction[];
@@ -246,6 +248,14 @@ function readMessage(item: unknown): ChatMessage | null {
     item.options === undefined
       ? []
       : each(item.options, (value) => (nonEmpty(value) ? value : null));
+  const optionDetails =
+    item.optionDetails === undefined
+      ? []
+      : Array.isArray(item.optionDetails) &&
+          item.optionDetails.length === options?.length &&
+          item.optionDetails.every((detail) => detail === null || nonEmpty(detail))
+        ? (item.optionDetails as (string | null)[])
+        : null;
   const reactions = item.reactions === undefined ? [] : each(item.reactions, readReaction);
   if (
     parentMessageId === undefined ||
@@ -254,6 +264,7 @@ function readMessage(item: unknown): ChatMessage | null {
     resolvedByMessageId === undefined ||
     attachments === null ||
     options === null ||
+    optionDetails === null ||
     reactions === null
   )
     return null;
@@ -271,6 +282,7 @@ function readMessage(item: unknown): ChatMessage | null {
     needsDecision: item.needsDecision,
     decisionState,
     options,
+    optionDetails,
     chosenOption,
     resolvedByMessageId,
     reactions,

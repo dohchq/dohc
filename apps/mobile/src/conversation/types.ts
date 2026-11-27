@@ -88,6 +88,8 @@ export type DecisionState =
 export interface Decision {
   /** A poll's choices, in its author's own words. A question has none. */
   readonly options: readonly string[];
+  /** One explanation per choice, or null. Empty when the poll has none. */
+  readonly details: readonly (string | null)[];
   readonly state: DecisionState;
 }
 

@@ -14,6 +14,7 @@ const message = (id: string, threadId: string, createdAtMs: number): ChatMessage
   needsDecision: false,
   decisionState: null,
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   reactions: [],
