@@ -908,6 +908,23 @@ describe("notice center", () => {
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
   });
 
+  it("counts a lasting live retry from its start while its cause changes", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(5_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying", "server-unreachable") }));
+    act(() => vi.advanceTimersByTime(5_000));
+    rerender(
+      noticeElement({ syncStatus: liveDeliveryStatus("retrying", "live-hosting-unavailable") }),
+    );
+    act(() => vi.advanceTimersByTime(4_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain(
+      "This server doesn't host live editing for this workspace",
+    );
+  });
+
   // A healthy recovery tries again within about 10 s of the server coming
   // back, so it never toasts or adds a row.
   it("never announces a live retry that recovers within 15 s of the server coming back", () => {

@@ -1726,11 +1726,13 @@ export function NoticeCenter(props: {
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
   // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
-  // shows; a named reason stays until someone acts, so it shows at once.
+  // shows, and so does one the server may recover from, however its cause
+  // changes meanwhile. A named reason stays until someone acts, so it shows
+  // at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
-      ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
+      ? `${props.workspaceId}:retrying:${liveDeliveryReason && !quietLiveRetry(liveDeliveryReason) ? liveDeliveryReason : "transient"}`
       : null;
   const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
   const liveDeliveryKey = useLasted(

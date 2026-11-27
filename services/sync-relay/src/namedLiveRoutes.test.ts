@@ -356,7 +356,9 @@ it.each([true, false])(
     f.raw
       .prepare("UPDATE sync_relay_shares SET selector_json=?")
       .run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    f.liveNote.mockClear();
     expect(await ask()).toEqual([404, { ok: false, error: "not found" }]);
+    expect(f.liveNote).not.toHaveBeenCalled();
   },
 );
 

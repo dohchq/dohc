@@ -616,9 +616,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             );
             return unboundLinkRefusal(note, block);
           }
-        } else {
+        } else if (namedReaches(context, document)) {
           const note = liveNote?.(document);
-          if (note && namedReaches(context, document))
+          if (note)
             return note === "starting" && blocked() !== "held"
               ? linkRefusal("link_live_starting")
               : namedLiveStoppedRefusal();
