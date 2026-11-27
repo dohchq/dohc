@@ -910,9 +910,6 @@ function mcpFailure(error: unknown, fallback: string) {
   return { ok: false as const, reason };
 }
 
-// A failure whose reason never names a host path. Node's own messages name
-// absolute paths, so a system error becomes `failed` and its code; dohc's own
-// refusals, which name paths as the caller spelled them, pass through.
 function ownerSetupRefusal(context: CliWorkspaceContext, options: CliServerOptions): string | null {
   if (context.readOnly)
     return "Only the owner's own agents can do this. Run it from your own workspace's folder.";
@@ -925,6 +922,9 @@ function ownerSetupRefusal(context: CliWorkspaceContext, options: CliServerOptio
   return options.agentSetup ? null : "Workspace setup is unavailable here.";
 }
 
+// A failure whose reason never names a host path. Node's own messages name
+// absolute paths, so a system error becomes `failed` and its code; dohc's own
+// refusals, which name paths as the caller spelled them, pass through.
 function pathFreeFailure(error: unknown, failed: string) {
   const system = error instanceof Error && "syscall" in error && "code" in error;
   const reason = system
