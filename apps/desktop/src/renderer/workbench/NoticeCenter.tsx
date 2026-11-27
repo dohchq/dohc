@@ -862,7 +862,7 @@ function liveDeliveryCopy(
   if (reason === "note-format-off") {
     return {
       title: "Live editing stopped",
-      body: "The server turned off the newer note format a document in this workspace uses, so others cannot edit it live. Your copy and its History are unchanged. Trying again is refused the same way until the server's operator turns the format back on. Contact the server's operator.",
+      body: "The server turned off the newer note format a note in this workspace uses, so live editing stopped. Your copy and its History are unchanged. Ask the server's operator to turn the format back on.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };

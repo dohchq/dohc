@@ -110,6 +110,8 @@ async function fixture(
   const sockets: WebSocket[] = [];
   const rawSockets: Socket[] = [];
   const hosts: WebSocket[] = [];
+  const hostTransports: Duplex[] = [];
+  hostHttp.on("upgrade", (_request, socket: Duplex) => hostTransports.push(socket));
   hostServer.on("connection", (socket) => {
     socket.on("error", () => undefined);
     hosts.push(socket);
@@ -236,6 +238,7 @@ async function fixture(
     resolve,
     open,
     hosts,
+    hostTransports,
     makeRoute,
     receiveOptions,
     invalidated,
@@ -1269,6 +1272,38 @@ it.each(relayAdapters)(
     const client = state.browser({ cookie: accountCookie });
     expect(await client.status).toBe(101);
     state.hosts[0]!.close(1013, "note_format_off");
+    expect(await client.closed).toEqual([1013, "note_format_off"]);
+  },
+);
+
+it.each(relayAdapters)(
+  "forwards the relay's format-off close through the %s route when the browser's hello arrives while the relay closes",
+  async (_route, adapter) => {
+    const state = await fixture({ limits: { ...limits, drainTimeoutMs: 10_000 } });
+    state.open.mockImplementation(adapter(state.hostUrl));
+    const client = state.browser({ cookie: accountCookie });
+    expect(await client.status).toBe(101);
+    const relay = state.hostTransports[0]!;
+    relay.pause();
+    state.hosts[0]!.close(1013, "note_format_off");
+    await vi.waitFor(() => expect(relay.readableLength).toBeGreaterThan(0));
+    client.socket.send(
+      encodeLiveFrame(
+        {
+          kind: "hello",
+          receivePolicy: {
+            maxFrameBytes: 2048,
+            maxStateVectorBytes: 512,
+            maxUpdateBytes: 1024,
+            maxSyncBytes: 2048,
+          },
+        },
+        2048,
+      ),
+    );
+    client.socket.ping(Buffer.from("after hello"));
+    await Promise.race([once(client.socket, "pong"), client.closed]);
+    relay.resume();
     expect(await client.closed).toEqual([1013, "note_format_off"]);
   },
 );

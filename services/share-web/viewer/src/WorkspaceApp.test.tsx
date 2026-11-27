@@ -2818,7 +2818,7 @@ describe("the owner's page", () => {
     ],
     [
       "note-format-off",
-      "This server turned off the newer note format this page uses. Contact the server's operator.",
+      "The server turned off the newer note format this page uses. Ask the server's operator to turn it back on.",
     ],
   ])("tells the owner why a page refused with %s", async (code, sentence) => {
     server({ level: "edit", session: OWNER_SESSION });

@@ -488,7 +488,7 @@ it.each([
       ),
     );
     expect(container.querySelector('[role="status"]')?.textContent).toBe(
-      `Live editing of this file is off on this server, because the server turned off the newer note format this file uses. Contact the server's operator.${suffix}`,
+      `Live editing is off because the server turned off the newer note format this file uses. Ask the server's operator to turn it back on.${suffix}`,
     );
     expect(container.querySelector("button")).toBeNull();
   },

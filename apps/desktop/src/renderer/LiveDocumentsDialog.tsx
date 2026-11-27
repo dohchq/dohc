@@ -1116,8 +1116,8 @@ export function LiveDocumentsDialog({
                 !pendingStops.has(row.objectId) &&
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server turned off the newer note format this document uses, so others cannot
-                    edit it live. Resume can't help until the server's operator turns it back on.
+                    The server turned off the newer note format this note uses. Ask the server's
+                    operator to turn it back on.
                   </p>
                 ) : null}
                 {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}

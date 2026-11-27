@@ -34,7 +34,7 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   "session-host-diverged":
     "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
   "note-format-off":
-    "This server turned off the newer note format this page uses. Contact the server's operator.",
+    "The server turned off the newer note format this page uses. Ask the server's operator to turn it back on.",
 };
 const READ_ONLY = "live_hosting_unsupported";
 

@@ -494,7 +494,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
           let pendingBytes = 0;
           let pendingFrames = 0;
           return (data: unknown, pong = false) => {
-            if (done || draining) return;
+            if (done || draining || destination.readyState === WebSocket.CLOSING) return;
             if (!Buffer.isBuffer(data)) {
               stop();
               return;
