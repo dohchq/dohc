@@ -452,7 +452,7 @@ export function createNoticeStore(deps: {
         if (!old.success) return null;
         const rows = old.data.rows.flatMap((row) => {
           const parsed = LocalRow.safeParse(row);
-          return parsed.success && !isRefusalNoticeKind(parsed.data.kind) ? [parsed.data] : [];
+          return parsed.success ? [parsed.data] : [];
         });
         return { version: 2, rows };
       });

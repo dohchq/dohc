@@ -1283,6 +1283,36 @@ describe("a refusal made again under the same coordinates", () => {
     ]);
     expect(f.engine.applied).toEqual([]);
   });
+
+  it("keeps a waiting dismissal of a Markdown hold from a version 1 file", async () => {
+    const directory = await createTestScratch("notices-");
+    const hold = { obligationOrder: 3, checkpointSha256: "held", headSha256: null };
+    await writeFile(
+      join(directory, "local.json"),
+      JSON.stringify({
+        version: 1,
+        rows: [
+          {
+            workspaceId: WORKSPACE,
+            noticeId: "sync-refusal-note",
+            kind: "markdown-write-held",
+            title: "A note's file was not written",
+            body: "",
+            target: {},
+            refusalCoordinates: [hold],
+            pendingRefusalDismissals: [hold],
+            createdAtMs: clock,
+            readAtMs: null,
+            dismissedAtMs: clock,
+          },
+        ],
+      }),
+    );
+    const f = refusalEngine([hold], "markdown-write-held");
+    const upgraded = await computer(null, { ...pick(f), directory });
+    expect((await upgraded.store.list()).notices).toEqual([]);
+    expect(f.engine.applied).toEqual([[hold]]);
+  });
 });
 
 it("keeps unavailable workspace refusals while refreshing other workspaces", async () => {
