@@ -2,8 +2,20 @@ import { collectionWords } from "@dohc/interface-words/collections";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { Stack, useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
-import { ChevronRight, Plus, Square, SquareCheck, Trash2, Undo2 } from "lucide-react-native";
-import { memo, useCallback, useEffect, useSyncExternalStore } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronRight,
+  Plus,
+  Search,
+  Square,
+  SquareCheck,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react-native";
+import { memo, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -13,26 +25,37 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { outsideLink } from "../apps/appNavigation";
 import { offerLink } from "../apps/offerLink";
-import { confirm } from "../confirm";
+import { useBackCloses } from "../backCloses";
+import { choose, confirm } from "../confirm";
 import { ActionPill } from "../notices/ActionPill";
 import type {
   CollectionField,
   CollectionRecord,
   CollectionTable,
   RecordValue,
+  RelationLabels,
 } from "../server/phoneCollections";
 import { phoneWrites } from "../server/phoneWrites";
 import type { ReadProblem } from "../server/workspaceData";
 import { useTheme } from "../theme";
+import { ripple, slopTo, TOUCH } from "../touch";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
-import { editorKind, recordName, rowText, shownValue } from "./collectionFields";
+import {
+  editorKind,
+  recordName,
+  rowText,
+  shownValue,
+  supportsSearch,
+  supportsSort,
+} from "./collectionFields";
 import {
   canUndo,
   newRecordKey,
@@ -41,6 +64,7 @@ import {
   type RecordChange,
   type WorkspaceCollections,
 } from "./collectionStore";
+import { NewRecordSheet } from "./NewRecordSheet";
 
 // A Collection's records, from Home, and one record. The list reads its first table, or the one chosen, 50 records at
 // a time, the next page as it nears its end. Pulling down, and a return to the foreground, read the Collection again.
@@ -75,6 +99,8 @@ function Records({
   const problemText = useProblemText();
   const state = useSyncExternalStore(collections.subscribe, collections.view);
   const actions = useSyncExternalStore(collections.subscribe, collections.actions);
+  const [searchInput, setSearchInput] = useState("");
+  const [creating, setCreating] = useState(false);
   useEffect(() => {
     void collections.open(datasetId);
     return () => collections.close(datasetId);
@@ -95,6 +121,20 @@ function Records({
   const view = state?.datasetId === datasetId ? state : null;
   const description = view?.description;
   const table = description?.tables.find((table) => table.tableId === view?.tableId);
+  const clearQuery = useCallback(() => {
+    setSearchInput("");
+    void collections.setQuery({ search: "", sort: null });
+  }, [collections]);
+  useEffect(() => {
+    setSearchInput(view?.search ?? "");
+    setCreating(false);
+  }, [view?.tableId]);
+  useEffect(() => {
+    if (!view || searchInput.trim() === view.search) return;
+    const timer = setTimeout(() => void collections.setQuery({ search: searchInput.trim() }), 250);
+    return () => clearTimeout(timer);
+  }, [searchInput, view?.search, collections]);
+  useBackCloses(Boolean(searchInput || view?.sort), clearQuery);
   const open = useCallback(
     (record: CollectionRecord) => {
       collections.openRecord(record);
@@ -107,28 +147,105 @@ function Records({
   };
   const newKey = table ? newRecordKey(datasetId, table.tableId) : null;
   const adding = newKey ? actions.get(newKey) : undefined;
+  const sortable = table ? table.fields.filter(supportsSort) : [];
+  const sortField =
+    view?.sort && table ? table.fields.find((f) => f.fieldId === view.sort!.fieldId) : null;
+  const pickSort = async () => {
+    if (!sortable.length) return;
+    const cur = view?.sort ?? null;
+    const items: Array<{ label: string; run(): void }> = [
+      ...(cur
+        ? [
+            {
+              label: collectionWords.reverseOrder,
+              run: () =>
+                void collections.setQuery({
+                  sort: {
+                    fieldId: cur.fieldId,
+                    direction: cur.direction === "asc" ? "desc" : "asc",
+                  },
+                }),
+            },
+            {
+              label: collectionWords.defaultOrder,
+              run: () => void collections.setQuery({ sort: null }),
+            },
+          ]
+        : []),
+      ...sortable.map((f) => ({
+        label: f.name,
+        run: () =>
+          void collections.setQuery({
+            sort: {
+              fieldId: f.fieldId,
+              direction: cur?.fieldId === f.fieldId && cur.direction === "asc" ? "desc" : "asc",
+            },
+          }),
+      })),
+    ];
+    const picked = await choose({
+      title: collectionWords.sortBy,
+      options: items.map((i) => ({ label: i.label })),
+    });
+    if (picked !== null) items[picked]?.run();
+  };
+  const showSort = sortable.length > 0 && !view?.refused;
+  const showCreate = phoneWrites && table?.canCreate;
 
   const title = (
     <Stack.Screen
       options={{
         title: description?.name ?? "",
+        headerTransparent: false,
+        headerStyle: { backgroundColor: theme.bg },
+        headerShadowVisible: false,
         headerRight:
-          phoneWrites && table?.canCreate
-            ? () =>
-                adding?.state.kind === "saving" ? (
-                  <ActivityIndicator accessibilityLabel={collectionWords.saving} />
-                ) : (
-                  <Pressable
-                    onPress={() => void collections.create().then(added)}
-                    disabled={adding !== undefined}
-                    hitSlop={8}
-                    style={styles.headerButton}
-                    accessibilityRole="button"
-                    accessibilityLabel={collectionWords.newRecord}
-                  >
-                    <Plus size={24} color={theme.ink} strokeWidth={2} />
-                  </Pressable>
-                )
+          showSort || showCreate
+            ? () => (
+                <View style={styles.headerButtons}>
+                  {showSort ? (
+                    <Pressable
+                      onPress={() => void pickSort()}
+                      hitSlop={8}
+                      android_ripple={ripple(theme, true)}
+                      style={styles.headerButton}
+                      accessibilityRole="button"
+                      accessibilityLabel={collectionWords.sort}
+                    >
+                      <ArrowUpDown
+                        size={22}
+                        color={view?.sort ? theme.accent : theme.ink}
+                        strokeWidth={2}
+                      />
+                    </Pressable>
+                  ) : null}
+                  {!showCreate ? null : adding?.state.kind === "saving" && !creating ? (
+                    <View style={styles.headerButton}>
+                      <ActivityIndicator accessibilityLabel={collectionWords.saving} />
+                    </View>
+                  ) : (
+                    <Pressable
+                      onPress={() =>
+                        table.createFields.length > 0
+                          ? setCreating(true)
+                          : void collections.create().then(added)
+                      }
+                      disabled={
+                        table.createFields.length === 0
+                          ? adding !== undefined
+                          : adding?.state.kind === "saving"
+                      }
+                      hitSlop={8}
+                      android_ripple={ripple(theme, true)}
+                      style={styles.headerButton}
+                      accessibilityRole="button"
+                      accessibilityLabel={collectionWords.newRecord}
+                    >
+                      <Plus size={24} color={theme.ink} strokeWidth={2} />
+                    </Pressable>
+                  )}
+                </View>
+              )
             : undefined,
       }}
     />
@@ -149,12 +266,14 @@ function Records({
       </>
     );
 
+  const SortArrow = view.sort?.direction === "desc" ? ArrowDown : ArrowUp;
   const header = (
     <>
       {description.tables.length > 1 ? (
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
+          style={styles.tabsWrap}
           contentContainerStyle={styles.tables}
         >
           {description.tables.map((each) => {
@@ -164,8 +283,10 @@ function Records({
                 key={each.tableId}
                 onPress={() => {
                   void Haptics.selectionAsync();
+                  setSearchInput("");
                   void collections.chooseTable(each.tableId);
                 }}
+                android_ripple={ripple(theme)}
                 style={[
                   styles.table,
                   { borderColor: theme.line },
@@ -182,6 +303,73 @@ function Records({
           })}
         </ScrollView>
       ) : null}
+      {table && supportsSearch(table.fields) && !view.refused ? (
+        <View style={[styles.searchBar, { backgroundColor: theme.field }]}>
+          <Search size={18} color={theme.subtle} strokeWidth={2} />
+          <TextInput
+            value={searchInput}
+            onChangeText={setSearchInput}
+            placeholder={collectionWords.searchRecords}
+            placeholderTextColor={theme.subtle}
+            returnKeyType="search"
+            onSubmitEditing={() => void collections.setQuery({ search: searchInput.trim() })}
+            maxLength={200}
+            accessibilityLabel={collectionWords.searchRecords}
+            style={[styles.searchInput, { color: theme.ink }]}
+          />
+          {searchInput ? (
+            <Pressable
+              onPress={() => {
+                setSearchInput("");
+                void collections.setQuery({ search: "" });
+              }}
+              android_ripple={ripple(theme, true)}
+              style={styles.headerButton}
+              accessibilityRole="button"
+              accessibilityLabel={collectionWords.clearSearch}
+            >
+              <X size={18} color={theme.subtle} strokeWidth={2} />
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+      {view.sort && sortField ? (
+        <View style={styles.sortRow}>
+          <Pressable
+            onPress={() =>
+              void collections.setQuery({
+                sort: {
+                  fieldId: view.sort!.fieldId,
+                  direction: view.sort!.direction === "asc" ? "desc" : "asc",
+                },
+              })
+            }
+            hitSlop={slopTo(36)}
+            android_ripple={ripple(theme)}
+            style={[styles.sortPill, { backgroundColor: theme.panel2, borderColor: theme.line }]}
+            accessibilityRole="button"
+            accessibilityLabel={collectionWords.sortedBy(
+              sortField.name,
+              view.sort.direction === "asc",
+            )}
+          >
+            <Text style={[styles.sortText, { color: theme.ink }]} numberOfLines={1}>
+              {sortField.name}
+            </Text>
+            <SortArrow size={15} color={theme.ink} strokeWidth={2} />
+          </Pressable>
+          <Pressable
+            onPress={() => void collections.setQuery({ sort: null })}
+            hitSlop={slopTo(36)}
+            android_ripple={ripple(theme, true)}
+            style={styles.sortClear}
+            accessibilityRole="button"
+            accessibilityLabel={collectionWords.defaultOrder}
+          >
+            <X size={16} color={theme.muted} strokeWidth={2} />
+          </Pressable>
+        </View>
+      ) : null}
       {view.problem ? (
         <View style={styles.problem}>
           <ProblemLine
@@ -192,12 +380,16 @@ function Records({
           />
         </View>
       ) : null}
-      {newKey && adding ? (
+      {newKey && adding && !creating ? (
         <View style={styles.problem}>
           <ChangeLine
             state={adding.state}
             cause={problemText}
             onRetry={() => void collections.retryAction(newKey).then(added)}
+            onReload={() => {
+              collections.discardAction(newKey);
+              void collections.reload();
+            }}
             onDiscard={() => collections.discardAction(newKey)}
           />
         </View>
@@ -205,34 +397,61 @@ function Records({
     </>
   );
   return (
-    <FlatList
-      style={{ backgroundColor: theme.bg }}
-      contentInsetAdjustmentBehavior="automatic"
-      data={view.rows}
-      keyExtractor={(record) => JSON.stringify(record.id)}
-      renderItem={({ item }) =>
-        table ? <RecordRow record={item} table={table} files={view.files} onPress={open} /> : null
-      }
-      ListHeaderComponent={
-        <>
-          {title}
-          {header}
-        </>
-      }
-      ListEmptyComponent={
-        view.refused && table ? (
-          <EmptyLine text={collectionWords.noRead(table.name)} />
-        ) : view.reading === "first" ? (
-          <HoldRow />
-        ) : view.problem ? undefined : (
-          <EmptyLine text={collectionWords.noRecords} />
-        )
-      }
-      ListFooterComponent={view.reading === "more" ? <HoldRow /> : undefined}
-      onEndReached={more}
-      onEndReachedThreshold={0.5}
-      refreshControl={<RefreshControl refreshing={view.reading === "refresh"} onRefresh={reload} />}
-    />
+    <View style={[styles.screen, { backgroundColor: theme.bg }]}>
+      {title}
+      {header}
+      <FlatList
+        style={styles.screen}
+        keyboardShouldPersistTaps="handled"
+        data={view.rows}
+        keyExtractor={(record) => JSON.stringify(record.id)}
+        renderItem={({ item }) =>
+          table ? (
+            <RecordRow
+              record={item}
+              table={table}
+              files={view.files}
+              relations={view.relations}
+              onPress={open}
+            />
+          ) : null
+        }
+        ListEmptyComponent={
+          view.queryUnsupported ? (
+            <View style={styles.unsupported}>
+              <EmptyLine text={collectionWords.queryUnsupported} />
+              <ActionPill label={collectionWords.clear} onPress={clearQuery} />
+            </View>
+          ) : view.refused && table ? (
+            <EmptyLine text={collectionWords.noRead(table.name)} />
+          ) : view.reading === "first" ? (
+            <HoldRow />
+          ) : view.problem ? undefined : (
+            <EmptyLine text={view.search ? collectionWords.noMatches : collectionWords.noRecords} />
+          )
+        }
+        ListFooterComponent={view.reading === "more" ? <HoldRow /> : undefined}
+        onEndReached={more}
+        onEndReachedThreshold={0.5}
+        refreshControl={
+          <RefreshControl refreshing={view.reading === "refresh"} onRefresh={reload} />
+        }
+      />
+      {showCreate && table && newKey && table.createFields.length > 0 ? (
+        <NewRecordSheet
+          open={creating}
+          table={table}
+          collections={collections}
+          action={adding}
+          actionKey={newKey}
+          renderAction={(p) =>
+            adding ? <ChangeLine state={adding.state} cause={problemText} {...p} /> : null
+          }
+          onClose={() => setCreating(false)}
+          onCreated={added}
+        />
+      ) : null}
+    </View>
   );
 }
 
@@ -241,16 +460,21 @@ const RecordRow = memo(function RecordRow(props: {
   record: CollectionRecord;
   table: CollectionTable;
   files: Readonly<Record<string, string>>;
+  relations: RelationLabels;
   onPress(record: CollectionRecord): void;
 }) {
-  const { record, table, files } = props;
+  const { record, table, files, relations } = props;
   const theme = useTheme();
   const lead = leadField(table);
-  const name = recordName(lead, record.values, files);
+  const name = recordName(lead, record.values, files, relations);
   const details = table.fields
     .filter((field) => field !== lead)
     .flatMap(
-      (field) => rowText(shownValue(field, record.values[field.fieldId], files), field.name) ?? [],
+      (field) =>
+        rowText(
+          shownValue(field, record.values[field.fieldId], files, relations[field.fieldId]),
+          field.name,
+        ) ?? [],
     )
     .slice(0, 2);
   return (
@@ -310,7 +534,7 @@ export function RecordScreen() {
   );
   if (!collections || !view || !opened || !table)
     return <ScreenFailure text={collectionWords.recordMissing} />;
-  const { record, files } = opened;
+  const { record, files, relations } = opened;
   const key = recordKey(view.datasetId, table.tableId, record.id);
   const last = changes.get(key);
   const deleting = deleted || deletion?.state.kind === "saving";
@@ -326,7 +550,7 @@ export function RecordScreen() {
       collections.remove();
   };
   const lead = leadField(table);
-  const title = recordName(lead, record.values, files);
+  const title = recordName(lead, record.values, files, relations);
   const edit = (fieldId: string, value?: RecordValue) =>
     router.push({
       pathname: "/collection-field",
@@ -359,6 +583,7 @@ export function RecordScreen() {
                       <Pressable
                         onPress={() => collections.undo(key)}
                         hitSlop={8}
+                        android_ripple={ripple(theme, true)}
                         style={styles.headerButton}
                         accessibilityRole="button"
                         accessibilityLabel={collectionWords.undoLastEdit}
@@ -375,6 +600,7 @@ export function RecordScreen() {
                         onPress={() => void askDelete()}
                         disabled={last?.state.kind === "saving"}
                         hitSlop={8}
+                        android_ripple={ripple(theme, true)}
                         style={styles.headerButton}
                         accessibilityRole="button"
                         accessibilityLabel={collectionWords.deleteRecord}
@@ -424,7 +650,16 @@ export function RecordScreen() {
             <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
             <View style={styles.valueLine}>
               <View style={styles.valueText}>
-                <FieldValue field={field} record={shown} files={files} />
+                <FieldValue
+                  field={field}
+                  record={shown}
+                  files={files}
+                  relationLabels={
+                    pending?.relationLabels
+                      ? { ...relations[field.fieldId], ...pending.relationLabels }
+                      : relations[field.fieldId]
+                  }
+                />
               </View>
               {pending?.state.kind === "saving" ? (
                 <ActivityIndicator accessibilityLabel={collectionWords.saving} />
@@ -467,15 +702,17 @@ export function RecordScreen() {
 const NO_CHANGES: ReadonlyMap<string, RecordChange> = new Map();
 const NO_ACTIONS: ReadonlyMap<string, RecordAction> = new Map();
 
-/** Why a write didn't save, and what to do next. Try again waits while another write to the record saves. */
-function ChangeLine(props: {
+export interface ChangeLineProps {
   state: RecordChange["state"] | RecordAction["state"];
   cause(problem: ReadProblem): string;
   onRetry(): void;
   blocked?: boolean;
   onReload?(): void;
   onDiscard(): void;
-}) {
+}
+
+/** Why a write didn't save, and what to do next. Try again waits while another write to the record saves. */
+function ChangeLine(props: ChangeLineProps) {
   const theme = useTheme();
   const { state } = props;
   if (state.kind === "saving" || state.kind === "saved") return null;
@@ -513,10 +750,16 @@ function FieldValue(props: {
   field: CollectionField;
   record: CollectionRecord;
   files: Readonly<Record<string, string>>;
+  relationLabels?: Readonly<Record<string, string>>;
 }) {
   const theme = useTheme();
   const { origin } = useSignIn();
-  const shown = shownValue(props.field, props.record.values[props.field.fieldId], props.files);
+  const shown = shownValue(
+    props.field,
+    props.record.values[props.field.fieldId],
+    props.files,
+    props.relationLabels,
+  );
   if (shown.kind === "check") {
     const Mark = shown.checked ? SquareCheck : Square;
     return (
@@ -555,15 +798,48 @@ function FieldValue(props: {
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
+  tabsWrap: { flexGrow: 0 },
   tables: { gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
   table: {
-    minHeight: 44,
+    minHeight: TOUCH,
     justifyContent: "center",
     paddingHorizontal: 14,
     borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
   },
   tableName: { fontSize: 15 },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginVertical: 6,
+    paddingLeft: 12,
+    paddingRight: 4,
+    borderRadius: 10,
+    minHeight: TOUCH,
+  },
+  searchInput: { flex: 1, fontSize: 17, paddingVertical: 8 },
+  sortRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+  },
+  sortPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  sortText: { fontSize: 14, flexShrink: 1 },
+  sortClear: { minHeight: 36, minWidth: 36, alignItems: "center", justifyContent: "center" },
+  unsupported: { alignItems: "center", gap: 8, paddingHorizontal: 16 },
   problem: { paddingHorizontal: 16 },
   row: {
     minHeight: 56,
@@ -578,12 +854,17 @@ const styles = StyleSheet.create({
   field: { gap: 4, paddingVertical: 10 },
   label: { fontSize: 13 },
   value: { fontSize: 17, lineHeight: 22 },
-  linkTarget: { minHeight: 44, justifyContent: "center" },
+  linkTarget: { minHeight: TOUCH, justifyContent: "center" },
   link: { textDecorationLine: "underline" },
-  editable: { minHeight: 44, gap: 4 },
+  editable: { minHeight: TOUCH, gap: 4 },
   valueLine: { flexDirection: "row", alignItems: "center", gap: 8 },
   valueText: { flex: 1 },
-  headerButton: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
+  headerButton: {
+    minHeight: TOUCH,
+    minWidth: TOUCH,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   headerButtons: { flexDirection: "row" },
   change: { gap: 8, paddingTop: 8 },
   changeText: { fontSize: 15, lineHeight: 20 },

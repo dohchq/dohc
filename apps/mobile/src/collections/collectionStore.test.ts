@@ -36,6 +36,7 @@ const table = (tableId: string, name: string) => ({
   name,
   primaryFieldId: "f-name",
   fields: [field("f-name", "Name", "text", true), field("f-paid", "Paid", "checkbox", false)],
+  createFields: [],
   canCreate: true,
   canDelete: true,
 });
@@ -54,12 +55,17 @@ const describedAs = (revision: number): Answer => ({
 });
 const description = describedAs(3);
 const ok = (result: unknown): Answer => ({ status: 200, body: { ok: true, result } });
-const records = (names: string[], next: string | null): Answer =>
+const records = (
+  names: string[],
+  next: string | null,
+  relations: Record<string, Record<string, string>> = {},
+): Answer =>
   ok({
     status: "ready",
     rows: names.map((name) => ({ id: name, version: 1, values: { "f-name": name } })),
     nextCursor: next === null ? null : { id: next, value: next },
     files: {},
+    relations,
   });
 const names = (rows: readonly { id: unknown }[] | undefined) => rows?.map((row) => row.id);
 /** Waits until the server has had `count` requests. */
@@ -234,7 +240,12 @@ describe("a Collection's records", () => {
     // A return to the foreground reads the first page again, which doesn't have it.
     await collections.reload();
     expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
-    expect(collections.view()?.opened).toEqual({ tableId: "t-people", record: a2, files: {} });
+    expect(collections.view()?.opened).toEqual({
+      tableId: "t-people",
+      record: a2,
+      files: {},
+      relations: {},
+    });
     // One that has it takes its new values.
     server.on(
       "POST",
@@ -244,6 +255,7 @@ describe("a Collection's records", () => {
         rows: [{ id: "a2", version: 2, values: { "f-name": "A2" } }],
         nextCursor: null,
         files: { f: "x.png" },
+        relations: {},
       }),
     );
     await collections.reload();
@@ -251,6 +263,7 @@ describe("a Collection's records", () => {
       tableId: "t-people",
       record: { id: "a2", version: 2, values: { "f-name": "A2" } },
       files: { f: "x.png" },
+      relations: {},
     });
     server.on("POST", `${OPS}/collection`, "offline");
     await collections.reload();
@@ -588,8 +601,11 @@ describe("a record's change", () => {
     const edit = collections.edit(fieldId);
     if (edit) collections.change(edit, value);
   };
-  const page = (rows: unknown[], files: Record<string, string> = {}) =>
-    ok({ status: "ready", rows, nextCursor: null, files });
+  const page = (
+    rows: unknown[],
+    files: Record<string, string> = {},
+    relations: Record<string, Record<string, string>> = {},
+  ) => ok({ status: "ready", rows, nextCursor: null, files, relations });
 
   it("sends the field's change with a random key and the rules' stamp, then shows it saved, with Undo", async () => {
     const { server, collections } = await onRecord();
@@ -710,6 +726,7 @@ describe("a record's change", () => {
         rows: [{ id: "a0", version: 5, values: { "f-name": "Ana" } }],
         nextCursor: null,
         files: {},
+        relations: {},
       }),
     );
     expect(await collections.reloadRecord()).toBe(true);
@@ -743,7 +760,7 @@ describe("a record's change", () => {
     server.on(
       "POST",
       `${OPS}/collectionRecords`,
-      ok({ status: "ready", rows: [], nextCursor: null, files: {} }),
+      ok({ status: "ready", rows: [], nextCursor: null, files: {}, relations: {} }),
     );
     expect(await collections.reloadRecord()).toBe(false);
     expect(collections.view()?.opened).toBeNull();
@@ -955,6 +972,7 @@ describe("a new record and a deletion", () => {
           rows: stored.has(body.recordId) ? [stored.get(body.recordId)] : [],
           nextCursor: null,
           files: {},
+          relations: {},
         });
       const start = body.after ? ids.indexOf(body.after.id) + 1 : 0;
       const last = start + 2 < ids.length ? ids[start + 1]! : null;
@@ -963,6 +981,7 @@ describe("a new record and a deletion", () => {
         rows: all.slice(start, start + 2),
         nextCursor: last === null ? null : { id: last, value: last },
         files: {},
+        relations: {},
       });
     };
   /** Saves `record` on the server, then answers that it saved. */
@@ -1015,7 +1034,12 @@ describe("a new record and a deletion", () => {
     });
     expect(collections.view()?.rows[0]).toEqual(N1);
     expect(names(collections.view()?.rows)).toEqual(["n1", "a0", "a1"]);
-    expect(collections.view()?.opened).toEqual({ tableId: "t-people", record: N1, files: {} });
+    expect(collections.view()?.opened).toEqual({
+      tableId: "t-people",
+      record: N1,
+      files: {},
+      relations: {},
+    });
     expect(collections.actions().size).toBe(0);
   });
 
@@ -1303,5 +1327,120 @@ describe("a new record and a deletion", () => {
     expect(collections.actions().size).toBe(0);
     expect(collections.view()).toBeNull();
     expect(painted).toBe(0);
+  });
+
+  it("creates records with values, retries failed creates with the same values, and allows resubmit after refusal", async () => {
+    const { server, collections, stored } = await onList();
+    server.on(
+      "POST",
+      CREATE,
+      ok({ refused: { code: "not_unique", message: "Duplicate." } }),
+      "offline",
+      adds(stored),
+    );
+    expect(await collections.create({ "f-name": "Dup" })).toBe(false);
+    expect(collections.actions().get(NEW)?.state).toMatchObject({
+      kind: "refused",
+      code: "not_unique",
+    });
+    // After a refusal, a fresh create with edited values uses a new key.
+    expect(await collections.create({ "f-name": "Ada" })).toBe(false);
+    expect(collections.actions().get(NEW)?.state).toEqual({ kind: "failed", problem: "offline" });
+    // Retry resends the exact failed values and idempotencyKey.
+    expect(await collections.retryAction(NEW)).toBe(true);
+    const [first, second, third] = bodies(server, CREATE) as Array<{
+      idempotencyKey: string;
+      values?: Record<string, unknown>;
+    }>;
+    expect(first?.values).toEqual({ "f-name": "Dup" });
+    expect(second?.values).toEqual({ "f-name": "Ada" });
+    expect(second?.idempotencyKey).not.toBe(first?.idempotencyKey);
+    expect(third).toEqual(second);
+  });
+});
+
+describe("search, sort, and relation labels", () => {
+  it("forwards search and sort, resets query on table switch, and handles unsupported-query without clearing the description", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    await collections.setQuery({ search: "Ana", sort: { fieldId: "f-name", direction: "desc" } });
+    expect(server.calls.at(-1)?.body).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      search: "Ana",
+      sort: { fieldId: "f-name", direction: "desc" },
+    });
+    await collections.more();
+    expect(server.calls.at(-1)?.body).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      after: { id: "a1", value: "a1" },
+      search: "Ana",
+      sort: { fieldId: "f-name", direction: "desc" },
+    });
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      ok({ status: "refused", reason: "unsupported-query" }),
+    );
+    await collections.setQuery({ search: "Custom" });
+    expect(collections.view()).toMatchObject({
+      description: { name: "Registrations" },
+      queryUnsupported: true,
+      refused: false,
+      rows: [],
+    });
+    pages(server);
+    await collections.setQuery({ search: "", sort: null });
+    expect(collections.view()?.queryUnsupported).toBe(false);
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    await collections.chooseTable("t-notes");
+    expect(collections.view()).toMatchObject({ search: "", sort: null });
+  });
+
+  it("merges relation labels on edits including retries and loads relation options", async () => {
+    const { server, collections } = setup();
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      records(["a0"], null, { "f-name": { '"a0"': "Alpha" } }),
+    );
+    await collections.open(D);
+    collections.openRecord(collections.view()!.rows[0]!);
+    expect(collections.view()?.opened?.relations).toEqual({ "f-name": { '"a0"': "Alpha" } });
+    server.on(
+      "POST",
+      `${OPS}/collectionEdit`,
+      "offline",
+      ok({ saved: { version: 2, priorValue: "a0" } }),
+    );
+    collections.change(collections.edit("f-name")!, "b0", { '"b0"': "Beta" });
+    const key = recordKey(D, "t-people", "a0");
+    while (collections.changes().get(key)?.state.kind === "saving")
+      await new Promise((done) => setTimeout(done, 0));
+    collections.retry(key);
+    while (collections.changes().get(key)?.state.kind === "saving")
+      await new Promise((done) => setTimeout(done, 0));
+    expect(collections.view()?.opened?.relations["f-name"]).toEqual({
+      '"a0"': "Alpha",
+      '"b0"': "Beta",
+    });
+    server.on(
+      "POST",
+      `${OPS}/collectionRelationOptions`,
+      ok({ options: [{ value: "c-1", label: "Acme" }], nextCursor: null }),
+    );
+    expect(await collections.relationOptions("t-people", "f-org", "Ac", null)).toEqual({
+      options: [{ value: "c-1", label: "Acme" }],
+      next: null,
+      searchUnsupported: false,
+    });
+    expect(server.calls.at(-1)?.body).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      fieldId: "f-org",
+      search: "Ac",
+    });
   });
 });
