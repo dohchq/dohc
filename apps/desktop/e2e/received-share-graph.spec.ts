@@ -197,8 +197,9 @@ test("a standalone received share's Graph shows its Collections and Relations at
       page.locator(`[data-testid="graph-file-row"][data-path="${path}"]`);
     await expect(row("collection:trip/Tasks")).toBeVisible({ timeout: 60_000 });
     await expect(row("collection:trip/People")).toBeVisible();
-    await expect(row("trip/Tasks/first.md")).toHaveCount(0);
-    await expect(page.getByTestId("graph-rows")).not.toContainText(/vault|stamp/i);
+    await expect(row("trip/Tasks/first.md")).toBeVisible();
+    await expect(row("trip/People/ana.md")).toBeVisible();
+    await expect(page.getByTestId("graph-rows")).not.toContainText(/vault|secret|stamp/i);
     await page.screenshot({ path: test.info().outputPath("graph-panel.png") });
 
     await row("collection:trip/Tasks").click();
@@ -210,7 +211,10 @@ test("a standalone received share's Graph shows its Collections and Relations at
     await page.screenshot({ path: test.info().outputPath("graph-local-collection.png") });
 
     await page.getByTestId("graph-open-tab").click();
-    await expect(page.getByTestId("graph-view").first()).toBeVisible();
+    await expect(page.getByTestId("graph-doc-count").filter({ hasText: "2 items" })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByTestId("graph-link-count").filter({ hasText: "1 link" })).toBeVisible();
     for (const theme of ["light", "dark"]) {
       await page.evaluate((theme) => {
         document.documentElement.dataset.theme = theme;
