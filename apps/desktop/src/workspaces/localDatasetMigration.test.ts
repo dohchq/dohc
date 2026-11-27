@@ -344,6 +344,7 @@ describe("a joined Admin's Collection change", () => {
   it("sends the captured rule files to the Owner's workspace before the server prepares them, and stops when they don't arrive", async () => {
     const f = fixture();
     f.next();
+    f.files.set("items/migration.sql", `﻿${f.files.get("items/migration.sql")}`);
     const revision = describeDatasetRevision({
       definition,
       revision: 1,

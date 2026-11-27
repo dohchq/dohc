@@ -32,6 +32,8 @@ export interface PrepareLocalDatasetMigration {
 const maximumBytes = 256 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const decode = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
+const decodeAsStored = (value: Uint8Array) =>
+  new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(value);
 const allowed = (path: string) =>
   isShareablePath(path) &&
   !isSharedWithMePath(path) &&
@@ -231,7 +233,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
             throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
         }
         await dependencies.deliverSources?.(
-          Object.fromEntries(captured.files.map((file) => [file.path, decode(file.bytes)])),
+          Object.fromEntries(captured.files.map((file) => [file.path, decodeAsStored(file.bytes)])),
         );
         await current(previous.cursor);
         const candidate = DatasetMigrationCandidate.parse(
