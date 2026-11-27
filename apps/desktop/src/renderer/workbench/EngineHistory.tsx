@@ -1044,7 +1044,7 @@ export function HistoryRow(props: {
       {time(`${WHEN} ${fold ? "pr-24" : ""}`)}
       <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />
       {props.context === "workspace" ? (
-        <WorkspaceMomentLine moment={moment} fileOnly={fold !== undefined} />
+        <WorkspaceMomentLine moment={moment} fileOnly={fold !== undefined && fold.count > 1} />
       ) : (
         <span className={LINE_TWO}>
           <MomentName moment={moment} className="max-w-[45%] shrink-0" />
@@ -1066,7 +1066,8 @@ export function HistoryRow(props: {
   // A collapsed run holding the open change takes the selected ink; the
   // change keeps aria-current for itself, and the count says where it is.
   const holdsOpen = fold.holdsOpen === true;
-  const countWords = `${countFormat.format(fold.count)}${fold.more ? " or more" : ""} changes`;
+  const noun = fold.count === 1 && !fold.more ? "change" : "changes";
+  const countWords = `${countFormat.format(fold.count)}${fold.more ? " or more" : ""} ${noun}`;
   const Chevron = fold.expanded ? ChevronDown : ChevronRight;
   return (
     <div
@@ -1083,7 +1084,7 @@ export function HistoryRow(props: {
         onClick={fold.onToggle}
         className={`absolute right-1 top-[5px] flex h-5 items-center gap-1 rounded-md px-1 text-[12px] text-subtle hover:bg-hover hover:text-ink focus-visible:-outline-offset-2`}
       >
-        <LoadedCount count={fold.count} more={fold.more} noun="changes" />
+        <LoadedCount count={fold.count} more={fold.more} noun={noun} />
         <Chevron size={12} aria-hidden />
       </button>
       {description}
@@ -1093,7 +1094,8 @@ export function HistoryRow(props: {
 }
 
 // One author's run of edits to one file: its newest edit, with the count that
-// lists the earlier ones under it.
+// lists the earlier ones and Undo run under it. An agent run of one change
+// is a run too, so Undo run is where every agent run keeps it.
 function RunRow(props: {
   group: EngineHistoryGroup;
   more: boolean;
@@ -1750,8 +1752,9 @@ export function EngineHistoryView(props: {
                     label={labelOf(item.item.entry)}
                     openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
                   />
-                ) : item.item.group.moments.length > 1 ? (
-                  item.item.group.run ? (
+                ) : item.item.group.moments.length > 1 ||
+                  (item.item.group.agentRunId !== undefined && props.onUndoAgentRun) ? (
+                  item.item.group.run || item.item.group.moments.length === 1 ? (
                     <RunRow
                       group={item.item.group}
                       more={item.key === moreKey}

@@ -229,3 +229,63 @@ test("groups a multi-file agent run in History and undoes only safe files after 
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+test("offers Undo run on an agent run that made one change and restores that file", async () => {
+  const shotDir = process.env.PR5_SHOT_DIR;
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    const agentId = await seedAgent(temp.homeDir);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "Initial plan\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+
+    await openHistoryView(page);
+    await expect(page.getByTestId("engine-moment-open").first()).toBeVisible();
+
+    const runId = await startAgentRun(page, workspace.workspaceId, agentId);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "Rover plan update\n" }]);
+    const roverRun = page.getByTestId("engine-moment-run").filter({
+      has: page.getByTestId("engine-moment-source").filter({ hasText: "Rover" }),
+    });
+    await expect(roverRun.getByTestId("engine-moment-run-toggle")).toHaveText("1 change");
+    await endAgentRun(page, workspace.workspaceId, runId);
+
+    await roverRun.getByTestId("engine-moment-run-toggle").click();
+    await expect(roverRun.getByTestId("engine-moment-undo-run")).toBeVisible();
+    if (shotDir) {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(page, theme);
+        const toggle = roverRun.getByTestId("engine-moment-run-toggle");
+        if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+        await expect(roverRun.getByTestId("engine-moment-undo-run")).toBeVisible();
+        await page.screenshot({ path: join(shotDir, `history-single-run-${theme}.png`) });
+      }
+      await setTheme(page, "light");
+      const toggle = roverRun.getByTestId("engine-moment-run-toggle");
+      if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+    }
+
+    await roverRun.getByTestId("engine-moment-undo-run").click();
+    const dialog = page.getByTestId("agent-run-undo-dialog");
+    await expect(dialog).toContainText("Undo changes from Rover");
+    await expect(
+      dialog.locator(
+        '[data-testid="agent-run-undo-restorable-item"][data-undo-path="notes/plan.md"]',
+      ),
+    ).toContainText("Restore earlier version");
+    const confirm = dialog.getByTestId("agent-run-undo-confirm");
+    await expect(confirm).toHaveText("Undo 1 file");
+    await confirm.click();
+    await expect(dialog).toBeHidden();
+
+    await expect
+      .poll(async () => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
+      .toBe("Initial plan\n");
+    await expect(page.getByText("Undid agent run").first()).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
