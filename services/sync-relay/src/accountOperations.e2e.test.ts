@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import {
   UnauthorizedError,
@@ -877,9 +877,10 @@ function wakeConsumer(input: {
   intents: ChatWakeIntents;
   workspace: ChatWakeWorkspace;
   errors: unknown[];
+  installId?: string;
 }): ChatWakeConsumer {
   return createChatWakeConsumer({
-    account: { scope: SCOPE, userId: "owner", installId: INSTALL },
+    account: { scope: SCOPE, userId: "owner", installId: input.installId ?? INSTALL },
     isCurrent: () => true,
     client: input.client,
     intents: input.intents,
@@ -1020,6 +1021,73 @@ it.skipIf(engine.missing)(
     expect(wakeRows(storage)).toHaveLength(1);
     expect(await local.triggers(posted.messageId)).toHaveLength(1);
     await consumer.stop();
+    expect(failures(errors)).toEqual([]);
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "wakes only the computer whose agent remembers for a phone mention, and waits for it without naming it",
+  async () => {
+    const { storage, owner, route, client, planning } = await wakeWorld();
+    const local = ownerWakes(owner);
+    const errors: unknown[] = [];
+    await client.replaceRunners(
+      WORKSPACE,
+      {
+        installId: "laptop",
+        computerLabel: "Laptop",
+        runners: [{ agentId: "default", displayName: "Claude", enabled: true, memory: true }],
+      },
+      AbortSignal.timeout(DEADLINE_MS),
+    );
+
+    const posted = (await route("post", {
+      operationId: "op-remembers",
+      groupId: planning.channelId,
+      title: "Dinner",
+      body: "@claude book a table",
+    })) as { ok: true; threadId: string; messageId: string };
+    expect(wakeRows(storage)).toMatchObject([
+      {
+        state: "waiting",
+        candidates_json: [{ ...CANDIDATE, installId: "laptop", label: "Laptop" }],
+      },
+    ]);
+    await owner.sync();
+
+    // The Mac has no wake to claim, and the phone reads a wait that names no computer.
+    expect(
+      (
+        await client.waitWakes(
+          { installId: INSTALL, since: 0, holdMs: 0 },
+          AbortSignal.timeout(DEADLINE_MS),
+        )
+      ).wakes,
+    ).toEqual([]);
+    expect(
+      storage.phoneChatWakes({
+        accountId: "owner",
+        workspaceId: WORKSPACE,
+        messages: new Map([[posted.messageId, posted.threadId]]),
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject([{ state: "waiting", winnerLabel: null, agentName: "Claude" }]);
+
+    // The laptop comes online and takes it.
+    const laptop = wakeConsumer({
+      client,
+      intents: createChatWakeIntents(join(await tempRoot("chat-wakes-laptop"), "chat-wakes.json")),
+      workspace: local.workspace,
+      errors,
+      installId: "laptop",
+    });
+    laptop.start();
+    await vi.waitFor(() => expect(wakeRows(storage)[0]).toMatchObject({ state: "queued" }), {
+      timeout: DEADLINE_MS,
+    });
+    expect(await local.triggers(posted.messageId)).toHaveLength(1);
+    await laptop.stop();
     expect(failures(errors)).toEqual([]);
   },
   120_000,
