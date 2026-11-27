@@ -360,6 +360,37 @@ describe("drops", () => {
     expect(t.server.paths()).toEqual([OPEN]);
   });
 
+  it("opens the page again by itself when the note's lineage was replaced and nothing is unsent", async () => {
+    const t = await connected(ready(), ready());
+    t.fromPage(1)({
+      type: "state",
+      facts: {
+        status: "quarantined",
+        reason: "lineage-replaced",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
+    expect(t.sockets[0]!.socket.closed).toBe(true);
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(2));
+    t.latest().open();
+    expect(t.server.paths()).toEqual([OPEN, OPEN]);
+    expect(t.posted.at(-1)).toMatchObject({ type: "connect", gen: 2, seq: 1 });
+    expect(t.live.state().phase).toBe("open");
+  });
+
+  it("stays stopped when the note's lineage was replaced with typing unsent", async () => {
+    const t = await connected(ready(), ready());
+    t.fromPage(1)({
+      type: "state",
+      facts: { status: "quarantined", reason: "lineage-replaced", pendingUpdates: 1, unsent: true },
+    });
+    expect(t.live.state()).toMatchObject({ phase: "refused", reason: "lineage-replaced" });
+    expect(holdsUnsent(t.live.state())).toBe(true);
+    t.live.retry();
+    expect(t.server.paths()).toEqual([OPEN]);
+  });
+
   it("closes the socket when the sign-in ends", async () => {
     const t = await connected();
     t.signIn.abort();

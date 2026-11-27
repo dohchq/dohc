@@ -86,8 +86,8 @@ function page(limits = liveLimits()) {
       toPage,
       frames,
       submissions,
-      /** Welcomes the page and sends it `doc`: the page is then live. */
-      async sync(doc: Y.Doc) {
+      /** Welcomes the page and sends it `doc` on `selected`: the page is then live, or stopped. */
+      async sync(doc: Y.Doc, selected = binding) {
         await vi.waitFor(() => expect(frames.some((frame) => frame.kind === "credit")).toBe(true));
         send({ kind: "welcome", hostEpoch: parseHostEpoch(epoch), receivePolicy: policy.receive });
         send({
@@ -98,7 +98,7 @@ function page(limits = liveLimits()) {
         await vi.waitFor(() => expect(vector).toBeDefined());
         const bytes = encodeLiveFrameSync(
           {
-            binding,
+            binding: selected,
             hostVector: Y.encodeStateVector(doc),
             missingStateUpdate: Y.encodeStateAsUpdate(doc, vector),
           },
@@ -115,7 +115,9 @@ function page(limits = liveLimits()) {
         } as LiveFrameBegin);
         for (let offset = 0; offset < bytes.length; offset += 900)
           send({ kind: "chunk", transferId, offset, bytes: bytes.subarray(offset, offset + 900) });
-        await vi.waitFor(() => expect(provider().state().status).toBe("live"));
+        await vi.waitFor(() =>
+          expect(["live", "quarantined"]).toContain(provider().state().status),
+        );
       },
       ack(item: { begin: LiveFrameBegin }) {
         if (item.begin.purpose !== "submit-update") throw new Error("Expected a submitted update.");
@@ -218,6 +220,91 @@ describe("the page's live connection", () => {
       }),
       expect.objectContaining({ type: "close" }),
     ]);
+  });
+
+  const successor = { ...binding, lineageClaimId: "claim-2" };
+  /** The relay replaced the note's lineage while the page was away: its next sync names the new one. */
+  async function replaced(t: ReturnType<typeof page>, typed = "") {
+    const first = t.connect();
+    await first.sync(document("base"));
+    if (typed) {
+      type(t.provider(), typed);
+      await vi.waitFor(() => expect(first.submissions).toHaveLength(1));
+    }
+    first.lose();
+    await settled();
+    const old = t.provider();
+    await t.connect(2).sync(document("base"), successor);
+    expect(old.state()).toMatchObject({ status: "quarantined", reason: "lineage-replaced" });
+    return old;
+  }
+
+  it("opens a fresh provider and document on the note's new lineage when nothing is unsent, and goes live", async () => {
+    const t = page();
+    const old = await replaced(t);
+    expect(t.reported(2)).toMatchObject({
+      facts: { status: "quarantined", reason: "lineage-replaced", unsent: false },
+    });
+    const third = t.connect(3);
+    const doc = document("converted");
+    await third.sync(doc, successor);
+    expect(t.provider()).not.toBe(old);
+    expect(t.provider().doc).not.toBe(old.doc);
+    expect(old.state().status).toBe("closed");
+    expect(t.provider().state()).toMatchObject({ status: "live", binding: successor });
+    expect(getDohcYDocBodyFragment(t.provider().doc).toString()).toBe(
+      getDohcYDocBodyFragment(doc).toString(),
+    );
+    expect(t.reported(3)).toMatchObject({ facts: { status: "live", unsent: false } });
+    type(t.provider(), " more");
+    await vi.waitFor(() => expect(third.submissions).toHaveLength(1));
+  });
+
+  it("stays stopped on the note's new lineage while typing is unsent, and says so", async () => {
+    const t = page();
+    const old = await replaced(t, " typed");
+    expect(t.reported(2)).toMatchObject({
+      facts: { status: "quarantined", reason: "lineage-replaced", unsent: true },
+    });
+    t.connect(3);
+    await settled();
+    expect(t.provider()).toBe(old);
+    expect(t.sentOn(3)).toEqual([
+      expect.objectContaining({
+        type: "state",
+        facts: expect.objectContaining({ status: "quarantined", unsent: true }),
+      }),
+      expect.objectContaining({ type: "close" }),
+    ]);
+  });
+
+  it("stops the reopened provider when its first sync names another path than the lineage that replaced it", async () => {
+    const t = page();
+    await replaced(t);
+    await t.connect(3).sync(document("converted"), {
+      ...successor,
+      currentPath: "moved.md",
+      selectorPaths: ["moved.md"],
+    });
+    expect(t.provider().state()).toMatchObject({
+      status: "quarantined",
+      reason: "binding-changed",
+    });
+  });
+
+  it("never reconnects a provider stopped by a changed binding", async () => {
+    const t = page();
+    const first = t.connect();
+    await first.sync(document("base"));
+    first.lose();
+    await settled();
+    const old = t.provider();
+    await t.connect(2).sync(document("base"), { ...binding, currentPath: "moved.md" });
+    expect(old.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
+    t.connect(3);
+    await settled();
+    expect(t.provider()).toBe(old);
+    expect(t.sentOn(3).map((message) => message.type)).toEqual(["state", "close"]);
   });
 
   it("closes the connection when the app's frames pass the provider's queue", async () => {
