@@ -2861,3 +2861,49 @@ it("keeps staged owner versions in order, keeps a running launch on a version se
   expect(() => bind(a)).toThrow(expect.objectContaining({ code: "not_found" }));
   expect(await catalog()).not.toContain(a);
 });
+
+it("keeps the current owner version current when it is sent again over a staged one", async () => {
+  const f = await memberFixture();
+  const version = (operationIds: string[], expected?: string | null) =>
+    f.publishWith(
+      [
+        resolveAppDatasetCapability(
+          {
+            kind: "dataset",
+            datasetId: memberRevision.datasetId,
+            revision: 1,
+            revisionSha256: memberRevision.revisionSha256,
+            operationIds,
+          },
+          memberRevision,
+        ),
+      ],
+      "owner",
+      undefined,
+      expected,
+    );
+  const desktop: AppBackendAuth = {
+    kind: "named",
+    workspaceId: "w",
+    userId: "owner",
+    device: "desktop",
+  };
+  const { run } = ownerPhone(f);
+  const catalog = async () =>
+    ((await run("apps", {})).apps as { publicationId: string }[]).map((row) => row.publicationId);
+  const a = version([id(5), id(6), id(7)]);
+  f.host.bindPublication(desktop, { workspaceId: "w", publicationId: a });
+  const b = version([id(5), id(6)], a);
+  expect(version([id(5), id(6), id(7)], b)).toBe(a);
+  expect(await catalog()).toEqual([a]);
+  const owned = f.storage.listAppPublications({
+    workspaceId: "w",
+    ownerUserId: "owner",
+    limits,
+    audience: "owner",
+  }).publications;
+  expect(owned).toContainEqual(
+    expect.objectContaining({ publicationId: a, ownerState: "current" }),
+  );
+  expect(owned).not.toContainEqual(expect.objectContaining({ publicationId: b }));
+});
