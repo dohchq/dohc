@@ -500,7 +500,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const selfTestReservations = new Set<string>();
   // End records of self-tests whose runner has exited. stop() waits for them.
   const selfTestEnds = new Set<Promise<void>>();
-  // Sessions whose runner has exited, still being marked free. stop() waits for them.
   const memoryEnds = new Set<Promise<void>>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
