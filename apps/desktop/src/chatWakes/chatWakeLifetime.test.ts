@@ -384,6 +384,24 @@ describe("the chat wake lifetime", () => {
     expect(w.deps.log).toHaveBeenCalledOnce();
   });
 
+  it("reads wakes again as soon as a pull reaches the relay again, instead of waiting out the backoff", async () => {
+    const w = setup();
+    const failed = deferred();
+    w.relay.firstRead.set("A", async () => {
+      failed.resolve();
+      throw new Error("The relay can't be reached.");
+    });
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    await failed.promise;
+    await w.lifetime.pulled(APPLIED);
+    expect(w.relay.reads).toEqual([]);
+    await w.lifetime.pulled({ applied: false, recovered: true });
+    await w.relay.untilReads(1);
+    expect(w.relay.reads).toEqual(["A"]);
+    await w.lifetime.stop();
+  });
+
   it("resumes after a pull only when it brought changes or reached the relay again", async () => {
     let arrived = false;
     let syncs = 0;

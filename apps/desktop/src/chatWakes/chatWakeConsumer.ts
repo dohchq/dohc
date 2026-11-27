@@ -126,6 +126,8 @@ export interface ChatWakeConsumer {
    * again. Calls before that pass starts share it.
    */
   resume(): Promise<void>;
+  /** The relay answered again after failing. A read waiting out its backoff reads now, and backs off from the start. */
+  reachable(): void;
   /** Admits nothing more, and settles after the step in progress. */
   stop(): Promise<void>;
 }
@@ -490,11 +492,12 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     owe();
   }
 
+  let readFailures = 0;
+  let backedOff = new AbortController();
   async function read(): Promise<void> {
     await serial(recover).catch(passFailed);
     // The feed lists only waiting wakes that changed after `since`; a restart starts again from 0.
     let since = 0;
-    let failures = 0;
     while (live()) {
       try {
         const startedAtMs = deps.nowMs();
@@ -511,12 +514,15 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
         }
         if (!(await serial(() => take(page)))) continue;
         since = page.cursor;
-        failures = 0;
+        readFailures = 0;
       } catch (error) {
         if (!live()) break;
         deps.onError(error);
-        failures += 1;
-        await deps.sleep(deps.backoffMs(failures), abort.signal);
+        readFailures += 1;
+        await deps.sleep(
+          deps.backoffMs(readFailures),
+          AbortSignal.any([abort.signal, backedOff.signal]),
+        );
       }
     }
   }
@@ -533,6 +539,11 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
         pass = null;
         await again();
       }).catch(passFailed));
+    },
+    reachable() {
+      readFailures = 0;
+      backedOff.abort();
+      backedOff = new AbortController();
     },
     async stop() {
       stopped = true;

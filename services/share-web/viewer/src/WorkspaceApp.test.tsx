@@ -202,9 +202,7 @@ function server(
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
-    groupsFail = options.groupsFail ?? 0,
     deleteFails = options.deleteFails ?? 0,
-    holdGroups = options.holdGroups ?? 0,
     workspacesFail = options.workspacesFail ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
@@ -326,8 +324,8 @@ function server(
     }
     if (url.pathname === "/api/named-chat/channels" && options.groupsGone)
       return jsonResponse({ ok: false, error: "not found" }, 404);
-    if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {
-      groupsFail -= 1;
+    if (url.pathname === "/api/named-chat/channels" && (options.groupsFail ?? 0) > 0) {
+      options.groupsFail! -= 1;
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     const listing = () => ({
@@ -344,8 +342,8 @@ function server(
         access: options.groupRules?.[group.wire] ?? access(),
       })),
     });
-    if (url.pathname === "/api/named-chat/channels" && holdGroups > 0) {
-      holdGroups -= 1;
+    if (url.pathname === "/api/named-chat/channels" && (options.holdGroups ?? 0) > 0) {
+      options.holdGroups! -= 1;
       return hold("groups", url, signal, listing());
     }
     if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
@@ -765,30 +763,71 @@ const channelReads = (fetch: ReturnType<typeof server>) =>
       new URL(String(input), "https://share.test").pathname === "/api/named-chat/channels",
   ).length;
 
-it("shows a Group added while the workspace is open, even when it had none", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
+it("shows a Group added just after the workspace opened, as soon as it reaches the relay, even when it had none", async () => {
   const options: { groups: Array<{ wire: string; name: string }> } = { groups: [] };
   const fetch = server(options);
   await render();
   await settle(
     () =>
-      text().includes("Leave at nine.") &&
       groupPanel().textContent?.includes("No Groups in this workspace yet.") === true &&
-      following("log").length === 1,
+      following("chat").length === 1,
   );
+  expect(following("chat")[0]!.url.searchParams.get("since")).toBe("7");
   options.groups = [{ wire: "wire-plans", name: "plans" }];
-  // A files update soon after the Groups arrived reads them no sooner.
   await act(async () =>
-    following("log")[0]!.answer({ ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0 }),
-  );
-  await settle(() => following("log").length === 1);
-  // The first files update a hold after the last read of the Groups reads them again.
-  vi.setSystemTime(Date.now() + 30_000);
-  await act(async () =>
-    following("log")[0]!.answer({ ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0 }),
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
   );
   await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
   expect(channelReads(fetch)).toBe(2);
+  await settle(() => following("chat").length === 1);
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => following("chat").length === 1);
+  expect(channelReads(fetch)).toBe(2);
+});
+
+it("reads the Groups again with backoff when reading a new one fails", async () => {
+  const options: { groups: Array<{ wire: string; name: string }>; groupsFail?: number } = {
+    groups: [],
+  };
+  const fetch = server(options);
+  await render();
+  await settle(() => following("chat").length === 1);
+  options.groups = [{ wire: "wire-plans", name: "plans" }];
+  options.groupsFail = 1;
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => channelReads(fetch) === 2);
+  expect(groupPanel().textContent).toContain("No Groups in this workspace yet.");
+  expect(groupPanel().querySelector(".load-failed")).toBeNull();
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(channelReads(fetch)).toBe(3);
+});
+
+it("shows a Group read while the follow keeps moving, and reads once more after it", async () => {
+  const options: { groups: Array<{ wire: string; name: string }>; holdGroups?: number } = {
+    groups: [],
+  };
+  const fetch = server(options);
+  await render();
+  await settle(() => following("chat").length === 1);
+  options.groups = [{ wire: "wire-plans", name: "plans" }];
+  options.holdGroups = 2;
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => held.some((item) => item.path === "groups") && following("chat").length === 1);
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 9, hasMore: false }),
+  );
+  await settle(() => following("chat").length === 1);
+  const first = held.find((item) => item.path === "groups")!;
+  await act(async () => first.answer(first.body));
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  await settle(() => held.some((item) => item.path === "groups"));
+  expect(channelReads(fetch)).toBe(3);
 });
 
 it("lists a new Group as soon as a message in it arrives, and keeps the open Group following", async () => {
@@ -2833,6 +2872,8 @@ describe("the owner's page", () => {
       wakes: [[wake("waiting")], [wake("claimed")], [wake("unclaimed")]],
     });
     const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
+    await settle(() => groupPanel().textContent!.includes("@claude plan it"));
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => line() === "Claude is waiting for a computer");
     expect(
       groupPanel().querySelector(".chat-wake")?.closest(".chat-message")?.textContent,
@@ -2871,9 +2912,32 @@ describe("the owner's page", () => {
         .find((node) => node.textContent?.startsWith("plans"))!
         .click(),
     );
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => line() === "Claude didn't start");
     await act(async () => vi.advanceTimersByTime(30_000));
     expect(wakeReads()).toHaveLength(3);
+  });
+
+  it("reads a post's wakes 2 seconds after it, so a computer that is on shows it starting, never waiting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await ownerPost({
+      user: "lee",
+      history: { "wire-plans": [chat(3, "Plans start here")] },
+      wakes: [[wake("claimed")], [wake("unclaimed")]],
+    });
+    const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
+    await settle(() => groupPanel().textContent!.includes("@claude plan it"));
+    await act(async () => vi.advanceTimersByTime(1_000));
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => vi.advanceTimersByTime(999));
+    expect(wakeReads()).toEqual([]);
+    expect(line()).toBeUndefined();
+    await act(async () => vi.advanceTimersByTime(1));
+    await settle(() => line() === "Claude is starting on a computer");
+    await act(async () => vi.advanceTimersByTime(1_999));
+    expect(wakeReads()).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTime(1));
+    await settle(() => line() === "Claude didn't start");
   });
 
   it("stops reading a post's wakes once the owner deletes it", async () => {
@@ -2883,6 +2947,8 @@ describe("the owner's page", () => {
       [...groupPanel().querySelectorAll(".chat-message")].find((node) =>
         node.textContent?.includes("@claude plan it"),
       );
+    await settle(() => post() !== undefined);
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => post()?.querySelector(".chat-wake") != null);
     await act(async () =>
       post()!.querySelector<HTMLButtonElement>('button[aria-label="Delete message"]')!.click(),

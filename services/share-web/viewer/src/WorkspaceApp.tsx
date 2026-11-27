@@ -837,11 +837,6 @@ function MemberWorkspace({
     commentsGone.current = false;
     setCommentsRead((count) => count + 1);
   }, [files]);
-  // The held read of the files returns at least once per hold. Each return reads the Groups again once they are that old,
-  // so a new Group appears even when the workspace had none, or the new one has no messages yet.
-  useEffect(() => {
-    if (view.status === "ready") refreshListing(VIEW_LOG_HOLD_MS);
-  }, [view, refreshListing]);
   // A changed reach can change a Group's level or hide it, so it reads the Groups again at once.
   // The first reach that arrives needs no second read: the Groups' first read starts with it.
   const reach = files?.meta.reach,
@@ -1230,7 +1225,8 @@ function MemberWorkspace({
               found={listing.found}
               reads={listing.reads}
               onRetry={listing.retry}
-              onUnlisted={refreshListing}
+              onMoved={listing.catchUp}
+              since={files.nextCursor}
               shown={showing === "chats"}
               onEnded={placeGone}
               onUnread={setUnread}

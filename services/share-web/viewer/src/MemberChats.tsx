@@ -10,6 +10,7 @@ import {
 import type { ShareAccess } from "./model";
 import type { NamedChatAccess } from "./namedChat";
 import "./namedChat.css";
+import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 
 // The app's sentences for a joined workspace's Groups and a file's Comments.
 const READ_ONLY = "Only people who can comment post here.";
@@ -23,8 +24,9 @@ export type MemberListing = "loading" | "failed" | MemberGroups;
 /**
  * The membership's share and Groups, which Chats and Comments both use, read once `place` is set:
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
- * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
- * Given an age, it reads only when the last read is older. A refresh that fails keeps the Groups shown, and the next one tries again.
+ * `refresh` reads them again without showing a load, and an answer already on its way no longer shows, so a changed
+ * rule shows. `catchUp` reads them once more after any read in flight, whose answer still shows, so a Group added
+ * while the workspace is open appears. A read after the first that fails keeps the Groups shown and tries again with backoff.
  * `reads` counts the reads that arrived, including one that brought the same Groups.
  */
 export function useMemberListing(
@@ -37,30 +39,34 @@ export function useMemberListing(
     [attempt, setAttempt] = useState(0);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
-  // When the Groups last arrived, or null before they do.
-  const readAt = useRef<number | null>(null),
-    request = useRef<((olderThanMs: number) => void) | null>(null);
+  const request = useRef<((stale: boolean) => void) | null>(null);
   useEffect(() => {
     setFound("loading");
-    readAt.current = null;
     if (place === null) return;
     const controller = new AbortController();
     // A rule can change while a read is out. A refresh asked for then reads once more after it,
     // and only the newest read asked for shows, so an older answer never replaces a newer level.
     let asked = 0,
-      pending = false;
+      pending = false,
+      queued = false,
+      loaded = false,
+      retry: ReturnType<typeof setTimeout> | undefined,
+      delay = RETRY_INITIAL_MS;
     const read = () => {
       const number = asked;
       pending = true;
+      queued = false;
+      clearTimeout(retry);
       void openMemberGroups(place, controller.signal)
         .then(
           (groups) => {
             if (controller.signal.aborted || number !== asked) return;
             if (groups.userId !== accountId) {
-              if (readAt.current === null) setFound("failed");
+              if (!loaded) setFound("failed");
               return;
             }
-            readAt.current = Date.now();
+            loaded = true;
+            delay = RETRY_INITIAL_MS;
             setReads((count) => count + 1);
             // The same Groups keep the same object, so nothing open reads them again.
             setFound((current) =>
@@ -79,35 +85,43 @@ export function useMemberListing(
               onEndedRef.current(reason);
               asked = before;
             }
-            if (readAt.current === null && number === asked) setFound("failed");
+            if (number !== asked) return;
+            if (!loaded) setFound("failed");
+            else if (!reason) {
+              retry = setTimeout(() => ask(false), delay);
+              delay = Math.min(delay * 2, RETRY_MAX_MS);
+            }
           },
         )
         .finally(() => {
           pending = false;
-          if (!controller.signal.aborted && number !== asked) read();
+          if (!controller.signal.aborted && (number !== asked || queued)) read();
         });
     };
-    request.current = (olderThanMs) => {
+    const ask = (stale: boolean) => {
       if (pending) {
-        if (olderThanMs === 0) asked += 1;
+        if (stale) asked += 1;
+        else queued = true;
         return;
       }
-      if (readAt.current === null || Date.now() - readAt.current < olderThanMs) return;
+      if (!loaded) return;
       asked += 1;
       read();
     };
+    request.current = ask;
     read();
     return () => {
       controller.abort();
+      clearTimeout(retry);
       request.current = null;
     };
   }, [place, accountId, attempt]);
-  const refresh = useCallback((olderThanMs = 0) => request.current?.(olderThanMs), []);
   return {
     found,
     reads,
     retry: useCallback(() => setAttempt((value) => value + 1), []),
-    refresh,
+    refresh: useCallback(() => request.current?.(true), []),
+    catchUp: useCallback(() => request.current?.(false), []),
   };
 }
 
@@ -115,13 +129,14 @@ export function useMemberListing(
  * The workspace's Groups beside its files. One follow serves every Group; the
  * open one shows its messages, and the others count what arrives. `shown`
  * says whether the person can see the panel, so a phone's hidden tab counts too.
- * The follow carries every Group the member reaches, so a message in a Group the list lacks calls `onUnlisted`.
+ * The follow wakes whenever the workspace's log moves, so each move calls `onMoved`: it may have added a Group.
  */
 export function MemberChats({
   found,
   reads,
   onRetry,
-  onUnlisted,
+  onMoved,
+  since,
   shown,
   onEnded,
   onUnread,
@@ -131,7 +146,10 @@ export function MemberChats({
   // Counts the reads of the Groups that arrived, so a follow that came back 404 starts again after one.
   reads: number;
   onRetry(): void;
-  onUnlisted(): void;
+  onMoved(): void;
+  // Where the workspace's log was when its files were read. The follow starts there, so a Group added after
+  // the first read of the Groups appears even when no Group is open.
+  since: number;
   shown: boolean;
   onEnded(reason: Ended): void;
   onUnread(count: number): void;
@@ -142,8 +160,9 @@ export function MemberChats({
     [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
-  const onUnlistedRef = useRef(onUnlisted);
-  onUnlistedRef.current = onUnlisted;
+  const onMovedRef = useRef(onMoved);
+  onMovedRef.current = onMoved;
+  const firstSince = useRef(since);
   const seen = useRef({ open, shown });
   seen.current = { open, shown };
   const listed = useRef<HTMLButtonElement | null>(null),
@@ -155,8 +174,6 @@ export function MemberChats({
     if (opened) setOpen((current) => current ?? opened.groups[0]?.channelWireId ?? null);
   }, [opened]);
 
-  const listedIds = useRef(new Set<string>());
-  listedIds.current = new Set(opened?.groups.map((item) => item.channelWireId));
   // A follow that came back 404 stops. If the next read of the Groups arrives, the membership still holds,
   // so a new follow starts.
   const followEnded = useRef(false),
@@ -181,11 +198,10 @@ export function MemberChats({
         ? createGroupFollow({
             shareId,
             userId,
-            since: lastHub.current?.cursor(),
+            since: lastHub.current?.cursor() ?? firstSince.current,
             onEnded: followGone,
+            onMoved: () => onMovedRef.current(),
             onMessages: (counts) => {
-              if ([...counts.keys()].some((wireId) => !listedIds.current.has(wireId)))
-                onUnlistedRef.current();
               setUnread((current) => {
                 const next = new Map(current);
                 for (const [wireId, count] of counts) {

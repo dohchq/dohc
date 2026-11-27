@@ -203,12 +203,14 @@ function heldFollows() {
 
 it("serves each open Group from one follow, and counts others' messages in every Group", async () => {
   const { follow, open } = heldFollows(),
-    counted: Array<Record<string, number>> = [];
+    counted: Array<Record<string, number>> = [],
+    onMoved = vi.fn();
   const hub = createGroupFollow({
     shareId: "share",
     userId: "sam",
     follow,
     onMessages: (counts) => counted.push(Object.fromEntries(counts)),
+    onMoved,
     onEnded: vi.fn(),
   });
   const signal = new AbortController().signal;
@@ -249,6 +251,16 @@ it("serves each open Group from one follow, and counts others' messages in every
   const waiting = plans.follow(14, 30_000, signal);
   open()[0]!.answer([["wire-plans", 15]], 16);
   expect((await waiting).messages.map((item) => item.relaySeq)).toEqual([15]);
+  expect(onMoved).toHaveBeenCalledTimes(2);
+  // A Group whose history ends earlier starts the follow again there. Pages it has read already move nothing.
+  const late = hub.client(group("wire-late"), false).follow(8, 30_000, signal);
+  await vi.waitFor(() => expect(open()[0]?.since).toBe(8));
+  open()[0]!.answer([], 16);
+  expect((await late).nextCursor).toBe(16);
+  expect(onMoved).toHaveBeenCalledTimes(2);
+  await vi.waitFor(() => expect(open()[0]?.since).toBe(16));
+  open()[0]!.answer([], 17);
+  await vi.waitFor(() => expect(onMoved).toHaveBeenCalledTimes(3));
   hub.close();
 });
 
@@ -260,6 +272,7 @@ it("ends every Group when the member is removed, and pauses while the tab is hid
     userId: "sam",
     follow,
     onMessages: vi.fn(),
+    onMoved: vi.fn(),
     onEnded,
   });
   hub.start();
@@ -285,6 +298,7 @@ it("brings a delete to every Group's view that read before it", async () => {
     userId: "sam",
     follow,
     onMessages: vi.fn(),
+    onMoved: vi.fn(),
     onEnded: vi.fn(),
   });
   const signal = new AbortController().signal;
@@ -310,6 +324,7 @@ it("offers Delete on a member's own messages, and on every message to the owner 
     userId: "sam",
     follow,
     onMessages: vi.fn(),
+    onMoved: vi.fn(),
     onEnded: vi.fn(),
   });
   const own = { ...message(1, "mine", "sam"), linkAgent: false } as never,
@@ -330,6 +345,7 @@ it("reads only from a started follow, and reads again once React closes and star
       userId: "sam",
       follow,
       onMessages: vi.fn(),
+      onMoved: vi.fn(),
       onEnded: vi.fn(),
       since: 22,
     });

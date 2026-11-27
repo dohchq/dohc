@@ -96,7 +96,8 @@ export interface ChatWakeLifetime {
   resume(): void;
   /**
    * A pull finished. Only one that brought changes or reached the relay again resumes: a deferred wake asks
-   * for a pull, so resuming on an empty one would ask for another, and another.
+   * for a pull, so resuming on an empty one would ask for another, and another. Reaching the relay again also
+   * ends the wake read's backoff, so a wake that waited while this computer was offline is claimed now.
    */
   pulled(pull: { applied: boolean; recovered: boolean }): Promise<void>;
   /** This computer's agents, or which workspaces sync here, may have changed: publishes again for the running session. */
@@ -289,7 +290,10 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
     },
     pulled({ applied, recovered }) {
       // Reaching the relay again is also when a declaration that failed can go out.
-      if (recovered && running) void deps.roster.reconcile(running.session);
+      if (recovered && running) {
+        running.consumer.reachable();
+        void deps.roster.reconcile(running.session);
+      }
       return applied || recovered
         ? (running?.consumer.resume() ?? Promise.resolve())
         : Promise.resolve();
