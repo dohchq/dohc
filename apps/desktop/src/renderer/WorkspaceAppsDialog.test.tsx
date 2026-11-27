@@ -80,6 +80,25 @@ it("keeps a failed review in the dialog, and Review tries again", async () => {
   await waitFor(() => expect(memberAppInspect).toHaveBeenCalledTimes(2));
 });
 
+it("hands a failure still showing to the shell when the dialog closes", async () => {
+  const unreachable = new Error("dohc could not load trip-board. The server answered 503.");
+  const { reportError, view, user } = renderDialog({
+    memberAppInspect: vi.fn(async () => {
+      throw unreachable;
+    }),
+  });
+
+  await user.click(await screen.findByRole("button", { name: "Review" }));
+  await screen.findByText(/The server answered 503/);
+  view.unmount();
+  expect(reportError).toHaveBeenCalledOnce();
+  expect(reportError).toHaveBeenCalledWith(
+    "dohc could not load trip-board.",
+    unreachable,
+    expect.any(Function),
+  );
+});
+
 it("reports a failure to the shell once the dialog has closed", async () => {
   let fail!: (error: Error) => void;
   const memberAppInspect = vi.fn(

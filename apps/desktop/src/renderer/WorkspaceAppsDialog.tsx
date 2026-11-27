@@ -27,7 +27,7 @@ import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "./workspace/workspaceSession";
 
 type Review = { row: WorkspaceAppRow; app: MemberAppInspectResult };
-type Failure = { at: string; message: string };
+type Failure = { at: string; message: string; report(): void };
 
 const FIELD =
   "w-full rounded-md border bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle";
@@ -74,6 +74,8 @@ export function WorkspaceAppsDialog(props: {
   const [folder, setFolder] = useState("");
   const [folderChecked, setFolderChecked] = useState(false);
   const alive = useRef(true);
+  const shown = useRef(failure);
+  shown.current = failure;
   const titleId = useId(),
     errorId = useId(),
     copyId = useId(),
@@ -83,6 +85,7 @@ export function WorkspaceAppsDialog(props: {
     alive.current = true;
     return () => {
       alive.current = false;
+      shown.current?.report();
     };
   }, []);
   const listed = useWorkspaceQuery(session, {
@@ -106,8 +109,9 @@ export function WorkspaceAppsDialog(props: {
     try {
       await work();
     } catch (cause) {
-      if (alive.current) setFailure({ at, message: ipcErrorMessage(cause, fallback) });
-      else props.reportError(fallback, cause, () => void run(at, fallback, work));
+      const report = () => props.reportError(fallback, cause, () => void run(at, fallback, work));
+      if (alive.current) setFailure({ at, message: ipcErrorMessage(cause, fallback), report });
+      else report();
     } finally {
       if (alive.current) setBusy(null);
     }
