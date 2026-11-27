@@ -1072,7 +1072,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_app",
     {
       description:
-        "Scaffold a starter app folder. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
+        "Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       inputSchema: {
         appRoot: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),

@@ -180,7 +180,7 @@ Returns `{ ok: true, apps: { root, title, kind, confidence, entry?, packageManag
 
 ### `dohc_create_app`
 
-Scaffold a starter app folder. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.
+Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.
 
 Changes the workspace, so a shared view does not offer it.
 

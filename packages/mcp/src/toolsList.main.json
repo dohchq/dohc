@@ -154,7 +154,7 @@
     },
     {
       "name": "dohc_create_app",
-      "description": "Scaffold a starter app folder. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
+      "description": "Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -7089,6 +7089,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -9763,6 +9769,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -12859,6 +12871,12 @@
       },
       "execution": {
         "taskSupport": "forbidden"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {

@@ -1875,7 +1875,7 @@ export async function detectApps(
 
 export async function createApp(
   ctx: ToolContext,
-  args: { appRoot: string; title?: string; withDohcJson?: boolean },
+  args: { appRoot: string; title?: string },
   agent?: string,
 ) {
   const root = await safeResolve(ctx, args.appRoot);
@@ -1897,11 +1897,10 @@ export async function createApp(
   }
 
   const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const files = generateAppSource({
-    title,
-    appRoot: root.normalized,
-    withDohcJson: args.withDohcJson !== false,
-  }).map((file) => ({ ...file, path: relativeJoin(root.normalized, file.path) }));
+  const files = generateAppSource({ title }).map((file) => ({
+    ...file,
+    path: relativeJoin(root.normalized, file.path),
+  }));
 
   const resolvedFiles = [];
   for (const file of files) {
