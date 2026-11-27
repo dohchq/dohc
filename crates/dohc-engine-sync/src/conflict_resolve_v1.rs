@@ -5041,6 +5041,15 @@ mod tests {
         kind: ContentKind,
         shape: impl FnOnce(SuccessorBase) -> SuccessorBase,
     ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_in_format(passive, kind, 1, shape)
+    }
+
+    fn receiver_fixture_in_format(
+        passive: bool,
+        kind: ContentKind,
+        schema_version: u8,
+        shape: impl FnOnce(SuccessorBase) -> SuccessorBase,
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = if passive {
@@ -5097,17 +5106,26 @@ mod tests {
             dohc_engine_storage::hex_sha256(&predecessor.encode_state_vector());
         let current_sha = dohc_engine_storage::hex_sha256(b"current text");
         let result_sha = dohc_engine_storage::hex_sha256(b"resolved text");
-        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
-            key: &key,
-            predecessor_claim_id: &predecessor_claim_id,
-            predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
-            artifact_op_kind: "conflict.resolve",
-            artifact_id: "conflict-1",
-            artifact_preimage_sha256: &current_sha,
-            content_kind: kind,
-            result_sha256: &result_sha,
-        });
-        let successor = fresh_successor_base(&identity, "resolved text").expect("successor");
+        let identity = SuccessorIdentity::derive_with_schema_version(
+            SuccessorIdentityInput {
+                key: &key,
+                predecessor_claim_id: &predecessor_claim_id,
+                predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                artifact_op_kind: "conflict.resolve",
+                artifact_id: "conflict-1",
+                artifact_preimage_sha256: &current_sha,
+                content_kind: kind,
+                result_sha256: &result_sha,
+            },
+            schema_version,
+        );
+        let build = || fresh_successor_base(&identity, "resolved text");
+        let successor = if schema_version == 2 {
+            dohc_engine_collab::ydoc::reading_body_sequence_here(build)
+        } else {
+            build()
+        }
+        .expect("successor");
         let successor = shape(successor);
         let update_blob_sha256 = store
             .put_binary_blob(&successor.update)
@@ -7540,24 +7558,10 @@ mod tests {
     const NEWER_BODY_FORMAT: &str = "ydoc-note-uses-a-newer-body-format";
 
     fn format_two_successor_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
-        receiver_fixture_shaped(false, ContentKind::Richdoc, |mut successor| {
-            use yrs::updates::decoder::Decode;
-            use yrs::{Map, ReadTxn, Transact};
-            let raw = yrs::Doc::with_client_id(9);
-            let meta = raw.get_or_insert_map(dohc_engine_collab::ydoc::ROOT_META);
-            raw.transact_mut()
-                .apply_update(yrs::Update::decode_v1(&successor.update).expect("decode"))
-                .expect("load successor");
-            meta.insert(&mut raw.transact_mut(), "schemaVersion", 2.0);
-            let marked = raw
-                .transact()
-                .encode_state_as_update_v1(&yrs::StateVector::default());
+        receiver_fixture_in_format(false, ContentKind::Richdoc, 2, |successor| {
             let doc = dohc_engine_collab::Ydoc::wire();
-            doc.apply(&marked).expect("the successor applies");
+            doc.apply(&successor.update).expect("the successor applies");
             assert_eq!(doc.note_schema_version(), 2);
-            successor.state_vector = doc.encode_state_vector();
-            successor.lineage_claim_id = dohc_engine_storage::hex_sha256(&marked);
-            successor.update = marked;
             successor
         })
     }
@@ -7674,36 +7678,60 @@ mod tests {
         assert_eq!(kept, [(0, successor), (1, edit)]);
     }
 
-    #[test]
-    fn a_kept_format_two_successor_and_its_held_edit_stay_kept_when_the_engine_reads_format_two() {
-        for (reading, with_field) in [(false, true), (false, false), (true, true)] {
-            successor_and_its_edit_stay_kept(reading, with_field);
-        }
+    struct KeptSuccessor {
+        _scratch: ScratchDir,
+        store: EngineStore,
+        key: DocKey,
+        successor: String,
+        predecessor: Option<String>,
+        child: ReplicationEnvelope,
     }
 
-    fn successor_and_its_edit_stay_kept(reading: bool, with_field: bool) {
+    fn kept_rows_and_notices(store: &EngineStore) -> (i64, Vec<(i64, String)>) {
+        store
+            .read_with(|conn| {
+                let kept = conn.query_row(
+                    "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let notices = conn
+                    .prepare(
+                        "SELECT origin_seq, reason_message FROM replication_pending_refusals \
+                         WHERE origin_id='peer' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>((kept, notices))
+            })
+            .expect("kept rows")
+    }
+
+    fn format_two_successor_edit(store: &mut EngineStore, successor: &str) -> String {
         use yrs::updates::decoder::Decode;
         use yrs::{ReadTxn, Text, Transact};
-        let (_scratch, mut store, key, built) = format_two_successor_fixture();
-        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
-            .as_str()
-            .expect("successor claim")
-            .to_owned();
-        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
         let raw = yrs::Doc::with_client_id(11);
+        let sequence = raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
         let successor_bytes = store
-            .get_binary_blob(&successor)
+            .get_binary_blob(successor)
             .expect("read successor")
             .expect("successor blob");
         raw.transact_mut()
             .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
             .expect("load successor");
         let before = raw.transact().state_vector();
-        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
-            .insert(&mut raw.transact_mut(), 0, "z");
-        let edit = store
+        sequence.insert(&mut raw.transact_mut(), 1, "z");
+        store
             .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
-            .expect("edit blob");
+            .expect("edit blob")
+    }
+
+    fn successor_edit_envelope(
+        store: &mut EngineStore,
+        successor: &str,
+        with_field: bool,
+    ) -> ReplicationEnvelope {
+        let edit = format_two_successor_edit(store, successor);
         let mut payload = json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false});
         if !with_field {
             payload
@@ -7711,8 +7739,70 @@ mod tests {
                 .expect("payload")
                 .remove("isBaseState");
         }
-        let mut next = imported_envelope(1, "ydoc.update", payload);
-        next.relay_seq = Some(1);
+        let mut next = imported_envelope(2, "ydoc.update", payload);
+        next.relay_seq = Some(3);
+        next
+    }
+
+    fn always_reading(with_field: bool) -> (Vec<(i64, String)>, String) {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            let parent = imported_envelope(0, "conflict.resolve", built.value);
+            crate::apply_conflict_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+                .expect("the successor installs");
+            let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
+            let next = successor_edit_envelope(&mut store, &successor, with_field);
+            for op in [child, next] {
+                crate::apply_replication_envelope(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                )
+                .expect("the op applies");
+            }
+            assert_eq!(active_claim(&store, &key), Some(successor));
+            (
+                kept_rows_and_notices(&store).1,
+                projected_ydoc_text(&mut store, &key),
+            )
+        })
+    }
+
+    fn kept_successor_with_edit(
+        moved: bool,
+        arrive_reading: bool,
+        with_field: bool,
+    ) -> KeptSuccessor {
+        let (scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        let predecessor = active_claim(&store, &key);
+        if moved {
+            diverge(&mut store);
+        }
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
+        let verified = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the child of a refused parent changes nothing");
+        assert!(matches!(
+            verified.primary,
+            crate::ApplyDisposition::Applied(_)
+        ));
+        let next = successor_edit_envelope(&mut store, &successor, with_field);
         let arrive = |store: &mut EngineStore| {
             crate::apply_replication_envelope(
                 store,
@@ -7722,47 +7812,223 @@ mod tests {
                 &crate::NoLiveLeases,
             )
         };
-        let arrived = if reading {
+        let arrived = if arrive_reading {
             dohc_engine_collab::ydoc::reading_body_sequence_here(|| arrive(&mut store))
         } else {
             arrive(&mut store)
         };
-        arrived.expect("the edit is kept");
-        let left = |store: &EngineStore| {
-            store
-                .read_with(|conn| {
-                    conn.query_row(
-                        "SELECT (SELECT COUNT(*) FROM replication_refused_ydoc_blobs), \
-                                (SELECT COUNT(*) FROM replication_pending_refusals \
-                                  WHERE origin_id='peer')",
-                        [],
-                        |row| Ok::<(i64, i64), _>((row.get(0)?, row.get(1)?)),
-                    )
-                })
-                .expect("kept rows")
-        };
-        let kept = left(&store);
-        assert_eq!(kept.0, 2, "reading {reading}, isBaseState {with_field}");
-        let state = (active_claim(&store, &key), divergence_state(&store));
-        for _ in 0..2 {
-            let replayed = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        match arrived.expect("the edit is kept").primary {
+            crate::ApplyDisposition::Refused(refusal) => {
+                assert_eq!(refusal.reason.message(), NEWER_BODY_FORMAT)
+            }
+            other => panic!("the edit was not kept: {other:?}"),
+        }
+        assert_eq!(
+            kept_rows_and_notices(&store),
+            (
+                2,
+                vec![
+                    (0, NEWER_BODY_FORMAT.to_owned()),
+                    (2, NEWER_BODY_FORMAT.to_owned())
+                ]
+            )
+        );
+        KeptSuccessor {
+            _scratch: scratch,
+            store,
+            key,
+            successor,
+            predecessor,
+            child,
+        }
+    }
+
+    fn replay_reading(store: &mut EngineStore) -> usize {
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            crate::replay_kept_format_two(
+                store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &NoFaults,
+            )
+        })
+        .expect("the replay goes on")
+    }
+
+    fn moments(store: &EngineStore, moment_id: &str) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                    [moment_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("moments")
+    }
+
+    fn archived_successor_text(store: &EngineStore) -> String {
+        use yrs::updates::decoder::Decode;
+        use yrs::{GetString, Transact};
+        let full: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages \
+                     WHERE workspace_id='ws' AND disposition='conflicting-successor'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("archived successor");
+        let bytes = store
+            .get_binary_blob(&full)
+            .expect("read archived state")
+            .expect("archived state blob");
+        let raw = yrs::Doc::new();
+        let sequence = raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE);
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&bytes).expect("decode"))
+            .expect("load archived state");
+        sequence.get_string(&raw.transact())
+    }
+
+    #[test]
+    fn a_kept_format_two_successor_replays_and_its_edit_lands_on_the_lineage_it_ends_on() {
+        for (moved, arrive_reading, with_field) in [
+            (false, false, true),
+            (false, false, false),
+            (false, true, true),
+            (true, false, true),
+        ] {
+            let case = format!("moved {moved}, reading {arrive_reading}, field {with_field}");
+            let KeptSuccessor {
+                _scratch,
+                mut store,
+                key,
+                successor,
+                predecessor,
+                child,
+            } = kept_successor_with_edit(moved, arrive_reading, with_field);
+            assert_eq!(replay_reading(&mut store), 2, "{case}");
+            assert_eq!(kept_rows_and_notices(&store).0, 0, "{case}");
+            assert_eq!(deferred_rows(&store), 0, "{case}");
+            if moved {
+                assert_eq!(kept_rows_and_notices(&store).1, vec![], "{case}");
+                assert_eq!(active_claim(&store, &key), predecessor, "{case}");
+                assert_eq!(divergence_state(&store), (1, 1), "{case}");
+                let archived = archived_successor_text(&store);
+                assert!(archived.contains('z'), "{case}: {archived}");
+            } else {
+                assert_eq!(active_claim(&store, &key), Some(successor), "{case}");
+                assert_eq!(divergence_state(&store), (0, 0), "{case}");
+                assert_eq!(moments(&store, "moment-result"), 1, "{case}");
+                let text = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                    projected_ydoc_text(&mut store, &key)
+                });
+                assert!(
+                    text.contains('z') && text.contains("resolved"),
+                    "{case}: {text}"
+                );
+                assert_eq!(
+                    (kept_rows_and_notices(&store).1, text),
+                    always_reading(with_field),
+                    "{case}"
+                );
+            }
+            let result = moments(&store, "moment-result");
+            let again = crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &child,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .expect("the child is redelivered");
+            assert!(
+                matches!(again.primary, crate::ApplyDisposition::Skipped),
+                "{case}"
+            );
+            assert_eq!(moments(&store, "moment-result"), result, "{case}");
+            assert_eq!(replay_reading(&mut store), 0, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_replayed_successor_leaves_nothing_to_write_at_the_next_open() {
+        let KeptSuccessor { mut store, .. } = kept_successor_with_edit(false, false, true);
+        replay_reading(&mut store);
+        let commits = store.commit_count_for_harness();
+        assert_eq!(replay_reading(&mut store), 0);
+        assert_eq!(store.commit_count_for_harness(), commits);
+    }
+
+    struct CrashAtCommit {
+        nth: usize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl dohc_engine_storage::FaultInjector for CrashAtCommit {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            use std::sync::atomic::Ordering;
+            if point == dohc_engine_storage::FaultPoint::StorageBeforePersist
+                && self.seen.fetch_add(1, Ordering::SeqCst) == self.nth
+            {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+
+    #[test]
+    fn a_crash_at_each_commit_of_a_successor_replay_lands_its_edit_once() {
+        use std::sync::atomic::Ordering;
+        for moved in [false, true] {
+            let crash = |nth| CrashAtCommit {
+                nth,
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let counted = crash(usize::MAX);
+            let KeptSuccessor { mut store, .. } = kept_successor_with_edit(moved, false, true);
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
                 crate::replay_kept_format_two(
                     &mut store,
                     &mut dohc_engine_collab::WriterDocCache::new(),
-                    &NoFaults,
+                    &counted,
                 )
             })
             .expect("the replay goes on");
-            assert_eq!(replayed, 0);
-            assert_eq!(
-                left(&store),
-                kept,
-                "reading {reading}, isBaseState {with_field}"
-            );
-            assert_eq!(
-                (active_claim(&store, &key), divergence_state(&store)),
-                state
-            );
+            let commits = counted.seen.load(Ordering::SeqCst);
+            assert!(commits >= 3, "moved {moved}: {commits} commits");
+            for nth in 0..commits {
+                let case = format!("moved {moved}, crash at commit {nth}");
+                let KeptSuccessor {
+                    mut store,
+                    key,
+                    successor,
+                    ..
+                } = kept_successor_with_edit(moved, false, true);
+                let crashed = crash(nth);
+                let _ = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                    crate::replay_kept_format_two(
+                        &mut store,
+                        &mut dohc_engine_collab::WriterDocCache::new(),
+                        &crashed,
+                    )
+                });
+                assert!(crashed.seen.load(Ordering::SeqCst) > nth, "{case}");
+                replay_reading(&mut store);
+                assert_eq!(kept_rows_and_notices(&store).0, 0, "{case}");
+                assert_eq!(deferred_rows(&store), 0, "{case}");
+                let text = if moved {
+                    archived_successor_text(&store)
+                } else {
+                    assert_eq!(active_claim(&store, &key), Some(successor), "{case}");
+                    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                        projected_ydoc_text(&mut store, &key)
+                    })
+                };
+                assert_eq!(text.matches('z').count(), 1, "{case}: {text}");
+            }
         }
     }
 

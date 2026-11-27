@@ -614,8 +614,8 @@ impl Validation {
         Self(Waiting::Ready(Some(result)))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
+    /// Block the calling thread until the validation ends. For callers off
+    /// any async runtime, such as the engine's open.
     pub fn wait(mut self) -> Result<(), ValidationError> {
         struct Unpark(std::thread::Thread);
         impl std::task::Wake for Unpark {

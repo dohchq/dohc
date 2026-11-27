@@ -4170,4 +4170,4 @@ fn drained_again(store: &mut EngineStore) -> Vec<String> {
 }
 
 mod device_update;
-mod kept_format_two;
+pub(in crate::tests) mod kept_format_two;

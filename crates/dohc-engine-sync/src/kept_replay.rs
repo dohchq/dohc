@@ -24,12 +24,16 @@ const BASE: &str =
     "(l.op_kind='conflict.resolve' OR COALESCE(json_extract(l.payload_json,'$.isBaseState'),0))";
 const UNREPLAYED: &str = "k.reason='ydoc-note-uses-a-newer-body-format' AND k.replayed=0";
 const CANDIDATE: &str = "k.reason='ydoc-note-uses-a-newer-body-format' AND k.replayed=0 \
-     AND l.op_kind='ydoc.update' AND k.relay_seq IS NOT NULL \
-     AND k.workspace_id NOT IN (SELECT workspace_id FROM hosted_replicas) \
+     AND (k.relay_seq IS NOT NULL OR l.op_kind='conflict.resolve') \
      AND k.replication_epoch IS \
        (SELECT replication_epoch FROM sync_identity s WHERE s.workspace_id=k.workspace_id) \
      AND k.stream_identity IS \
        (SELECT stream_identity FROM sync_identity s WHERE s.workspace_id=k.workspace_id)";
+const REPIN: &str = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
+     replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
+     AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
+     AND r.origin_seq=k.origin_seq AND r.reason_message<>'markdown-write-held' \
+     AND k.rowid IN";
 const AT: &str = "k.workspace_id=?1 AND k.origin_id=?2 AND k.origin_seq=?3";
 
 pub(crate) fn replaying<R>(run: impl FnOnce() -> R) -> R {
@@ -70,8 +74,10 @@ fn kept_row<T: rusqlite::types::FromSql>(
 pub(crate) fn kept_candidate(
     conn: &Connection,
     envelope: &ReplicationEnvelope,
+    hosted: bool,
 ) -> Result<bool, SyncError> {
-    Ok(REPLAYING.get() && kept_row::<i64>(conn, "1", CANDIDATE, envelope)?.is_some())
+    let replaying = REPLAYING.get() || (hosted && dohc_engine_collab::ydoc::reads_body_sequence());
+    Ok(replaying && kept_row::<i64>(conn, "1", CANDIDATE, envelope)?.is_some())
 }
 
 pub(crate) fn counted_when_parked(
@@ -90,7 +96,7 @@ pub(crate) fn held_behind_its_base(
     };
     let base = format!(
         "SELECT EXISTS(SELECT 1 {KEPT_ROWS} WHERE k.update_sha256=json_extract(?1,'$[3]') \
-           AND {CLAIM_OF}=?1 AND {BASE} AND {UNREPLAYED})"
+           AND {CLAIM_OF}=?1 AND {BASE} AND {CANDIDATE})"
     );
     conn.query_row(&base, [claim], |row| row.get(0))
         .map_err(SyncError::corrupt)
@@ -109,6 +115,68 @@ pub(crate) fn mark_replayed_in_tx(
             .map_err(SyncError::persist)?;
     }
     Ok(())
+}
+
+fn document_rows() -> String {
+    format!("{KEPT_ROWS} WHERE k.workspace_id=?1 AND json_extract({CLAIM_OF},'$[2]')=?2")
+}
+
+fn retry_from(
+    conn: &Connection,
+    workspace: &str,
+    object: &str,
+    upto: i64,
+) -> Result<Option<i64>, SyncError> {
+    let document = document_rows();
+    conn.query_row(
+        &format!(
+            "WITH r AS (SELECT k.relay_seq AS seq, k.replayed, k.update_sha256 AS sha, \
+               k.replication_epoch AS epoch, k.stream_identity AS stream, \
+               {CLAIM_OF} AS claim, ({CANDIDATE}) AS candidate {document}) \
+             SELECT MIN(e.seq)-1 FROM r e WHERE e.candidate AND e.seq<=?3 \
+             AND EXISTS(SELECT 1 FROM r b WHERE b.replayed=1 AND b.claim=e.claim \
+               AND b.sha=json_extract(e.claim,'$[3]') \
+               AND b.epoch IS e.epoch AND b.stream IS e.stream)"
+        ),
+        rusqlite::params![workspace, object, upto],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+pub(crate) fn rewinds_before(
+    conn: &Connection,
+    op: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    let (Some(object), Some(seq)) = (crate::hosted::hosted_document(op), op.relay_seq) else {
+        return Ok(false);
+    };
+    let reading = REPLAYING.get() || dohc_engine_collab::ydoc::reads_body_sequence();
+    Ok(reading && retry_from(conn, &op.workspace_id, object, seq - 1)?.is_some())
+}
+
+pub(crate) fn hosted_retry_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    object: &str,
+    cursor: i64,
+) -> Result<Option<i64>, SyncError> {
+    let document = document_rows();
+    tx.execute(
+        &format!("{REPIN} (SELECT k.rowid {document})"),
+        [workspace, object],
+    )
+    .map_err(SyncError::persist)?;
+    let retry = retry_from(tx, workspace, object, cursor)?;
+    tx.execute(
+        &format!(
+            "DELETE FROM replication_refused_ydoc_blobs WHERE rowid IN \
+             (SELECT k.rowid {document} AND k.replayed=1)"
+        ),
+        [workspace, object],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(retry)
 }
 
 pub(crate) fn refuse_claim_in_tx(
@@ -152,8 +220,10 @@ fn kept_claims(store: &EngineStore) -> Result<Vec<KeptClaim>, SyncError> {
            json_object('workspaceId',k.workspace_id,'originId',k.origin_id,'originSeq',k.origin_seq, \
            'relaySeq',k.relay_seq,'opKind',l.op_kind,'payload',json(l.payload_json), \
            'recordedAtMs',l.recorded_at_ms) END \
-         {KEPT_ROWS} WHERE k.replayed=1 OR ({CANDIDATE}) \
-         ORDER BY 1, MIN(k.rowid) OVER (PARTITION BY {CLAIM_OF}), NOT {BASE}, \
+         {KEPT_ROWS} WHERE k.workspace_id NOT IN (SELECT workspace_id FROM hosted_replicas) \
+           AND (k.replayed=1 OR ({CANDIDATE})) \
+         ORDER BY 1, MAX(k.rowid, COALESCE(MIN(CASE WHEN {BASE} THEN k.rowid END) \
+           OVER (PARTITION BY {CLAIM_OF}), k.rowid)), NOT {BASE}, \
            k.relay_seq, k.origin_id, k.origin_seq"
     );
     let rows = store
@@ -191,9 +261,21 @@ fn replay_claim(
         {
             continue;
         }
-        let outcome = replaying(|| {
-            crate::apply_replication_envelope(store, cache, &envelope, faults, &crate::NoLiveLeases)
-        })?;
+        let outcome = loop {
+            match replaying(|| {
+                crate::apply_replication_envelope(
+                    store,
+                    cache,
+                    &envelope,
+                    faults,
+                    &crate::NoLiveLeases,
+                )
+            }) {
+                Err(SyncError::ValidationPending(pending)) if pending.validate().wait().is_ok() => {
+                }
+                outcome => break outcome?,
+            }
+        };
         if let ApplyDisposition::Crashed { .. } = outcome.primary {
             return Err(SyncError::FaultCrash);
         }
@@ -225,11 +307,7 @@ fn finish_note(
         serde_json::from_str(&claims[0].0).map_err(SyncError::corrupt)?;
     let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
     crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
-    let refused = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
-         replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
-         AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
-         AND r.origin_seq=k.origin_seq AND r.reason_message<>'markdown-write-held' \
-         AND k.rowid IN (SELECT value FROM json_each(?1))";
+    let refused = format!("{REPIN} (SELECT value FROM json_each(?1))");
     let note = claims
         .iter()
         .flat_map(|(_, _, kept)| kept.iter().map(|(rowid, _)| rowid))
@@ -242,7 +320,7 @@ fn finish_note(
            WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
     match store.write_with(faults, |tx| -> Result<(), SyncError> {
-        tx.execute(refused, [&note]).map_err(SyncError::persist)?;
+        tx.execute(&refused, [&note]).map_err(SyncError::persist)?;
         for kept in finished {
             let rowids = kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>();
             let rowids = serde_json::to_string(&rowids).map_err(SyncError::corrupt)?;
@@ -255,9 +333,46 @@ fn finish_note(
     }
 }
 
-/// Replay the format-2 notes this desktop kept while it couldn't read them,
-/// now that it reads format 2. Hosted copies and resolved successors keep
-/// theirs.
+fn restart_hosted_reads(
+    store: &mut EngineStore,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    let restart = format!(
+        "SELECT d.workspace_id, d.object_id, MIN(k.relay_seq)-1 AS cursor \
+         {KEPT_ROWS} JOIN hosted_replicas r ON r.workspace_id=k.workspace_id \
+         JOIN hosted_documents d ON d.workspace_id=k.workspace_id \
+           AND d.scope_generation=r.scope_generation AND d.object_id=COALESCE( \
+             json_extract(l.payload_json,'$.objectId'), \
+             json_extract(l.payload_json,'$.transition.result.objectId')) \
+         WHERE {CANDIDATE} AND k.relay_seq IS NOT NULL AND d.state<>'parked' \
+         GROUP BY d.workspace_id, d.object_id \
+         HAVING MIN(k.relay_seq)-1 < d.backfill_cursor OR d.state='ready'"
+    );
+    let due: bool = store
+        .read_with(|conn| {
+            conn.query_row(&format!("SELECT EXISTS({restart})"), [], |row| row.get(0))
+        })
+        .map_err(SyncError::corrupt)?;
+    if !due {
+        return Ok(());
+    }
+    let sql = format!(
+        "WITH restart AS ({restart}) UPDATE hosted_documents AS h \
+         SET state=CASE h.state WHEN 'held' THEN 'held' ELSE 'backfilling' END, \
+           backfill_cursor=MIN(h.backfill_cursor, restart.cursor) \
+         FROM restart WHERE h.workspace_id=restart.workspace_id AND h.object_id=restart.object_id"
+    );
+    match store.write_with(faults, |tx| {
+        tx.execute(&sql, []).map_err(SyncError::persist)
+    })? {
+        TxnOutcome::Committed(_) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+/// Replay the format-2 notes this engine kept while it couldn't read them,
+/// now that it reads format 2. A hosted copy restarts the read of each
+/// document in its scope that has some, and its next pass replays them.
 pub fn replay_kept_format_two(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -266,6 +381,7 @@ pub fn replay_kept_format_two(
     if !dohc_engine_collab::ydoc::reads_body_sequence() {
         return Ok(0);
     }
+    restart_hosted_reads(store, faults)?;
     let mut replayed = 0;
     for note in kept_claims(store)?.chunk_by(|a, b| a.0 == b.0) {
         match finish_note(store, cache, faults, note) {
