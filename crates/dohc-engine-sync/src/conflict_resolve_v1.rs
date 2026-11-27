@@ -7687,16 +7687,22 @@ mod tests {
         child: ReplicationEnvelope,
     }
 
-    fn kept_rows_and_notices(store: &EngineStore) -> (i64, i64) {
+    fn kept_rows_and_notices(store: &EngineStore) -> (i64, Vec<(i64, String)>) {
         store
             .read_with(|conn| {
-                conn.query_row(
-                    "SELECT (SELECT COUNT(*) FROM replication_refused_ydoc_blobs), \
-                            (SELECT COUNT(*) FROM replication_pending_refusals \
-                              WHERE origin_id='peer')",
+                let kept = conn.query_row(
+                    "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
                     [],
-                    |row| Ok::<(i64, i64), _>((row.get(0)?, row.get(1)?)),
-                )
+                    |row| row.get(0),
+                )?;
+                let notices = conn
+                    .prepare(
+                        "SELECT origin_seq, reason_message FROM replication_pending_refusals \
+                         WHERE origin_id='peer' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>((kept, notices))
             })
             .expect("kept rows")
     }
@@ -7778,7 +7784,16 @@ mod tests {
             }
             other => panic!("the edit was not kept: {other:?}"),
         }
-        assert_eq!(kept_rows_and_notices(&store), (2, 2));
+        assert_eq!(
+            kept_rows_and_notices(&store),
+            (
+                2,
+                vec![
+                    (0, NEWER_BODY_FORMAT.to_owned()),
+                    (2, NEWER_BODY_FORMAT.to_owned())
+                ]
+            )
+        );
         KeptSuccessor {
             _scratch: scratch,
             store,
@@ -7855,7 +7870,7 @@ mod tests {
                 child,
             } = kept_successor_with_edit(moved, arrive_reading, with_field);
             assert_eq!(replay_reading(&mut store), 2, "{case}");
-            assert_eq!(kept_rows_and_notices(&store), (0, 0), "{case}");
+            assert_eq!(kept_rows_and_notices(&store), (0, vec![]), "{case}");
             assert_eq!(deferred_rows(&store), 0, "{case}");
             if moved {
                 assert_eq!(active_claim(&store, &key), predecessor, "{case}");
