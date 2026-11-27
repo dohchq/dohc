@@ -61,6 +61,17 @@ describe("agent memory", () => {
     expect(after!.sessionId).not.toBe(fresh!.sessionId);
   });
 
+  it("takes back a message whose run never started", async () => {
+    const path = join(await createTestScratch("dohc-agent-memory-"), "agent-memory.json");
+    const memory = createAgentMemory(() => path);
+    const first = await memory.take(turn("message-1"));
+    await memory.release("trip", "default", first!.sessionId, "message-1");
+    await expect(createAgentMemory(() => path).take(turn("message-1"))).resolves.toEqual({
+      sessionId: first!.sessionId,
+      resume: false,
+    });
+  });
+
   it("sets a damaged file aside and starts fresh", async () => {
     const path = join(await createTestScratch("dohc-agent-memory-"), "agent-memory.json");
     await writeFile(path, "{not json");

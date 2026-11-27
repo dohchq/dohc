@@ -1106,8 +1106,9 @@ describe("chatDispatchService", () => {
         ? call.args.slice(at, at + 1)
         : call.args.slice(at, at + 2);
     };
-    const memoryFixture = () =>
+    const memoryFixture = (options: FixtureOptions = {}) =>
       createFixture({
+        ...options,
         runner: {
           command: "",
           profile: { tool: "claude", executable: resolve("test-claude.exe") },
@@ -1185,6 +1186,43 @@ describe("chatDispatchService", () => {
       void fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
       await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(4));
       expect(sessionFlags(fixture.spawnCalls[3]!)).toEqual(["--no-session-persistence"]);
+    });
+
+    it("keeps a request that never reached Claude Code for its session", async () => {
+      let lookups = 0;
+      const fixture = await memoryFixture({
+        afterTrustLookup: (trust) => {
+          if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID);
+        },
+      });
+      await createAgentThread(fixture, { body: "Plan the trip.", authorUserId: "user_local" });
+      await activate(fixture);
+      expect(fixture.spawnCalls).toEqual([]);
+
+      await trustWorkspace(fixture);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(sessionFlags(fixture.spawnCalls[0]!)[0]).toBe("--session-id");
+    });
+
+    it("keeps its session when dohc quits during a run", async () => {
+      const fixture = await memoryFixture();
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.", false);
+      const [, sessionId] = sessionFlags(first.call);
+      vi.useFakeTimers();
+      const stopping = fixture.service.stop();
+      await vi.advanceTimersByTimeAsync(APP_QUIT_KILL_GRACE_MS);
+      await stopping;
+      vi.useRealTimers();
+      await expect(
+        createAgentMemory(() => join(fixture.stateRoot, "agent-memory.json")).take({
+          workspaceId: WORKSPACE_ID,
+          agentId: "default",
+          memoryId: MEMORY_ID,
+          triggerMessageId: "next-message",
+        }),
+      ).resolves.toEqual({ sessionId, resume: true });
     });
 
     it("starts fresh, once, when Claude Code no longer has the session", async () => {

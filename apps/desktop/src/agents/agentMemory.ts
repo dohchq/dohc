@@ -33,12 +33,16 @@ export interface AgentMemory {
   }): Promise<MemoryTurn | null>;
   /** The session's run ended. A session still busy from an earlier dohc starts over, as its runner can outlive dohc. */
   finish(workspaceId: string, agentId: string, sessionId: string): Promise<void>;
+  /** The run never started, so the session never got its message. */
+  release(
+    workspaceId: string,
+    agentId: string,
+    sessionId: string,
+    triggerMessageId: string,
+  ): Promise<void>;
   /** Drops the session, so the next run starts a new one. */
   forget(workspaceId: string, agentId: string, sessionId: string): Promise<void>;
 }
-
-const MEMORIES_LIMIT = 1_000;
-const GIVEN_LIMIT = 500;
 
 export function createAgentMemory(
   path: () => string,
@@ -99,16 +103,20 @@ export function createAgentMemory(
             : { workspaceId, agentId, memoryId, sessionId: randomUUID(), given: [] };
         const next = {
           ...memory,
-          given: [...memory.given, triggerMessageId].slice(-GIVEN_LIMIT),
+          given: [...memory.given, triggerMessageId],
           busy: instance,
         };
         return [
-          [...others(memories, workspaceId, agentId), next].slice(-MEMORIES_LIMIT),
+          [...others(memories, workspaceId, agentId), next],
           { sessionId: memory.sessionId, resume: memory.given.length > 0 },
         ];
       }),
     finish: (workspaceId, agentId, sessionId) =>
       withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [memory]),
+    release: (workspaceId, agentId, sessionId, triggerMessageId) =>
+      withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [
+        { ...memory, given: memory.given.filter((given) => given !== triggerMessageId) },
+      ]),
     forget: (workspaceId, agentId, sessionId) =>
       withSession(workspaceId, agentId, sessionId, () => []),
   };

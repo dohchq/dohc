@@ -1288,6 +1288,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(workspace);
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
     runReservations.add(workspace.workspaceId);
+    let unstarted: { agentId: string; sessionId: string } | null = null;
     try {
       // A claim from before a lost response can name an agent turned off since.
       if (!agent) throw new Error("this agent is off or no longer set up");
@@ -1338,6 +1339,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               triggerMessageId: claim.run.triggerMessageId,
             })
           : null;
+      if (memory) unstarted = { agentId: agent.id, sessionId: memory.sessionId };
       const child = await spawnConfiguredRunner({
         rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
@@ -1364,6 +1366,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           assertMayStart();
         },
       });
+      unstarted = null;
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
       }, agent.timeoutMinutes * 60_000);
@@ -1417,6 +1420,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
+      if (unstarted) {
+        await options.agentMemory
+          ?.release(
+            workspace.workspaceId,
+            unstarted.agentId,
+            unstarted.sessionId,
+            claim.run.triggerMessageId,
+          )
+          .catch(reportError);
+      }
       // A restrict that landed while the run was starting stops it here. Its
       // request goes back in line, where the next drain holds it, or starts
       // it when the workspace is trusted again. That costs one attempt; when
@@ -2493,6 +2506,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ...runWorkspacesToRelease.map(async (live) => {
         try {
           await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
+          if (live.memory) {
+            await options.agentMemory
+              ?.finish(live.workspace.workspaceId, live.claim.run.agentId, live.memory.sessionId)
+              .catch(reportError);
+          }
           await clearLiveAttribution(live);
         } catch (error) {
           reportError(error);
