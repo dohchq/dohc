@@ -186,9 +186,16 @@ fn a_hosted_replica_replays_the_kept_format_two_rows_of_its_documents_in_scope()
     assert!(ready(&store, "doc-a"));
 }
 
-#[test]
-fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
-    let (_scratch, _path, mut store) = hosted_store();
+fn archived_note_with(
+    edit: impl FnOnce(&dohc_engine_collab::Ydoc) -> Vec<u8>,
+) -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+    String,
+) {
+    let (scratch, path, mut store) = hosted_store();
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
     let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
@@ -229,15 +236,27 @@ fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
         replacement,
         &replacement_claim,
     );
-    let edit = crate::moment_apply_tests::format_two_sequence_edit(&note, 7, "z");
-    ydoc_row(feed, ("writer", 0), ("doc-a", "a.md"), edit, &claim);
+    ydoc_row(feed, ("writer", 0), ("doc-a", "a.md"), edit(&note), &claim);
+    (scratch, path, store, client, claim)
+}
+
+#[test]
+fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
+    let edit = |note: &dohc_engine_collab::Ydoc| {
+        crate::moment_apply_tests::format_two_sequence_edit(note, 7, "z")
+    };
+    let (_always_scratch, _always_path, mut always, reading, _) = archived_note_with(edit);
+    reading_sync(&reading, &mut always);
+    let (_scratch, _path, mut store, client, claim) = archived_note_with(edit);
     sync(&client, &mut store);
     assert_eq!(kept_of(&store, "doc-a"), 1);
     assert_eq!(replay_reading(&mut store), 0);
     reading_body_sequence_here(|| sync(&client, &mut store));
+    let refused = refusal_of(&always, "writer");
+    assert_eq!(refusal_of(&store, "writer"), refused);
     assert_eq!(
-        (kept_reasons(&store, "writer"), refusal_of(&store, "writer")),
-        (Vec::new(), None)
+        kept_reasons(&store, "writer"),
+        refused.into_iter().map(Some).collect::<Vec<_>>()
     );
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM ydoc_deferred_updates"),
@@ -256,6 +275,18 @@ fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
     let text = sequence_text(&store, &archived);
     assert!(text.contains('z'), "{text}");
     assert!(ready(&store, "doc-a"));
+}
+
+#[test]
+fn a_kept_edit_the_archived_drain_refuses_stays_kept_on_a_hosted_replica() {
+    let (_scratch, _path, mut store, client, _) = archived_note_with(stray_edit);
+    sync(&client, &mut store);
+    assert_eq!(kept_of(&store, "doc-a"), 1);
+    replay_reading(&mut store);
+    reading_sync(&client, &mut store);
+    let stray = "ydoc-update-outside-format-two-roots";
+    assert_eq!(kept_reasons(&store, "writer"), [Some(stray.to_owned())]);
+    assert_eq!(refusal_of(&store, "writer").as_deref(), Some(stray));
 }
 
 #[test]
@@ -365,65 +396,6 @@ fn a_kept_base_past_the_text_cap_refuses_its_claim_and_the_edit_after_it() {
         0
     );
     assert_eq!(refusal_of(&store, "writer").as_ref(), Some(reason));
-}
-
-#[test]
-fn a_kept_edit_the_archived_drain_refuses_stays_kept_on_a_hosted_replica() {
-    let (_scratch, _path, mut store) = hosted_store();
-    let feed = HostedFeed::new();
-    feed.append(envelope("owner", 0, "workspace.init", json!({})));
-    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
-    let base = note.encode_full_state();
-    let claim = dohc_engine_storage::hex_sha256(&base);
-    ydoc_row(&feed, ("owner", 1), ("doc-a", "a.md"), base, &claim);
-    feed.create("owner", 2, "doc-a", "a.md", "A note.\n");
-    feed.share("doc-a", "a.md");
-    let client = RelaySyncClient::new(feed);
-    reading_body_sequence_here(|| sync(&client, &mut store));
-    let key = DocKey::new("ws", "main", "doc-a").unwrap();
-    let vector = dohc_engine_storage::hex_sha256(&note.encode_state_vector());
-    reading_body_sequence_here(|| {
-        store
-            .write_with(&NoFaults, |tx| {
-                dohc_engine_collab::archive_active_lineage_in_tx(
-                    tx,
-                    &key,
-                    &claim,
-                    &vector,
-                    Some(&dohc_engine_storage::hex_sha256(b"A note.\n")),
-                    2,
-                )
-            })
-            .unwrap()
-    });
-    let replacement = dohc_engine_collab::Ydoc::wire();
-    replacement
-        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Head.\n")
-        .unwrap();
-    let replacement = replacement.encode_full_state();
-    let replacement_claim = dohc_engine_storage::hex_sha256(&replacement);
-    let feed = client.transport();
-    ydoc_row(
-        feed,
-        ("replacement", 0),
-        ("doc-a", "a.md"),
-        replacement,
-        &replacement_claim,
-    );
-    ydoc_row(
-        feed,
-        ("writer", 0),
-        ("doc-a", "a.md"),
-        stray_edit(&note),
-        &claim,
-    );
-    sync(&client, &mut store);
-    assert_eq!(kept_of(&store, "doc-a"), 1);
-    replay_reading(&mut store);
-    reading_sync(&client, &mut store);
-    let stray = "ydoc-update-outside-format-two-roots";
-    assert_eq!(kept_reasons(&store, "writer"), [Some(stray.to_owned())]);
-    assert_eq!(refusal_of(&store, "writer").as_deref(), Some(stray));
 }
 
 #[test]
