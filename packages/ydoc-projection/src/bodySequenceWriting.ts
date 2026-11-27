@@ -1741,7 +1741,7 @@ function copyOfWindow(
 function linesATrialGives(
   open: (given: readonly number[]) => Copy | null,
   guessed: readonly number[],
-): number[] | null | undefined {
+): number[] | string | null | undefined {
   const never = new Set<number>();
   const moved = new Set<number>();
   let given = [...guessed];
@@ -1767,7 +1767,8 @@ function linesATrialGives(
       continue;
     }
     if (!left.isSettled) return left.isRead ? null : undefined;
-    if (!changes.every((change) => passesTheRoom(change, 0, 0))) return null;
+    const past = changes.map(roomLimitPast).find((limit) => limit !== undefined);
+    if (past !== undefined) return past;
     return changes.every((change) => passesTheRoom(change, apart, longer)) ? given : undefined;
   }
   return undefined;
@@ -1789,11 +1790,19 @@ function passesTheRoom(change: Uint8Array, apart: number, longer: number): boole
   );
 }
 
+/** The limit of a live note's room one change is past, as a sentence that names it, its unit and the use. */
+export function roomLimitPast(change: Uint8Array): string | undefined {
+  const limit = bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY);
+  if (limit !== undefined || change.byteLength <= LIVE_UPDATE_MAX_BYTES) return limit;
+  const said = (count: number) => count.toLocaleString("en-US");
+  return `One change to a note takes at most ${said(LIVE_UPDATE_MAX_BYTES)} bytes. This one takes ${said(change.byteLength)}.`;
+}
+
 function linesToGiveFirst(
   writing: BodyWriting,
   transactions: readonly Transform[],
   trial: "window" | "note",
-): number[] | null {
+): number[] | string | null {
   const reading = writing.reader.reading();
   const touched = whatStepsTouch(reading, transactions);
   const guessed = linesTouched(reading, touched);
@@ -1839,21 +1848,36 @@ function asOneRange(transaction: Transform): Transform | null {
  * How to write the transactions of one dispatch, the first of which starts from what the
  * sequence reads as now: `lines`, the blocks with no boundary of their own that get one first,
  * by their index in that reading, and `transactions`, what to write after them, which may hold a
- * transaction's steps joined into one. Nothing is written. Null when the dispatch cannot be
- * written whole within every limit of the room, and is to be refused. `trial` `"note"` tries it
- * on a copy of the whole note at once instead of on a window of it first.
+ * transaction's steps joined into one. Nothing is written. When the dispatch cannot be written
+ * whole, it says why: `"limit"` with the sentence that names a limit of the room it is past, or
+ * `"shape"`. `trial` `"note"` tries it on a copy of the whole note at once instead of on a window
+ * of it first.
  */
+export function howToWriteOrWhy(
+  writing: BodyWriting,
+  transactions: readonly Transform[],
+  trial: "window" | "note" = "window",
+): HowToWrite | { refused: "limit"; limit: string } | { refused: "shape" } {
+  const lines = linesToGiveFirst(writing, transactions, trial);
+  if (Array.isArray(lines)) return { lines, transactions };
+  const asOne = transactions.map((each) => asOneRange(each) ?? each);
+  const joined = asOne.some((each, at) => each !== transactions[at]);
+  const given = joined ? linesToGiveFirst(writing, asOne, trial) : lines;
+  if (Array.isArray(given)) return { lines: given, transactions: asOne };
+  const limit = typeof given === "string" ? given : lines;
+  return typeof limit === "string" ? { refused: "limit", limit } : { refused: "shape" };
+}
+
+export type HowToWrite = { lines: number[]; transactions: readonly Transform[] };
+
+/** `howToWriteOrWhy`, null when the dispatch is to be refused. */
 export function howToWrite(
   writing: BodyWriting,
   transactions: readonly Transform[],
   trial: "window" | "note" = "window",
-): { lines: number[]; transactions: readonly Transform[] } | null {
-  const lines = linesToGiveFirst(writing, transactions, trial);
-  if (lines) return { lines, transactions };
-  const asOne = transactions.map((each) => asOneRange(each) ?? each);
-  if (asOne.every((each, at) => each === transactions[at])) return null;
-  const given = linesToGiveFirst(writing, asOne, trial);
-  return given && { lines: given, transactions: asOne };
+): HowToWrite | null {
+  const how = howToWriteOrWhy(writing, transactions, trial);
+  return "refused" in how ? null : how;
 }
 
 /**
