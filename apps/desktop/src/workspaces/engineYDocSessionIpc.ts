@@ -1261,8 +1261,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         input.kind ?? "richdoc",
       );
       authority.assertCurrent();
-      if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
-        throw new Error(SECRET_READ_DENIED_REASON);
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
       if (held) return { path, state: Y.encodeStateAsUpdate(held.session.provider.doc) };
@@ -1445,6 +1443,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const path = await this.#resolveDocumentPath(workspace, requested, access);
     if (path === null) throw new Error(`No document at ${requested}.`);
     if (liveDocumentKindForPath(path) !== kind) throw new Error(notKind);
+    if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
+      throw new Error(SECRET_READ_DENIED_REASON);
     return path;
   }
 

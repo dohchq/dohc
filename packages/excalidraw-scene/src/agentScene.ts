@@ -399,9 +399,11 @@ function center(element: ElementSnapshot) {
 function edge(element: ElementSnapshot, toward: readonly [number, number]) {
   const [cx, cy] = center(element);
   const [dx, dy] = [toward[0] - cx, toward[1] - cy];
+  const [cos, sin] = [Math.cos(numberOr(element.angle)), Math.sin(numberOr(element.angle))];
+  const [u, v] = [dx * cos + dy * sin, dy * cos - dx * sin];
   const reach = Math.min(
-    dx === 0 ? Infinity : (numberOr(element.width) / 2 + GAP) / Math.abs(dx),
-    dy === 0 ? Infinity : (numberOr(element.height) / 2 + GAP) / Math.abs(dy),
+    u === 0 ? Infinity : (numberOr(element.width) / 2 + GAP) / Math.abs(u),
+    v === 0 ? Infinity : (numberOr(element.height) / 2 + GAP) / Math.abs(v),
   );
   return Number.isFinite(reach)
     ? ([cx + dx * reach, cy + dy * reach] as const)

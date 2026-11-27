@@ -189,6 +189,25 @@ describe("planDrawingEdit", () => {
     expect((moved.y as number) + end[1]!).toBeCloseTo(204);
   });
 
+  it("starts and ends a new bound arrow on rotated shapes' outlines", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "b", type: "rectangle", x: 400, y: 0, width: 200, height: 100 },
+      ],
+    });
+    for (const shape of foldScene(doc).elements)
+      insertElementRevision(doc, { ...shape, version: 2, angle: Math.PI / 2 });
+    apply(doc, { add: [{ id: "go", type: "arrow", x: 0, y: 0, start: "a", end: "b" }] });
+    const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+    const end = (go.points as number[][])[1]!;
+    expect(go.x).toBeCloseTo(154);
+    expect(go.y).toBeCloseTo(50);
+    expect((go.x as number) + end[0]!).toBeCloseTo(446);
+    expect((go.y as number) + end[1]!).toBeCloseTo(50);
+  });
+
   it("keeps a person-drawn arrow's own gap when its shape is resized", () => {
     const doc = new Y.Doc();
     apply(doc, {

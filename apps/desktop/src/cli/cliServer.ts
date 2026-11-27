@@ -3516,6 +3516,7 @@ const DECLARED_WRITERS: {
     });
     if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
     const path = validated.normalized;
+    if (isSecretPath(path)) return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
     if (liveDocumentKindForPath(path) !== "scene")
       return { ok: false as const, reason: `a drawing path ends in .excalidraw: ${path}` };
     const elements = request.args.elements ?? [];
@@ -3535,6 +3536,7 @@ const DECLARED_WRITERS: {
     const validated = validateUserWritePath(requested);
     if (!validated.ok) return cliPathRejected(validated.reason, requested);
     const path = validated.normalized;
+    if (isSecretPath(path)) return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
     return await drawingWrite(
       context,
       options,
@@ -4798,6 +4800,7 @@ async function dispatchWorkspace(
       const validated = validateUserWritePath(resolvedPath);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       const path = validated.normalized;
+      if (isSecretPath(path)) return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
         try {
           const outcome = await documents.edit({

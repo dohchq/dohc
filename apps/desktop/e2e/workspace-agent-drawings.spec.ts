@@ -114,6 +114,14 @@ test("an agent creates a drawing and edits it live while the person draws", asyn
           files: { f: photo },
         }),
       },
+      {
+        path: "hand.excalidraw",
+        contents: JSON.stringify({
+          type: "excalidraw",
+          elements: [{ id: "photo", type: "image", version: 3, x: 0, y: 0, fileId: "f" }],
+          files: { f: { mimeType: photo.mimeType, dataURL: "data:image/png;base64,AAAA" } },
+        }),
+      },
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
@@ -140,6 +148,12 @@ test("an agent creates a drawing and edits it live while the person draws", asyn
         { timeout: 30_000 },
       )
       .toBe(50);
+    expect(
+      await agentCli(temp, "drawingEdit", {
+        path: "hand.excalidraw",
+        update: [{ id: "photo", expectedVersion: 3, x: 50 }],
+      }),
+    ).toEqual({ ok: false, reason: expect.stringContaining("hand.excalidraw is not saved") });
 
     const create = {
       path,

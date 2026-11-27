@@ -57,6 +57,7 @@ import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { SECRET_READ_DENIED_REASON } from "@dohc/security-contract/engine-path-floor";
 import type { AgentMembersRequest, MembersResult } from "@dohc/cli/members";
 import type { DatasetResult } from "@dohc/cli/dataset";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
@@ -4398,6 +4399,10 @@ describe("CLI socket server", () => {
       { ok: false, reason: expect.stringContaining("This file is protected") },
     );
     await expect(
+      invoke("documentEdit", { cwd, actor: "agent", path: ".env.md", replacement: "Leaked" }),
+    ).resolves.toEqual({ ok: false, reason: SECRET_READ_DENIED_REASON });
+    expect(documents.get("app/.env.md")).toBeUndefined();
+    await expect(
       invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" }),
     ).rejects.toThrow("not inside a dohc workspace");
     await expect(
@@ -4987,6 +4992,14 @@ describe("CLI socket server", () => {
     const lostResult = await invoke("drawingEdit", lost);
     expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("same moment") });
     await expect(invoke("drawingEdit", lost)).resolves.toEqual(lostResult);
+    expect(edits).toHaveLength(4);
+    const refused = { ok: false, reason: SECRET_READ_DENIED_REASON };
+    await expect(
+      invoke("drawingEdit", { ...move, path: ".env.excalidraw", requestId: "draw-5" }),
+    ).resolves.toEqual(refused);
+    await expect(
+      invoke("drawingCreate", { ...args, path: "notes/.env.excalidraw", requestId: "draw-6" }),
+    ).resolves.toEqual(refused);
     expect(edits).toHaveLength(4);
 
     context.readOnly = true;
