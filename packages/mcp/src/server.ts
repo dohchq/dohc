@@ -60,6 +60,7 @@ import {
   resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
+  readOwnerSetup,
   disconnectLinkAgent,
   createDocument,
   createRecord,
@@ -266,6 +267,8 @@ const DECLARED_WRITE_ANNOTATIONS: Record<keyof typeof DECLARED_WRITE_TOOLS, Tool
   dohc_set_member_app_sharing: CHANGE_SERVER,
   dohc_create_drawing: ADD,
   dohc_edit_drawing: CHANGE,
+  dohc_use_server_for_automations: CHANGE_SERVER,
+  dohc_create_incoming_webhook: ADD_SERVER,
 };
 
 export const MCP_INSTRUCTIONS = [
@@ -416,6 +419,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       annotations: READ_SERVER,
     },
     async (args) => text(await listAutomations(ctx, args)),
+  );
+  register(
+    "dohc_read_automation_host",
+    {
+      description:
+        "Read which of the owner's computers, or the dohc server, runs this workspace's automations and schedules. kind relay gives the generation that dohc_use_server_for_automations needs, the host's installId (server for the dohc server), and handoverFrom while a computer hands over.",
+      inputSchema: {},
+      annotations: READ_SERVER,
+    },
+    async () => text(await readOwnerSetup(ctx, "automationHost")),
+  );
+  register(
+    "dohc_list_incoming_webhooks",
+    {
+      description:
+        "List this workspace's incoming webhooks: each one's name, Collection, paused state, and recent deliveries. Never returns their addresses. List before you retry a create whose result you don't know.",
+      inputSchema: {},
+      annotations: READ_SERVER,
+    },
+    async () => text(await readOwnerSetup(ctx, "webhookList")),
   );
   register(
     "dohc_switch_automation",

@@ -87,6 +87,31 @@ describe("parseCliArguments", () => {
       "--base",
     );
   });
+  it("parses the automation host, the move to the server, and incoming webhooks", () => {
+    expect(parseCliArguments(["automation", "host"], {})).toMatchObject({ verb: "automationHost" });
+    expect(parseCliArguments(["automation", "use-server", "--generation", "3"], {})).toMatchObject({
+      verb: "automationUseServer",
+      generation: 3,
+    });
+    expect(() => parseCliArguments(["automation", "use-server"], {})).toThrow(
+      "automation use-server requires --generation <n> from dohc automation host",
+    );
+    for (const generation of ["-1", "1.5", "", " "])
+      expect(() =>
+        parseCliArguments(["automation", "use-server", "--generation", generation], {}),
+      ).toThrow("--generation requires a whole number");
+    expect(parseCliArguments(["webhook", "list"], {})).toMatchObject({ verb: "webhookList" });
+    expect(
+      parseCliArguments(["webhook", "create", "Waitlist", "--collection", "forms/waitlist"], {}),
+    ).toMatchObject({ verb: "webhookCreate", name: "Waitlist", collection: "forms/waitlist" });
+    expect(() => parseCliArguments(["webhook", "create", "Waitlist"], {})).toThrow(
+      "webhook create requires a name and --collection <path>",
+    );
+    for (const collection of ["/", " ", "\\ /"])
+      expect(() =>
+        parseCliArguments(["webhook", "create", "Waitlist", "--collection", collection], {}),
+      ).toThrow("Choose a Collection folder, not the workspace root.");
+  });
   it("parses the read verbs and global actor options", () => {
     expect(parseCliArguments(["chat", "groups"], {})).toEqual({
       actor: "human",

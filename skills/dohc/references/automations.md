@@ -83,3 +83,13 @@ The syntax differs by position:
 3. **Message templates (`post`, `notify`, `direct-message`)**: Interpolate expressions with **single braces** `{expr}` (`'Expense needs review: {record.Amount}'`). Double braces `{{` and `}}` render literal `{` and `}` characters.
 
 Available names in formulas and conditions: `record`, `previous`, `trigger`, `person`, `message`, plus helpers `today()`, `now()`, `dateAdd`, `dateBetween`, `formatDate`, `lower`, `upper`, `trim`, `contains`, `join`, `length`, `sum`, `min`, `max`, `round`.
+
+## Incoming webhooks
+
+An incoming webhook is a secret address that adds a record to a private Collection for each delivery, so a website form or another service can feed a Collection, and its `automations.yaml` runs on the new records. Only the owner's own agents set them up, and only in a synced workspace.
+
+1. Read the host with `dohc_read_automation_host` (`dohc automation host`). Webhooks need the dohc server to run the workspace's automations.
+2. If a computer runs them, pass the `generation` you read to `dohc_use_server_for_automations` (`dohc automation use-server --generation <n>`). `handover-pending` means the named computer must hand over first; if it stays offline, the owner uses Take over in Settings › Advanced.
+3. Create the webhook with `dohc_create_incoming_webhook` (`dohc webhook create <name> --collection <path>`). The path is the Collection's folder, relative to the workspace root.
+
+The result shows the address once, as `endpointUrl`. Anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list with `dohc_list_incoming_webhooks` (`dohc webhook list`) before you try again; the list never shows addresses. The owner renames, pauses, rotates, and deletes webhooks in Settings › Secrets › Incoming webhooks.

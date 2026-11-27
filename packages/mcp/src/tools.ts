@@ -141,6 +141,8 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_disconnect_link_agent: ["share.link.agent.disconnect"],
     dohc_list_automations: ["automation.list"],
     dohc_switch_automation: ["automation.switch"],
+    dohc_read_automation_host: ["automation.host.read"],
+    dohc_list_incoming_webhooks: ["workspace.webhooks.list"],
     dohc_dataset: Object.values(DATASET_CAPABILITIES),
     dohc_collection_access: [...DATASET_ADMIN_ACTIONS].map(
       (action) => DATASET_CAPABILITIES[action as keyof typeof DATASET_CAPABILITIES],
@@ -2368,6 +2370,10 @@ export async function listLinkAgents(ctx: ToolContext, input: unknown) {
       ),
     };
   return requestCli(ctx, "shareAgents", parsed.data);
+}
+
+export function readOwnerSetup(ctx: ToolContext, verb: "automationHost" | "webhookList") {
+  return requestCli(ctx, verb, {});
 }
 
 export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {

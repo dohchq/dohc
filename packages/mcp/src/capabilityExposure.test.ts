@@ -22,3 +22,17 @@ it.each(["owner", "view", "comment", "edit"] as const)(
     );
   },
 );
+
+it("offers workspace setup only to the owner's own agents", async () => {
+  const setup = [
+    "dohc_read_automation_host",
+    "dohc_use_server_for_automations",
+    "dohc_list_incoming_webhooks",
+    "dohc_create_incoming_webhook",
+  ];
+  const names = async (level?: "view" | "comment" | "edit") =>
+    (await advertisedCapabilityTools(level)).map((tool) => tool.name);
+  expect(await names()).toEqual(expect.arrayContaining(setup));
+  for (const level of ["view", "comment", "edit"] as const)
+    expect((await names(level)).filter((name) => setup.includes(name))).toEqual([]);
+});

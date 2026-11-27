@@ -37,7 +37,7 @@ When an agent connects, the server sends short instructions and serves the skill
 | **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_read_drawing`](#dohc_read_drawing), [`dohc_create_drawing`](#dohc_create_drawing), [`dohc_edit_drawing`](#dohc_edit_drawing), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices), [`dohc_inbox_list`](#dohc_inbox_list), [`dohc_inbox_add`](#dohc_inbox_add), [`dohc_inbox_archive`](#dohc_inbox_archive), [`dohc_inbox_move`](#dohc_inbox_move) |
 | **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_connections`](#dohc_links_connections), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
-| **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
+| **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run), [`dohc_read_automation_host`](#dohc_read_automation_host), [`dohc_use_server_for_automations`](#dohc_use_server_for_automations), [`dohc_list_incoming_webhooks`](#dohc_list_incoming_webhooks), [`dohc_create_incoming_webhook`](#dohc_create_incoming_webhook) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_update_version`](#dohc_update_version), [`dohc_archive_version`](#dohc_archive_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
 | **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access), [`dohc_list_member_apps`](#dohc_list_member_apps), [`dohc_inspect_member_app`](#dohc_inspect_member_app), [`dohc_read_member_app_source`](#dohc_read_member_app_source), [`dohc_share_member_app`](#dohc_share_member_app), [`dohc_fork_member_app`](#dohc_fork_member_app), [`dohc_promote_member_app`](#dohc_promote_member_app), [`dohc_withdraw_member_app`](#dohc_withdraw_member_app), [`dohc_set_member_app_sharing`](#dohc_set_member_app_sharing) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
@@ -603,7 +603,7 @@ Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment,
 
 ---
 
-**Automations and Buttons.** Inspect Collection automations, toggle them, press Button fields, and check run logs.
+**Automations and Buttons.** Inspect Collection automations, toggle them, press Button fields, check run logs, move automations to the server, and create incoming webhooks.
 
 ### `dohc_list_automations`
 
@@ -688,6 +688,47 @@ Changes the workspace, so a shared view does not offer it.
 - `startOver`: `boolean`
 
 Returns `{ ok: true, status: "queued" } | { ok: false, status: "switched-off", reason, target: { recovery: "automation-controls", automation, path } } | { ok: false, status: "definition-changed", repeatsMessages, repeatsWebhooks?, reason } | { ok: false, reason, notice?: { title, body } }`.
+
+### `dohc_read_automation_host`
+
+Read which of the owner's computers, or the dohc server, runs this workspace's automations and schedules. kind relay gives the generation that dohc_use_server_for_automations needs, the host's installId (server for the dohc server), and handoverFrom while a computer hands over.
+
+Only the owner's own agents set up the workspace. Shared profiles do not offer this read.
+
+No arguments.
+
+Returns `{ kind: "this-computer" } | { kind: "another-computer", label, sameName, waits } | { kind: "no-computer", message, cause? } | { kind: "none" } | { kind: "note", message } | { kind: "relay", generation, hostInstallId, handoverFrom, computers: { kind, installId, label, lastSeenMs, thisComputer }[] }`.
+
+### `dohc_use_server_for_automations`
+
+Move a synced workspace's automations and schedules to the dohc server, so they run while the owner's computers are off. Pass the generation from dohc_read_automation_host. moved means the server runs them now. handover-pending names the computer that must release them first; if it stays offline, the owner uses Take over in Settings › Advanced. A stale generation is refused: read the host again.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `generation`: `integer`. Required.
+
+Returns `{ ok: true, outcome, generation, handoverFrom } | { ok: false, reason }`.
+
+### `dohc_list_incoming_webhooks`
+
+List this workspace's incoming webhooks: each one's name, Collection, paused state, and recent deliveries. Never returns their addresses. List before you retry a create whose result you don't know.
+
+Only the owner's own agents set up the workspace. Shared profiles do not offer this read.
+
+No arguments.
+
+Returns `{ kind: "none" } | { kind: "unavailable", message } | { kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }[], limit }`.
+
+### `dohc_create_incoming_webhook`
+
+Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `name`: `string`. Required.
+- `collection`: `string`. Required.
+
+Returns `{ ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }, endpointUrl } | { ok: false, reason }`.
 
 ---
 
@@ -1333,6 +1374,36 @@ List items waiting in the workspace Inbox.
 - `--limit <<n>>`: Show at most this many items (default 50, max 100).
 
 With `--json`, prints `{ schemaVersion, exists, items: { kind, id, path, title, status, source, received, url?, attachment?, filedTo? }[], hasMore }`.
+
+### `dohc webhook`
+
+List and create incoming webhooks that add records to Collections.
+
+Only the owner's own agents can use them, in a synced workspace.
+
+#### `dohc webhook list`
+
+```sh
+dohc webhook list [options]
+```
+
+List this workspace's incoming webhooks and their recent deliveries.
+
+With `--json`, prints `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "unavailable", message }` or `{ schemaVersion, kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }[], limit }`.
+
+#### `dohc webhook create`
+
+```sh
+dohc webhook create <name> [options]
+```
+
+Create an incoming webhook address that adds records to a private Collection.
+
+The address is a secret: anyone who has it can add records. dohc shows it once. If you don't know whether a create worked, run dohc webhook list before you try again. Creating needs the server to run this workspace's automations, with no handover waiting, and a synced Collection.
+
+- `--collection <path>`: Required. The Collection's folder, relative to the workspace root.
+
+With `--json`, prints `{ schemaVersion, ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }, endpointUrl }`.
 
 ### `dohc member-apps`
 
@@ -3287,6 +3358,32 @@ dohc automation list <collection> [options]
 Read a Collection's automation definitions and on/off file state.
 
 With `--json`, prints `{ schemaVersion, ok: true, definitions }`.
+
+#### `dohc automation host`
+
+```sh
+dohc automation host [options]
+```
+
+Read which computer, or the server, runs this workspace's automations.
+
+Prints the generation that dohc automation use-server needs.
+
+With `--json`, prints `{ schemaVersion, kind: "this-computer" }` or `{ schemaVersion, kind: "another-computer", label, sameName, waits }` or `{ schemaVersion, kind: "no-computer", message, cause? }` or `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "note", message }` or `{ schemaVersion, kind: "relay", generation, hostInstallId, handoverFrom, computers: { kind, installId, label, lastSeenMs, thisComputer }[] }`.
+
+#### `dohc automation use-server`
+
+```sh
+dohc automation use-server [options]
+```
+
+Move this workspace's automations to the server.
+
+Only the owner's own agents can move them, from a synced workspace. While a computer hands over, the server waits for it. If it stays offline, use Take over in Settings › Advanced.
+
+- `--generation <n>`: Required. The generation dohc automation host printed.
+
+With `--json`, prints `{ schemaVersion, ok: true, outcome, generation, handoverFrom }`.
 
 #### `dohc automation switch`
 

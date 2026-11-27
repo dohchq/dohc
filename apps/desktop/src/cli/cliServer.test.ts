@@ -89,6 +89,11 @@ import {
   type CliWorkspaceContext,
 } from "./cliServer";
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
+import {
+  AUTOMATION_SERVER_INSTALL_ID,
+  AUTOMATION_SERVER_OFF,
+  type ScheduleHostResult,
+} from "@dohc/workspace-contracts/relay";
 import { cliMessageId, cliThreadId } from "@dohc/workspace-operations/chats";
 import { openedLocalState } from "../testing/preparedLocalState";
 import {
@@ -2398,6 +2403,230 @@ describe("CLI socket server", () => {
       args: { cwd: workspaceRoot, actor: "human", agentRunId: "run-1" },
     });
     expect(sharePlanReply).toMatchObject({ ok: false });
+  });
+
+  describe("owner workspace setup", () => {
+    const webhook = {
+      webhookId: "whk_aaaaaaaaaaaaaaaaaaaaaaaa",
+      name: "Waitlist",
+      collectionPath: "waitlist",
+      collectionId: "collection-1",
+      paused: false,
+      pauseReason: null,
+      createdAtMs: 1_700_000_000_000,
+      updatedAtMs: 1_700_000_000_000,
+      lastDeliveryAtMs: null,
+      pendingCount: 0,
+      recentDeliveries: [],
+    };
+    const webhookToken = "a".repeat(43);
+    const endpointUrl = `https://relay.test/sync/hooks/${webhookToken}`;
+    const laptop = {
+      installId: "install-laptop",
+      kind: "computer" as const,
+      label: "Laptop",
+      lastSeenMs: 1,
+      thisComputer: true,
+    };
+    const server = {
+      installId: AUTOMATION_SERVER_INSTALL_ID,
+      kind: "server" as const,
+      label: "This server",
+      lastSeenMs: 1,
+      thisComputer: false,
+    };
+    const relayHost = (
+      generation: number,
+      hostInstallId: string,
+      handoverFrom: string | null = null,
+    ): ScheduleHostResult => ({
+      kind: "relay",
+      generation,
+      hostInstallId,
+      handoverFrom,
+      computers: [laptop, server],
+    });
+    let host: ScheduleHostResult;
+    let chosen: ScheduleHostResult;
+    let agentSetup: {
+      [Key in keyof NonNullable<CliServerOptions["agentSetup"]>]: ReturnType<
+        typeof vi.fn<NonNullable<CliServerOptions["agentSetup"]>[Key]>
+      >;
+    };
+
+    beforeEach(() => {
+      host = relayHost(3, "install-laptop");
+      chosen = relayHost(4, AUTOMATION_SERVER_INSTALL_ID);
+      agentSetup = {
+        anyAgentRun: vi.fn(() => false),
+        readHost: vi.fn(async () => host),
+        useServer: vi.fn(async () => chosen),
+        listWebhooks: vi.fn(async () => ({
+          kind: "ready" as const,
+          serverOrigin: "https://relay.test",
+          webhooks: [webhook],
+          limit: 20,
+        })),
+        createWebhook: vi.fn(async () => ({
+          webhook,
+          token: webhookToken,
+          endpointUrl,
+          webhooks: [webhook],
+          limit: 20,
+        })),
+      };
+      serverOptions.agentSetup = agentSetup;
+    });
+
+    const send = (verb: CliVerb, args: Record<string, unknown> = {}) =>
+      rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb,
+        args: { cwd: workspaceRoot, actor: "agent", ...args },
+        ...(callerRunSecret === undefined ? {} : { runSecret: callerRunSecret }),
+      });
+    const useServer = (generation = 3) => send("automationUseServer", { generation });
+    const create = () => send("webhookCreate", { name: "Waitlist", collection: "waitlist" });
+    const refused = (reason: string) => ({ ok: true, result: { ok: false, reason } });
+    const RUN_REFUSAL =
+      "Agent runs can't set up incoming webhooks or the automation host. Finish the active agent run first.";
+
+    it("moves automations to the server and reports each outcome", async () => {
+      expect(await useServer()).toMatchObject({
+        ok: true,
+        result: { ok: true, outcome: "moved", generation: 4, handoverFrom: null },
+      });
+      expect(agentSetup.useServer).toHaveBeenCalledWith(WORKSPACE_ID, 3);
+
+      chosen = relayHost(4, AUTOMATION_SERVER_INSTALL_ID, "install-laptop");
+      expect(await useServer()).toMatchObject({
+        ok: true,
+        result: { ok: true, outcome: "handover-pending", generation: 4, handoverFrom: "Laptop" },
+      });
+
+      agentSetup.useServer.mockClear();
+      host = relayHost(5, AUTOMATION_SERVER_INSTALL_ID);
+      expect(await useServer(5)).toMatchObject({
+        ok: true,
+        result: { ok: true, outcome: "already-server", generation: 5, handoverFrom: null },
+      });
+      expect(agentSetup.useServer).not.toHaveBeenCalled();
+
+      host = relayHost(3, "install-laptop");
+      chosen = relayHost(4, "install-desktop");
+      expect(await useServer()).toMatchObject(
+        refused(
+          "Another computer changed the automation host first. Read it again with dohc automation host.",
+        ),
+      );
+    });
+
+    it("refuses a stale generation, a workspace that never synced, and a signed-out computer", async () => {
+      expect(await useServer(2)).toMatchObject(
+        refused(
+          "The automation host is at generation 3, not 2. Read it again with dohc automation host.",
+        ),
+      );
+      host = { kind: "this-computer" };
+      expect(await useServer()).toMatchObject(
+        refused("Automations move to the server only in a synced workspace. Turn on sync first."),
+      );
+      host = { kind: "note", message: "Sign in to choose where automations run." };
+      expect(await useServer()).toMatchObject(refused("Sign in to choose where automations run."));
+      const serverOff: ScheduleHostResult = {
+        kind: "relay",
+        generation: 3,
+        hostInstallId: AUTOMATION_SERVER_INSTALL_ID,
+        handoverFrom: null,
+        computers: [laptop],
+      };
+      host = serverOff;
+      expect(await useServer()).toMatchObject(refused(AUTOMATION_SERVER_OFF));
+      expect(agentSetup.useServer).not.toHaveBeenCalled();
+      host = relayHost(3, "install-laptop");
+      chosen = { kind: "note", message: "Sign in to choose where automations run." };
+      expect(await useServer()).toMatchObject(refused("Sign in to choose where automations run."));
+    });
+
+    it("returns the new address once, without the token or the other webhooks", async () => {
+      const reply = await create();
+      expect(reply).toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: true,
+        result: { ok: true, webhook, endpointUrl },
+      });
+      expect(agentSetup.createWebhook).toHaveBeenCalledWith(WORKSPACE_ID, {
+        name: "Waitlist",
+        collectionPath: "waitlist",
+      });
+      expect(await send("webhookList")).toMatchObject({
+        ok: true,
+        result: { kind: "ready", webhooks: [webhook] },
+      });
+      expect(await send("automationHost")).toMatchObject({
+        ok: true,
+        result: { kind: "relay", generation: 3 },
+      });
+    });
+
+    it("refuses every dohc agent run, a shared view, and a received share", async () => {
+      const writes = [useServer, create];
+      const reads = () => [send("automationHost"), send("webhookList")];
+      const unreached = () => {
+        const { anyAgentRun: _checked, ...setup } = agentSetup;
+        for (const call of Object.values(setup)) expect(call).not.toHaveBeenCalled();
+      };
+
+      holdRun("active-run", "default");
+      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
+      for (const reply of await Promise.all(reads()))
+        expect(reply).toEqual({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: false,
+          error: `dohc: ${RUN_REFUSAL}`,
+        });
+      dispatchedRun = null;
+      dispatchedRunId = null;
+
+      agentSetup.anyAgentRun.mockReturnValue(true);
+      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
+      for (const reply of await Promise.all(reads()))
+        expect(reply).toMatchObject({ ok: false, error: `dohc: ${RUN_REFUSAL}` });
+      expect(
+        await send("webhookCreate", {
+          agentId: "terminal",
+          name: "Waitlist",
+          collection: "waitlist",
+        }),
+      ).toMatchObject(refused(RUN_REFUSAL));
+      agentSetup.anyAgentRun.mockReturnValue(false);
+      unreached();
+
+      context.readOnly = true;
+      const ownerOnly =
+        "Only the owner's own agents can do this. Run it from your own workspace's folder.";
+      for (const write of writes) expect(await write()).toMatchObject(refused(ownerOnly));
+      for (const reply of await Promise.all(reads()))
+        expect(reply).toMatchObject({ ok: false, error: `dohc: ${ownerOnly}` });
+
+      context.readOnly = false;
+      const inShare = join(workspaceRoot, "shared-with-me", "received");
+      await mkdir(inShare, { recursive: true });
+      for (const [verb, args] of [
+        ["automationHost", {}],
+        ["webhookList", {}],
+        ["automationUseServer", { generation: 3 }],
+        ["webhookCreate", { name: "Waitlist", collection: "waitlist" }],
+      ] as const)
+        expect(await send(verb, { ...args, cwd: inShare }), verb).toEqual({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: false,
+          error:
+            "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.",
+        });
+      unreached();
+    });
   });
 
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {

@@ -595,7 +595,22 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return `Disconnected ${(result as CliResultByVerb["shareDisconnect"]).connectionId}`;
     case "automationList":
     case "automationSwitch":
+    case "automationHost":
+    case "webhookList":
       return JSON.stringify(result, null, 2);
+    case "automationUseServer": {
+      const moved = result as Extract<CliResultByVerb["automationUseServer"], { ok: true }>;
+      if (moved.outcome === "handover-pending")
+        return `The server runs automations once ${lineSafe(moved.handoverFrom ?? "the other computer")} hands them over. If it stays offline, use Take over in Settings › Advanced.`;
+      return moved.outcome === "moved"
+        ? "The server runs this workspace's automations now."
+        : "The server already runs this workspace's automations.";
+    }
+    case "webhookCreate": {
+      const created = result as Extract<CliResultByVerb["webhookCreate"], { ok: true }>;
+      return `Created ${lineSafe(created.webhook.name)} for ${lineSafe(created.webhook.collectionPath)}. Keep this address secret; dohc shows it once:
+${created.endpointUrl}`;
+    }
     case "documentRead": {
       const document = result as CliResultByVerb["documentRead"];
       if (!document.ok) throw new DohcCliError(document.reason);

@@ -273,6 +273,13 @@ function buildCliRequest(
           grantId: command.grantId,
         },
       };
+    case "automationHost":
+    case "webhookList":
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "shareAgents":
       return {
         protocolVersion: common.protocolVersion,
@@ -885,6 +892,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
                   command.verb === "historyUndo" ||
                     command.verb === "accessRefresh" ||
                     command.verb === "undoAgentRun" ||
+                    command.verb === "automationUseServer" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||

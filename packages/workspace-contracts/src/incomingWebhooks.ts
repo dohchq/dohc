@@ -137,6 +137,20 @@ export const IncomingWebhookCreatedResult = z
   .strict();
 export type IncomingWebhookCreatedResult = z.infer<typeof IncomingWebhookCreatedResult>;
 
+export const AgentIncomingWebhookCreateInput = z
+  .object({
+    name: IncomingWebhookName,
+    collection: IncomingWebhookCollectionPath.refine(
+      (path) => /[^\s/\\]/u.test(path),
+      "Choose a Collection folder, not the workspace root.",
+    ),
+  })
+  .strict();
+export const AgentIncomingWebhookCreated = IncomingWebhookCreatedResult.pick({
+  webhook: true,
+  endpointUrl: true,
+});
+
 export const IncomingWebhooksState = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }).strict(),
   z

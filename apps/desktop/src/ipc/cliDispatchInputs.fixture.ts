@@ -105,6 +105,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "access sharing": ["received"],
   "share copy": ["share", "grant"],
   "share agents": ["share", "grant"],
+  "webhook list": [],
   "share disconnect": ["share", "grant", "connection"],
   "members list": [],
   "members invite": ["ana@example.com"],
@@ -170,6 +171,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "version restore": ["Draft"],
   "version resolve": ["conflict", "--keep", "current"],
   "automation list": ["Tasks"],
+  "automation host": [],
   "automation buttons": ["Tasks"],
   "automation switch": ["Tasks", "stamp", "on", "--base", hash, "--submit-id", "switch-1"],
   "automation runs": ["Tasks", "stamp"],
@@ -208,6 +210,8 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "drawing read": ["plan.excalidraw"],
   "drawing create": ["plan.excalidraw", '[{"type":"rectangle","x":0,"y":0}]'],
   "drawing edit": ["plan.excalidraw", '{"update":[{"id":"a","expectedVersion":1,"x":10}]}'],
+  "automation use-server": ["--generation", "3"],
+  "webhook create": ["Waitlist", "--collection", "waitlist"],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>

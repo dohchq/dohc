@@ -154,6 +154,10 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 export const NOTICES_RESULTS: Record<string, CliSocketVerb> = { list: "notices" };
+const WEBHOOK_RESULTS: Record<string, CliSocketVerb> = {
+  list: "webhookList",
+  ...declaredWriteSocketVerbs("webhook"),
+};
 const SHARE_RESULTS: Record<string, CliSocketVerb> = {
   copy: "shareCopy",
   agents: "shareAgents",
@@ -234,6 +238,8 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
   run: "automationRun",
   retry: "automationRetry",
   press: "automationPress",
+  host: "automationHost",
+  ...declaredWriteSocketVerbs("automation"),
 };
 
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
@@ -479,6 +485,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_retry_automation_run: { cli: "automationRetry" },
     dohc_press_button: { cli: "automationPress" },
     dohc_inspect_buttons: { cli: "automationButtons" },
+    dohc_read_automation_host: { cli: "automationHost" },
+    dohc_list_incoming_webhooks: { cli: "webhookList" },
   } as const,
 );
 
@@ -708,6 +716,10 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The workspace Inbox belongs to the owning workspace. Shared profiles do not offer this read.",
   dohc_read_drawing:
     "Only the original workspace opens drawings live. Shared profiles do not offer this read.",
+  dohc_read_automation_host:
+    "Only the owner's own agents set up the workspace. Shared profiles do not offer this read.",
+  dohc_list_incoming_webhooks:
+    "Only the owner's own agents set up the workspace. Shared profiles do not offer this read.",
 };
 
 export const MCP_TOOL_GROUPS: readonly {
@@ -792,7 +804,7 @@ export const MCP_TOOL_GROUPS: readonly {
     id: "automations-and-buttons",
     title: "Automations and Buttons",
     summary:
-      "Inspect Collection automations, toggle them, press Button fields, and check run logs.",
+      "Inspect Collection automations, toggle them, press Button fields, check run logs, move automations to the server, and create incoming webhooks.",
     tools: [
       "dohc_list_automations",
       "dohc_switch_automation",
@@ -801,6 +813,10 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_list_automation_runs",
       "dohc_read_automation_run",
       "dohc_retry_automation_run",
+      "dohc_read_automation_host",
+      "dohc_use_server_for_automations",
+      "dohc_list_incoming_webhooks",
+      "dohc_create_incoming_webhook",
     ],
   },
   {
@@ -1056,15 +1072,17 @@ function verbReturns(command: string, name: string): string {
                               ? NOTICES_RESULTS[name]
                               : command === "share"
                                 ? SHARE_RESULTS[name]
-                                : command === "members"
-                                  ? MEMBERS_RESULTS[name]
-                                  : command === "version"
-                                    ? VERSION_RESULTS[name]
-                                    : command === "account"
-                                      ? ACCOUNT_RESULTS[name]
-                                      : command === "collection"
-                                        ? COLLECTION_RESULTS[name]
-                                        : undefined;
+                                : command === "webhook"
+                                  ? WEBHOOK_RESULTS[name]
+                                  : command === "members"
+                                    ? MEMBERS_RESULTS[name]
+                                    : command === "version"
+                                      ? VERSION_RESULTS[name]
+                                      : command === "account"
+                                        ? ACCOUNT_RESULTS[name]
+                                        : command === "collection"
+                                          ? COLLECTION_RESULTS[name]
+                                          : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -1079,6 +1097,7 @@ function verbReturns(command: string, name: string): string {
           "document",
           "collection",
           "automation",
+          "webhook",
           "sync",
           "account",
         ].includes(command) || branch.properties?.ok?.const !== false,

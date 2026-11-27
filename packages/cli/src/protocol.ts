@@ -24,6 +24,8 @@ import {
   ShareLinkAgentDisconnectInput,
   ShareLinkAgentsInput,
 } from "@dohc/workspace-contracts/share-link-agents";
+import { IncomingWebhooksState } from "@dohc/workspace-contracts/incoming-webhooks";
+import { ScheduleHostResult } from "@dohc/workspace-contracts/relay";
 import {
   AccessAnswer,
   AccessRefreshResult,
@@ -983,6 +985,16 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z
     .object({
       ...requestBase,
+      verb: z.literal("automationHost"),
+      args: z.object(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("webhookList"), args: z.object(argsBase).strict() })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
       verb: z.literal("shareDisconnect"),
       args: ShareLinkAgentDisconnectInput.extend(argsBase).strict(),
     })
@@ -1304,6 +1316,8 @@ export const CLI_CAPABILITIES = distinct(
     link: ["work.reference.make"],
     shareCopy: ["share.copy.read"],
     shareAgents: ["share.link.agents.list"],
+    automationHost: ["automation.host.read"],
+    webhookList: ["workspace.webhooks.list"],
     shareDisconnect: ["share.link.agent.disconnect"],
     members: Object.values(MEMBERS_CAPABILITIES).filter((id) => id !== MEMBERS_CAPABILITIES.leave),
     accountDeletePreview: ["account.delete.preview"],
@@ -2938,6 +2952,8 @@ export const cliResultSchemas = distinct(
       .strict(),
     shareCopy: ShareCopyResult,
     shareAgents: ListRelayShareLinkAgentsResult,
+    automationHost: ScheduleHostResult,
+    webhookList: IncomingWebhooksState,
     shareDisconnect: DisconnectRelayShareLinkAgentResult,
     members: MembersResult,
     accountDeletePreview: ServerAccountDeletionPreview,

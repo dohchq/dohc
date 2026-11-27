@@ -25,6 +25,7 @@ import {
   LinksResolveInput,
 } from "@dohc/workspace-contracts/links";
 import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
+import { AgentIncomingWebhookCreateInput } from "@dohc/workspace-contracts/incoming-webhooks";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
 import {
   DrawingCreateInput,
@@ -234,6 +235,7 @@ type CliCommandBody =
       server?: true;
     }
   | { verb: "automationList"; collectionPath: string }
+  | { verb: "automationHost" | "webhookList" }
   | {
       verb: "automationSwitch";
       collectionPath: string;
@@ -1631,6 +1633,23 @@ const AUTOMATION_VERBS = {
       return { verb: "automationList", collectionPath };
     },
   },
+  host: {
+    capabilityId: "automation.host.read",
+    summary: "Read which computer, or the server, runs this workspace's automations.",
+    operands: "",
+    notes: ["Prints the generation that dohc automation use-server needs."],
+    parse: ({ operands }) => {
+      noExtraArgs(operands, "automation host");
+      return { verb: "automationHost" };
+    },
+  },
+  "use-server": declaredWrite("automationUseServer", (input) => {
+    noExtraArgs(input.operands, "automation use-server");
+    const generation = lastValue(input, "--generation");
+    if (generation === undefined)
+      fail("automation use-server requires --generation <n> from dohc automation host");
+    return { generation: integerFlag(generation, "--generation", { allowZero: true }) };
+  }),
   switch: {
     capabilityId: "automation.switch",
     summary: "Switch one automation on or off in its file.",
@@ -2641,6 +2660,31 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         noExtraArgs(extra, "inbox move");
         const targetFolder = rawFolder === "." ? "" : rawFolder;
         return InboxMoveInput.parse({ item, targetFolder });
+      }),
+    },
+  },
+  webhook: {
+    summary: "List and create incoming webhooks that add records to Collections.",
+    notes: ["Only the owner's own agents can use them, in a synced workspace."],
+    verbs: {
+      list: {
+        capabilityId: "workspace.webhooks.list",
+        summary: "List this workspace's incoming webhooks and their recent deliveries.",
+        operands: "",
+        parse: ({ operands }) => {
+          noExtraArgs(operands, "webhook list");
+          return { verb: "webhookList" };
+        },
+      },
+      create: declaredWrite("webhookCreate", (input) => {
+        const [name, ...extra] = input.operands;
+        noExtraArgs(extra, "webhook create");
+        const collection = lastValue(input, "--collection");
+        if (!name || !collection) fail("webhook create requires a name and --collection <path>");
+        const parsed = AgentIncomingWebhookCreateInput.safeParse({ name, collection });
+        if (!parsed.success)
+          fail(parsed.error.issues[0]?.message ?? "invalid webhook create input");
+        return parsed.data;
       }),
     },
   },

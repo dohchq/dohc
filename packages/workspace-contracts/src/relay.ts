@@ -1,3 +1,4 @@
+import { z } from "zod";
 export interface SyncRelayConnection {
   baseUrl: string;
   token: string;
@@ -803,6 +804,50 @@ export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
 // automations, and refuses it in a computer's check-in, release, or press
 // answer.
 export const AUTOMATION_SERVER_INSTALL_ID = "server";
+export const ScheduleHostComputer = z.object({
+  installId: z.string().min(1).max(256),
+  // "server" for the dohc server, listed first while it runs automations.
+  kind: z.enum(["computer", "server"]),
+  label: z.string().min(1).max(64),
+  lastSeenMs: z.number().int().nonnegative(),
+  thisComputer: z.boolean(),
+});
+export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
+export const ScheduleHostResult = z.discriminatedUnion("kind", [
+  // A workspace that never synced runs its schedules on one computer: this
+  // one, or the one named. `sameName` says it has this computer's name, so
+  // it may be an earlier installation here. `waits` says this computer has
+  // schedules or Group triggers that the other one runs.
+  z.object({ kind: z.literal("this-computer") }),
+  z.object({
+    kind: z.literal("another-computer"),
+    label: z.string().min(1).max(64),
+    sameName: z.boolean(),
+    waits: z.boolean(),
+  }),
+  // dohc cannot read which computer runs a workspace that never synced, so
+  // none does until one takes over. `cause` is the error, for Copy.
+  z.object({
+    kind: z.literal("no-computer"),
+    message: z.string().min(1).max(500),
+    cause: z.string().min(1).max(2000).optional(),
+  }),
+  // A shared view never runs schedules.
+  z.object({ kind: z.literal("none") }),
+  // dohc cannot ask the relay; `message` says what to do.
+  z.object({ kind: z.literal("note"), message: z.string().min(1).max(300) }),
+  z.object({
+    kind: z.literal("relay"),
+    // Rises on every change; choose and take over name the one they read.
+    generation: z.number().int().nonnegative(),
+    hostInstallId: z.string().min(1).max(256).nullable(),
+    // The computer that is handing over, while a handover waits.
+    handoverFrom: z.string().min(1).max(256).nullable(),
+    // Most recently seen first.
+    computers: z.array(ScheduleHostComputer).max(64),
+  }),
+]);
+export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 // The most workspaces one server runs automations for. Past it, a workspace's
 // host stays one of the owner's computers.
 export const AUTOMATION_SERVER_MAX_WORKSPACES = 64;
