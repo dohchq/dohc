@@ -589,31 +589,147 @@ describe("an edit to a note whose body is one sequence", () => {
   });
 
   test.each([
-    ["ends", { find: "\uDE00 now", replacement: "later" }],
-    ["starts", { find: "Smile \uD83D", replacement: "Hi" }],
+    ["starts", { find: "\uDE00 now", replacement: "later" }],
+    ["ends", { find: "Smile \uD83D", replacement: "Hi" }],
   ])("refuses a find that %s inside a character, in either format", (_case, edit) => {
     for (const doc of [sequenceNote("Smile 😀 now"), markdownToYDoc("Smile 😀 now")])
       expect(() => documentEditUpdate(state(doc), edit, open)).toThrow("half of a character");
   });
 
   test("finds the match in a note that holds the letter it probes with", () => {
-    const M = "";
-    const doc = sequenceNote(`${M}${M}x${M}${M}`);
+    const [M, N] = ["\uE000", "\uE001"];
+    const doc = sequenceNote(`${M}${N}x${M}${N}`);
     const letters = () => tokens(doc).filter((token) => token.kind === "letter");
     const before = letters().map((token) => token.id);
     editedNote(doc, { find: `x${M}`, replacement: "" });
     const kept = new Set(letters().map((token) => token.id));
     expect(before.filter((id) => !kept.has(id))).toEqual([before[2], before[3]]);
-    expect(markdownOf(doc)).toBe(`${M}${M}${M}\n`);
+    expect(markdownOf(doc)).toBe(`${M}${N}${N}\n`);
   });
 
   test("refuses an attribute a note can't hold instead of dropping it", () => {
     const doc = sequenceNote("```js\nx\n```");
     expect(() =>
-      documentEditUpdate(state(doc), { find: "js", replacement: "foo bar" }, open),
+      documentEditUpdate(state(doc), { find: "js", replacement: "foo\u2028bar" }, open),
     ).toThrow("a value a note can't hold");
     editedNote(doc, { find: "js", replacement: "foo bar" });
     expect(markdownOf(doc)).toBe("```foo bar\nx\n```\n");
+  });
+
+  test.each([
+    ["an entity", "x a&. y", "a&amp;"],
+    ["a less-than sign", "x a<. y", "a&lt;"],
+  ])("keeps the letter after a match that ends in %s", (_case, markdown, find) => {
+    const doc = sequenceNote(markdown);
+    const dot = () =>
+      tokens(doc).find((token) => token.kind === "letter" && token.text === ".")?.id;
+    const before = dot();
+    expect(() => documentEditUpdate(state(doc), { find, replacement: "a\\" }, open)).toThrow(
+      "outside the text to replace",
+    );
+    const edit = { find, replacement: "b" };
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect(dot()).toBe(before);
+  });
+
+  test("refuses an edit that would retype the formatted letter after its match", () => {
+    const doc = sequenceNote("a **b**");
+    expect(() => documentEditUpdate(state(doc), { find: "a **", replacement: "a" }, open)).toThrow(
+      "outside the text to replace",
+    );
+  });
+
+  test("edits inside inline code as the first format does, or refuses", () => {
+    const markdown = "``a`b``";
+    const edit = { find: "`b", replacement: "`c" };
+    const doc = sequenceNote(markdown);
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    let update: Uint8Array | null;
+    try {
+      update = documentEditUpdate(state(doc), edit, open);
+    } catch (error) {
+      expect((error as Error).message).toContain("outside the text to replace");
+      return;
+    }
+    expect(markdownOf(landed(doc, update))).toBe(expected);
+  });
+
+  test("asks for the link text when an edit changes only a link's address or title", () => {
+    for (const [markdown, find, replacement] of [
+      ["See [docs](https://example.com) here.", "example.com", "dohc.app"],
+      ['See [docs](https://example.com "Guide") here.', "Guide", "Manual"],
+    ]) {
+      const doc = sequenceNote(markdown!);
+      expect(() =>
+        documentEditUpdate(state(doc), { find: find!, replacement: replacement! }, open),
+      ).toThrow("Include the link text");
+    }
+    const doc = sequenceNote("See [docs](https://example.com) here.");
+    editedNote(doc, {
+      find: "[docs](https://example.com)",
+      replacement: "[docs](https://dohc.app)",
+    });
+    expect(markdownOf(doc)).toBe("See [docs](https://dohc.app) here.\n");
+  });
+
+  const TABLE = "| a | b |\n| - | - |\n| c | d |\n| e | f |";
+  test.each([
+    [
+      "inserts a row",
+      { find: "| c   | d   |", replacement: "| c   | d   |\n| x   | y   |" },
+      "abcdef",
+    ],
+    ["replaces a row", { find: "| c   | d   |", replacement: "| x   | y   |" }, "abef"],
+    ["replaces the header row", { find: "| a   | b   |", replacement: "| x   | y   |" }, "cdef"],
+    ["deletes a row", { find: "\n| c   | d   |", replacement: "" }, "abef"],
+  ])("%s of a table and keeps the other rows", (_case, edit, kept) => {
+    const doc = sequenceNote(TABLE);
+    const letter = (text: string) =>
+      tokens(doc).find((token) => token.kind === "letter" && token.text === text)?.id;
+    const before = [...kept].map(letter);
+    expect(before.every((id) => id !== undefined)).toBe(true);
+    const expected = markdownOf(edited(markdownToYDoc(TABLE), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect([...kept].map(letter)).toEqual(before);
+  });
+
+  test.each([
+    [
+      "adds a table column",
+      TABLE,
+      {
+        find: "| a   | b   |\n| --- | --- |",
+        replacement: "| a   | b   | z   |\n| --- | --- | --- |",
+      },
+    ],
+    ["edits parts of two table cells", TABLE, { find: "c   | d", replacement: "x   | y" }],
+    [
+      "lifts a block out of a list item",
+      "- ```\n  code\n  ```",
+      { find: "- \n  ```\n  code\n  ```", replacement: "```\ncode\n```" },
+    ],
+  ])("%s as the first format does, or says what to do instead", (_case, markdown, edit) => {
+    const doc = sequenceNote(markdown);
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    let update: Uint8Array | null;
+    try {
+      update = documentEditUpdate(state(doc), edit, open);
+    } catch (error) {
+      expect((error as Error).message).not.toContain("Read the document again");
+      return;
+    }
+    expect(markdownOf(landed(doc, update))).toBe(expected);
+  });
+
+  test("refuses formatting a note can't hold together, and keeps bold around inline items", () => {
+    const link = "[`npm install`](https://docs.example/install)";
+    expect(() =>
+      documentEditUpdate(state(sequenceNote("Run it.")), { find: "it", replacement: link }, open),
+    ).toThrow("a link on inline code");
+    const edit = { find: "it", replacement: "**[[Wiki]]** and **a  \nb**" };
+    const expected = markdownOf(edited(markdownToYDoc("Run it."), edit, closed));
+    expect(markdownOf(editedNote(sequenceNote("Run it."), edit))).toBe(expected);
   });
 
   test("reads a note in the newer format without declaring the older body", () => {

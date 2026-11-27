@@ -2943,7 +2943,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
       const lost = h.ipc.editDocument(edit({ find: "Before.", replacement: "## Before." }));
       await expect(lost).rejects.toThrow(
-        "its text is in notes/a.md, but a change it made to a block, such as its kind, is not",
+        "some or all of this edit is not in notes/a.md. Read the document again and redo what is missing.",
       );
       await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan Before.\n");

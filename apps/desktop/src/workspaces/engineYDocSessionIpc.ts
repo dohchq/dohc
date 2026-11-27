@@ -1991,7 +1991,7 @@ async function applyDocumentEdit(
   if (!editLanded(provider.doc, update)) {
     throw new LiveDocumentEditAppliedError(
       readsBodySequence(provider.doc)
-        ? `Someone changed the blocks this edit went into at the same moment. All of its text is in ${path}, but a change it made to a block, such as its kind, is not. Read the document again and redo that change.`
+        ? `Someone changed the blocks this edit went into at the same moment, so some or all of this edit is not in ${path}. Read the document again and redo what is missing.`
         : `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
     );
   }

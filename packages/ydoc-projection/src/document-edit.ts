@@ -3,7 +3,7 @@ import { ReplaceAroundStep, ReplaceStep, Transform, type Step } from "@tiptap/pm
 import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
-import { keepsAttrs } from "./bodySequenceGrammar.js";
+import { keepsAttrs, keepsMarkup } from "./bodySequenceGrammar.js";
 import { createBodyReader } from "./bodySequenceReading.js";
 import {
   BODY_CONTAINERS_FIELD,
@@ -58,13 +58,24 @@ export const DOCUMENT_OPEN_REFUSAL =
   "to make this change; or retry after they close the document.";
 
 const UNSAVED = "dohc can't save this edit in a live note, so nothing changed";
-const SHAPE_REFUSAL = `${UNSAVED}: it would nest a block more than 64 deep, or set an attribute to a value a note can't hold.`;
+const SHAPE_REFUSAL = `${UNSAVED}: it would nest a block more than 64 deep, set an attribute to a value a note can't hold, or put formatting together that a note can't hold, such as a link on inline code.`;
+const CHECK_REFUSAL = `${UNSAVED}: the note would be past what a live note's check reads. Ask the person to make this change in dohc.`;
 const HALF_REFUSAL =
   "The edit would leave half of a character, such as half of an emoji: the text to replace " +
   "starts or ends inside one, or the replacement holds half of one. Include whole characters.";
 const OUTSIDE_REFUSAL =
-  "Part of the block around this edit reads back differently from Markdown, such as two " +
-  "paragraphs in one table cell, so nothing changed. Ask the person to make this change in dohc.";
+  "This edit would also change text outside the text to replace, such as formatting that " +
+  "starts or ends inside it, or a block that reads back differently from Markdown, such as two " +
+  "paragraphs in one table cell. Nothing changed. Include that text in the text to replace, or " +
+  "ask the person to make this change in dohc.";
+const MARKS_REFUSAL =
+  "This edit changes the formatting of text outside the text to replace, such as a link's " +
+  "address or title. Nothing changed. Include the link text in the text to replace.";
+const STRUCTURE_REFUSAL =
+  "dohc can't yet write this change to how blocks sit inside each other into a live note, such " +
+  "as adding or removing a table column, editing parts of several table cells at once, or " +
+  "moving a block out of a list item. Nothing changed. Change whole rows or whole blocks " +
+  "instead, or ask the person to make this change in dohc.";
 const UNLIKE_REFUSAL =
   "dohc couldn't write this edit into the note as asked, so nothing changed. Read the " +
   "document again and retry, or ask the person to make this change in dohc.";
@@ -148,9 +159,15 @@ export function documentEditUpdate(
   return withDoc(state, (doc) => {
     if (holdsBodySequence(doc) && !readsBodySequence(doc)) throw new Error(MIXED_REFUSAL);
     const sequence = readsBodySequence(doc) ? doc.getText(BODY_SEQUENCE_FIELD) : null;
-    const containers = doc.getMap(BODY_CONTAINERS_FIELD);
     const writing = sequence
-      ? { sequence, reader: createBodyReader(getDohcProseMirrorSchema(), sequence, containers) }
+      ? {
+          sequence,
+          reader: createBodyReader(
+            getDohcProseMirrorSchema(),
+            sequence,
+            doc.getMap(BODY_CONTAINERS_FIELD),
+          ),
+        }
       : undefined;
     // withDoc deleted the empty shells before the edit starts recording, so
     // the update never carries that.
@@ -238,11 +255,12 @@ function layoutOf(doc: Y.Doc, read?: ProseMirrorNode): Layout {
   });
   const elements = fragment?.toArray() ?? [];
   if (
-    elements.length !== (read ? 0 : blocks.length) ||
-    elements.some(
-      (element, index) =>
-        !(element instanceof Y.XmlElement) || element.nodeName !== blocks[index]!.type.name,
-    )
+    !read &&
+    (elements.length !== blocks.length ||
+      elements.some(
+        (element, index) =>
+          !(element instanceof Y.XmlElement) || element.nodeName !== blocks[index]!.type.name,
+      ))
   ) {
     throw new Error("dohc could not read the blocks of this document.");
   }
@@ -370,7 +388,7 @@ function blockChange(
     blocks.length > 0 ? blocks : [schema.nodes.paragraph!.create()],
   );
   const { writing } = layout;
-  if (writing && !replacement.every(holdsAttrs)) throw new Error(SHAPE_REFUSAL);
+  if (writing && !replacement.every(holdsMarkup)) throw new Error(SHAPE_REFUSAL);
   if (writing) return () => writeSequenceEdit(writing, layout, target, { first, last, start, end });
   const mapping = new Map<Y.XmlElement, ProseMirrorNode>();
   layout.elements.forEach((element, index) => {
@@ -390,13 +408,21 @@ function writeSequenceEdit(
   const target = storedForm(asked);
   const before = unitsOf(layout.root);
   const wanted = unitsOf(target);
-  const kept = middleOf(before, wanted, ...edgesOf(layout, before, match));
-  if (!kept) throw new Error(OUTSIDE_REFUSAL);
-  const transform =
-    stepsTo(layout.root, target, before, wanted, kept, false) ??
-    stepsTo(layout.root, target, before, wanted, kept, true);
-  const how = transform && howToWriteOrWhy(writing, [transform]);
-  if (!how) throw new Error(UNLIKE_REFUSAL);
+  const [from, to] = edgesOf(layout, before, match);
+  const kept = middleOf(before, wanted, from, to);
+  if (!kept)
+    throw new Error(
+      middleOf(before, wanted, from, to, sameLetter) ? MARKS_REFUSAL : OUTSIDE_REFUSAL,
+    );
+  const attempt = (each: Kept) => {
+    const transform =
+      stepsTo(layout.root, target, before, wanted, each, false) ??
+      stepsTo(layout.root, target, before, wanted, each, true);
+    return transform && { transform, kept: each };
+  };
+  const found = attempt(kept) ?? attempt(wholeLines(before, wanted, kept));
+  if (!found) throw new Error(STRUCTURE_REFUSAL);
+  const how = howToWriteOrWhy(writing, [found.transform]);
   if ("refused" in how)
     throw new Error(how.refused === "limit" ? limitRefusal(how.limit) : SHAPE_REFUSAL);
   const doc = writing.sequence.doc!;
@@ -408,19 +434,20 @@ function writeSequenceEdit(
     how.transactions.every((each) => writeTransaction(writing, each)),
   );
   const result = readBodySequence(target.type.schema, doc);
-  if (!wrote || !readsAsAsked(result, target, before, wanted, kept))
+  if (!wrote || !readsAsAsked(result, target, before, wanted, found.kept))
     throw new Error(UNLIKE_REFUSAL);
 }
 
 function refuseWhatTheRoomRefuses(state: Uint8Array, update: Uint8Array): void {
+  const past = sizeLimitPast(update);
+  if (past) throw new Error(limitRefusal(past));
   const copy = new Y.Doc();
   try {
-    declareBodySequence(copy);
     Y.applyUpdate(copy, state);
-    const past = sizeLimitPast(update);
-    if (past) throw new Error(limitRefusal(past));
     const refusal = bodySequenceEditRefusal(copy, update);
-    if (refusal) throw new Error(refusal.limit ? limitRefusal(refusal.limit) : UNLIKE_REFUSAL);
+    if (refusal?.limit) throw new Error(limitRefusal(refusal.limit));
+    if (refusal)
+      throw new Error(refusal.reason === "capacity-refused" ? CHECK_REFUSAL : UNLIKE_REFUSAL);
   } finally {
     copy.destroy();
   }
@@ -475,6 +502,9 @@ function same(one: Unit, other: Unit): boolean {
   return other.letter === undefined && !other.node.isBlock && one.node.eq(other.node);
 }
 
+const sameLetter = (one: Unit, other: Unit) =>
+  one.letter === undefined ? same(one, other) : one.letter === other.letter;
+
 function edgesOf(layout: Layout, units: Unit[], match: Match): [number, number] {
   const base = (block: number) => {
     const at = units.findIndex((unit) => unit.block >= block);
@@ -485,52 +515,58 @@ function edgesOf(layout: Layout, units: Unit[], match: Match): [number, number] 
   while (layout.body.includes(String.fromCharCode(code))) code += 1;
   const marker = String.fromCharCode(code);
   const marked = (unit: Unit, from: number, to: number) => {
-    const text = layout.root.type.schema.text(
-      marker,
-      unit.letter === undefined ? [] : unit.node.marks,
-    );
+    const text = layout.root.type.schema.text(marker, unit.node.isBlock ? [] : unit.node.marks);
     const root = layout.root.replace(from, to, new Slice(Fragment.from(text), 0, 0));
     const markdown = blockMarkdown(root.child(unit.block), unit.block === 0);
     const at = markdown.indexOf(marker);
     if (at < 0 || at !== markdown.lastIndexOf(marker)) throw new Error(OUTSIDE_REFUSAL);
     return layout.chunks[unit.block]!.start + at;
   };
-  const gap = (at: number): number => {
-    const unit = units[at - 1]!;
-    const next = units[at]?.block === unit.block ? units[at] : undefined;
-    if (unit.letter !== undefined) return marked(unit, unit.pos, unit.pos + 1) + 1;
-    if (next?.letter !== undefined) return marked(next, next.pos, next.pos + 1);
-    if (!unit.node.isBlock || unit.node.isTextblock) return marked(unit, after(unit), after(unit));
-    return next ? gap(at + 1) : layout.chunks[unit.block]!.end;
+  const leafBlock = (at: number) => units[at]!.node.isBlock && !units[at]!.node.isTextblock;
+  const inBlock = (at: number, block: number) => units[at]?.block === block;
+  const startOf = (at: number): number => {
+    const unit = units[at]!;
+    if (unit.letter !== undefined) return marked(unit, unit.pos, unit.pos + 1);
+    if (!unit.node.isBlock) return marked(unit, unit.pos, unit.pos);
+    if (unit.node.isTextblock) return marked(unit, unit.pos + 1, unit.pos + 1);
+    if (inBlock(at - 1, unit.block) && !leafBlock(at - 1)) return endOf(at - 1);
+    return layout.chunks[unit.block]!.start;
   };
-  const firstPast = (block: number, past: (offset: number) => boolean) => {
-    const start = base(block);
-    let low = 0;
-    let high = base(block + 1) - start + 1;
+  const endOf = (at: number): number => {
+    const unit = units[at]!;
+    if (unit.letter !== undefined) return startOf(at) + 1;
+    if (!leafBlock(at)) return marked(unit, after(unit), after(unit));
+    return inBlock(at + 1, unit.block) ? startOf(at + 1) : layout.chunks[unit.block]!.end;
+  };
+  const firstIn = (block: number, test: (at: number) => boolean) => {
+    let [low, high] = [base(block), base(block + 1)];
     while (low < high) {
       const middle = (low + high) >> 1;
-      if (past(middle === 0 ? layout.chunks[block]!.start - 1 : gap(start + middle))) high = middle;
+      if (test(middle)) high = middle;
       else low = middle + 1;
     }
-    return start + low;
+    return low;
   };
   return [
-    firstPast(match.first, (offset) => offset > match.start) - 1,
-    Math.min(
-      firstPast(match.last, (offset) => offset >= match.end),
-      base(match.last + 1),
-    ),
+    firstIn(match.first, (at) => endOf(at) > match.start),
+    firstIn(match.last, (at) => startOf(at) >= match.end),
   ];
 }
 
-function middleOf(before: Unit[], wanted: Unit[], from: number, to: number): Kept | null {
+function middleOf(
+  before: Unit[],
+  wanted: Unit[],
+  from: number,
+  to: number,
+  alike = same,
+): Kept | null {
   const [n, m] = [before.length, wanted.length];
   const least = Math.min(n, m);
   let p = 0;
-  while (p < least && same(before[p]!, wanted[p]!)) p += 1;
+  while (p < least && alike(before[p]!, wanted[p]!)) p += 1;
   if (p > 0 && /[\uD800-\uDBFF]/u.test(before[p - 1]!.letter ?? "")) p -= 1;
   let s = 0;
-  while (s < least && same(before[n - 1 - s]!, wanted[m - 1 - s]!)) s += 1;
+  while (s < least && alike(before[n - 1 - s]!, wanted[m - 1 - s]!)) s += 1;
   if (s > 0 && /[\uDC00-\uDFFF]/u.test(before[n - s]!.letter ?? "")) s -= 1;
   const keep = from > 0 && before[from - 1]!.node.isBlock ? from - 1 : from;
   if (p < keep || s < n - to || m < keep + n - to) return null;
@@ -539,7 +575,7 @@ function middleOf(before: Unit[], wanted: Unit[], from: number, to: number): Kep
   if (p + s === least && n !== m) {
     const [long, size] = n > m ? [before, n] : [wanted, m];
     let most = 0;
-    while (most < p - keep && same(long[p - 1 - most]!, long[size - s - 1 - most]!)) most += 1;
+    while (most < p - keep && alike(long[p - 1 - most]!, long[size - s - 1 - most]!)) most += 1;
     for (let slid = 0; slid <= most; slid++)
       if (isLine(long, p - slid) && isLine(long, size - s - slid))
         return { p: p - slid, s: s + slid };
@@ -547,21 +583,36 @@ function middleOf(before: Unit[], wanted: Unit[], from: number, to: number): Kep
   return { p, s };
 }
 
+function wholeLines(before: Unit[], wanted: Unit[], { p, s }: Kept): Kept {
+  const [n, m] = [before.length, wanted.length];
+  while (p > 0 && !(isLine(before, p) && isLine(wanted, p))) p -= 1;
+  while (s > 0 && !(isLine(before, n - s) && isLine(wanted, m - s))) s -= 1;
+  return { p, s };
+}
+
 const tried = (transform: Transform, step: Step) =>
   unlessRangeError(() => !transform.maybeStep(step).failed, false);
 
-function linesOf(root: ProseMirrorNode): ProseMirrorNode[] {
-  const lines: ProseMirrorNode[] = [];
-  root.descendants((node) => {
-    if (node.isBlock && (node.isTextblock || node.isLeaf)) lines.push(node);
+function eachLine(root: ProseMirrorNode, visit: (line: ProseMirrorNode, pos: number) => void) {
+  root.descendants((node, pos) => {
+    if (node.isBlock && (node.isTextblock || node.isLeaf)) visit(node, pos);
     return !node.isTextblock;
   });
+}
+
+function linesOf(root: ProseMirrorNode): ProseMirrorNode[] {
+  const lines: ProseMirrorNode[] = [];
+  eachLine(root, (line) => lines.push(line));
   return lines;
 }
 
-const holdsAttrs = (node: ProseMirrorNode): boolean =>
-  [node, ...node.marks].every((each) => keepsAttrs(each.type, each.attrs)) &&
-  node.children.every(holdsAttrs);
+const holdsMarkup = (node: ProseMirrorNode): boolean =>
+  (node.isText
+    ? keepsMarkup(node)
+    : [node, ...node.marks].every((each) => keepsAttrs(each.type, each.attrs))) &&
+  node.children.every(holdsMarkup);
+
+const TABLE_PARTS = new Set(["row", "cell", "header_cell"]);
 
 function withLines(node: ProseMirrorNode, lines: ProseMirrorNode[], at = { next: 0 }) {
   if (node.isTextblock || node.isLeaf) return lines[at.next++]!;
@@ -590,8 +641,20 @@ function stepsTo(
   const [n, m] = [before.length, wanted.length];
   const whole =
     isLine(before, p) && isLine(wanted, p) && isLine(before, n - s) && isLine(wanted, m - s);
+  const lifted = (doc: ProseMirrorNode, pos: number) => {
+    const $pos = doc.resolve(pos);
+    for (let depth = $pos.depth; depth > 0 && pos === $pos.start(depth); depth--) {
+      if (!TABLE_PARTS.has($pos.node(depth).type.spec.tableRole)) break;
+      pos = $pos.before(depth);
+    }
+    return pos;
+  };
   const at = (units: Unit[], doc: ProseMirrorNode, gap: number) =>
-    whole ? (units[gap]?.pos ?? doc.content.size) : gap === 0 ? 0 : after(units[gap - 1]!);
+    whole
+      ? lifted(doc, units[gap]?.pos ?? doc.content.size)
+      : gap === 0
+        ? 0
+        : after(units[gap - 1]!);
   const lines = linesOf(target);
   const kind = (node: ProseMirrorNode, pos: number, want: ProseMirrorNode | undefined) => {
     if (!want || node.isLeaf || node.sameMarkup(want) || !want.type.validContent(node.content))
@@ -603,10 +666,10 @@ function stepsTo(
       new ReplaceAroundStep(pos, end, pos + 1, end - 1, new Slice(wrap, 0, 0), 1, true),
     );
   };
-  const kinds = () =>
-    unitsOf(transform.doc)
-      .filter((unit) => unit.node.isBlock)
-      .forEach(({ node, pos }, index) => kind(node, pos, lines[index]));
+  const kinds = () => {
+    let index = 0;
+    eachLine(transform.doc, (line, pos) => kind(line, pos, lines[index++]));
+  };
   if (early) {
     const shift = lines.length - linesOf(root).length;
     let line = 0;
@@ -635,6 +698,9 @@ function stepsTo(
   return transform;
 }
 
+const unmarked = (node: ProseMirrorNode) =>
+  Fragment.fromArray(node.children.map((child) => (child.isText ? child.mark([]) : child)));
+
 function readsAsAsked(
   result: ProseMirrorNode,
   target: ProseMirrorNode,
@@ -653,7 +719,7 @@ function readsAsAsked(
     .map((at) => at >= 0 && before[at]!.node.type.spec.code === true);
   const expected = lines.map((line, index) => {
     const read = shown[index]!;
-    const kept = wasCode[index] && read.sameMarkup(line) && read.textContent === line.textContent;
+    const kept = wasCode[index] && read.sameMarkup(line) && unmarked(read).eq(unmarked(line));
     return kept ? read : line;
   });
   return unlessRangeError(() => result.eq(withLines(target, expected)), false);
