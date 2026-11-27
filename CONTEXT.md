@@ -1,10 +1,14 @@
 # dohc
 
-dohc is a local-first workspace and runtime where people and their agents build, run, share, and manage small apps alongside their files, documents, data, and chat. This glossary is the canonical vocabulary; check new names against it before defining them.
+dohc is a local-first desktop app and runtime for small apps. This glossary is the canonical vocabulary; check new names against it before defining them.
 
 ## Language
 
 ### Offering
+
+**Workspace**:
+One folder on disk that dohc opens and manages. Files, pages, Collections, chats, apps, shares, and history belong to one workspace.
+_Avoid_: calling dohc itself a workspace. Keep "app runtime" for the isolated environment where app code runs, not for dohc as a whole.
 
 **dohc Drive**:
 The optional managed service for dohc sync and sharing. dohc operates the services while users retain ownership of their work.
