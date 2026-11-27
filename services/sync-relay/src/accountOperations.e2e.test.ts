@@ -1065,14 +1065,14 @@ it.skipIf(engine.missing)(
         )
       ).wakes,
     ).toEqual([]);
-    expect(
-      storage.phoneChatWakes({
-        accountId: "owner",
-        workspaceId: WORKSPACE,
-        messages: new Map([[posted.messageId, posted.threadId]]),
-        nowMs: Date.now(),
-      }),
-    ).toMatchObject([{ state: "waiting", winnerLabel: null, agentName: "Claude" }]);
+    expect(await route("chatContext", { group: planning.channelId })).toMatchObject({
+      mentions: expect.arrayContaining([
+        { kind: "agent", handle: "Claude", label: "Claude", computers: ["Laptop"] },
+      ]),
+      wakes: [
+        { messageId: posted.messageId, state: "waiting", winnerLabel: null, agentName: "Claude" },
+      ],
+    });
 
     // The laptop comes online and takes it.
     const laptop = wakeConsumer({
