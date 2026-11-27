@@ -9874,7 +9874,12 @@ fn refuse_ydoc_with_reason(
     faults: &dyn FaultInjector,
     reason: String,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    if crate::kept_replay::replaying_now() {
+    if crate::kept_replay::replaying_now()
+        || store.read_with(|conn| {
+            let hosted = crate::hosted::is_hosted(conn, &envelope.workspace_id)?;
+            crate::kept_replay::kept_candidate(conn, envelope, hosted)
+        })?
+    {
         return crate::apply_envelope_with(store, envelope, faults, move |_tx, _op| {
             Err(SyncError::BaseRefused { reason })
         });

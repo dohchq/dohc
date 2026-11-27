@@ -29,6 +29,11 @@ const CANDIDATE: &str = "k.reason='ydoc-note-uses-a-newer-body-format' AND k.rep
        (SELECT replication_epoch FROM sync_identity s WHERE s.workspace_id=k.workspace_id) \
      AND k.stream_identity IS \
        (SELECT stream_identity FROM sync_identity s WHERE s.workspace_id=k.workspace_id)";
+const REPIN: &str = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
+     replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
+     AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
+     AND r.origin_seq=k.origin_seq AND r.reason_message<>'markdown-write-held' \
+     AND k.rowid IN";
 const AT: &str = "k.workspace_id=?1 AND k.origin_id=?2 AND k.origin_seq=?3";
 
 pub(crate) fn replaying<R>(run: impl FnOnce() -> R) -> R {
@@ -112,26 +117,57 @@ pub(crate) fn mark_replayed_in_tx(
     Ok(())
 }
 
+fn document_rows() -> String {
+    format!("{KEPT_ROWS} WHERE k.workspace_id=?1 AND json_extract({CLAIM_OF},'$[2]')=?2")
+}
+
+fn retry_from(
+    conn: &Connection,
+    workspace: &str,
+    object: &str,
+    upto: i64,
+) -> Result<Option<i64>, SyncError> {
+    let document = document_rows();
+    conn.query_row(
+        &format!(
+            "WITH r AS (SELECT k.relay_seq AS seq, k.replayed, k.update_sha256 AS sha, \
+               k.replication_epoch AS epoch, k.stream_identity AS stream, \
+               {CLAIM_OF} AS claim, ({CANDIDATE}) AS candidate {document}) \
+             SELECT MIN(e.seq)-1 FROM r e WHERE e.candidate AND e.seq<=?3 \
+             AND EXISTS(SELECT 1 FROM r b WHERE b.replayed=1 AND b.claim=e.claim \
+               AND b.sha=json_extract(e.claim,'$[3]') \
+               AND b.epoch IS e.epoch AND b.stream IS e.stream)"
+        ),
+        rusqlite::params![workspace, object, upto],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+pub(crate) fn rewinds_before(
+    conn: &Connection,
+    op: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    let (Some(object), Some(seq)) = (crate::hosted::hosted_document(op), op.relay_seq) else {
+        return Ok(false);
+    };
+    let reading = REPLAYING.get() || dohc_engine_collab::ydoc::reads_body_sequence();
+    Ok(reading && retry_from(conn, &op.workspace_id, object, seq - 1)?.is_some())
+}
+
 pub(crate) fn hosted_retry_in_tx(
     tx: &Transaction<'_>,
     workspace: &str,
     object: &str,
     cursor: i64,
 ) -> Result<Option<i64>, SyncError> {
-    let document =
-        format!("{KEPT_ROWS} WHERE k.workspace_id=?1 AND json_extract({CLAIM_OF},'$[2]')=?2");
-    let retry = tx
-        .query_row(
-            &format!(
-                "SELECT MIN(k.relay_seq)-1 {document} AND k.relay_seq<=?3 AND {CANDIDATE} \
-                 AND EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs b \
-                   WHERE b.workspace_id=k.workspace_id AND b.replayed=1 \
-                   AND b.update_sha256=json_extract({CLAIM_OF},'$[3]'))"
-            ),
-            rusqlite::params![workspace, object, cursor],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
+    let document = document_rows();
+    tx.execute(
+        &format!("{REPIN} (SELECT k.rowid {document})"),
+        [workspace, object],
+    )
+    .map_err(SyncError::persist)?;
+    let retry = retry_from(tx, workspace, object, cursor)?;
     tx.execute(
         &format!(
             "DELETE FROM replication_refused_ydoc_blobs WHERE rowid IN \
@@ -270,11 +306,7 @@ fn finish_note(
         serde_json::from_str(&claims[0].0).map_err(SyncError::corrupt)?;
     let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
     crate::ydoc_apply::drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
-    let refused = "UPDATE replication_refused_ydoc_blobs AS k SET reason=r.reason_message, \
-         replayed=0 FROM replication_pending_refusals r WHERE k.replayed=1 \
-         AND r.workspace_id=k.workspace_id AND r.origin_id=k.origin_id \
-         AND r.origin_seq=k.origin_seq AND r.reason_message<>'markdown-write-held' \
-         AND k.rowid IN (SELECT value FROM json_each(?1))";
+    let refused = format!("{REPIN} (SELECT value FROM json_each(?1))");
     let note = claims
         .iter()
         .flat_map(|(_, _, kept)| kept.iter().map(|(rowid, _)| rowid))
@@ -287,7 +319,7 @@ fn finish_note(
            WHERE k.rowid IN (SELECT value FROM json_each(?1)) AND {UNREPLAYED})"
     );
     match store.write_with(faults, |tx| -> Result<(), SyncError> {
-        tx.execute(refused, [&note]).map_err(SyncError::persist)?;
+        tx.execute(&refused, [&note]).map_err(SyncError::persist)?;
         for kept in finished {
             let rowids = kept.iter().map(|(rowid, _)| rowid).collect::<Vec<_>>();
             let rowids = serde_json::to_string(&rowids).map_err(SyncError::corrupt)?;

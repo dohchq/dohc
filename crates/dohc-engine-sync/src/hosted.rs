@@ -60,6 +60,8 @@ pub(crate) const BACKFILL_PATH_HELD: &str = "hosted-backfill-path-held";
 /// that one moves.
 pub(crate) const PATH_HELD_IN_SCOPE: &str = "hosted-path-held-in-scope";
 
+pub(crate) const KEPT_EDIT_REWINDS: &str = "hosted-kept-edit-rewinds";
+
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
@@ -483,6 +485,9 @@ pub(crate) fn held_before_routing(
     if journaled && !crate::kept_replay::kept_candidate(conn, op, true)? {
         return Ok(None);
     }
+    if crate::kept_replay::rewinds_before(conn, op)? {
+        return Ok(Some(KEPT_EDIT_REWINDS));
+    }
     if let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id))
         && let Some(hold) =
             park::parked_hold(&mut Occupancy::new(conn, &op.workspace_id), object_id)?
@@ -524,9 +529,21 @@ pub(crate) fn backfill_path_held(
     let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id)) else {
         return Ok(None);
     };
-    let Some((path, version_id)) = claimed_path(op) else {
+    let Some((claimed, version_id)) = claimed_path(op) else {
         return Ok(None);
     };
+    let current: Option<String> = if crate::kept_replay::kept_candidate(conn, op, true)? {
+        conn.query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![op.workspace_id, version_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+    } else {
+        None
+    };
+    let path = current.as_deref().unwrap_or(claimed);
     let held_by: Option<String> = conn
         .query_row(
             "SELECT o.object_id FROM hosted_documents o JOIN hosted_replicas h \
