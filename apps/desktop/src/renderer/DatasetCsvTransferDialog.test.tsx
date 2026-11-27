@@ -87,6 +87,8 @@ describe("DatasetCsvTransferDialog", () => {
     ["a differently cased Name", "amount,name\n3,Hotel", [id(4), id(3)]],
     ["a real Name column", "Item,Name,Amount\nHotel,Tokyo,3", ["", id(3), id(4)]],
     ["a first number column", "Cost,Where\n3,Hotel", ["", ""]],
+    ["a first exponent column", "Cost,Amount\n1e3,3", ["", id(4)]],
+    ["a numbered title header", "Item,Amount\n123,3", ["", id(4)]],
   ])("maps the Collection's first text field from %s", (_label, text, fields) => {
     setup();
     fireEvent.change(screen.getByLabelText("CSV text"), { target: { value: text } });
