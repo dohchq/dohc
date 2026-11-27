@@ -3522,7 +3522,8 @@ pub fn current_ydoc_content_matches_in_tx(
     let (settled, pruned_to_marker): (bool, bool) = tx
         .query_row(
             "SELECT settled_update_seq IS head_update_seq AND settle_prior_update_seq IS NULL, \
-             settled_update_seq IS NULL AND head_update_seq=0 AND head_snapshot_seq=0 \
+             settled_update_seq IS NULL AND settle_prior_update_seq IS NULL \
+             AND head_update_seq=0 AND head_snapshot_seq=0 \
              AND NOT EXISTS (SELECT 1 FROM ydoc_updates u WHERE u.workspace_id=d.workspace_id \
                AND u.version_id=d.version_id AND u.object_id=d.object_id) \
              AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=d.workspace_id \
