@@ -173,6 +173,7 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
       if (!before || !after) return [0, 0] as const;
       const change = (key: "x" | "y" | "width" | "height") =>
         numberOr(after[key]) - numberOr(before[key]);
+      if (numberOr(arrow.angle) !== 0) return [change("x"), change("y")] as const;
       const grow = (size: "width" | "height") => {
         const span = numberOr(before[size]) + 2 * numberOr(binding?.gap);
         return span > 0 ? change(size) / span : 0;

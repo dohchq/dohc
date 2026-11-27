@@ -217,6 +217,42 @@ describe("planDrawingEdit", () => {
     expect(live(doc).find((element) => element.id === "go")).toMatchObject({ x: 1020, y: 50 });
   });
 
+  it("leaves a rotated arrow where it was when its shape grows away from it", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 100, height: 100 },
+        {
+          id: "go",
+          type: "arrow",
+          x: -4,
+          y: 50,
+          start: "a",
+          points: [
+            [0, 0],
+            [-100, 0],
+          ],
+        },
+      ],
+    });
+    const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+    insertElementRevision(doc, {
+      ...go,
+      version: 2,
+      x: -54,
+      y: 0,
+      angle: Math.PI / 2,
+      points: [
+        [0, 0],
+        [0, 100],
+      ],
+      width: 0,
+      height: 100,
+    });
+    const written = apply(doc, { update: [{ id: "a", expectedVersion: 1, width: 200 }] });
+    expect(written.map(({ id }) => id)).toEqual(["a"]);
+  });
+
   it("edits around an arrow with no points", () => {
     const doc = new Y.Doc();
     apply(doc, { add: [{ id: "a", type: "rectangle", x: 0, y: 0 }] });
