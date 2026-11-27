@@ -934,6 +934,27 @@ describe("ChatsView Group access marks", () => {
     await waitFor(() => expect(screen.queryByTestId("chats-group-settings-dialog")).toBeNull());
   });
 
+  it("offers only Close in Group settings when the workspace never synced", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'desktop:workspace-members': Error [workspace-not-synced]: Sync this workspace before sharing.",
+      ),
+    );
+    renderView(vi.fn(), vi.fn());
+    const row = (await screen.findAllByTestId("chats-channel")).find(
+      (entry) => entry.textContent === "Open",
+    )!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+    await user.click(await screen.findByTestId("chat-row-menu-group-settings"));
+    const dialog = await screen.findByTestId("chats-group-settings-dialog");
+    await waitFor(() => expect(dialog.textContent).toContain("Only you are in this workspace."));
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.queryByTestId("chats-group-settings-save")).toBeNull();
+    expect(dialog.textContent).not.toContain("Try again");
+  });
+
   // The page tells the shell, and the shell tells the navigator.
   it("reads the rules again when another Chats changes one", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });

@@ -1592,8 +1592,17 @@ export function ChatsView(props: {
   // Until someone else is in the workspace or can join it, a Group with no rule hides nothing.
   const loadGroupAccess = useCallback(
     async (wireId: string): Promise<GroupAccess> => {
-      const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
-      return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-members";
+      try {
+        const result = await bridge().workspaceMembers({
+          workspaceId,
+          request: { action: "list" },
+        });
+        return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-members";
+      } catch (cause) {
+        // A workspace that never synced has no rules to set. Any other failure offers Try again.
+        if (refusalCode(cause) === WORKSPACE_NOT_SYNCED) return "no-members";
+        throw cause;
+      }
     },
     [workspaceId],
   );
@@ -5035,7 +5044,8 @@ export function ChatsView(props: {
                 !inJoinedWorkspace && channelShares !== null && joined === null && !!channel.wireId,
               canLeave: joined !== null,
               hasSettings: groupSettingsWireId(channel) !== null,
-              hasFolder: !!channel.folderPath,
+              // A shared Group's folder path is its owner's, not this computer's.
+              hasFolder: joined === null && !!channel.folderPath,
             },
           })}
           trailing={
