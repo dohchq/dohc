@@ -8846,7 +8846,10 @@ fn journal_decision_set(
         if !options.is_empty() {
             payload["options"] = serde_json::json!(options);
         }
-        if !option_details.is_empty() {
+        // Only opening a poll sends its explanations. An answer sends this
+        // engine's copy, which a share link served with withheld links
+        // rewritten, and peers keep the explanations they already have.
+        if state == ChatDecisionState::Open && !option_details.is_empty() {
             payload["optionDetails"] = serde_json::json!(option_details);
         }
         if let Some(chosen) = chosen_option {

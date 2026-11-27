@@ -447,10 +447,16 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
         serde_json::json!(["7am direct", "2pm with a stop"])
     );
     assert_eq!(last["chosenOption"], "7am direct");
+    // Only the poll's author sends its explanations. An answer from a share
+    // member would carry the member's copy, with withheld links rewritten.
+    let first: serde_json::Value =
+        serde_json::from_str(payloads.first().expect("one")).expect("json");
+    assert_eq!(first["state"], "open");
     assert_eq!(
-        last["optionDetails"],
+        first["optionDetails"],
         serde_json::json!(["Lands by noon", null])
     );
+    assert!(last.get("optionDetails").is_none());
 }
 
 #[test]
