@@ -50,6 +50,7 @@ import {
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import type { LiveRooms } from "./liveRoom";
 import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
+import { createLiveNoteRoutes } from "./liveNoteRoutes";
 import { randomUUID } from "node:crypto";
 import {
   createNamedLiveBrowserHttp,
@@ -1431,6 +1432,7 @@ export function createSyncRelayHandler({
 
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
   const respondToLivePauses = createLiveRoomPauseRoutes(storage);
+  const respondToLiveNotes = createLiveNoteRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,
@@ -1890,7 +1892,7 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToHeldDocuments(request, route, actor.userId);
       }
-      if (route.route === "live-pauses") {
+      if (route.route === "live-pauses" || route.route === "live-notes") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
@@ -1903,7 +1905,9 @@ export function createSyncRelayHandler({
           route.workspaceId,
         );
         if (actor.workspaceId !== route.workspaceId) throw notFound();
-        return await respondToLivePauses(request, route, actor.userId);
+        return route.route === "live-notes"
+          ? respondToLiveNotes(request, route, actor.userId)
+          : await respondToLivePauses(request, route, actor.userId);
       }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.

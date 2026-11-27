@@ -1632,14 +1632,58 @@ function registerValidatedBaseline(
   });
 }
 
+const lineageEndings = (oneObject: boolean) => {
+  const object = oneObject ? " AND object_id=?" : "";
+  return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
+    UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${object}
+    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${object}
+    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND state<>'starting'`;
+};
+
+export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
+export type RelayLiveNote = { objectId: string; path: string | null; kinds: RelayLiveNoteKind[] };
+
+export function relayLiveNotes(storage: StorageContext, workspaceId: string): RelayLiveNote[] {
+  const rows = storage.readTx(() =>
+    storage.db
+      .prepare(`SELECT DISTINCT e.object_id,e.kind,(SELECT d.current_path FROM sync_relay_live_documents d
+          WHERE d.workspace_id=? AND d.main_version_id='main' AND d.object_id=e.object_id
+          ORDER BY d.lineage_state='current' DESC,d.registered_at_ms DESC LIMIT 1) AS path
+        FROM (${lineageEndings(false)}
+          UNION ALL SELECT 'session',object_id FROM sync_relay_live_documents
+          WHERE workspace_id=? AND main_version_id='main' AND lineage_state='current' AND admission_state='open') e
+        ORDER BY e.object_id,e.kind`)
+      .all(
+        workspaceId,
+        workspaceId,
+        "main",
+        workspaceId,
+        "main",
+        workspaceId,
+        "main",
+        workspaceId,
+        workspaceId,
+      ),
+  );
+  const notes = new Map<string, RelayLiveNote>();
+  for (const row of rows) {
+    const objectId = String(row.object_id);
+    const note = notes.get(objectId) ?? {
+      objectId,
+      path: row.path === null ? null : String(row.path),
+      kinds: [],
+    };
+    note.kinds.push(row.kind as RelayLiveNoteKind);
+    notes.set(objectId, note);
+  }
+  return [...notes.values()];
+}
+
 function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
   return (
     storage.db
-      .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
-        UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
-        UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=? AND object_id=?
-        UNION ALL SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND state<>'starting' LIMIT 1`)
+      .prepare(`${lineageEndings(true)} LIMIT 1`)
       .get(
         workspaceId,
         mainVersionId,

@@ -42,6 +42,7 @@ const ENGINE_PATHS = [
   `/sync/shares/share-a/blobs/${SHA}`,
   "/sync/shares/share-a/proposals",
   "/sync/shares/share-a/collection-writes",
+  "/sync/ws-a/live-notes",
 ];
 
 describe("relay API version", () => {
