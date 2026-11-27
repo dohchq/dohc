@@ -899,7 +899,8 @@ describe("History timeline sources", () => {
       ],
     });
 
-    expect(screen.queryByTestId("engine-moment-run")).toBeNull();
+    const later = screen.getByTestId("engine-moment-run");
+    expect(within(later).getByTestId("engine-moment-run-toggle").textContent).toBe("1 change");
     const toggle = screen.getByTestId("engine-moment-group-toggle");
     expect(toggle.textContent).toContain("Rover");
     expect(toggle.textContent).toContain("Agent run");
@@ -908,6 +909,9 @@ describe("History timeline sources", () => {
     fireEvent.click(toggle);
     fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
     expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+    fireEvent.click(within(later).getByTestId("engine-moment-run-toggle"));
+    fireEvent.click(within(later).getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenLastCalledWith("run-2", "Rover");
   });
 
   it("shows Agent run and keeps Undo run on correlated multi-file captures from one run, and separates distinct runs sharing a correlationId", () => {
@@ -951,6 +955,66 @@ describe("History timeline sources", () => {
     fireEvent.click(toggle);
     fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
     expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("offers Undo run on an agent run that made one change, keeping the change's own row", () => {
+    const onUndoAgentRun = vi.fn();
+    const calls = view({
+      onUndoAgentRun,
+      entries: [
+        file("m-1", {
+          path: "drawings/plan.excalidraw",
+          summary: "Edited drawings/plan.excalidraw",
+          agentAuthorName: "Rover",
+          authors: [{ kind: "agent", agentId: "rover", onBehalfOf: "user-1", agentRunId: "run-1" }],
+        }),
+      ],
+    });
+    const run = screen.getByTestId("engine-moment-run");
+    expect(within(run).getByTestId("engine-moment-summary").textContent).toContain("Edited");
+    const toggle = within(run).getByTestId("engine-moment-run-toggle");
+    expect(toggle.textContent).toBe("1 change");
+    expect(toggle.getAttribute("aria-label")).toBe("1 change");
+    expect(screen.queryByTestId("engine-moment-undo-run")).toBeNull();
+
+    fireEvent.click(within(run).getByTestId("engine-moment-open"));
+    expect(calls.open).toHaveBeenCalledWith("m-1", "drawings/plan.excalidraw");
+
+    fireEvent.click(toggle);
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+    const undo = screen.getByTestId("engine-moment-undo-run");
+    expect(undo.textContent).toContain("Undo run…");
+    fireEvent.click(undo);
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("keeps one change a plain row when it has no run or nothing can undo it", () => {
+    const author = { kind: "agent" as const, agentId: "rover", onBehalfOf: "user-1" };
+    view({
+      onUndoAgentRun: vi.fn(),
+      entries: [
+        file("m-2", { path: "notes/a.md", agentAuthorName: "Rover", authors: [author] }),
+        file("m-1", {
+          path: "notes/b.md",
+          origin: "restore",
+          recordedAtMs: DAY - 60_000,
+          authors: [{ ...author, agentRunId: "run-1" }],
+        }),
+      ],
+    });
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(2);
+    expect(screen.queryByTestId("engine-moment-run-toggle")).toBeNull();
+    cleanup();
+    view({
+      entries: [
+        file("m-1", {
+          agentAuthorName: "Rover",
+          authors: [{ ...author, agentRunId: "run-1" }],
+        }),
+      ],
+    });
+    expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
+    expect(screen.queryByTestId("engine-moment-run-toggle")).toBeNull();
   });
 
   it("labels a single-file agent-run undo as Undid agent run", () => {
