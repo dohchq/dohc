@@ -1267,3 +1267,135 @@ fn a_claim_whose_path_is_taken_waits_and_the_notes_other_claim_replays() {
         all(NEWER_BODY_FORMAT, "peer-a", &[0, 1, 2])
     );
 }
+
+fn end_a_live_session_on_another_lineage(engine: &mut EngineStore) {
+    let lineage = engine
+        .put_binary_blob(b"a lineage an ended live session wrote")
+        .expect("lineage blob");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,5,'ended')",
+                [dohc_engine_storage::hex_sha256(b"ended")],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,\
+                   source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
+                   released_at_ms,released_restore_generation,released_accepted_cursor,\
+                   released_boundary_json,carried_manifest_json) \
+                 VALUES ('relay','ended','ws','main','object-two',?1,'{}','moment-ended',?2,5,\
+                   '{}',1,0,1,'null','[]')",
+                (lineage, dohc_engine_storage::hex_sha256(b"ended")),
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("an ended live session");
+}
+
+#[test]
+fn a_kept_base_waits_for_a_cold_validation_and_then_meets_a_later_competing_base() {
+    let (_scratch, _path, mut engine) = open_store();
+    let note = note();
+    let (older_base, older_claim, _local) = format_one_base();
+    let key = seed_object(&mut engine, "object-two");
+    for (seq, bytes) in [(0, &note.base), (1, &note.edits[0])] {
+        let kept = op(
+            &mut engine,
+            "object-two",
+            ("peer-a", seq, 1 + seq),
+            bytes,
+            &note.claim,
+        );
+        assert_eq!(
+            refused_as(&arrive(&mut engine, &kept)),
+            Some(NEWER_BODY_FORMAT)
+        );
+    }
+    let other = op(
+        &mut engine,
+        "object-two",
+        ("peer-b", 0, 3),
+        &older_base,
+        &older_claim,
+    );
+    assert!(matches!(
+        arrive(&mut engine, &other),
+        ApplyDisposition::Applied(_)
+    ));
+    end_a_live_session_on_another_lineage(&mut engine);
+    assert_eq!(replay(&mut engine), 2);
+    assert_eq!(count(&engine, KEPT), 0);
+    let (claim, text) = note_text(&engine, &key);
+    assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
+    assert!(text.contains('y'), "{text}");
+}
+
+#[test]
+fn edits_behind_a_base_kept_from_another_epoch_replay_onto_the_installed_base() {
+    let (_scratch, _path, mut engine) = open_store();
+    let note = note();
+    let key = keep(&mut engine, "object-two", "peer-a", 1, &note);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_refused_ydoc_blobs SET replication_epoch='an-older-epoch' \
+                 WHERE origin_id='peer-a' AND origin_seq=0",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("age the base");
+    reading_body_sequence_here(|| {
+        let fresh = op(
+            &mut engine,
+            "object-two",
+            ("peer-c", 0, 10),
+            &note.base,
+            &note.claim,
+        );
+        assert!(matches!(
+            arrive(&mut engine, &fresh),
+            ApplyDisposition::Applied(_)
+        ));
+    });
+    assert_eq!(replay(&mut engine), 2);
+    assert_eq!(kept_reasons(&engine).len(), 1);
+    assert_eq!(notices(&engine), all(NEWER_BODY_FORMAT, "peer-a", &[0]));
+    let (claim, text) = note_text(&engine, &key);
+    assert_eq!(claim.as_deref(), Some(note.claim.as_str()));
+    assert!(text.contains('y') && text.contains('z'), "{text}");
+}
+
+#[test]
+fn a_newer_format_row_decides_a_later_edit_over_a_live_unadmitted_row_of_the_same_claim() {
+    let (_scratch, _path, mut engine) = open_store();
+    let note = note();
+    keep(&mut engine, "object-two", "peer-a", 1, &note);
+    keep(&mut engine, "object-two", "peer-z", 10, &note);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_refused_ydoc_blobs SET reason=?1 WHERE origin_id='peer-a'",
+                [crate::ydoc_apply::LIVE_UNADMITTED_UPDATE],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("mark the first rows live");
+    let later = reading_body_sequence_here(|| {
+        let later = op(
+            &mut engine,
+            "object-two",
+            ("peer-e", 0, 30),
+            &note.later,
+            &note.claim,
+        );
+        arrive(&mut engine, &later)
+    });
+    assert_eq!(refused_as(&later), Some(NEWER_BODY_FORMAT));
+    assert_eq!(count(&engine, QUEUED), 0);
+}
