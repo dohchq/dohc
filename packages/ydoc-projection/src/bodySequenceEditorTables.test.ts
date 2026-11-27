@@ -263,14 +263,20 @@ describe("table changes the editor writes", () => {
     a.expectMirror();
   });
 
-  it("pastes nothing, and leaves nothing to the browser, for cells an uneven table can't fit", () => {
+  it.each([
+    ["rows of 3, 2, 2 and 1 cells, where the paste would throw", [3, 2, 2, 1], "b2"],
+    ["rows of 1, 1 and 2 cells, where the paste would land in the wrong rows", [1, 1, 2], "a1"],
+  ])("pastes no cells into a table with %s", (_name, widths, at) => {
+    const ids = widths.map((width, row) =>
+      Array.from({ length: width }, (_, col) => `${"abcd"[row]!}${String(col + 1)}`),
+    );
     const frames: Frame[] = [
       ["TB", "table"],
-      ...["R1", "R2", "R3", "R4"].map((id): Frame => [id, "tableRow"]),
-      ...["A1", "A2", "A3", "B1", "B2", "C1", "C2", "D1"].map((id): Frame => [id, "tableCell"]),
+      ...ids.map((_, row): Frame => [`R${String(row)}`, "tableRow"]),
+      ...ids.flat().map((id): Frame => [id, "tableCell"]),
     ];
-    const rows = ["R1 A1", "R1 A2", "R1 A3", "R2 B1", "R2 B2", "R3 C1", "R3 C2", "R4 D1"].map(
-      (path): Row => [["TB", ...path.split(" ")], path.slice(3).toLowerCase()],
+    const rows = ids.flatMap((cells, row) =>
+      cells.map((id): Row => [["TB", `R${String(row)}`, id], id]),
     );
     const a = person(noteIn(frames, rows), 10, "bare", [unevenTableGuard(), tableEditing()]);
     const { tableRow, tableCell, paragraph } = schema.nodes;
@@ -278,11 +284,15 @@ describe("table changes the editor writes", () => {
       tableRow!.create(null, tableCell!.create(null, paragraph!.create(null, schema.text(text))));
     const cells = new Slice(Fragment.from([cell("x"), cell("y"), cell("z")]), 1, 1);
     const lines = a.lines();
-    caretIn(a, "b2");
-    const paste = new Event("paste") as ClipboardEvent;
-    expect(a.view.someProp("handlePaste", (handle) => handle(a.view, paste, cells))).toBe(true);
+    caretIn(a, at);
+    const paste = (slice: Slice) =>
+      a.view.someProp("handlePaste", (handle) =>
+        handle(a.view, new Event("paste") as ClipboardEvent, slice),
+      );
+    expect(paste(cells)).toBe(true);
     expect(a.sent).toEqual([]);
     expect(a.lines()).toEqual(lines);
+    expect(paste(new Slice(Fragment.from(schema.text("typed")), 0, 0))).toBeFalsy();
   });
 
   it("writes a letter typed in an uneven table and refuses the repair the table plugin adds to it", () => {

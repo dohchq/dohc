@@ -1,9 +1,9 @@
 import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
 import { Plugin, Selection } from "@tiptap/pm/state";
 import {
+  __pastedCells,
   CellSelection,
   goToNextCell,
-  handlePaste,
   pointsAtCell,
   TableMap,
 } from "@tiptap/pm/tables";
@@ -29,8 +29,8 @@ export function inUnevenTable($pos: ResolvedPos): boolean {
  * selection there, whether a person makes it or a change from elsewhere maps one into it,
  * becomes a caret in its head cell, or in its anchor cell when the head is a missing cell: one
  * reads as the table's first row, so the selection would cover the wrong cells. Tab in the
- * table's last cell adds no row. Cells pasted there that `prosemirror-tables` can't fit are not
- * pasted, rather than left to the browser.
+ * table's last cell adds no row. Cells pasted there are not pasted: `prosemirror-tables` would
+ * throw, leaving the paste to the browser, or put them in the wrong rows.
  */
 export function unevenTableGuard(): Plugin {
   return new Plugin({
@@ -45,13 +45,8 @@ export function unevenTableGuard(): Plugin {
         if (event.key !== "Tab" || event.shiftKey) return false;
         return inUnevenTable(view.state.selection.$head) && !goToNextCell(1)(view.state);
       },
-      handlePaste(view, event, slice) {
-        if (!inUnevenTable(view.state.selection.$head)) return false;
-        try {
-          return handlePaste(view, event, slice);
-        } catch {
-          return true;
-        }
+      handlePaste(view, _, slice) {
+        return inUnevenTable(view.state.selection.$head) && __pastedCells(slice) !== null;
       },
     },
   });
