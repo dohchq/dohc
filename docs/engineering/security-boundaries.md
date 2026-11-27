@@ -285,6 +285,19 @@ preview that runs its code. The copy runs for no one until the Owner publishes
 it through the same Review app as any official app, which shows what it can
 reach.
 
+## Only the desktop window reads workspace files
+
+The desktop renderer shows workspace images and audio through
+`dohc-file://<workspaceId>/<path>`. Local site previews run in an iframe in the
+same session, so the scheme can't rely on the session to keep them out. The
+main process adds a per-launch secret header to a `dohc-file` request only when
+the request comes from a top-level frame that passes the IPC sender check, and
+the handler refuses any request without it. Worker loads never pass through
+`webRequest`, so they never get the header. The admission is the default
+session's only `onBeforeSendHeaders` listener. A second registration would
+replace it, and the window's own images and audio would stop loading. Static
+previews also send a CSP whose `*` leaves out custom schemes.
+
 ## A phone runs an app in a locked web view
 
 The phone posts a one-use handoff to the app's bootstrap on a random host under

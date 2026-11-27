@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
-import { createWorkspaceFileProtocolHandler } from "./workspaceFileProtocol";
+import { createWorkspaceFileProtocol } from "./workspaceFileProtocol";
 
-afterEach(() => vi.unstubAllEnvs());
+const TRUSTED = "file:///app/renderer/index.html";
 
 function harness() {
   const workspace = { workspaceId: "workspace-a" };
@@ -13,8 +13,26 @@ function harness() {
       mediaType: "text/plain",
     }),
   );
-  const handle = createWorkspaceFileProtocolHandler({ findWorkspace, readOwnedWorkspaceAsset });
-  return { workspace, findWorkspace, readOwnedWorkspaceAsset, handle };
+  const protocol = createWorkspaceFileProtocol({
+    findWorkspace,
+    readOwnedWorkspaceAsset,
+    isTrustedFrame: (url) => url === TRUSTED,
+  });
+  const admit = (frame: Parameters<typeof protocol.admit>[0]["frame"]) => {
+    let response: Parameters<Parameters<typeof protocol.admit>[1]>[0] | undefined;
+    protocol.admit({ frame, requestHeaders: { accept: "*/*" } }, (value) => {
+      response = value;
+    });
+    return response;
+  };
+  const handle = (request: Request) => {
+    const admitted = admit({ parent: null, url: TRUSTED });
+    if (!admitted || "cancel" in admitted) throw new Error("trusted frame was refused");
+    const headers = new Headers(request.headers);
+    for (const [name, value] of Object.entries(admitted.requestHeaders)) headers.set(name, value);
+    return protocol.handle(new Request(request.url, { headers }));
+  };
+  return { workspace, findWorkspace, readOwnedWorkspaceAsset, protocol, admit, handle };
 }
 
 describe("workspace file protocol", () => {
@@ -72,33 +90,44 @@ describe("workspace file protocol", () => {
       const response = await result;
       expect(response.status).toBe(404);
       expect(await response.text()).toBe("Not found");
-      expect(response.headers.has("access-control-allow-origin")).toBe(false);
     } finally {
       read.resolve({ bytes: Buffer.alloc(0), mediaType: "text/plain" });
       await result;
     }
   });
 
-  it.each([
-    [undefined, undefined, null],
-    [undefined, "null", "null"],
-    [undefined, "file://", "file://"],
-    [undefined, "https://foreign.test", null],
-    ["http://localhost:5173/app", "http://localhost:5173", "http://localhost:5173"],
-    ["http://localhost:5173/app", "http://localhost:5174", null],
-    ["http://localhost:5173/app", "http://localhost:5173.foreign.test", null],
-    ["http://localhost:5173/app", "null", null],
-    ["invalid-url", "file://", null],
-  ])("selects CORS for renderer URL %s and origin %s", async (rendererUrl, origin, allowed) => {
-    vi.stubEnv("ELECTRON_RENDERER_URL", rendererUrl);
+  it("admits only a trusted top-level frame", () => {
     const h = harness();
-    const response = await h.handle(
-      new Request("dohc-file://workspace-a/file.txt", {
-        headers: origin ? { origin } : undefined,
-      }),
-    );
-    expect(response.headers.get("access-control-allow-origin")).toBe(allowed);
-    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(await response.text()).toBe("file");
+    const destroyed = {
+      get parent(): null {
+        throw new Error("Render frame was disposed before WebFrameMain could be accessed");
+      },
+      url: TRUSTED,
+    };
+    expect(h.admit({ parent: null, url: TRUSTED })).toEqual({
+      requestHeaders: { accept: "*/*", "x-dohc-admitted": expect.any(String) },
+    });
+    for (const frame of [
+      { parent: {}, url: TRUSTED },
+      { parent: null, url: "http://127.0.0.1:5000/" },
+      { parent: null, url: "file:///tmp/dohc-export/document.html" },
+      null,
+      undefined,
+      destroyed,
+    ]) {
+      expect(h.admit(frame)).toEqual({ cancel: true });
+    }
+  });
+
+  it("refuses a request the admission hook never saw", async () => {
+    const h = harness();
+    for (const headers of [new Headers(), new Headers({ "x-dohc-admitted": "guess" })]) {
+      const response = await h.protocol.handle(
+        new Request("dohc-file://workspace-a/file.txt", { headers }),
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(h.findWorkspace).not.toHaveBeenCalled();
+    expect(h.readOwnedWorkspaceAsset).not.toHaveBeenCalled();
   });
 });
