@@ -2458,6 +2458,7 @@ describe("CLI socket server", () => {
       host = relayHost(3, "install-laptop");
       chosen = relayHost(4, AUTOMATION_SERVER_INSTALL_ID);
       agentSetup = {
+        anyAgentRun: vi.fn(() => false),
         readHost: vi.fn(async () => host),
         useServer: vi.fn(async () => chosen),
         listWebhooks: vi.fn(async () => ({
@@ -2543,6 +2544,9 @@ describe("CLI socket server", () => {
       host = serverOff;
       expect(await useServer()).toMatchObject(refused(AUTOMATION_SERVER_OFF));
       expect(agentSetup.useServer).not.toHaveBeenCalled();
+      host = relayHost(3, "install-laptop");
+      chosen = { kind: "note", message: "Sign in to choose where automations run." };
+      expect(await useServer()).toMatchObject(refused("Sign in to choose where automations run."));
     });
 
     it("returns the new address once, without the token or the other webhooks", async () => {
@@ -2570,7 +2574,8 @@ describe("CLI socket server", () => {
       const writes = [useServer, create];
       const reads = () => [send("automationHost"), send("webhookList")];
       const unreached = () => {
-        for (const call of Object.values(agentSetup)) expect(call).not.toHaveBeenCalled();
+        const { anyAgentRun: _checked, ...setup } = agentSetup;
+        for (const call of Object.values(setup)) expect(call).not.toHaveBeenCalled();
       };
 
       holdRun("active-run", "default");
@@ -2581,7 +2586,11 @@ describe("CLI socket server", () => {
           ok: false,
           error: `dohc: ${RUN_REFUSAL}`,
         });
-      agentWriteRunId = "active-run";
+      dispatchedRun = null;
+      dispatchedRunId = null;
+
+      agentSetup.anyAgentRun.mockReturnValue(true);
+      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
       expect(
         await send("webhookCreate", {
           agentId: "terminal",
@@ -2589,28 +2598,7 @@ describe("CLI socket server", () => {
           collection: "waitlist",
         }),
       ).toMatchObject(refused(RUN_REFUSAL));
-      dispatchedRun = null;
-      dispatchedRunId = null;
-      agentWriteRunId = null;
-
-      agentRunDepth = 1;
-      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
-      agentRunDepth = 0;
-
-      agentWriteRunId = "run-settings-active";
-      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
-      agentWriteRunId = null;
-
-      const ownWorkspaces = serverOptions.listWorkspaces;
-      const ownDepth = serverOptions.agentRunDepth;
-      serverOptions.listWorkspaces = () => [
-        registryWorkspace,
-        { workspaceId: "ws-other", rootPath: join(stateDir, "other") },
-      ];
-      serverOptions.agentRunDepth = (workspaceId) => (workspaceId === "ws-other" ? 1 : 0);
-      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
-      serverOptions.listWorkspaces = ownWorkspaces;
-      serverOptions.agentRunDepth = ownDepth;
+      agentSetup.anyAgentRun.mockReturnValue(false);
       unreached();
 
       context.readOnly = true;

@@ -107,6 +107,10 @@ describe("parseCliArguments", () => {
     expect(() => parseCliArguments(["webhook", "create", "Waitlist"], {})).toThrow(
       "webhook create requires a name and --collection <path>",
     );
+    for (const collection of ["/", " ", "\\ /"])
+      expect(() =>
+        parseCliArguments(["webhook", "create", "Waitlist", "--collection", collection], {}),
+      ).toThrow("Choose a Collection folder, not the workspace root.");
   });
   it("parses the read verbs and global actor options", () => {
     expect(parseCliArguments(["chat", "groups"], {})).toEqual({

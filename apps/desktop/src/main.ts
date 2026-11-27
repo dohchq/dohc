@@ -8409,6 +8409,14 @@ const { startDesktopCliServer } = createDesktopCliServer({
   notices: async (workspaceId) =>
     agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   agentSetup: {
+    anyAgentRun: () =>
+      workspaceAuthorities
+        .workspaceIds()
+        .some((workspaceId) =>
+          withWorkspaceActivityState(workspaceId, (lease) =>
+            workspaceActivity.hasAgentRun(lease.state.activity),
+          ),
+        ),
     readHost: (workspaceId) => scheduleHostState(workspaceId),
     useServer: (workspaceId, generation) =>
       scheduleHostState(workspaceId, {

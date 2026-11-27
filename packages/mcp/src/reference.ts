@@ -716,6 +716,10 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The workspace Inbox belongs to the owning workspace. Shared profiles do not offer this read.",
   dohc_read_drawing:
     "Only the original workspace opens drawings live. Shared profiles do not offer this read.",
+  dohc_read_automation_host:
+    "Only the owner's own agents set up the workspace. Shared profiles do not offer this read.",
+  dohc_list_incoming_webhooks:
+    "Only the owner's own agents set up the workspace. Shared profiles do not offer this read.",
 };
 
 export const MCP_TOOL_GROUPS: readonly {

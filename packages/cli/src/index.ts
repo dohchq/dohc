@@ -892,6 +892,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
                   command.verb === "historyUndo" ||
                     command.verb === "accessRefresh" ||
                     command.verb === "undoAgentRun" ||
+                    command.verb === "automationUseServer" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||

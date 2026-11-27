@@ -731,6 +731,7 @@ export interface CliServerOptions {
   notices?(workspaceId: string): Promise<AgentNotice[]>;
   // Settings' automation host and incoming webhooks, for the owner's own agents.
   agentSetup?: {
+    anyAgentRun(): boolean;
     readHost(workspaceId: string): Promise<ScheduleHostResult>;
     useServer(workspaceId: string, generation: number): Promise<ScheduleHostResult>;
     listWebhooks(workspaceId: string): Promise<IncomingWebhooksState>;
@@ -914,17 +915,10 @@ function mcpFailure(error: unknown, fallback: string) {
 function ownerSetupRefusal(context: CliWorkspaceContext, options: CliServerOptions): string | null {
   if (context.readOnly)
     return "Only the owner's own agents can do this. Run it from your own workspace's folder.";
-  if (
-    context.run !== undefined ||
-    options
-      .listWorkspaces()
-      .some(
-        ({ workspaceId }) =>
-          options.agentWriteRunId(workspaceId) !== null || options.agentRunDepth(workspaceId) > 0,
-      )
-  )
+  if (!options.agentSetup) return "Workspace setup is unavailable here.";
+  if (context.run !== undefined || options.agentSetup.anyAgentRun())
     return "Agent runs can't set up incoming webhooks or the automation host. Finish the active agent run first.";
-  return options.agentSetup ? null : "Workspace setup is unavailable here.";
+  return null;
 }
 
 // A failure whose reason never names a host path. Node's own messages name
@@ -3462,6 +3456,7 @@ const DECLARED_WRITERS: {
         before.hostInstallId === AUTOMATION_SERVER_INSTALL_ID
           ? before
           : await options.agentSetup!.useServer(context.workspaceId, generation);
+      if (after.kind === "note") return { ok: false as const, reason: after.message };
       if (after.kind !== "relay" || after.hostInstallId !== AUTOMATION_SERVER_INSTALL_ID)
         return {
           ok: false as const,

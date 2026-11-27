@@ -693,7 +693,7 @@ Returns `{ ok: true, status: "queued" } | { ok: false, status: "switched-off", r
 
 Read which of the owner's computers, or the dohc server, runs this workspace's automations and schedules. kind relay gives the generation that dohc_use_server_for_automations needs, the host's installId (server for the dohc server), and handoverFrom while a computer hands over.
 
-Changes the workspace, so a shared view does not offer it.
+Only the owner's own agents set up the workspace. Shared profiles do not offer this read.
 
 No arguments.
 
@@ -713,7 +713,7 @@ Returns `{ ok: true, outcome, generation, handoverFrom } | { ok: false, reason }
 
 List this workspace's incoming webhooks: each one's name, Collection, paused state, and recent deliveries. Never returns their addresses. List before you retry a create whose result you don't know.
 
-Changes the workspace, so a shared view does not offer it.
+Only the owner's own agents set up the workspace. Shared profiles do not offer this read.
 
 No arguments.
 
