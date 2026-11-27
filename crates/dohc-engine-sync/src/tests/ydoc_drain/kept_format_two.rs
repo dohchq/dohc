@@ -1458,7 +1458,7 @@ fn a_late_edit_of_a_kept_base_replays_after_the_resolution_it_followed() {
         let mut ops = vec![row(engine, "owner", 1, &note.base)];
         for (relay, op) in (2..).zip(&resolution) {
             let mut op = op.clone();
-            op.relay_seq = Some(relay);
+            (op.origin_seq, op.relay_seq) = (relay - 1, Some(relay));
             ops.push(op);
         }
         ops.push(row(engine, "offline", 4, &note.edits[0]));
