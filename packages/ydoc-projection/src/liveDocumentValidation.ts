@@ -6,6 +6,7 @@ import {
 } from "@dohc/live-session-contract";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import { Schema } from "@tiptap/pm/model";
 import { digest as sha256 } from "lib0/hash/sha256";
 import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
@@ -22,6 +23,7 @@ import {
   type BodySequenceIntakeRules,
   type BodySequenceIntakeWork,
 } from "./bodySequenceIntake.js";
+import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "./frontmatter.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -1359,6 +1361,39 @@ function validateMetadata(
   return { metadata: snapshot, witness };
 }
 
+let format1Schema: Schema | undefined;
+
+// Format 1 stores and writes inline code under a link or bold, as `[`npm install`](…)` and
+// `**`flag`**`. The shared schema keeps code exclusive because format 2 reads a letter of inline
+// code with code alone (https://github.com/dohchq/dohc/issues/4601).
+function format1BodySchema(): Schema {
+  if (format1Schema) return format1Schema;
+  const { spec, marks } = getDohcProseMirrorSchema();
+  const excludes = Object.keys(marks)
+    .filter((name) => name !== "link" && name !== "bold")
+    .join(" ");
+  format1Schema = new Schema({
+    ...spec,
+    marks: spec.marks.update("code", { ...spec.marks.get("code"), excludes }),
+  });
+  return format1Schema;
+}
+
+function joinsInlineCode(blocks: XmlFingerprint[]): boolean {
+  return blocks.some((block) =>
+    block.kind === "text"
+      ? block.delta.some((run, index) => {
+          const next = block.delta[index + 1];
+          return (
+            next !== undefined &&
+            [run, next].every(({ attributes }) => attributes.some(([name]) => name === "code")) &&
+            !semanticEqual(run.attributes, next.attributes)
+          );
+        })
+      : joinsInlineCode(block.children),
+  );
+}
+
 /** A format-1 body: what it shows must be what it stores, with nothing the schema refuses. */
 function validateBody(
   body: Y.XmlFragment,
@@ -1367,7 +1402,7 @@ function validateBody(
 ): void {
   let rootNode: ReturnType<typeof yXmlFragmentToProseMirrorRootNode>;
   try {
-    rootNode = yXmlFragmentToProseMirrorRootNode(body, getDohcProseMirrorSchema());
+    rootNode = yXmlFragmentToProseMirrorRootNode(body, format1BodySchema());
     if (!hasActiveItem) {
       const json = rootNode.toJSON();
       if (Object.keys(json).length !== 1 || json.type !== "doc") refuse("invalid-schema");
@@ -1381,7 +1416,7 @@ function validateBody(
   const rebuilt = new Y.Doc({ gc: false });
   try {
     const rebuiltBody = rebuilt.getXmlFragment("body");
-    prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody);
+    prosemirrorJSONToYXmlFragment(format1BodySchema(), rootNode.toJSON(), rebuiltBody);
     if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null)))
       refuse("invalid-schema");
   } catch (error) {
@@ -1389,6 +1424,16 @@ function validateBody(
     refuse("invalid-schema");
   } finally {
     rebuilt.destroy();
+  }
+}
+
+function writtenMarkdown(scratch: Y.Doc): string {
+  try {
+    return yDocToMarkdown(scratch);
+  } catch (error) {
+    if (error instanceof Error && error.message === FRONTMATTER_EDIT_REFUSED_MESSAGE)
+      refuse("invalid-schema");
+    throw error;
   }
 }
 
@@ -1431,9 +1476,20 @@ function validatePublicState(
   const storedBody = bodySequence ? undefined : bodyFingerprint(body, budget);
   const frontmatterSnapshot = getDohcYDocFrontmatter(scratch);
   if (storedBody) validateBody(body, storedBody, topology.bodyHasActiveItem);
-  const projectedMarkdown = yDocToMarkdown(scratch);
+  if (storedBody && joinsInlineCode(storedBody)) refuse("invalid-schema");
+  const projectedMarkdown = writtenMarkdown(scratch);
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse("capacity-refused");
-  if (!bodySequence && metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes("\r\n"))
+  const emptied =
+    storedBody?.every(
+      (block) =>
+        block.kind === "element" && block.nodeName === "paragraph" && block.children.length === 0,
+    ) === true;
+  if (
+    !bodySequence &&
+    !emptied &&
+    metadata.dohcMarkdownCrlf === true &&
+    !projectedMarkdown.includes("\r\n")
+  )
     refuse("invalid-schema");
   const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader);
   if (source.kind === "capacity-refused") refuse("capacity-refused");
@@ -1460,6 +1516,7 @@ function validatePublicState(
       const withoutSources = (values: Record<string, unknown>) => {
         const kept = { ...values };
         delete kept[LINEAGE_EPOCH_META_KEY];
+        if (emptied) delete kept.dohcMarkdownCrlf;
         if (engineReader) delete kept.dohcMarkdownSourceReader;
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key];
         for (const key of Object.keys(kept))

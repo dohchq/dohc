@@ -8,7 +8,9 @@ import * as projection from "./import-export.js";
 import { getDohcYDocFrontmatter, markdownToYDoc } from "./import-export.js";
 import * as ordered from "./orderedLiveUpdateCut.js";
 import { type OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
+import { holdsBodySequence } from "./bodySequenceStore.js";
 import {
+  admitBodySequenceNotes,
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
   liveEditFitsCopy,
@@ -668,8 +670,8 @@ describe("real scratch finalization", () => {
   });
 });
 
-function journalFixture(edits: ((doc: Y.Doc) => void)[] = []) {
-  const doc = markdownToYDoc("Text");
+function journalFixture(edits: ((doc: Y.Doc) => void)[] = [], markdown = "Text") {
+  const doc = markdownToYDoc(markdown);
   try {
     const checkpoint = Y.encodeStateAsUpdate(doc);
     const updates = edits.map((edit) => {
@@ -1094,6 +1096,101 @@ describe("live note capacity (#3575, #2534)", () => {
     // It walks the deleted blocks once; well under the time that would stall the window.
     expect(elapsed).toBeLessThan(1_000);
   }, 60_000);
+});
+
+describe("notes the save threw on or refused by mistake (#4475, #4601)", () => {
+  const emptyText = (doc: Y.Doc) => {
+    const text = (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    text.delete(0, text.length);
+  };
+
+  it("refuses properties text that no longer reads as the properties", () => {
+    const call = journalFixture(
+      [(doc) => doc.getMap("meta").set("dohcFrontmatterSource", "status: other")],
+      "---\nstatus: draft\n---\n\nText\n",
+    );
+    expect(journal(call)).toEqual({ kind: "refused", reason: "invalid-schema", source: "final" });
+  });
+
+  it("takes emptying a note with CRLF line ends, and typing into it again", () => {
+    const emptied = journal(journalFixture([emptyText], "Text\r\n"));
+    expect(emptied.kind).toBe("accepted");
+    if (emptied.kind !== "accepted") return;
+    expect(emptied.evidence.projectedMarkdownByteLength).toBe(0);
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, emptied.evidence.stateUpdate);
+      const before = Y.encodeStateVector(doc);
+      editText("Again")(doc);
+      const candidate = Y.encodeStateAsUpdate(doc, before);
+      const checkpoint = emptied.evidence.stateUpdate;
+      const typed = journal({ ...input(checkpoint), suffix: [], candidate });
+      expect(typed.kind).toBe("accepted");
+      if (typed.kind === "accepted")
+        expect(accepted(typed.evidence.stateUpdate).projectedMarkdown).toBe("Again\r\n");
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("takes emptying a CRLF note whose properties keep LF line ends", () => {
+    const call = journalFixture([emptyText], "---\nstatus: draft\n---\n\nText\r\n");
+    expect(journal(call).kind).toBe("accepted");
+  });
+
+  it("refuses a CRLF note whose text the writer trims to nothing", () => {
+    const call = journalFixture(
+      [
+        (doc) => {
+          emptyText(doc);
+          ((doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(
+            0,
+            "\u2003",
+          );
+        },
+      ],
+      "Text\r\n",
+    );
+    expect(journal(call)).toEqual({ kind: "refused", reason: "invalid-schema", source: "final" });
+  });
+
+  it.each(["Run [`npm install`](https://docs.example/install) first.\n", "A **`flag`** here.\n"])(
+    "registers inline code under a link or bold as written, and keeps format 1 when format 2 is asked for: %j",
+    (markdown) => {
+      expect(accepted(encode(markdown)).projectedMarkdown).toBe(markdown);
+      admitBodySequenceNotes(true);
+      try {
+        const doc = markdownToYDoc(markdown, { bodySequence: true });
+        try {
+          expect(holdsBodySequence(doc)).toBe(false);
+          expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe(markdown);
+        } finally {
+          doc.destroy();
+        }
+      } finally {
+        admitBodySequenceNotes(false);
+      }
+    },
+  );
+
+  it.each([
+    "[`a`](https://a.example)[`b`](https://b.example)\n",
+    "`a`[`b`](https://b.example)\n",
+    "**`a`**`b`\n",
+  ])("refuses touching inline code that the writer would join into one: %j", (markdown) => {
+    refused(encode(markdown));
+  });
+
+  it("refuses deleting the space between two linked inline codes", () => {
+    const call = journalFixture(
+      [
+        (doc) =>
+          ((doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText).delete(1, 1),
+      ],
+      "[`a`](https://a.example) [`b`](https://b.example)\n",
+    );
+    expect(journal(call)).toMatchObject({ kind: "refused", reason: "invalid-schema" });
+  });
 });
 
 describe("live edit format guard", () => {

@@ -539,7 +539,7 @@ it.each(rows)("constructs and replays the desktop reading: $name", (row) => {
 });
 
 it("refuses schema check failures in the reader and its strict journal", () => {
-  const source = "[`code`](https://example.com)",
+  const source = "*`code`*",
     doc = markdownToYDoc(source);
   try {
     bind(doc, source);
