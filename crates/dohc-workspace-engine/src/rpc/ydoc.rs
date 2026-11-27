@@ -2784,7 +2784,7 @@ impl EngineService {
             None => (
                 open.actor
                     .ydoc_resync(
-                        session.key,
+                        session.key.clone(),
                         session.lineage_claim_id,
                         cancellation.token(),
                         session.restore_generation,
@@ -2806,6 +2806,26 @@ impl EngineService {
                 .set_lineage_claim(state.lineage_claim_id.clone())
                 .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
+        }
+        if owner_draft.is_none() && session.restore_generation.is_none() {
+            let written = match now_ms() {
+                Ok(now) => open
+                    .actor
+                    .ydoc_write_owed(
+                        session.key,
+                        YdocCloseMaterialization {
+                            root_dir: open.root.clone(),
+                            self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+                        },
+                        now,
+                    )
+                    .await
+                    .map_err(map_runtime),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = written {
+                eprintln!("engine: resync file write deferred: {error}");
+            }
         }
         // The resync committed the document's pulled edits, so it runs to its
         // answer, its blob included. If the blob cannot have its egress budget
@@ -4365,6 +4385,82 @@ mod tests {
         let doc = dohc_engine_collab::Ydoc::wire();
         doc.apply(&egress.bytes).expect("the document's state");
         assert_eq!(doc.plaintext_string(), "before parked");
+    }
+
+    #[tokio::test]
+    async fn an_editors_resync_writes_the_pulled_edit_to_its_file() {
+        let parked = ParkedEdit::new("resync-pulled-write", true).await;
+        let session = parked.session.clone().expect("the editor's session");
+        let (_, egress) = parked
+            .service
+            .ydoc_resync(
+                &RequestContext::unbounded(),
+                Some(parked.handle.clone()),
+                json!({ "sessionId": session }),
+                2,
+            )
+            .await
+            .expect("the editor resyncs");
+        shows_the_pulled_edit(&egress);
+        assert_eq!(parked.parked(), 0, "the resync took the pulled edit");
+        let owed: i64 = rusqlite::Connection::open_with_flags(
+            &parked.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("engine db")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count owed writes");
+        let file =
+            std::fs::read_to_string(parked._scratch.path().join(PARKED_PATH)).expect("the file");
+        assert_eq!(
+            (file.as_str(), owed),
+            ("before parked", 0),
+            "the file holds the pulled edit and owes no write"
+        );
+        parked.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resync_whose_owed_write_fails_still_answers_with_the_pulled_edit() {
+        let parked = ParkedEdit::new("resync-owed-write-fails", true).await;
+        let session = parked.session.clone().expect("the editor's session");
+        let root = parked._scratch.path().to_path_buf();
+        let moved = root.with_extension("moved");
+        std::fs::rename(&root, &moved).expect("move the workspace folder");
+        let resynced = parked
+            .service
+            .ydoc_resync(
+                &RequestContext::unbounded(),
+                Some(parked.handle.clone()),
+                json!({ "sessionId": session }),
+                2,
+            )
+            .await;
+        let moved_db = moved.join(".dohc").join("engine").join("engine.db");
+        let owed: i64 = rusqlite::Connection::open_with_flags(
+            &moved_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("engine db")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count owed writes");
+        std::fs::rename(&moved, &root).expect("move the workspace folder back");
+        let (_, egress) = resynced.expect("the committed resync answers");
+        shows_the_pulled_edit(&egress);
+        assert_eq!(parked.parked(), 0, "the resync took the pulled edit");
+        assert_eq!(owed, 1, "the write it could not land stays owed");
+        parked.close().await;
     }
 
     /// An open or resync is cancelled after it committed the document's

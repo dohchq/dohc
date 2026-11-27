@@ -1555,6 +1555,37 @@ impl ActorHandle {
         .await
     }
 
+    /// Replay the writes `key` still owes its file, oldest first. One that
+    /// does not land stays owed, and the editor's settle or close reports it.
+    pub async fn ydoc_write_owed(
+        &self,
+        key: DocKey,
+        materialization: YdocCloseMaterialization,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            let writes = store.read_with(|conn| pending_ydoc_writes_in(conn, &key))?;
+            replay_materializations_in_order(
+                store,
+                &materialization.root_dir,
+                MaterializationReplayScope {
+                    holds: None,
+                    workspace_id: &key.workspace_id,
+                    self_writes: Some(materialization.self_writes.as_ref()),
+                    progress: None,
+                    file_outcomes_settled: false,
+                    released_hold_paths: None,
+                    planned_against_active_heads: false,
+                },
+                now_ms,
+                &NoFaults,
+                &writes,
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Run `stage` on the actor until no drain in it waits for released-tail
     /// validation. A drain that waits leaves what it committed queued and
     /// ends its transaction; the actor is free while the store's worker
@@ -4862,9 +4893,9 @@ fn materialize_ydoc_drain(
         released_hold_paths: None,
         planned_against_active_heads: false,
     };
-    // Every write the document still owes its file, not only the head's: a
-    // resync applies edits without writing, and the head's write expects the
-    // file to hold the write before it.
+    // Every write the document still owes its file, not only the head's: an
+    // earlier write that did not land stays owed, and the head's write
+    // expects the file to hold the write before it.
     let mut failed_jobs = replay_materializations_in_order(
         store,
         &materialization.root_dir,

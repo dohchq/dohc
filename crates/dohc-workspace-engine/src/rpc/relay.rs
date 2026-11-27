@@ -7,6 +7,7 @@ use crate::rpc::held_documents::HELD_RESPONSE_BYTE_BUDGET;
 use crate::rpc::reads::json_string_encoded_len;
 use crate::rpc::reads::response_encoded_bytes;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::landed_wait_until;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
@@ -53,6 +54,7 @@ pub(crate) struct PendingCursor {
     /// itself: they reconcile once this cursor commits, after the page's files
     /// landed, as a capture pass reconciles after it applies what it scanned.
     pub(super) reconcile_collections: bool,
+    pub(super) notify_editors: bool,
     /// A hosted pass's `departedAfter`, which its commit lists departed
     /// documents after too.
     pub(super) departed_after: Option<String>,
@@ -1125,6 +1127,7 @@ impl EngineService {
                     materialization_paths: Vec::new(),
                     materialized: false,
                     reconcile_collections: false,
+                    notify_editors: false,
                     departed_after: None,
                     issue,
                 },
@@ -1603,20 +1606,18 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
-        // Every terminal page asks, whether or not it applied anything: an
-        // earlier request may have been dropped, and the parked updates are the
-        // debt, which only the editor's resync clears.
-        if !passive
+        // Every terminal page asks, whether or not it applied anything, once
+        // its files are written and its cursor commits: an earlier request may
+        // have been dropped, and the parked updates are the debt, which only
+        // the editor's resync clears.
+        let notify_editors = !passive
             && matches!(
                 &outcome,
                 RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                     has_more: false,
                     ..
                 })
-            )
-        {
-            self.notify_editors_behind(ctx, open).await;
-        }
+            );
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -1648,11 +1649,17 @@ impl EngineService {
                 })?;
                 entry.materialization_paths = materialization_paths;
                 entry.reconcile_collections = reconcile_at_commit;
+                entry.notify_editors = notify_editors;
             }
             result["pendingCursor"] = issued;
-        } else if reconcile_at_commit {
-            // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_changed(ctx, open).await;
+        } else {
+            if notify_editors {
+                self.notify_editors_behind(ctx, open).await;
+            }
+            if reconcile_at_commit {
+                // Nothing to materialize or commit: the page's changes are in place.
+                self.collections_changed(ctx, open).await;
+            }
         }
         Ok(result)
     }
@@ -1827,6 +1834,7 @@ impl EngineService {
         let consumed =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let reconcile_collections = consumed.reconcile_collections;
+        let notify_editors = consumed.notify_editors;
         let departed_after = consumed.departed_after.clone();
         let share_view = matches!(&consumed.cursor, IssuedCursor::ShareView(_));
         let hosted = matches!(&consumed.cursor, IssuedCursor::Hosted(_));
@@ -1866,6 +1874,14 @@ impl EngineService {
             }
             executed => executed?,
         };
+        let landed = after_landing(ctx);
+        let committed = match &outcome {
+            RelayOperationOutcome::HostedCursorCommitted { commit, .. } => commit.committed,
+            _ => true,
+        };
+        if notify_editors && committed {
+            self.notify_editors_behind(&landed, &open).await;
+        }
         // A hosted replica takes no part in enrollment. A pass fetched under
         // a scope that has since moved commits nothing. A commit that kept a
         // document held for the pass that writes its files has more to pull,
@@ -2303,9 +2319,7 @@ impl EngineService {
         for facts in std::mem::take(&mut pass.record_facts) {
             emit_record_events(&self.events, &open.workspace_id, &facts);
         }
-        if !pass.has_more {
-            self.notify_editors_behind(ctx, &open).await;
-        }
+        let notify_editors = !pass.has_more;
         let pending_cursor = match pass.pending_cursor.take() {
             Some(cursor) => {
                 let issued =
@@ -2319,10 +2333,16 @@ impl EngineService {
                 })?;
                 entry.materialization_paths = pass.changed_paths.clone();
                 entry.departed_after = params.departed_after.clone();
+                entry.notify_editors = notify_editors;
                 drop(pending);
                 issued
             }
-            None => Value::Null,
+            None => {
+                if notify_editors {
+                    self.notify_editors_behind(ctx, &open).await;
+                }
+                Value::Null
+            }
         };
         hosted_pass_json(
             request_id,
@@ -4138,6 +4158,95 @@ mod tests {
         let state = f.collections_rows();
         f.close().await;
         state
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editors_are_asked_to_resync_once_the_terminal_pages_cursor_commits() {
+        use dohc_engine_sync::{AlwaysLive, LeaseProbe, NoLiveLeases, ReplicationEnvelope};
+        const WORKSPACE: &str = "resync-after-commit";
+        const PATH: &str = "notes/live.md";
+        let ctx = RequestContext::unbounded();
+        let relay = PagedRelay::start(Default::default());
+        lock(&relay.ops).push(PagedRelay::row(WORKSPACE, 0, "workspace.init", json!({})));
+        relay.release();
+        let f = CursorFixture::with_relay(WORKSPACE, false, relay.configuration()).await;
+        f.prepare().await;
+        f.service
+            .sync_claim(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "workspaceId": WORKSPACE }),
+            )
+            .await
+            .expect("claim");
+        f.pulled("live", PATH, "before").await;
+        let envelope = |origin_seq: i64, update: &str, base: &str| ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WORKSPACE.to_owned(),
+            origin_id: "editing-peer".to_owned(),
+            origin_seq,
+            relay_seq: Some(1_000 + origin_seq),
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main", "objectId": "live", "path": PATH,
+                "contentKind": "plaintext", "updateBlobSha256": update,
+                "lineageClaimId": base, "isBaseState": update == base
+            }),
+            recorded_at_ms: 100 + origin_seq,
+        };
+        let apply = |bytes: Vec<u8>, base: Option<&str>, parked: bool| {
+            let mut store =
+                dohc_engine_storage::EngineStore::open(f.open.actor.database_path(), 100)
+                    .expect("store");
+            let blob = store.put_binary_blob(&bytes).expect("blob");
+            let base = base.unwrap_or(&blob).to_owned();
+            let leases: &dyn LeaseProbe = if parked { &AlwaysLive } else { &NoLiveLeases };
+            dohc_engine_sync::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope(i64::from(parked), &blob, &base),
+                &dohc_engine_storage::NoFaults,
+                leases,
+            )
+            .expect("apply the envelope");
+            base
+        };
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "before");
+        let base = apply(doc.encode_full_state(), None, false);
+        let (opened, _) = f
+            .service
+            .ydoc_open(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+                1,
+            )
+            .await
+            .expect("the editor's session");
+        let session = opened["sessionId"].as_str().expect("session").to_owned();
+        apply(doc.plaintext_insert(6, " parked"), Some(&base), true);
+        let mut events = f.service.events().subscribe();
+        let mut asked = || {
+            let mut seen = false;
+            while let Ok(event) = events.try_recv() {
+                seen |= event.name == "ydoc.remoteUpdate"
+                    && event.payload["sessionId"] == session
+                    && event.payload["resyncRequired"] == true;
+            }
+            seen
+        };
+        let page = pull(&f).await.expect("the terminal page");
+        assert_eq!(page["hasMore"], json!(false));
+        assert!(
+            page["pendingCursor"].is_object(),
+            "the page issues a cursor"
+        );
+        assert!(!asked(), "no resync before the cursor commits");
+        commit_page(&f, &page).await.expect("commit the page");
+        assert!(asked(), "the committed page asks the editor to resync");
+        f.close().await;
     }
 
     async fn held_second_page(workspace_id: &'static str) -> (PagedRelay, CursorFixture, String) {
