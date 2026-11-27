@@ -7,6 +7,7 @@ use crate::rpc::held_documents::HELD_RESPONSE_BYTE_BUDGET;
 use crate::rpc::reads::json_string_encoded_len;
 use crate::rpc::reads::response_encoded_bytes;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::landed_wait_until;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
@@ -1605,9 +1606,10 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
-        // Every terminal page asks, whether or not it applied anything: an
-        // earlier request may have been dropped, and the parked updates are the
-        // debt, which only the editor's resync clears.
+        // Every terminal page asks, whether or not it applied anything, once
+        // its files are written and its cursor commits: an earlier request may
+        // have been dropped, and the parked updates are the debt, which only
+        // the editor's resync clears.
         let notify_editors = !passive
             && matches!(
                 &outcome,
@@ -1872,8 +1874,13 @@ impl EngineService {
             }
             executed => executed?,
         };
-        if notify_editors {
-            self.notify_editors_behind(ctx, &open).await;
+        let landed = after_landing(ctx);
+        let committed = match &outcome {
+            RelayOperationOutcome::HostedCursorCommitted { commit, .. } => commit.committed,
+            _ => true,
+        };
+        if notify_editors && committed {
+            self.notify_editors_behind(&landed, &open).await;
         }
         // A hosted replica takes no part in enrollment. A pass fetched under
         // a scope that has since moved commits nothing. A commit that kept a

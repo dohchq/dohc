@@ -4893,9 +4893,9 @@ fn materialize_ydoc_drain(
         released_hold_paths: None,
         planned_against_active_heads: false,
     };
-    // Every write the document still owes its file, not only the head's: a
-    // resync applies edits without writing, and the head's write expects the
-    // file to hold the write before it.
+    // Every write the document still owes its file, not only the head's: an
+    // earlier write that did not land stays owed, and the head's write
+    // expects the file to hold the write before it.
     let mut failed_jobs = replay_materializations_in_order(
         store,
         &materialization.root_dir,
