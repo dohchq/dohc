@@ -1722,6 +1722,14 @@ fn materialize_page_on_store(
                 },
             )
         };
+        let state = match state {
+            ProjectionTargetState::UntrackedContent
+                if approved.is_some() && held.is_none() && change.content_kind == "text" =>
+            {
+                probe_target(probe.as_ref(), &change.path, ProjectionTargetKind::Secret)
+            }
+            state => state,
+        };
         let head = relay_head(store, workspace_id, &active, &change, &mut secret_key)?;
         if let Some(approved) = approved {
             let Some(head) = head.as_ref() else {
@@ -2252,6 +2260,41 @@ pub(super) mod tests {
                 "held\n"
             ]
         );
+    }
+
+    /// Capture reads a file at a binary extension only up to 5 MiB, but a
+    /// text head there can be larger. The caller approved such a file's
+    /// bytes, so its head writes over it instead of refusing every retry.
+    #[test]
+    fn approved_heads_write_a_large_text_file_at_a_binary_extension() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let old = "o".repeat(dohc_engine_files::MAX_CAPTURE_BINARY_BYTES as usize + 95);
+        let head = "h".repeat(old.len());
+        write_head(&mut store, "big", "big.bin", &old, 2);
+        write_head(&mut store, "big", "big.bin", &head, 3);
+        std::fs::write(scratch.join("big.bin"), &old).unwrap();
+        let approved = std::collections::HashMap::from([(
+            "big.bin".to_owned(),
+            Preimage::Present(dohc_engine_storage::hex_sha256(old.as_bytes())),
+        )]);
+        materialize_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![MomentMaterializationChange {
+                version_id: "main".to_owned(),
+                path: "big.bin".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Some(&approved),
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(scratch.join("big.bin")).unwrap() == head);
     }
 
     /// A page whose files already match holds one head's body at a time,
