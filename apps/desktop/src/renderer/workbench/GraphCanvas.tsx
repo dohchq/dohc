@@ -8,6 +8,7 @@ import {
   type LayoutFrame,
   type LayoutRequest,
 } from "./graphLayout";
+import * as visuals from "./graphVisuals";
 
 export type GraphShape =
   | "circle"
@@ -22,6 +23,8 @@ export const LINK_STYLE = { prose: 0, structural: 1, pending: 2, mention: 3 } as
 export type GraphLink = readonly [source: number, target: number, style?: number];
 const LINK_DASH: readonly (readonly number[])[] = [[], [], [5, 4], [1.5, 3]];
 
+export type ApprovalSurge = { nonce: number; edges: readonly (readonly [string, string])[] };
+
 export type CanvasNode = {
   path: string;
   title: string;
@@ -29,6 +32,8 @@ export type CanvasNode = {
   kind: string;
   shape: GraphShape;
   degree: number;
+  structural?: boolean;
+  paused?: boolean;
 };
 
 export function nodeAnnouncement(node: CanvasNode): string {
@@ -64,7 +69,11 @@ type Palette = {
   edge: string;
   label: string;
   match: string;
+  warning: string;
+  line: string;
+  dark: boolean;
   groups: string[];
+  glowSprites: (HTMLCanvasElement | null)[];
   font: string;
   edgeAlpha: number;
   nodeDim: number;
@@ -103,6 +112,7 @@ function readPalette(canvas: HTMLCanvasElement, surface: "bg" | "panel"): Palett
   const token = (name: string) => style.getPropertyValue(`--dohc-${name}`).trim() || "#888";
   const themed = canvas.closest<HTMLElement>("[data-theme]") ?? document.documentElement;
   const theme = themed.dataset.theme === "dark" ? "dark" : "light";
+  const groups = GROUP_HUES.map((hue) => token(`hue-${hue}`));
   return {
     bg: token(surface),
     ink: token("ink"),
@@ -110,7 +120,11 @@ function readPalette(canvas: HTMLCanvasElement, surface: "bg" | "panel"): Palett
     edge: token("ink"),
     label: token("muted"),
     match: token("match"),
-    groups: GROUP_HUES.map((hue) => token(`hue-${hue}`)),
+    warning: token("warning"),
+    line: token("line"),
+    dark: theme === "dark",
+    groups,
+    glowSprites: visuals.createGlowSprites(groups),
     font: style.getPropertyValue("--font-sans").trim() || "system-ui, sans-serif",
     edgeAlpha: theme === "dark" ? 0.2 : 0.16,
     nodeDim: NODE_DIM[theme],
@@ -199,11 +213,10 @@ function addShape(
       return;
     }
     case "bubble":
-      ctx.moveTo(x + r, y);
-      ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.moveTo(x - 0.62 * r, y + 0.79 * r);
       ctx.lineTo(x - 0.95 * r, y + 1.1 * r);
       ctx.lineTo(x - 0.2 * r, y + 0.98 * r);
+      ctx.arc(x, y, r, Math.atan2(0.98, -0.2), Math.atan2(0.79, -0.62), true);
       ctx.closePath();
       return;
     default:
@@ -261,6 +274,12 @@ export function createGraphRenderer(
   // Neighbours as compressed rows: node i's are adjacency[offsets[i]..offsets[i+1]].
   let offsets = new Uint32Array(1);
   let adjacency = new Uint32Array(0);
+  let hasPending = new Uint8Array(0);
+  let pathIndex = new Map<string, number>();
+  let useGlow = false,
+    useCurved = false,
+    curvedCount = 0;
+  let glowLayer: visuals.GlowLayer | null = null;
   const remembered = new Map<string, { x: number; y: number; label: number }>();
 
   let width = 0,
@@ -285,6 +304,11 @@ export function createGraphRenderer(
   let mixFrom = 0,
     mixTo = 0,
     mixStart = 0;
+  let hoverFlowActive = false,
+    hoverFlowStart = -1,
+    surgeStart = -1,
+    lastSurgeNonce = -1;
+  let surgeEdges: readonly (readonly [string, string])[] = [];
 
   type Gesture =
     | {
@@ -345,13 +369,21 @@ export function createGraphRenderer(
     source = new Uint32Array(next.links.length);
     target = new Uint32Array(next.links.length);
     style = new Uint8Array(next.links.length);
+    hasPending = new Uint8Array(count);
+    pathIndex = new Map(next.nodes.map((node, i) => [node.path, i]));
+    useGlow = next.nodes.filter((node) => node.structural).length <= visuals.MAX_GLOW_STRUCTURAL;
+    curvedCount = 0;
     next.links.forEach(([s, t, kind = LINK_STYLE.prose], l) => {
       source[l] = s;
       target[l] = t;
       style[l] = kind;
+      if (kind === LINK_STYLE.pending) hasPending[s] = 1;
+      if (kind === LINK_STYLE.structural || kind === LINK_STYLE.pending) curvedCount++;
       degree[s]!++;
       degree[t]!++;
     });
+    useCurved = curvedCount <= visuals.MAX_CURVED_LINKS;
+    if (count === 0) surgeEdges = [];
     offsets = new Uint32Array(count + 1);
     for (let i = 0; i < count; i++) offsets[i + 1] = offsets[i]! + degree[i]!;
     adjacency = new Uint32Array(offsets[count]!);
@@ -455,13 +487,43 @@ export function createGraphRenderer(
     wake();
   }
 
+  function setApprovalSurge(surge: ApprovalSurge | null): void {
+    if (!surge) {
+      surgeEdges = [];
+      surgeStart = -1;
+      return;
+    }
+    if (surge.nonce === lastSurgeNonce) return;
+    lastSurgeNonce = surge.nonce;
+    if (reduced || !visible || !ctx || !surge.edges.length) return;
+    surgeEdges = surge.edges;
+    surgeStart = -1;
+    wake();
+  }
+
+  const hasHoverMotion = (nodeIndex: number) =>
+    hasPending[nodeIndex] === 1 ||
+    source.some(
+      (s, l) =>
+        (s === nodeIndex || target[l] === nodeIndex) &&
+        (style[l] === LINK_STYLE.pending ||
+          (style[l] === LINK_STYLE.structural &&
+            !model.nodes[s]?.paused &&
+            !model.nodes[target[l]!]?.paused)),
+    );
+
   function relight(): void {
     const next = hover >= 0 ? hover : focus;
-    if (next >= 0 && next !== lit) {
+    if (next < 0) {
+      hoverFlowActive = false;
+      hoverFlowStart = -1;
+    } else if (next !== lit) {
       litSet.fill(0);
       litSet[next] = 1;
       for (let a = offsets[next]!; a < offsets[next + 1]!; a++) litSet[adjacency[a]!] = 1;
       lit = next;
+      hoverFlowActive = !reduced && ctx !== null && hasHoverMotion(next);
+      hoverFlowStart = -1;
     }
     const target = next >= 0 ? 1 : 0;
     if (reduced) {
@@ -531,17 +593,37 @@ export function createGraphRenderer(
       fading = t < 1;
       if (!fading && mixTo === 0) lit = -1;
     }
-    const labelsFading = draw(now);
-    if (fading || easing || labelsFading) {
-      frame = requestAnimationFrame(step);
-    } else if (layoutSettled && !incoming && canvas.dataset.settled !== "true") {
+    const advance = (active: boolean, start: number, ms: number): [number, number] => {
+      if (!active || reduced || !ctx) return [-1, -1];
+      const s = start < 0 ? now : start;
+      const elapsed = Math.max(0, now - s);
+      return elapsed >= ms ? [-1, -1] : [s, elapsed / ms];
+    };
+    let hoverProgress = -1,
+      surgeProgress = -1;
+    [hoverFlowStart, hoverProgress] = advance(
+      hoverFlowActive && lit >= 0,
+      hoverFlowStart,
+      visuals.HOVER_FLOW_MS,
+    );
+    if (hoverProgress < 0) hoverFlowActive = false;
+    [surgeStart, surgeProgress] = advance(
+      surgeEdges.length > 0,
+      surgeStart,
+      visuals.APPROVAL_SURGE_MS,
+    );
+    if (surgeProgress < 0) surgeEdges = [];
+    const labelsFading = draw(now, hoverProgress, surgeProgress);
+    const coreDone = !fading && !easing && !labelsFading;
+    if (coreDone && layoutSettled && !incoming && canvas.dataset.settled !== "true") {
       canvas.dataset.settled = "true";
       callbacks.settled();
     }
+    if (!coreDone || hoverFlowActive || surgeEdges.length > 0) frame = requestAnimationFrame(step);
   }
 
   // Draws a frame and reports whether a label is still fading.
-  function draw(now: number): boolean {
+  function draw(now: number, hoverProgress: number, surgeProgress: number): boolean {
     const fadeStep = reduced ? 1 : Math.min(34, now - lastDraw) / FADE_MS;
     lastDraw = now;
     if (!ctx) return false;
@@ -559,6 +641,37 @@ export function createGraphRenderer(
     const sy = (i: number) => py(i) * k + ty;
     const minR = options.local ? 2.5 : 1.25;
     const screenR = (i: number) => Math.max(minR, radius[i]! * k);
+    const group = (i: number) => (i < groups.length ? groups[i]! : -1);
+    const outerR = (i: number) =>
+      visuals.outerRadius(model.nodes[i]!.shape, screenR(i)) *
+      (highlight && i === lit && i !== active ? 1 + 0.15 * mix : 1);
+    const ringR = (i: number) =>
+      outerR(i) + (i === active ? (hasPending[i] ? 6.5 : 4) : hasPending[i] ? 3.5 : 0);
+
+    if (useGlow && mix < 1 && (glowLayer = visuals.ensureGlowLayer(glowLayer, width, height))) {
+      const mode = palette.dark ? "screen" : "source-over";
+      glowLayer.ctx.globalCompositeOperation = mode;
+      let anyGlow = false;
+      for (let i = 0; i < count; i++) {
+        const sprite =
+          model.nodes[i]!.structural && group(i) >= 0 ? palette.glowSprites[group(i)] : null;
+        if (!sprite) continue;
+        const gr = visuals.GLOW_RADIUS_FACTOR * screenR(i),
+          x = sx(i),
+          y = sy(i);
+        if (x < -gr || y < -gr || x > width + gr || y > height + gr) continue;
+        glowLayer.ctx.drawImage(sprite, (x - gr) / 2, (y - gr) / 2, gr, gr);
+        anyGlow = true;
+      }
+      if (anyGlow) {
+        ctx.save();
+        ctx.globalCompositeOperation = mode;
+        ctx.globalAlpha =
+          (palette.dark ? visuals.REST_GLOW.dark : visuals.REST_GLOW.light) * (1 - mix);
+        ctx.drawImage(glowLayer.canvas, 0, 0, width, height);
+        ctx.restore();
+      }
+    }
 
     // Links: one batched stroke for the rest, one for the lit node's own.
     // Many links wider than a device pixel stall the GPU for hundreds of
@@ -569,8 +682,64 @@ export function createGraphRenderer(
     );
     const strokeWidth = (links: number, wide: number) =>
       links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide;
+    const linkColor = (s: number, edgeStyle: number, fallback: string) =>
+      edgeStyle === LINK_STYLE.pending
+        ? palette.warning
+        : group(s) >= 0
+          ? palette.groups[group(s)]!
+          : fallback;
+    const drawCurved = (litOnly: boolean) => {
+      for (let l = 0; l < source.length; l++) {
+        const edgeStyle = style[l]!,
+          s = source[l]!,
+          t = target[l]!;
+        if (!visuals.isCurvedEdge(useCurved, edgeStyle)) continue;
+        if ((highlight && (s === lit || t === lit)) !== litOnly) continue;
+        const x1 = sx(s),
+          y1 = sy(s),
+          x2 = sx(t),
+          y2 = sy(t);
+        const [cx, cy] = visuals.quadControl(x1, y1, x2, y2);
+        if (
+          !litOnly &&
+          (Math.max(x1, x2, cx) < 0 ||
+            Math.max(y1, y2, cy) < 0 ||
+            Math.min(x1, x2, cx) > width ||
+            Math.min(y1, y2, cy) > height)
+        )
+          continue;
+        const stroke = () => {
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.quadraticCurveTo(cx, cy, x2, y2);
+          ctx.stroke();
+        };
+        ctx.strokeStyle = linkColor(s, edgeStyle, litOnly ? palette.match : palette.edge);
+        if (litOnly) {
+          const litW = lineWidth * (1 + 0.4 * mix);
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 0.2 * mix;
+          ctx.lineWidth = litW * 2.5;
+          stroke();
+          ctx.setLineDash(LINK_DASH[edgeStyle]!);
+          ctx.lineDashOffset =
+            edgeStyle === LINK_STYLE.pending && hoverProgress >= 0 ? -hoverProgress * 36 : 0;
+          ctx.globalAlpha = palette.edgeAlpha + (0.9 - palette.edgeAlpha) * mix;
+          ctx.lineWidth = litW;
+          stroke();
+        } else {
+          ctx.setLineDash(LINK_DASH[edgeStyle]!);
+          ctx.globalAlpha =
+            palette.edgeAlpha * linkRest * (edgeStyle === LINK_STYLE.pending ? 2.4 : 2.2);
+          ctx.lineWidth = strokeWidth(curvedCount, lineWidth);
+          stroke();
+        }
+      }
+      ctx.lineDashOffset = 0;
+    };
     ctx.strokeStyle = palette.edge;
     for (let pass = 0; pass < LINK_DASH.length; pass++) {
+      if (visuals.isCurvedEdge(useCurved, pass)) continue;
       ctx.globalAlpha =
         palette.edgeAlpha *
         linkRest *
@@ -600,12 +769,16 @@ export function createGraphRenderer(
       ctx.lineWidth = strokeWidth(shown, lineWidth);
       ctx.stroke();
     }
+    if (useCurved) drawCurved(false);
     if (highlight) {
       ctx.strokeStyle = palette.match;
       ctx.globalAlpha = palette.edgeAlpha + (0.75 - palette.edgeAlpha) * mix;
       ctx.lineWidth = strokeWidth(offsets[lit + 1]! - offsets[lit]!, lineWidth * (1 + 0.4 * mix));
       for (let pass = 0; pass < LINK_DASH.length; pass++) {
+        if (visuals.isCurvedEdge(useCurved, pass)) continue;
         ctx.setLineDash(LINK_DASH[pass]!);
+        ctx.lineDashOffset =
+          pass === LINK_STYLE.pending && hoverProgress >= 0 ? -hoverProgress * 36 : 0;
         ctx.beginPath();
         for (let l = 0; l < source.length; l++) {
           const s = source[l]!,
@@ -616,14 +789,17 @@ export function createGraphRenderer(
         }
         ctx.stroke();
       }
+      ctx.lineDashOffset = 0;
+      if (useCurved) drawCurved(true);
     }
     ctx.setLineDash([]);
     if (display.arrows && k > 0.25) {
+      const size = Math.max(3, 5 * Math.min(k, 1.5));
       ctx.fillStyle = palette.edge;
       ctx.globalAlpha = Math.min(0.55, palette.edgeAlpha * 2.5) * linkRest;
       ctx.beginPath();
-      const size = Math.max(3, 5 * Math.min(k, 1.5));
       for (let l = 0; l < source.length; l++) {
+        if (visuals.isCurvedEdge(useCurved, style[l]!)) continue;
         const s = source[l]!,
           t = target[l]!;
         const x2 = sx(t),
@@ -632,18 +808,80 @@ export function createGraphRenderer(
         const dx = x2 - sx(s),
           dy = y2 - sy(s);
         const length = Math.hypot(dx, dy);
-        const r = screenR(t);
+        const r = outerR(t);
         if (length < r + size * 2) continue;
         const ux = dx / length,
           uy = dy / length;
-        const tipX = x2 - ux * (r + 1),
-          tipY = y2 - uy * (r + 1);
-        ctx.moveTo(tipX, tipY);
-        ctx.lineTo(tipX - ux * size - uy * size * 0.55, tipY - uy * size + ux * size * 0.55);
-        ctx.lineTo(tipX - ux * size + uy * size * 0.55, tipY - uy * size - ux * size * 0.55);
-        ctx.closePath();
+        visuals.drawArrowhead(ctx, [x2 - ux * (r + 1), y2 - uy * (r + 1), ux, uy], size);
       }
       ctx.fill();
+      if (useCurved) {
+        for (let l = 0; l < source.length; l++) {
+          const edgeStyle = style[l]!,
+            s = source[l]!,
+            t = target[l]!;
+          if (!visuals.isCurvedEdge(useCurved, edgeStyle)) continue;
+          const x1 = sx(s),
+            y1 = sy(s),
+            x2 = sx(t),
+            y2 = sy(t),
+            r = outerR(t);
+          const dist = Math.hypot(x2 - x1, y2 - y1);
+          if (x2 < -20 || y2 < -20 || x2 > width + 20 || y2 > height + 20 || dist < r + size * 2)
+            continue;
+          ctx.fillStyle = linkColor(s, edgeStyle, palette.edge);
+          ctx.globalAlpha =
+            highlight && (s === lit || t === lit)
+              ? 0.9
+              : Math.min(0.65, palette.edgeAlpha * 2.8) * linkRest;
+          ctx.beginPath();
+          visuals.drawArrowhead(
+            ctx,
+            visuals.quadAt([x1, y1, x2, y2], Math.max(0.15, 1 - (r + 2) / dist)),
+            size,
+          );
+          ctx.fill();
+        }
+      }
+    }
+    if (hoverProgress >= 0 && lit >= 0) {
+      for (let l = 0, comets = 0; l < source.length && comets < 24; l++) {
+        const s = source[l]!,
+          t = target[l]!;
+        if (
+          style[l] !== LINK_STYLE.structural ||
+          (s !== lit && t !== lit) ||
+          model.nodes[s]?.paused ||
+          model.nodes[t]?.paused
+        )
+          continue;
+        const color = linkColor(s, style[l]!, palette.match);
+        visuals.drawComet(ctx, [sx(s), sy(s), sx(t), sy(t)], hoverProgress, {
+          curved: useCurved,
+          color,
+          head: palette.dark ? palette.ink : color,
+        });
+        comets++;
+      }
+    }
+    if (surgeProgress >= 0 && surgeEdges.length > 0) {
+      const rippleMax = 26 * Math.min(1.5, Math.max(0.6, k));
+      for (const [srcPath, dstPath] of surgeEdges) {
+        const s = pathIndex.get(srcPath),
+          t = pathIndex.get(dstPath);
+        if (s === undefined || t === undefined) continue;
+        const color = linkColor(s, LINK_STYLE.structural, palette.match);
+        visuals.drawComet(ctx, [sx(s), sy(s), sx(t), sy(t)], surgeProgress, {
+          curved: useCurved,
+          color,
+          head: palette.dark ? palette.ink : color,
+        });
+        const p0 = surgeProgress / 0.75,
+          p1 = (surgeProgress - 0.25) / 0.75;
+        visuals.drawRipple(ctx, sx(s), sy(s), outerR(s), rippleMax, p0, color);
+        const dstColor = group(t) >= 0 ? palette.groups[group(t)]! : color;
+        visuals.drawRipple(ctx, sx(t), sy(t), outerR(t), rippleMax, p1, dstColor);
+      }
     }
 
     const visibleNode = (i: number) => {
@@ -666,7 +904,6 @@ export function createGraphRenderer(
       if (any) ctx.fill();
     };
     const isLit = (i: number) => highlight && litSet[i] === 1;
-    const group = (i: number) => (i < groups.length ? groups[i]! : -1);
     const plain = (i: number) => i !== active && group(i) < 0 && model.nodes[i]!.shape !== "ring";
     fillPass(palette.node, rest, (i) => plain(i) && !isLit(i));
     const ring = (i: number) => model.nodes[i]!.shape === "ring";
@@ -696,7 +933,7 @@ export function createGraphRenderer(
     if (active >= 0 && active < count) {
       const r = screenR(active);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = palette.ink;
+      ctx.fillStyle = group(active) >= 0 ? palette.groups[group(active)]! : palette.ink;
       ctx.beginPath();
       addShape(
         ctx,
@@ -709,12 +946,19 @@ export function createGraphRenderer(
       ctx.strokeStyle = palette.ink;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(sx(active), sy(active), r + 4, 0, Math.PI * 2);
+      ctx.arc(
+        sx(active),
+        sy(active),
+        outerR(active) + (hasPending[active] ? 6.5 : 4),
+        0,
+        Math.PI * 2,
+      );
       ctx.stroke();
     }
     if (highlight && lit !== active) {
       ctx.globalAlpha = 1;
-      ctx.fillStyle = palette.match;
+      const coloredStructural = model.nodes[lit]!.structural && group(lit) >= 0;
+      ctx.fillStyle = coloredStructural ? palette.groups[group(lit)]! : palette.match;
       ctx.beginPath();
       const shape = model.nodes[lit]!.shape;
       addShape(
@@ -725,7 +969,26 @@ export function createGraphRenderer(
         screenR(lit) * (1 + 0.15 * mix),
       );
       ctx.fill();
+      if (coloredStructural) {
+        ctx.strokeStyle = palette.ink;
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = "round";
+        ctx.stroke();
+      }
     }
+    ctx.strokeStyle = palette.warning;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    for (let i = 0; i < count; i++) {
+      if (!hasPending[i] || !visibleNode(i)) continue;
+      ctx.globalAlpha = isLit(i) || i === active ? 1 : rest;
+      ctx.lineDashOffset = hoverProgress >= 0 && i === lit ? -hoverProgress * 24 : 0;
+      ctx.beginPath();
+      ctx.arc(sx(i), sy(i), outerR(i) + 3.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.lineDashOffset = 0;
+    ctx.setLineDash([]);
 
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
@@ -764,12 +1027,14 @@ export function createGraphRenderer(
       if (placed[i]) return;
       placed[i] = 1;
       const own = highlight && litSet[i] === 1;
+      const isPill = highlight && i === lit;
       const shown = (i === active && options.local) || k * Math.sqrt(radius[i]! / 4) >= fadeAt;
       let fits = (shown || own || labelAlpha[i]! > 0) && drawn < LABEL_LIMIT && visibleNode(i);
       let title = "",
         left = 0,
         top = 0,
         w = 0,
+        boxW = 0,
         c0 = 0,
         c1 = 0,
         r0 = 0,
@@ -777,11 +1042,17 @@ export function createGraphRenderer(
       if (fits) {
         title = shortTitle(model.nodes[i]!.title);
         w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
-        left = sx(i) - w / 2;
-        top = sy(i) + screenR(i) + 3;
-        fits = left >= 2 && top >= 0 && left + w <= width - 2 && top + LABEL_HEIGHT <= height;
+        const pillPad = isPill ? 4 : 0;
+        left = sx(i) - w / 2 - pillPad;
+        boxW = w + pillPad * 2;
+        top = sy(i) + (i === lit || i === active || hasPending[i] ? ringR(i) : screenR(i)) + 3;
+        fits =
+          left >= 2 &&
+          top >= (isPill ? 1 : 0) &&
+          left + boxW <= width - 2 &&
+          top + LABEL_HEIGHT + (isPill ? 1 : 0) <= height;
         c0 = Math.floor(left / CELL);
-        c1 = Math.floor((left + w) / CELL);
+        c1 = Math.floor((left + boxW) / CELL);
         r0 = Math.floor(top / CELL);
         r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
         // The label may touch its own node's dot, not another's.
@@ -812,9 +1083,23 @@ export function createGraphRenderer(
       if (alpha < 0.03) return;
       for (let r = r0; r <= r1; r++) taken.fill(1, r * cols + c0, r * cols + c1 + 1);
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = own || i === active ? palette.ink : palette.label;
-      ctx.strokeText(title, sx(i), top + 1);
-      ctx.fillText(title, sx(i), top + 1);
+      if (isPill) {
+        ctx.fillStyle = palette.bg;
+        ctx.beginPath();
+        ctx.roundRect(left, top - 1, boxW, LABEL_HEIGHT + 2, 5);
+        ctx.fill();
+        ctx.strokeStyle = palette.line;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = palette.bg;
+        ctx.fillStyle = palette.ink;
+        ctx.fillText(title, sx(i), top + 1);
+      } else {
+        ctx.fillStyle = own || i === active ? palette.ink : palette.label;
+        ctx.strokeText(title, sx(i), top + 1);
+        ctx.fillText(title, sx(i), top + 1);
+      }
       drawn++;
     };
     if (highlight) label(lit);
@@ -989,6 +1274,7 @@ export function createGraphRenderer(
     setActive,
     setGroups,
     setOptions,
+    setApprovalSurge,
     resize,
     setVisible,
     setFocus(index: number) {
@@ -1043,6 +1329,7 @@ export function createGraphRenderer(
     destroy() {
       if (frame !== null) cancelAnimationFrame(frame);
       frame = null;
+      glowLayer = null;
       worker?.terminate();
       worker = null;
       canvas.removeEventListener("pointerdown", onPointerDown);
@@ -1066,6 +1353,7 @@ export function GraphCanvas(props: {
   pointIndex: number;
   display: GraphDisplay;
   forces: GraphForces;
+  approvalSurge?: ApprovalSurge | null;
   surface: "bg" | "panel";
   local: boolean;
   label: string;
@@ -1134,6 +1422,10 @@ export function GraphCanvas(props: {
   useEffect(() => {
     rendererRef.current?.setModel({ nodes: props.nodes, links: props.links });
   }, [props.nodes, props.links]);
+
+  useEffect(() => {
+    rendererRef.current?.setApprovalSurge(props.approvalSurge ?? null);
+  }, [props.approvalSurge]);
 
   useEffect(() => {
     rendererRef.current?.setActive(props.activeIndex);

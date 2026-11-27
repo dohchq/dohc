@@ -37,11 +37,20 @@ import { bridge } from "../bridge";
 import { isChatMentionPageChanged, refusalCode } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { EmptyState, IconButton, RetryRow } from "../ui/controls";
-import { GraphCanvas, LINK_STYLE, type CanvasNode, type GraphLink } from "./GraphCanvas";
+import {
+  GROUP_HUES,
+  GraphCanvas,
+  LINK_STYLE,
+  type ApprovalSurge,
+  type CanvasNode,
+  type GraphLink,
+} from "./GraphCanvas";
 import {
   DEFAULT_SETTINGS,
   GRAPH_KINDS,
   GraphSettings,
+  HUE_TEXT,
+  STRUCTURAL_KIND_HUE,
   ShapeMark,
   type GraphKind,
   type GraphSettingsValue,
@@ -139,9 +148,26 @@ const linkStyle = (edge: GraphEdge) =>
     ? LINK_STYLE.pending
     : edge.kind.startsWith("chat-")
       ? LINK_STYLE.mention
-      : edge.kind === "wikilink" || edge.kind === "markdown" || edge.kind === "heading-in-file"
+      : edge.kind === "wikilink" ||
+          edge.kind === "markdown" ||
+          edge.kind === "heading-in-file" ||
+          edge.kind === "record-in-collection"
         ? LINK_STYLE.prose
         : LINK_STYLE.structural;
+
+export function detectApprovedEdges(
+  previousRequested: ReadonlySet<string>,
+  edges: LinksConnectionsResult["edges"],
+): [string, string][] {
+  return edges
+    .filter(
+      (edge) =>
+        edge.kind === "app-uses-data" &&
+        edge.approval === "approved" &&
+        previousRequested.has(JSON.stringify([edge.source, edge.target])),
+    )
+    .map((edge) => [edge.source, edge.target]);
+}
 
 function buildModel(
   graph: GraphData,
@@ -225,6 +251,11 @@ function buildModel(
     kind: KIND_NAMES[graphKind(node)],
     shape: SHAPES[graphKind(node)],
     degree: linkDegree[i]!,
+    structural: node.kind === "connection",
+    paused:
+      node.kind === "connection" &&
+      node.connection.kind === "automation" &&
+      !node.connection.enabled,
   }));
   return { nodes, sources, links, index, filteredNodeCount, filteredLinkCount, kindCounts, local };
 }
@@ -234,7 +265,12 @@ function groupsFor(model: GraphViewModel, groups: GraphSettingsValue["groups"]):
   const queries = groups
     .map((group) => ({ query: group.query.trim().toLocaleLowerCase(), hue: group.hue }))
     .filter((group) => group.query);
-  if (!queries.length) return result;
+  if (!queries.length) {
+    model.sources.forEach((node, i) => {
+      result[i] = STRUCTURAL_KIND_HUE[graphKind(node)] ?? -1;
+    });
+    return result;
+  }
   model.sources.forEach((node, i) => {
     const title = node.title.toLocaleLowerCase(),
       path = node.path.toLocaleLowerCase();
@@ -281,8 +317,12 @@ function useDelayed(active: boolean): boolean {
   return active && shown;
 }
 
+const markTone = (hue: number, active = false) =>
+  hue >= 0 ? HUE_TEXT[GROUP_HUES[hue]!] : active ? "text-ink" : "text-subtle";
+
 function GraphRows(props: {
   model: GraphViewModel;
+  groups: Int16Array;
   activePath: string | null;
   onOpen: (node: GraphNode) => void;
   onFocusNode: (index: number) => void;
@@ -374,7 +414,7 @@ function GraphRows(props: {
             >
               <ShapeMark
                 shape={SHAPES[graphKind(node)]}
-                className={active ? "text-ink" : "text-subtle"}
+                className={markTone(props.groups[index] ?? -1, active)}
               />
               <span className="min-w-0 flex-1 truncate">{node.title}</span>
               <span className="text-[12px] tabular-nums text-subtle">
@@ -391,6 +431,7 @@ function GraphRows(props: {
 function GraphSearch(props: {
   value: string;
   model: GraphViewModel;
+  groups: Int16Array;
   onChange: (value: string) => void;
   onOpen: (node: GraphNode) => void;
   onPointNode: (index: number) => void;
@@ -488,7 +529,7 @@ function GraphSearch(props: {
                 activeMatch?.index === index ? "bg-selected text-ink" : "text-muted"
               }`}
             >
-              <ShapeMark shape={node.shape} className="text-subtle" />
+              <ShapeMark shape={node.shape} className={markTone(props.groups[index] ?? -1)} />
               <span className="min-w-0 flex-1 truncate">{node.title}</span>
               <span className="text-[12px] tabular-nums text-subtle">
                 {node.degree.toLocaleString()}
@@ -802,18 +843,47 @@ export function GraphView(props: {
     if (freshConnections)
       holdConnections({ workspaceId: props.workspaceId, value: freshConnections });
   }, [freshConnections, props.workspaceId]);
+  const approvalEventPendingRef = useRef(false);
+  const prevRequestedRef = useRef<Set<string> | null>(null);
+  const surgeNonceRef = useRef(0);
+  const [approvalSurge, setApprovalSurge] = useState<ApprovalSurge | null>(null);
+  useEffect(() => {
+    approvalEventPendingRef.current = false;
+    prevRequestedRef.current = null;
+    setApprovalSurge(null);
+    return bridge().onLocalAppsChanged((event) => {
+      if (event.workspaceId === props.workspaceId) approvalEventPendingRef.current = true;
+    });
+  }, [props.workspaceId]);
+  useEffect(() => {
+    if (!freshConnections || freshConnections.scope !== "workspace") return;
+    const requested = new Set(
+      freshConnections.edges
+        .filter((edge) => edge.kind === "app-uses-data" && edge.approval === "requested")
+        .map((edge) => JSON.stringify([edge.source, edge.target])),
+    );
+    const prev = prevRequestedRef.current;
+    const armed = approvalEventPendingRef.current;
+    approvalEventPendingRef.current = false;
+    prevRequestedRef.current = requested;
+    if (!armed || !prev) return;
+    const edges = detectApprovedEdges(prev, freshConnections.edges);
+    if (edges.length > 0) setApprovalSurge({ nonce: ++surgeNonceRef.current, edges });
+  }, [freshConnections, props.workspaceId]);
   const connections =
     freshConnections ??
     (heldConnections?.workspaceId === props.workspaceId ? heldConnections.value : undefined);
   const connectionsError = connectionsQuery.error;
   const retryConnections = connectionsQuery.retry;
   useEffect(() => {
-    if (connectionsError)
+    if (connectionsError) {
+      approvalEventPendingRef.current = false;
       reportError.current?.(
         "dohc could not load how Collections and apps connect.",
         connectionsError,
         () => void retryConnections(),
       );
+    }
   }, [connectionsError, retryConnections]);
 
   const settingsKey = `${props.workspaceId}\0${variant}`;
@@ -914,6 +984,7 @@ export function GraphView(props: {
       pointIndex={pointIndex}
       display={settings.display}
       forces={settings.forces}
+      approvalSurge={approvalSurge}
       surface={variant === "page" ? "bg" : "panel"}
       local={model.local}
       label={model.local ? "Links to and from the open page" : "Workspace graph"}
@@ -995,6 +1066,7 @@ export function GraphView(props: {
           <GraphSearch
             value={search}
             model={model}
+            groups={groups}
             onChange={setSearch}
             onOpen={openNode}
             onPointNode={setPointIndex}
@@ -1086,6 +1158,7 @@ export function GraphView(props: {
           {variant === "panel" && !loadingBlank ? (
             <GraphRows
               model={model}
+              groups={groups}
               activePath={shownPath}
               onOpen={openNode}
               onFocusNode={setFocusIndex}

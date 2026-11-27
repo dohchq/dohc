@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: GraphSettingsValue = {
 };
 
 // Spelled out so Tailwind sees every class.
-const HUE_TEXT: Record<(typeof GROUP_HUES)[number], string> = {
+export const HUE_TEXT: Record<(typeof GROUP_HUES)[number], string> = {
   teal: "text-hue-teal",
   amber: "text-hue-amber",
   plum: "text-hue-plum",
@@ -61,6 +61,13 @@ const HUE_TEXT: Record<(typeof GROUP_HUES)[number], string> = {
   rust: "text-hue-rust",
   indigo: "text-hue-indigo",
   rose: "text-hue-rose",
+};
+export const STRUCTURAL_KIND_HUE: Partial<Record<GraphKind, number>> = {
+  collection: 0,
+  automation: 1,
+  dataset: 2,
+  app: 5,
+  group: 6,
 };
 
 export function ShapeMark(props: { shape: GraphShape; className?: string; hollow?: boolean }) {
@@ -193,6 +200,7 @@ export function GraphSettings(props: {
   const forcesChanged = (Object.keys(DEFAULT_FORCES) as (keyof GraphForces)[]).some(
     (key) => value.forces[key] !== DEFAULT_FORCES[key],
   );
+  const hasColorRules = value.groups.some((group) => group.query.trim().length > 0);
 
   return (
     <div
@@ -229,6 +237,7 @@ export function GraphSettings(props: {
         ) : null}
         {GRAPH_KINDS.map(({ kind, name, shape }) => {
           const shown = !value.hidden.includes(kind);
+          const hue = !hasColorRules && shown ? STRUCTURAL_KIND_HUE[kind] : undefined;
           return (
             <Row
               key={kind}
@@ -237,7 +246,7 @@ export function GraphSettings(props: {
                   <ShapeMark
                     shape={shape}
                     hollow={!shown && shape !== "ring"}
-                    className="text-subtle"
+                    className={hue !== undefined ? HUE_TEXT[GROUP_HUES[hue]!] : "text-subtle"}
                   />
                   <span className="truncate">{name}</span>
                   <span className="text-[12px] tabular-nums text-subtle">
