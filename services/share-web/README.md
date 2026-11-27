@@ -101,6 +101,8 @@ Settings › Agents shows when the agent last signed in, and the `client_name` a
 A share link agent's token never works at a personal address, nor the reverse. A personal token works only at the address it signed in at.
 Every tool but `dohc_list_workspaces` and `dohc_wait_for_messages` names a workspace, and the relay checks the agent's reach and level there on every call.
 View reads files, channels, and file discussions. Comment also posts in channels and on files. Edit also changes Collections and [live documents](#live-documents), and no other files.
+`dohc_read_file` reads a current file by its path, also one past the limit of `dohc_list_files`, or by its blob hash. The relay finds the file at that path within the agent's reach, and checks again before each chunk, so a narrower reach, a sign-out, or new bytes at the path end the read.
+The server's instructions say what the agent can do. Its resources at `dohc://guides/` serve the `skills/dohc` skill and its Collections and automations references from `src/personalMcpGuides.json`, so the bundle reads no file at run time. A test fails when that copy falls behind `skills/dohc`. Refresh it with `pnpm --filter @dohc/share-web exec vitest run personalMcpInventory -u`.
 At Edit, `dohc_write_collection_files` takes the same files as an Edit link's write, plus the workspace it goes to.
 It edits a Collection's `collection.yaml`, creates or replaces its `automations.yaml`, adds new records, or creates a Collection.
 The relay refuses any other file, including a change to an existing record, and says the agent can't write other files.

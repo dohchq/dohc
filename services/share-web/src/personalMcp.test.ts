@@ -85,6 +85,18 @@ function relay({ action, body }: Call): Response {
     if (body.sha256 === BINARY_SHA) return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
     return Response.json({ ok: false, code: "not_found", error: "not found" }, { status: 404 });
   }
+  if (action === "file") {
+    const kind = (contentKind: string) => ({ headers: { "x-dohc-content-kind": contentKind } });
+    if (body.path === "docs/later.md") return new Response("# Later", kind("text"));
+    if (body.path === "photo.png")
+      return new Response(new Uint8Array([0x89, 0x50]), kind("binary"));
+    if (body.path === "secret/plan.md")
+      return Response.json(
+        { ok: false, code: "personal_agent_out_of_reach", error: "out of reach" },
+        { status: 403 },
+      );
+    return Response.json({ ok: false, code: "not_found", error: "not found" }, { status: 404 });
+  }
   if (action === "chat") return Response.json({ ok: true, messages: [message(3)], olderCursor: 2 });
   if (action === "discussion") {
     return Response.json(
@@ -1133,4 +1145,49 @@ it("answers null for a token the relay doesn't accept, and words a reach check t
       error: PERSONAL_SIGN_IN_UNAVAILABLE,
     });
   }
+});
+
+it("reads a file by its path from the relay, without listing the workspace's files", async () => {
+  const f = fixture();
+  const client = await f.connect();
+  const read = async (path: string) =>
+    client.callTool({ name: "dohc_read_file", arguments: { workspace: "trip", path } });
+  expect(structured(await read("docs/later.md"))).toEqual({
+    ok: true,
+    source: "settled",
+    encoding: "utf8",
+    content: "# Later",
+  });
+  expect(structured(await read("photo.png"))).toEqual({
+    ok: true,
+    source: "settled",
+    encoding: "base64",
+    content: "iVA=",
+  });
+  const missing = await read("docs/missing.md");
+  expect(missing.isError).toBe(true);
+  expect(structured(missing)).toEqual({
+    ok: false,
+    code: "not_found",
+    error:
+      "dohc could not find a current file at this path in this workspace. Check the path with dohc_list_files.",
+  });
+  expect(structured(await read("secret/plan.md"))).toMatchObject({
+    ok: false,
+    code: "out_of_reach",
+  });
+  expect(f.calls).toEqual(
+    ["docs/later.md", "photo.png", "docs/missing.md", "secret/plan.md"].map((path) => ({
+      action: "file",
+      body: { workspaceId: "trip", path },
+    })),
+  );
+  for (const args of [
+    { workspace: "trip" },
+    { workspace: "trip", path: "docs/later.md", blobSha256: TEXT_SHA },
+  ])
+    expect(await refusedInput(client.callTool({ name: "dohc_read_file", arguments: args }))).toBe(
+      true,
+    );
+  expect(f.calls).toHaveLength(4);
 });

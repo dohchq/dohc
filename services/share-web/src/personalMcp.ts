@@ -28,6 +28,7 @@ import { collectionWriteChanges, type CollectionWriteOutcome } from "./collectio
 import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentClient";
 import type { PersonalLiveClient } from "./personalLiveClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
+import guides from "./personalMcpGuides.json" with { type: "json" };
 
 // The MCP server a personal agent signs in to at /mcp/agent/w/<workspace>.
 // Its token reaches the workspaces its owner chose, each at View, Comment or
@@ -226,6 +227,46 @@ const pageArgs = () => ({
   before: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(100).optional(),
 });
+const READS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
+// A post's idempotencyKey and a write's submitId make a retry land once.
+const POSTS = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
+const REPLACES = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
+
+const INSTRUCTIONS =
+  "You are a personal agent in dohc, working for the person who signed you in. " +
+  "dohc_list_workspaces lists the workspaces you reach and your level in each: view reads files and chat, " +
+  "comment also posts in chat and on files, and edit also changes Collections in your owner's own workspaces. " +
+  "Read a file with dohc_read_file by its path; dohc_list_files lists paths but can be truncated. " +
+  "Call dohc_wait_for_messages in a loop to hear from your owner. " +
+  "The only files you can write are a Collection's collection.yaml, its automations.yaml, and new Markdown records, " +
+  "with dohc_write_collection_files. Where dohc_edit_document is offered, you can also edit a live Markdown document. " +
+  "You can't write any other file or publish apps. " +
+  "The guides at dohc://guides/ explain Collections and automations. They were written for dohc's desktop MCP server, " +
+  "so some tools they name aren't here.";
+
+// Guides from skills/dohc, inlined when share-web is bundled.
+const GUIDES = [
+  {
+    name: "dohc",
+    file: "SKILL.md",
+    title: "Working in a dohc workspace",
+    description: "dohc's agent skill: workspaces, documents, Collections, chat and apps.",
+  },
+  {
+    name: "collections-and-datasets",
+    file: "references/collections-and-datasets.md",
+    title: "Collections and datasets",
+    description:
+      "collection.yaml and its Markdown records, and the desktop's dataset.json Collections.",
+  },
+  {
+    name: "automations",
+    file: "references/automations.md",
+    title: "Collection automations",
+    description: "The automations.yaml format: triggers, steps, conditions and message templates.",
+  },
+] as const;
+
 const UNVERIFIED_LINK =
   "authorKind link marks a link holder's post: its name was chosen by that link holder and nobody verified it.";
 
@@ -305,8 +346,18 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     client.call(action, body, signal);
   const server = new McpServer(
     { name: "dohc-personal", version: "0.1.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {}, resources: {} }, instructions: INSTRUCTIONS },
   );
+  for (const guide of GUIDES) {
+    server.registerResource(
+      guide.name,
+      `dohc://guides/${guide.name}`,
+      { title: guide.title, description: guide.description, mimeType: "text/markdown" },
+      (uri) => ({
+        contents: [{ uri: uri.href, mimeType: "text/markdown", text: guides[guide.file] }],
+      }),
+    );
+  }
   const refusals: Readonly<Record<string, Refused>> = {
     ...REFUSALS,
     personal_agent_out_of_reach: outOfReach(reach.agent.name),
@@ -369,6 +420,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         "dmChannel is your direct messages with your owner in that workspace, for dohc_read_channel and dohc_post_channel. " +
         "agent is your name as your posts show it, and the handle people mention you by, written after an @. " +
         "Pass a workspace's id as workspace to the other tools. Your owner changes this list in Settings › Agents.",
+      annotations: READS,
       inputSchema: z.object({}),
     },
     async () =>
@@ -391,6 +443,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       description:
         "List the Groups in a workspace you can reach, each with its channel for dohc_read_channel and, where you have Comment, dohc_post_channel. " +
         "Direct messages are not listed: dohc_list_workspaces names yours.",
+      annotations: READS,
       inputSchema: z.object({ workspace: workspaceArg() }),
     },
     async ({ workspace }) => {
@@ -424,6 +477,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     {
       description:
         "List the current files in a workspace you can reach. Paths are relative to the workspace. truncated means it has more files than one answer lists.",
+      annotations: READS,
       inputSchema: z.object({ workspace: workspaceArg() }),
     },
     async ({ workspace }) => {
@@ -439,24 +493,67 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     },
   );
 
+  // Bytes as the agent reads them: UTF-8 text where they decode, base64 otherwise.
+  const settled = (bytes: Buffer, binary: boolean) => {
+    if (!binary) {
+      try {
+        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        return toolResult({ ok: true, source: "settled", encoding: "utf8", content });
+      } catch {}
+    }
+    return toolResult({
+      ok: true,
+      source: "settled",
+      encoding: "base64",
+      content: bytes.toString("base64"),
+    });
+  };
+
   server.registerTool(
     "dohc_read_file",
     {
       description:
-        "Read up to 256 KiB of a current file in a workspace you can reach, using its blobSha256 from dohc_list_files. " +
+        "Read up to 256 KiB of a current file in a workspace you can reach, by its path or by its blobSha256 from dohc_list_files. " +
+        "A path reads a file dohc_list_files left out when it was truncated. " +
         "Markdown may lag the live document. Binary files are base64 encoded.",
-      inputSchema: z.object({
-        workspace: workspaceArg(),
-        blobSha256: z.string().regex(/^[0-9a-f]{64}$/),
-      }),
+      annotations: READS,
+      inputSchema: z
+        .object({
+          workspace: workspaceArg(),
+          path: z
+            .string()
+            .min(1)
+            .max(1024)
+            .optional()
+            .describe("The file's path relative to the workspace, as dohc_list_files lists paths."),
+          blobSha256: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .optional(),
+        })
+        .refine(
+          (value) => (value.path === undefined) !== (value.blobSha256 === undefined),
+          "Send path or blobSha256, not both.",
+        ),
     },
-    async ({ workspace, blobSha256 }) => {
-      const words = {
-        not_found:
-          "dohc could not find a current file with this blobSha256 in this workspace. List its files again with dohc_list_files.",
-        bad_request: NO_WORKSPACE,
-      };
+    async ({ workspace, path, blobSha256 }) => {
       try {
+        if (path !== undefined) {
+          const response = await call("file", { workspaceId: workspace, path });
+          if (!response.ok)
+            return await refused(response, {
+              not_found:
+                "dohc could not find a current file at this path in this workspace. Check the path with dohc_list_files.",
+              bad_request: "dohc could not read this file. Check its workspace and path.",
+            });
+          const binary = response.headers.get("x-dohc-content-kind") === "binary";
+          return settled(await boundedBytes(response, 256 * 1024, signal), binary);
+        }
+        const words = {
+          not_found:
+            "dohc could not find a current file with this blobSha256 in this workspace. List its files again with dohc_list_files.",
+          bad_request: NO_WORKSPACE,
+        };
         const response = await call("blob", { workspaceId: workspace, sha256: blobSha256 });
         if (!response.ok) return await refused(response, words);
         const bytes = await boundedBytes(response, 256 * 1024, signal);
@@ -465,33 +562,12 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
           filesSchema,
           words,
         );
-        if (
+        return settled(
+          bytes,
           inventory.files.some(
             (file) => file.blobSha256 === blobSha256 && file.contentKind === "binary",
-          )
-        ) {
-          return toolResult({
-            ok: true,
-            source: "settled",
-            encoding: "base64",
-            content: bytes.toString("base64"),
-          });
-        }
-        try {
-          return toolResult({
-            ok: true,
-            source: "settled",
-            encoding: "utf8",
-            content: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
-          });
-        } catch {
-          return toolResult({
-            ok: true,
-            source: "settled",
-            encoding: "base64",
-            content: bytes.toString("base64"),
-          });
-        }
+          ),
+        );
       } catch (e) {
         return failed(e);
       }
@@ -506,6 +582,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         "or another channel a message names. " +
         "Each message from dohc_wait_for_messages names its channel. Messages come newest first: pass before=olderCursor for earlier ones. " +
         UNVERIFIED_LINK,
+      annotations: READS,
       inputSchema: z.object({
         workspace: workspaceArg(),
         channel: z
@@ -578,6 +655,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       description:
         "Post in a channel of a workspace where you have Comment: name channel to start a thread, or threadId to reply in one. " +
         "The post shows as from you, your owner's agent.",
+      annotations: POSTS,
       inputSchema: z
         .object({
           workspace: workspaceArg(),
@@ -625,6 +703,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         "Delete one of your own messages in a Group or a file's Comments. This can't be undone. Its text leaves every chat view; " +
         "people see that a message was there. People who already read it may keep a copy. " +
         "You can delete only messages you posted, whatever your level.",
+      annotations: REPLACES,
       inputSchema: z.object({
         workspace: workspaceArg(),
         threadId: z
@@ -672,6 +751,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         "Name path for every thread on a current file, or threadId for one thread, also on a file since deleted. " +
         "A thread's answer names the path its file has or last had. " +
         UNVERIFIED_LINK,
+      annotations: READS,
       inputSchema: z
         .object({
           workspace: workspaceArg(),
@@ -749,6 +829,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       description:
         "Comment on a file in a workspace where you have Comment: name path to start a thread on the file, " +
         "or threadId to reply in one, also on a file since deleted. The comment shows as from you, your owner's agent.",
+      annotations: POSTS,
       inputSchema: z
         .object({
           workspace: workspaceArg(),
@@ -830,6 +911,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       description:
         "Change a Collection's own files, and no other file, in a workspace where you have Edit: " +
         COLLECTION_WRITE_GUIDE,
+      annotations: REPLACES,
       inputSchema: z
         .object({ workspace: workspaceArg(), ...collectionWriteFields })
         .refine(fitsCollectionWrite, COLLECTION_WRITE_TOO_LARGE),
@@ -926,6 +1008,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         "Call in a loop with the returned cursor; without a cursor, it starts from when you signed in. " +
         "It answers as soon as a message arrives, or with no messages once timeoutMs passes. more means messages remain: call again at once. " +
         "Your own posts are not returned. Nothing is marked read.",
+      annotations: READS,
       inputSchema: z.object({
         cursor: z
           .string()

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { servePersonalMcp } from "./personalMcp";
@@ -5,7 +6,7 @@ import personalTools from "./personalMcpTools.main.json";
 import linkTools from "./remoteMcpTools.main.json";
 import { selfHostLiveProfile } from "../../sync-relay/src/selfHostLiveProfile";
 
-type Tool = { name: string; inputSchema: unknown };
+type Tool = { name: string; inputSchema: unknown; annotations?: unknown };
 
 const unexpected = () => {
   throw new Error("Unexpected inventory call.");
@@ -14,7 +15,7 @@ const unexpected = () => {
 // Exercises the personal server's registration and HTTP transport. No tool
 // runs: the only relay answer is the reach check that starts each request.
 // The main inventory is a server that edits documents live.
-async function advertisedPersonalTools(live = true): Promise<Tool[]> {
+async function connected(live = true): Promise<Client> {
   const client = new Client({ name: "main-inventory", version: "1" });
   try {
     await client.connect(
@@ -58,13 +59,29 @@ async function advertisedPersonalTools(live = true): Promise<Tool[]> {
         },
       }),
     );
+    return client;
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
+}
+
+async function advertisedPersonalTools(live = true): Promise<Tool[]> {
+  const client = await connected(live);
+  try {
     return (await client.listTools()).tools
-      .map(({ name, inputSchema }) => ({ name, inputSchema }))
+      .map(({ name, inputSchema, annotations }) => ({ name, inputSchema, annotations }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } finally {
     await client.close();
   }
 }
+
+const GUIDE_FILES = [
+  "SKILL.md",
+  "references/collections-and-datasets.md",
+  "references/automations.md",
+] as const;
 
 const properties = (tools: readonly Tool[], name: string) =>
   (tools.find((tool) => tool.name === name)!.inputSchema as { properties: Record<string, unknown> })
@@ -120,4 +137,58 @@ it("takes the share link tools' inputs where they mean the same thing", () => {
   expect(properties(personalTools, "dohc_wait_for_messages").timeoutMs).toEqual(
     properties(linkChannel, "dohc_wait_for_messages").timeoutMs,
   );
+});
+
+it("keeps the inlined guides the same as skills/dohc", async () => {
+  // Refresh after a guide changes: pnpm --filter @dohc/share-web exec vitest run personalMcpInventory -u
+  const skills = new URL("../../../skills/dohc/", import.meta.url);
+  const current = Object.fromEntries(
+    GUIDE_FILES.map((file) => [file, readFileSync(new URL(file, skills), "utf8")]),
+  );
+  await expect(`${JSON.stringify(current, null, 2)}\n`).toMatchFileSnapshot(
+    "./personalMcpGuides.json",
+  );
+});
+
+it("tells the agent what it can do, and serves the guides from the bundle", async () => {
+  const client = await connected();
+  try {
+    const instructions = client.getInstructions() ?? "";
+    for (const words of [
+      "dohc_list_workspaces",
+      "dohc_read_file by its path",
+      "collection.yaml, its automations.yaml, and new Markdown records",
+      "can't write any other file",
+      "dohc://guides/",
+    ])
+      expect(instructions).toContain(words);
+    const { resources } = await client.listResources();
+    expect(resources.map((resource) => resource.uri)).toEqual([
+      "dohc://guides/dohc",
+      "dohc://guides/collections-and-datasets",
+      "dohc://guides/automations",
+    ]);
+    const skills = new URL("../../../skills/dohc/", import.meta.url);
+    for (const [index, file] of GUIDE_FILES.entries()) {
+      const uri = resources[index]!.uri;
+      expect((await client.readResource({ uri })).contents).toEqual([
+        { uri, mimeType: "text/markdown", text: readFileSync(new URL(file, skills), "utf8") },
+      ]);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+it("marks only the posts, the deletes and the writes as changing a workspace", () => {
+  const changes = personalTools
+    .filter((tool) => !tool.annotations.readOnlyHint)
+    .map((tool) => tool.name);
+  expect(changes).toEqual([
+    "dohc_delete_message",
+    "dohc_edit_document",
+    "dohc_post_channel",
+    "dohc_post_discussion",
+    "dohc_write_collection_files",
+  ]);
 });

@@ -8,6 +8,7 @@ export type PersonalAgentAction =
   | "groups"
   | "files"
   | "blob"
+  | "file"
   | "chat"
   | "discussion"
   | "post"
