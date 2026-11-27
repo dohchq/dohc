@@ -1299,6 +1299,22 @@ describe("chatDispatchService", () => {
       expect(codexFlags(fixture.spawnCalls[1]!)).toEqual(["resume", thread]);
     });
 
+    it("resumes Codex's thread after a stopped first run that a scan ends", async () => {
+      const fixture = await memoryFixture({}, "codex");
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.", false);
+      await createAgentThread(fixture, { body: "Pack the bags.", authorUserId: "user_local" });
+      const thread = "01a21c8a-fe95-7b20-ae5b-b869bed0ee78";
+      await codexStarted(fixture, first.run.run.runId, thread);
+      await expect(fixture.service.stopAgentRun(WORKSPACE_ID, first.run.run.runId)).resolves.toBe(
+        true,
+      );
+      first.call.process.markExitedSilently();
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+      expect(codexFlags(fixture.spawnCalls[1]!)).toEqual(["resume", thread]);
+    });
+
     it("starts a new Codex thread when its launch arguments change", async () => {
       const fixture = await memoryFixture({}, "codex");
       await activate(fixture);

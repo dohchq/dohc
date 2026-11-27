@@ -1083,11 +1083,9 @@ export function AgentPage(props: {
               {confirmMemory === "on" ? (
                 <p>
                   {tool.name} saves each chat it answers, including other people's messages, in its
-                  folder on this computer. What it reads in one chat carries into the workspace's
-                  other chats
-                  {tool.id === "claude"
-                    ? ", and it keeps earlier command output after you turn off Commands."
-                    : ", with the output of the commands it ran."}
+                  folder on this computer. What it reads in one chat, and the output of commands it
+                  ran, carries into the workspace's other chats.
+                  {tool.id === "claude" ? " It keeps that output after you turn off Commands." : ""}
                 </p>
               ) : (
                 <p>

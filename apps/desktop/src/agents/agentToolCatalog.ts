@@ -243,7 +243,8 @@ export function agentProfileArguments(
         ...runArguments,
         ...(readOnly ? ["--ignore-rules"] : []),
         "--skip-git-repo-check",
-        ...(memory ? [] : ["--ephemeral"]),
+        // A remembering run keeps dohc's chats out of Codex's memories of the person's other work.
+        ...(memory ? ["--disable", "memories"] : ["--ephemeral"]),
         "--json",
         "-",
       ];

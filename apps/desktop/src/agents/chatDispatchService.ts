@@ -18,7 +18,7 @@ import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import type { AgentMemory, MemoryTurn } from "./agentMemory";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -357,6 +357,8 @@ interface LiveRun {
   child: RunnerProcess;
   logPath: string;
   memory: MemoryTurn | null;
+  // Settles the session once, before the next run can take it.
+  endMemory: () => Promise<void>;
   timeoutMinutes: number;
   timeout: ReturnType<typeof setTimeout>;
   presenceHeartbeat: ReturnType<typeof setInterval> | null;
@@ -888,6 +890,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     if (!live.child.hasExited()) return false;
+    await live.endMemory();
     await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
@@ -1365,10 +1368,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           ? await options.agentMemory.take({
               workspaceId: workspace.workspaceId,
               agentId: agent.id,
-              // Codex keeps a thread's folders from its first run, so other launch arguments start a new thread.
+              // Codex keeps a thread's folders from its first run, so another folder or launch arguments start a new thread.
               memoryId:
                 profile.tool === "codex"
-                  ? `${agent.memory} ${JSON.stringify(profile.arguments ?? [])}`
+                  ? `${agent.memory} ${createHash("sha256")
+                      .update(JSON.stringify([workspace.rootPath, profile.arguments ?? []]))
+                      .digest("hex")}`
                   : agent.memory,
               triggerMessageId: claim.run.triggerMessageId,
             })
@@ -1404,6 +1409,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
       }, agent.timeoutMinutes * 60_000);
+      let memoryEnd: Promise<void> | null = null;
       const live: LiveRun = {
         workspace,
         claim,
@@ -1411,6 +1417,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         child,
         logPath,
         memory,
+        endMemory: () =>
+          (memoryEnd ??= memory
+            ? endMemory(
+                workspace.workspaceId,
+                agent.id,
+                memory,
+                profile?.tool === "codex" ? logPath : null,
+              ).catch(reportError)
+            : Promise.resolve()),
         timeoutMinutes: agent.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
@@ -1425,16 +1440,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runReservations.delete(workspace.workspaceId);
       if (memory)
         child.onExit(() => {
-          const ended = enqueue(workspace.workspaceId, () =>
-            endMemory(
-              workspace.workspaceId,
-              agent.id,
-              memory,
-              profile?.tool === "codex" ? logPath : null,
-            ),
-          )
-            .catch(reportError)
-            .finally(() => memoryEnds.delete(ended));
+          const ended = live.endMemory().finally(() => memoryEnds.delete(ended));
           memoryEnds.add(ended);
         });
       child.onExit((code, signal) => {

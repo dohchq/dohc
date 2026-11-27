@@ -83,6 +83,8 @@ describe("agent launch profiles", () => {
       "--config",
       "x=1",
       "--skip-git-repo-check",
+      "--disable",
+      "memories",
       "--json",
       "-",
     ]);
@@ -100,6 +102,8 @@ describe("agent launch profiles", () => {
       "--config",
       "x=1",
       "--skip-git-repo-check",
+      "--disable",
+      "memories",
       "--json",
       "-",
     ]);
