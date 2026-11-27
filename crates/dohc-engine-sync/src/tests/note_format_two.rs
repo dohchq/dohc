@@ -9,10 +9,13 @@ use dohc_engine_collab::{
     ContentKind, DocKey, LocalAppend, SuccessorIdentity, SuccessorIdentityInput,
     fresh_successor_base,
 };
-use dohc_engine_domain::{WriteText, select_snapshot_by_path_in_tx};
+use dohc_engine_domain::{DeleteTextFile, WriteText, select_snapshot_by_path_in_tx};
 use dohc_engine_storage::hex_sha256;
 
 const NOTE: &str = "A note.\n";
+const OTHER_NOTE: &str = "Another note.\n";
+const DOC: (&str, &str) = ("object-a", "doc.md");
+const OTHER: (&str, &str) = ("object-b", "other.md");
 
 fn on<R>(run: impl FnOnce() -> R) -> R {
     writing_new_notes_in_format_two_here(|| reading_body_sequence_here(run))
@@ -35,13 +38,23 @@ fn base_of(texts: &[&str]) -> Vec<u8> {
 }
 
 fn write(store: &mut EngineStore, text: &str, moment_id: &str, now_ms: i64) {
+    write_at(store, DOC, text, moment_id, now_ms);
+}
+
+fn write_at(
+    store: &mut EngineStore,
+    (object_id, path): (&str, &str),
+    text: &str,
+    moment_id: &str,
+    now_ms: i64,
+) {
     VersionedTextStore::new(store)
         .write_text(
             &WriteText {
                 workspace_id: "ws".to_owned(),
                 version_id: "main".to_owned(),
-                object_id: "object-a".to_owned(),
-                path: "doc.md".to_owned(),
+                object_id: object_id.to_owned(),
+                path: path.to_owned(),
                 text: text.to_owned(),
                 moment_id: moment_id.to_owned(),
                 metadata_origin: "sync".to_owned(),
@@ -57,11 +70,21 @@ fn write(store: &mut EngineStore, text: &str, moment_id: &str, now_ms: i64) {
 }
 
 fn seed_note(store: &mut EngineStore, text: &str, moment_id: &str, base: Option<&[u8]>) -> DocKey {
+    seed_at(store, DOC, text, moment_id, base)
+}
+
+fn seed_at(
+    store: &mut EngineStore,
+    note: (&str, &str),
+    text: &str,
+    moment_id: &str,
+    base: Option<&[u8]>,
+) -> DocKey {
     VersionedTextStore::new(store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .unwrap();
-    write(store, text, moment_id, 10);
-    let key = DocKey::new("ws", "main", "object-a").unwrap();
+    write_at(store, note, text, moment_id, 10);
+    let key = DocKey::new("ws", "main", note.0).unwrap();
     if let Some(base) = base {
         dohc_engine_collab::claim_base(store, &key, ContentKind::Richdoc, base, &NoFaults, 11)
             .unwrap();
@@ -137,17 +160,26 @@ fn converted_owner(base: &[u8]) -> (ScratchDir, EngineStore, serde_json::Value) 
 }
 
 fn prebuilt(store: &mut EngineStore, schema_version: u8, named: Option<&str>) -> serde_json::Value {
-    let key = DocKey::new("ws", "main", "object-a").unwrap();
+    prebuilt_at(store, DOC, schema_version, named)
+}
+
+fn prebuilt_at(
+    store: &mut EngineStore,
+    (object_id, path): (&str, &str),
+    schema_version: u8,
+    named: Option<&str>,
+) -> serde_json::Value {
+    let key = DocKey::new("ws", "main", object_id).unwrap();
     let built = store
         .write_with(&NoFaults, |tx| {
             let marker = dohc_engine_collab::read_marker_in(tx, &key).unwrap();
             let claim = marker.unwrap().lineage_claim_id.unwrap();
             let doc = dohc_engine_collab::load_doc_in(tx, &key).unwrap();
-            let state = select_snapshot_by_path_in_tx(tx, "ws", "main", "doc.md").unwrap();
+            let state = select_snapshot_by_path_in_tx(tx, "ws", "main", path).unwrap();
             let snapshot = state.snapshot.unwrap();
             let vector = hex_sha256(&doc.encode_state_vector());
             let deletes = hex_sha256(&doc.encode_delete_set());
-            let cut = json!(["ws", "main", "object-a", claim, vector, deletes]);
+            let cut = json!(["ws", "main", object_id, claim, vector, deletes]);
             let conflict_id = named.map_or_else(
                 || format!("note-format-two-{}", hex_sha256(cut.to_string().as_bytes())),
                 str::to_owned,
@@ -172,8 +204,8 @@ fn prebuilt(store: &mut EngineStore, schema_version: u8, named: Option<&str>) ->
                 .map_err(SyncError::Storage)?;
             let created: i64 = tx
                 .query_row(
-                    "SELECT created_at_ms FROM file_objects WHERE object_id='object-a'",
-                    [],
+                    "SELECT created_at_ms FROM file_objects WHERE object_id=?1",
+                    [object_id],
                     |row| row.get(0),
                 )
                 .map_err(SyncError::corrupt)?;
@@ -193,7 +225,7 @@ fn prebuilt(store: &mut EngineStore, schema_version: u8, named: Option<&str>) ->
                 resolution: ResolutionV1::KeptCurrent,
                 target_version_id: "main".to_owned(),
                 source_version_id: "main".to_owned(),
-                paths: vec!["doc.md".to_owned()],
+                paths: vec![path.to_owned()],
                 current: head.clone(),
                 incoming: head.clone(),
                 result: head,
@@ -316,53 +348,84 @@ fn open_reviews(store: &EngineStore) -> i64 {
         .unwrap()
 }
 
-fn late_edit(store: &mut EngineStore, base: &[u8], lineage: &str, text: &str) {
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.apply(base).unwrap();
-    let delta = doc
-        .rewrite_content_to_markdown(ContentKind::Richdoc, text)
-        .unwrap();
-    let late = envelope(
-        "late-peer",
-        0,
-        "ydoc.update",
-        json!({
-            "versionId": "main",
-            "objectId": "object-a",
-            "path": "doc.md",
-            "contentKind": "richdoc",
-            "updateBlobSha256": store.put_binary_blob(&delta).unwrap(),
-            "lineageClaimId": lineage,
-            "isBaseState": false
-        }),
-    );
-    on(|| {
-        apply_ydoc_envelope(
-            store,
-            &mut WriterDocCache::new(),
-            &late,
-            &NoFaults,
-            &NoLiveLeases,
-        )
-    })
-    .unwrap();
+fn read_at(store: &mut EngineStore, path: &str) -> Option<String> {
+    VersionedTextStore::new(store)
+        .read_text("ws", "main", path)
+        .unwrap()
+        .map(|snapshot| snapshot.text)
 }
 
-fn archived(store: &EngineStore, lineage: &str) -> String {
-    let full_state: Vec<u8> = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT b.bytes FROM ydoc_inactive_lineages l \
-                 JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 \
-                 WHERE l.lineage_claim_id=?1",
-                [lineage],
-                |row| row.get(0),
-            )
-        })
-        .unwrap();
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.apply(&full_state).unwrap();
-    doc.project(ContentKind::Richdoc).unwrap().content
+struct OpenNote(&'static str);
+
+impl LeaseProbe for OpenNote {
+    fn is_live(&self, key: &DocKey) -> bool {
+        key.object_id == self.0
+    }
+}
+
+fn relay(ops: Vec<ReplicationEnvelope>) -> RelaySyncClient<FakeRelay> {
+    let next_cursor = i64::try_from(ops.len()).unwrap();
+    RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops,
+            next_cursor,
+            has_more: false,
+        })),
+        ..Default::default()
+    })
+}
+
+fn pull(
+    client: &RelaySyncClient<FakeRelay>,
+    peer: &mut EngineStore,
+    leases: &dyn LeaseProbe,
+) -> SyncPassOutcome {
+    on(|| {
+        client.pull_chat_workspace(
+            peer,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            leases,
+            1_000,
+        )
+    })
+    .expect("the pull goes on")
+}
+
+fn pending_cursor(outcome: &SyncPassOutcome) -> Option<i64> {
+    match outcome {
+        SyncPassOutcome::Complete { pending_cursor, .. } => {
+            pending_cursor.as_ref().map(|cursor| cursor.cursor)
+        }
+        _ => None,
+    }
+}
+
+fn conversion_op(seq: i64, carrier: &serde_json::Value) -> ReplicationEnvelope {
+    let mut op = envelope("owner", seq, "conflict.resolve", carrier.clone());
+    op.recorded_at_ms = 21;
+    op
+}
+
+fn later_owner_op(seq: i64) -> ReplicationEnvelope {
+    let mut op = version_create_with_shipped_snapshots("owner", "later-version", Vec::new());
+    op.origin_seq = seq;
+    op
+}
+
+fn peer_without_ydoc(
+    owner_store: &EngineStore,
+    carrier: &serde_json::Value,
+) -> (ScratchDir, EngineStore, DocKey) {
+    let (scratch, _path, mut peer) = open_store();
+    seed_identity(&mut peer);
+    let key = seed_note(&mut peer, NOTE, "moment-current", None);
+    hand_over(owner_store, &mut peer, carrier);
+    (scratch, peer, key)
 }
 
 #[test]
@@ -597,34 +660,168 @@ fn a_duplicate_conversion_keeps_the_first_and_a_later_edit() {
 }
 
 #[test]
-fn a_peer_with_no_ydoc_waits_for_the_base_and_keeps_a_late_edit() {
-    let base = base_of(&[NOTE]);
-    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base);
-    let (_scratch, _path, mut peer) = open_store();
-    let key = seed_note(&mut peer, NOTE, "moment-current", None);
-    let waiting = receive(&owner_store, &mut peer, &carrier, "owner");
-    assert!(
-        matches!(
-            waiting,
-            Err(SyncError::RetryableState {
-                reason: "ydoc-lineage-missing"
-            })
-        ),
-        "{waiting:?}"
-    );
+fn a_peer_with_no_ydoc_acknowledges_the_conversion_and_pulls_on() {
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
+    let client = relay(vec![conversion_op(0, &carrier), later_owner_op(1)]);
+    let outcome = pull(&client, &mut peer, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(2), "{outcome:?}");
+    assert_eq!(read_replication_acked_seq(&peer, "ws", "owner").unwrap(), 1);
     assert_eq!(claim(&peer, &key), None);
-    dohc_engine_collab::claim_base(&mut peer, &key, ContentKind::Richdoc, &base, &NoFaults, 22)
+    assert_eq!(text(&mut peer), NOTE);
+    assert_eq!(open_reviews(&peer), 0);
+}
+
+#[test]
+fn a_peer_that_deleted_the_note_offline_keeps_it_deleted_and_pulls_on() {
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
+    VersionedTextStore::new(&mut peer)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                moment_id: "moment-deleted".to_owned(),
+                request_id: None,
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 15,
+            },
+            &NoFaults,
+        )
         .unwrap();
-    let applied = receive(&owner_store, &mut peer, &carrier, "owner").unwrap();
+    let client = relay(vec![conversion_op(0, &carrier), later_owner_op(1)]);
+    let outcome = pull(&client, &mut peer, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(2), "{outcome:?}");
+    assert_eq!(read_replication_acked_seq(&peer, "ws", "owner").unwrap(), 1);
+    assert_eq!(read_at(&mut peer, "doc.md"), None);
+    assert_eq!(claim(&peer, &key), None);
+    assert_eq!(open_reviews(&peer), 0);
+}
+
+#[test]
+fn a_conversion_held_behind_an_open_note_holds_only_that_note() {
+    let (base, other_base) = (base_of(&[NOTE]), base_of(&[OTHER_NOTE]));
+    let (_owner_scratch, _owner_path, mut owner_store) = open_store();
+    seed_at(&mut owner_store, DOC, NOTE, "moment-current", Some(&base));
+    seed_at(
+        &mut owner_store,
+        OTHER,
+        OTHER_NOTE,
+        "moment-other",
+        Some(&other_base),
+    );
+    let carrier = on(|| prebuilt_at(&mut owner_store, DOC, 2, None));
+    let other_carrier = on(|| prebuilt_at(&mut owner_store, OTHER, 2, None));
+    let (_scratch, _path, mut peer) = open_store();
+    seed_identity(&mut peer);
+    let key = seed_at(&mut peer, DOC, NOTE, "moment-current", Some(&base));
+    let other_key = seed_at(
+        &mut peer,
+        OTHER,
+        OTHER_NOTE,
+        "moment-other",
+        Some(&other_base),
+    );
+    hand_over(&owner_store, &mut peer, &carrier);
+    hand_over(&owner_store, &mut peer, &other_carrier);
+    let owner_edit = on(|| {
+        let successor = &carrier["lineageTransition"]["successor"]["updateBlobSha256"];
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(
+            &owner_store
+                .get_binary_blob(successor.as_str().unwrap())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "An owner edit.\n")
+            .unwrap()
+    });
+    let new_note = "A new note.\n";
+    let new_sha = hex_sha256(new_note.as_bytes());
+    peer.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+            params![new_sha, i64::try_from(new_note.len()).unwrap(), new_note],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })
+    .unwrap();
+    let client = relay(vec![
+        conversion_op(0, &carrier),
+        conversion_op(1, &other_carrier),
+        envelope(
+            "owner",
+            2,
+            "moment.append",
+            json!({
+                "momentId": "owner-new-moment", "versionId": "main",
+                "objectId": "object-c", "objectCreatedAtMs": 1,
+                "path": "notes.md", "recordedAtMs": 2_000, "operation": "write",
+                "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+                "payloadAfterBlobSha256": new_sha, "payloadAfterPath": "notes.md",
+                "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+                "beforePresent": "absent",
+            }),
+        ),
+        envelope(
+            "owner",
+            3,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-a",
+                "path": "doc.md",
+                "contentKind": "richdoc",
+                "updateBlobSha256": peer.put_binary_blob(&owner_edit).unwrap(),
+                "lineageClaimId": successor_claim(&carrier),
+                "isBaseState": false
+            }),
+        ),
+    ]);
+    let held = pull(&client, &mut peer, &OpenNote("object-a"));
+    assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
+    assert_eq!(
+        claim(&peer, &other_key),
+        Some(successor_claim(&other_carrier))
+    );
+    assert_eq!(note(&peer, &other_key), (2, OTHER_NOTE.to_owned()));
+    assert_eq!(read_at(&mut peer, "notes.md").as_deref(), Some(new_note));
+    assert_ne!(claim(&peer, &key), Some(successor_claim(&carrier)));
+    assert_eq!(note(&peer, &key), (1, NOTE.to_owned()));
+    let closed = pull(&client, &mut peer, &NoLiveLeases);
     assert!(
-        matches!(applied, ApplyDisposition::Applied(_)),
-        "{applied:?}"
+        matches!(closed, SyncPassOutcome::Complete { .. }),
+        "{closed:?}"
     );
     assert_eq!(claim(&peer, &key), Some(successor_claim(&carrier)));
-    assert_eq!(note(&peer, &key), (2, NOTE.to_owned()));
-    let predecessor = predecessor_claim(&carrier);
-    late_edit(&mut peer, &base, predecessor, "A late edit.\n");
-    assert_eq!(archived(&peer, predecessor), "A late edit.\n");
+    assert_eq!(note(&peer, &key), (2, "An owner edit.\n".to_owned()));
+    assert_eq!(read_replication_acked_seq(&peer, "ws", "owner").unwrap(), 3);
+}
+
+#[test]
+fn a_note_too_large_for_format_two_does_not_fit() {
+    let large = vec!["p"; 50_000].join("\n\n") + "\n";
+    let (_scratch, _path, mut store) = open_store();
+    let key = seed_note(
+        &mut store,
+        &large,
+        "moment-large",
+        Some(&base_of(&[&large])),
+    );
+    let before = claim(&store, &key);
+    assert_eq!(
+        on(|| convert(&mut store, &key, &NoLiveLeases)),
+        FormatTwoConversion::DoesNotFit
+    );
+    assert_eq!(claim(&store, &key), before);
+    assert_eq!(note(&store, &key).0, 1);
+    assert!(carriers(&store).is_empty());
 }
 
 #[test]
@@ -661,34 +858,10 @@ fn a_peer_with_the_note_open_holds_the_conversion_until_it_closes() {
     seed_identity(&mut peer);
     let key = seed_note(&mut peer, NOTE, "moment-current", Some(&base));
     hand_over(&owner_store, &mut peer, &carrier);
-    let mut conversion = envelope("owner", 0, "conflict.resolve", carrier.clone());
-    conversion.recorded_at_ms = 21;
     let later = version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
-    let client = RelaySyncClient::new(FakeRelay {
-        pull: Mutex::new(Some(PullResponse {
-            work_references: Vec::new(),
-            next_reference_after: None,
-            reference_has_more: false,
-            ops: vec![conversion, later],
-            next_cursor: 2,
-            has_more: false,
-        })),
-        ..Default::default()
-    });
+    let client = relay(vec![conversion_op(0, &carrier), later]);
     let before = claim(&peer, &key);
-    let pull = |peer: &mut EngineStore, leases: &dyn LeaseProbe| {
-        on(|| {
-            client.pull_chat_workspace(
-                peer,
-                &mut WriterDocCache::new(),
-                "ws",
-                &NoFaults,
-                leases,
-                1_000,
-            )
-        })
-    };
-    let held = pull(&mut peer, &AlwaysLive).expect("the open note holds only its op");
+    let held = pull(&client, &mut peer, &AlwaysLive);
     assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
     assert_eq!(
         read_replication_acked_seq(&peer, "ws", "later-peer").unwrap(),
@@ -696,7 +869,7 @@ fn a_peer_with_the_note_open_holds_the_conversion_until_it_closes() {
     );
     assert_eq!(claim(&peer, &key), before);
     assert_ne!(before, Some(successor_claim(&carrier)));
-    let closed = pull(&mut peer, &NoLiveLeases).expect("the closed note takes its op");
+    let closed = pull(&client, &mut peer, &NoLiveLeases);
     assert!(
         matches!(closed, SyncPassOutcome::Complete { .. }),
         "{closed:?}"
