@@ -21,6 +21,7 @@ export interface SketchScene {
   readonly appState: JsonObject;
   readonly files: Readonly<Record<string, SketchFileAsset>>;
   readonly missingAssets: number;
+  readonly readOnly?: boolean;
 }
 export type SketchReadResult =
   | ({ readonly kind: "sketch" } & SketchScene)
@@ -118,6 +119,7 @@ function readScene(result: Record<string, unknown>): SketchScene | null {
     appState: result.appState as JsonObject,
     files,
     missingAssets: result.missingAssets,
+    ...(result.readOnly === true ? { readOnly: true } : {}),
   };
 }
 

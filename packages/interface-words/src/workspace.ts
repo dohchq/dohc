@@ -29,6 +29,7 @@ export const workspaceWords = {
   sketchUnsavedTitle: "Save changes to this sketch?",
   sketchUnsavedBody: "Your latest edits are only on this phone until you save.",
   sketchUnavailableJoined: "Sketches cannot be opened in a shared workspace on a phone yet.",
+  sketchConflictReadOnly: "This sketch has a sync conflict. Resolve it on desktop before editing.",
 
   // ChatThreadPanel.tsx and ChatPosts.tsx
   replies: (count: number) => `${count} ${count === 1 ? "reply" : "replies"}`,

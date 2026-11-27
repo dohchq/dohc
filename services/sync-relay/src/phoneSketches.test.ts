@@ -345,7 +345,14 @@ describe("owner-only sketch ops inside /ops/*", () => {
     expect(response.status).toBe(200);
     expect(await json(response)).toMatchObject({
       ok: true,
-      result: { ok: true, path: "Conflicted.excalidraw", elements: [], appState: {}, files: {} },
+      result: {
+        ok: true,
+        path: "Conflicted.excalidraw",
+        elements: [],
+        appState: {},
+        files: {},
+        readOnly: true,
+      },
     });
   });
 });

@@ -856,6 +856,108 @@ it.skipIf(engine.missing)(
       await after.evict().catch(() => undefined);
     }
 
+    // Never-opened legacy sketch with missing and out-of-order indices preserves source order and
+    // syncs cleanly to desktop with zero conflict.
+    const zNoIdx = { ...rect("z", 1, 1), index: undefined };
+    const aNoIdx = { ...rect("a", 1, 2), index: null };
+    const cHigh = rect("c", 1, 3, { index: "a1" });
+    const dLow = rect("d", 1, 4, { index: "a0" });
+    const legacyOrderWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LegacyOrder.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [zNoIdx, aNoIdx, cHigh, dLow],
+        appState: {},
+        files: {},
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed legacy unindexed sketch" },
+    });
+    await owner.sync();
+    const tail = rect("tail", 1, 5, { index: "a9" });
+    expect(
+      await op("saveSketch", {
+        path: "LegacyOrder.excalidraw",
+        objectId: legacyOrderWrite.moment.objectId,
+        requestId: "req-legacy-order-save",
+        elements: [tail],
+      }),
+    ).toMatchObject({ ok: true, lostElementIds: [] });
+    await owner.sync();
+    const afterOrder = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "LegacyOrder.excalidraw",
+      expectedObjectId: legacyOrderWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterOrder.doc).elements.map((e) => e.id)).toEqual([
+        "z",
+        "a",
+        "c",
+        "d",
+        "tail",
+      ]);
+    } finally {
+      await afterOrder.evict().catch(() => undefined);
+    }
+
+    // Never-opened sketch with a malformed referenced image entry (missing mimeType) is refused
+    // before rewriting so embedded bytes are never erased.
+    const badAssetText = JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      elements: [
+        {
+          ...rect("img-bad", 1, 1),
+          type: "image",
+          fileId: "bad-f",
+          status: "saved",
+          scale: [1, 1],
+        },
+      ],
+      appState: {},
+      files: { "bad-f": { id: "bad-f", dataURL: PNG_DATA_URL, created: 1_700_000_000_000 } },
+    });
+    const badAssetWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "BadAsset.excalidraw",
+      text: badAssetText,
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed malformed asset sketch" },
+    });
+    await owner.sync();
+    const beforeBadSave = logCount();
+    expect(
+      await op("saveSketch", {
+        path: "BadAsset.excalidraw",
+        objectId: badAssetWrite.moment.objectId,
+        requestId: "req-bad-asset-save",
+        elements: [rect("new-box", 1, 9, { index: "a1" })],
+      }),
+    ).toMatchObject({ ok: false, refusal: "invalid" });
+    expect(logCount()).toBe(beforeBadSave);
+    await owner.sync();
+    expect(
+      (
+        await owner.files.readTextFile({
+          workspaceId: WORKSPACE,
+          versionId: owner.versionId,
+          path: "BadAsset.excalidraw",
+        })
+      )?.text,
+    ).toBe(badAssetText);
+
     // Joined Member gets 404 on every sketch op.
     expect(
       storage.inviteWorkspaceMember({

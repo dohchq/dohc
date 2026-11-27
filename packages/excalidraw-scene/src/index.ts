@@ -1,3 +1,4 @@
+import { generateNKeysBetween } from "fractional-indexing";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 
@@ -423,12 +424,78 @@ function mergeElements(
   return merged;
 }
 
+function indexIsValid(current: string | null, lower: string | null, upper: string | null): boolean {
+  if (current === null) return false;
+  if (lower !== null && !(lower < current)) return false;
+  if (upper !== null && !(current < upper)) return false;
+  return true;
+}
+
+function repairImportedIndices(elements: readonly ElementSnapshot[]): ElementSnapshot[] {
+  const indices: (string | null)[] = elements.map((e) =>
+    typeof e.index === "string" && validFractionalIndex(e.index) ? e.index : null,
+  );
+  const nextLower = (cached: number | null, i: number): number | null => {
+    const prev = i > 0 ? indices[i - 1]! : null;
+    const cur = cached !== null ? indices[cached]! : null;
+    if (prev !== null && (cur === null || prev > cur)) return i - 1;
+    return cached;
+  };
+  const nextUpper = (cached: number | null, i: number): number | null => {
+    const idx = cached ?? indices.length;
+    const cur = cached !== null && cached < indices.length ? indices[cached]! : null;
+    if (cur !== null && i < idx) return cached;
+    for (let j = idx + 1; j < indices.length; j += 1) {
+      const cand = indices[j]!;
+      if (cand !== null && (cur === null || cand > cur)) return j;
+    }
+    return null;
+  };
+  const out = elements.map((e) => ({ ...e }));
+  let lower: number | null = null;
+  let upper: number | null = 0;
+  let i = 0;
+  while (i < indices.length) {
+    lower = nextLower(lower, i);
+    upper = nextUpper(upper, i);
+    const lVal = lower !== null ? indices[lower]! : null;
+    const uVal = upper !== null && upper < indices.length ? indices[upper]! : null;
+    if (indexIsValid(indices[i]!, lVal, uVal)) {
+      i += 1;
+      continue;
+    }
+    const group = [i];
+    i += 1;
+    while (i < indices.length) {
+      const nl = nextLower(lower, i);
+      const nu = nextUpper(upper, i);
+      const nlVal = nl !== null ? indices[nl]! : null;
+      const nuVal = nu !== null && nu < indices.length ? indices[nu]! : null;
+      if (indexIsValid(indices[i]!, nlVal, nuVal)) break;
+      lower = nl;
+      upper = nu;
+      group.push(i);
+      i += 1;
+    }
+    const keys = generateNKeysBetween(
+      lower !== null ? indices[lower]! : null,
+      upper !== null && upper < indices.length ? indices[upper]! : null,
+      group.length,
+    );
+    group.forEach((pos, idx) => {
+      out[pos] = { ...out[pos]!, index: keys[idx]! };
+    });
+  }
+  return out;
+}
+
 export function canonicalPortableScene(
   elements: readonly ElementSnapshot[],
   appState: JsonObject,
   files: Readonly<Record<string, JsonObject>>,
 ): string {
-  const live = elements.filter((e) => !e.isDeleted).sort(compareElementOrder);
+  const repaired = repairImportedIndices(elements);
+  const live = repaired.filter((e) => !e.isDeleted).sort(compareElementOrder);
   const liveIds = new Set(live.map((e) => e.id));
   const assetIds = new Set(Object.keys(files));
   const exportedElements = live.map((e) =>

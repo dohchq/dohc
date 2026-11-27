@@ -88,6 +88,7 @@ export interface SketchScenePayload {
   readonly appState: JsonObject;
   readonly files: Readonly<Record<string, HydratedSketchFile>>;
   readonly missingAssets: number;
+  readonly readOnly?: boolean;
 }
 export type SketchReadResult =
   | SketchScenePayload
@@ -231,12 +232,65 @@ async function hydrateSceneAssets(
 
 type ParsedPortable = {
   readonly result: SketchReadResult;
+  readonly allElements: readonly ElementSnapshot[];
   readonly assetIds: ReadonlySet<string>;
   readonly rawFiles: Readonly<Record<string, JsonObject>>;
+  readonly unseedableAsset: boolean;
   readonly headSha256?: string;
 };
 
 const EMPTY_FILES: Readonly<Record<string, JsonObject>> = {};
+const EMPTY_ELEMENTS: readonly ElementSnapshot[] = [];
+const EMBEDDED_FILE_FIELDS = new Set([
+  "created",
+  "dataURL",
+  "id",
+  "lastRetrieved",
+  "mimeType",
+  "version",
+]);
+const STANDARD_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+
+function parseRustImportFile(id: string, entry: unknown): HydratedSketchFile | null {
+  const f = asRecord(entry);
+  if (
+    !f ||
+    Object.keys(f).some((k) => !EMBEDDED_FILE_FIELDS.has(k)) ||
+    f.id !== id ||
+    typeof f.mimeType !== "string" ||
+    f.mimeType.length === 0 ||
+    typeof f.dataURL !== "string" ||
+    !isNonNegInt(f.created) ||
+    (f.lastRetrieved !== undefined && !isNonNegInt(f.lastRetrieved)) ||
+    (f.version !== undefined && !isNonNegInt(f.version))
+  ) {
+    return null;
+  }
+  const prefix = `data:${f.mimeType};base64,`;
+  if (!f.dataURL.startsWith(prefix)) return null;
+  const encoded = f.dataURL.slice(prefix.length);
+  if (!STANDARD_BASE64.test(encoded)) return null;
+  const canonicalDataURL = `${prefix}${Buffer.from(encoded, "base64").toString("base64")}`;
+  return {
+    id,
+    mimeType: f.mimeType,
+    dataURL: canonicalDataURL,
+    created: f.created,
+    ...(f.lastRetrieved === undefined ? {} : { lastRetrieved: f.lastRetrieved }),
+    ...(f.version === undefined ? {} : { version: f.version }),
+  };
+}
+
+function emptyPortable(result: SketchReadResult, headSha256?: string): ParsedPortable {
+  return {
+    result,
+    allElements: EMPTY_ELEMENTS,
+    assetIds: EMPTY_SET,
+    rawFiles: EMPTY_FILES,
+    unseedableAsset: false,
+    headSha256,
+  };
+}
 
 function parsePortableSketch(
   path: string,
@@ -245,21 +299,15 @@ function parsePortableSketch(
   headSha256?: string,
 ): ParsedPortable {
   if (text.trim() === "")
-    return {
-      result: { ok: true, path, objectId, elements: [], appState: {}, files: {}, missingAssets: 0 },
-      assetIds: EMPTY_SET,
-      rawFiles: EMPTY_FILES,
+    return emptyPortable(
+      { ok: true, path, objectId, elements: [], appState: {}, files: {}, missingAssets: 0 },
       headSha256,
-    };
+    );
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return {
-      result: invalidSketch(path, `${path} is not valid JSON.`),
-      assetIds: EMPTY_SET,
-      rawFiles: EMPTY_FILES,
-    };
+    return emptyPortable(invalidSketch(path, `${path} is not valid JSON.`));
   }
   const doc = asRecord(parsed);
   const rawElements = doc?.elements;
@@ -272,29 +320,28 @@ function parsePortableSketch(
     (rawApp !== undefined && rawApp !== null && !asRecord(rawApp)) ||
     (rawFilesObj !== undefined && rawFilesObj !== null && !asRecord(rawFilesObj))
   ) {
-    return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+    return emptyPortable(invalidSketch(path));
   }
+  const allElements: ElementSnapshot[] = [];
   const elements: ElementSnapshot[] = [];
   for (const raw of (rawElements as unknown[] | null | undefined) ?? []) {
     try {
       assertRestorableElement(raw);
     } catch (e) {
-      return {
-        result: invalidSketch(path, e instanceof Error ? e.message : undefined),
-        assetIds: EMPTY_SET,
-        rawFiles: EMPTY_FILES,
-      };
+      return emptyPortable(invalidSketch(path, e instanceof Error ? e.message : undefined));
     }
     if (typeof raw.id !== "string" || raw.id.length === 0)
-      return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+      return emptyPortable(invalidSketch(path));
     const version =
       raw.version === undefined || raw.version === null || raw.version === 0 ? 1 : raw.version;
     const versionNonce =
       raw.versionNonce === undefined || raw.versionNonce === null ? 0 : raw.versionNonce;
     const isDeleted = raw.isDeleted === undefined || raw.isDeleted === null ? false : raw.isDeleted;
     if (!isNonNegInt(version) || !isNonNegInt(versionNonce) || typeof isDeleted !== "boolean")
-      return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
-    if (!isDeleted) elements.push({ ...raw, version, versionNonce, isDeleted } as ElementSnapshot);
+      return emptyPortable(invalidSketch(path));
+    const normalizedEl = { ...raw, version, versionNonce, isDeleted } as ElementSnapshot;
+    allElements.push(normalizedEl);
+    if (!isDeleted) elements.push(normalizedEl);
   }
   const appRecord = asRecord(rawApp);
   const appState: JsonObject = {};
@@ -303,44 +350,40 @@ function parsePortableSketch(
   }
   const filesRecord = asRecord(rawFilesObj) ?? {};
   const assetIds = new Set(Object.keys(filesRecord));
+  const referencedIds = new Set(
+    elements
+      .filter((e) => e.type === "image" && typeof e.fileId === "string")
+      .map((e) => e.fileId as string),
+  );
   const rawFiles: Record<string, JsonObject> = {};
   const files: Record<string, HydratedSketchFile> = {};
   let missingAssets = 0;
   let totalBytes = 0;
+  let unseedableAsset = false;
   for (const [id, entry] of Object.entries(filesRecord)) {
-    const f = asRecord(entry);
+    const valid = parseRustImportFile(id, entry);
+    if (!valid) {
+      if (referencedIds.has(id)) unseedableAsset = true;
+      missingAssets += 1;
+      continue;
+    }
+    rawFiles[id] = valid as unknown as JsonObject;
     if (
-      !f ||
-      typeof f.mimeType !== "string" ||
-      typeof f.dataURL !== "string" ||
-      !f.dataURL.startsWith("data:")
+      !ASSET_MIME_TYPES.has(valid.mimeType) ||
+      totalBytes + valid.dataURL.length > MAX_HYDRATED_ASSET_BYTES
     ) {
       missingAssets += 1;
       continue;
     }
-    const normalized: HydratedSketchFile = {
-      id: typeof f.id === "string" && f.id.length > 0 ? f.id : id,
-      mimeType: f.mimeType,
-      dataURL: f.dataURL,
-      created: isNonNegInt(f.created) ? f.created : 0,
-      ...(isNonNegInt(f.lastRetrieved) ? { lastRetrieved: f.lastRetrieved } : {}),
-      ...(isNonNegInt(f.version) ? { version: f.version } : {}),
-    };
-    rawFiles[id] = normalized as unknown as JsonObject;
-    if (
-      !ASSET_MIME_TYPES.has(f.mimeType) ||
-      totalBytes + f.dataURL.length > MAX_HYDRATED_ASSET_BYTES
-    ) {
-      missingAssets += 1;
-      continue;
-    }
-    totalBytes += f.dataURL.length;
-    files[id] = normalized;
+    totalBytes += valid.dataURL.length;
+    files[id] = valid;
   }
   return {
     result: { ok: true, path, objectId, elements, appState, files, missingAssets },
+    allElements,
     assetIds,
     rawFiles,
+    unseedableAsset,
     headSha256,
   };
 }
@@ -444,20 +487,28 @@ async function readPortableFile(
     path,
     maxBytes: MAX_SKETCH_FILE_BYTES,
   });
-  if (!file || file.contentKind !== "text")
-    return { result: missingSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+  if (!file || file.contentKind !== "text") return emptyPortable(missingSketch(path));
   if (file.text === null || file.byteLength > MAX_SKETCH_FILE_BYTES) {
-    return {
-      result: {
-        ok: false,
-        refusal: "too-large",
-        reason: "This sketch is too large to open on a phone.",
-      },
-      assetIds: EMPTY_SET,
-      rawFiles: EMPTY_FILES,
-    };
+    return emptyPortable({
+      ok: false,
+      refusal: "too-large",
+      reason: "This sketch is too large to open on a phone.",
+    });
   }
   return parsePortableSketch(path, objectId, file.text, file.sha256);
+}
+
+async function hasOpenTextConflict(
+  files: VersionedLiveAdapter,
+  workspaceId: string,
+  versionId: string,
+  path: string,
+) {
+  const conflicts = await files
+    .listTextConflicts({ workspaceId, status: "open" })
+    .then((r) => r.conflicts)
+    .catch(() => []);
+  return conflicts.some((c) => c.targetVersionId === versionId && c.path === path);
 }
 
 async function readSketchInCopy(
@@ -486,7 +537,13 @@ async function readSketchInCopy(
       await closeSession(opened.provider, false);
     }
   }
-  return (await readPortableFile(files, workspaceId, version.id, path, objectId)).result;
+  const fallback = (await readPortableFile(files, workspaceId, version.id, path, objectId)).result;
+  if (!fallback.ok) return fallback;
+  const conflicted =
+    opened.kind === "conflict" ||
+    (opened.kind === "invalid" &&
+      (await hasOpenTextConflict(files, workspaceId, version.id, path)));
+  return conflicted ? { ...fallback, readOnly: true } : fallback;
 }
 
 const EMPTY_SKETCH_DOCUMENT = JSON.stringify(
@@ -521,7 +578,7 @@ async function ensureClaimedSceneLineage(
   };
   if (input.portable?.result.ok) {
     const canonical = canonicalPortableScene(
-      input.portable.result.elements,
+      input.portable.allElements,
       input.portable.result.appState,
       input.portable.rawFiles,
     );
@@ -710,6 +767,7 @@ async function saveSketchInCopy(
           ? missingSketch(input.path)
           : invalidSketch(input.path, portable.result.reason);
       }
+      if (portable.unseedableAsset) return invalidSketch(input.path);
       validateDeltaInput(input.elements, portable.assetIds);
       if (input.elements.length === 0) return { ...portable.result, lostElementIds: [] };
     } else {
@@ -749,13 +807,7 @@ async function saveSketchInCopy(
       refusal: "object-changed",
       reason: `${input.path} was replaced while saving.`,
     };
-  const conflicts = await files
-    .listTextConflicts({ workspaceId, status: "open" })
-    .then((r) => r.conflicts)
-    .catch(() => []);
-  const fileConflict = conflicts.some(
-    (c) => c.targetVersionId === version.id && c.path === input.path,
-  );
+  const fileConflict = await hasOpenTextConflict(files, workspaceId, version.id, input.path);
   const post = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
   if (post.kind !== "open") {
     if (post.kind !== "conflict" && !fileConflict) return invalidSketch(input.path);

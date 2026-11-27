@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import canonicalJsonFixture from "../fixtures/canonical-json.json";
 import {
   applySceneDelta,
+  canonicalPortableScene,
   compareUnicodeScalar,
   declareSceneRoots,
   exportPortableScene,
@@ -430,6 +431,44 @@ describe("portable export", () => {
     expect(folded.elements.find((each) => each.id === "b")?.x).toBe(50);
     expect(folded.assets["asset-1"]?.sha256).toBe(SHA256);
     expect(lostElementRevisions(folded, mixed.written).map((each) => each.id)).toEqual(["a"]);
+  });
+
+  it("canonicalizes portable scenes in source order, repairing missing and out-of-order indices", () => {
+    const unindexedZ = { ...element("z", 1, 1), index: undefined };
+    const unindexedA = { ...element("a", 1, 2), index: null };
+    const outOfOrderC = element("c", 1, 3, { index: "a1" });
+    const outOfOrderD = element("d", 1, 4, { index: "a0" });
+    const arrow = {
+      ...element("arr", 1, 5, { index: "a2" }),
+      type: "arrow",
+      points: [
+        [0, 0],
+        [10, 10],
+      ],
+      lastCommittedPoint: [10, 10],
+      startBinding: { elementId: "missing" },
+    };
+    const exported = JSON.parse(
+      canonicalPortableScene(
+        [unindexedZ, unindexedA, outOfOrderC, outOfOrderD, arrow],
+        { viewBackgroundColor: "#ffffff" },
+        {},
+      ),
+    ) as {
+      elements: {
+        id: string;
+        index: string;
+        lastCommittedPoint?: unknown;
+        startBinding?: unknown;
+      }[];
+    };
+    expect(exported.elements.map((e) => e.id)).toEqual(["z", "a", "c", "d", "arr"]);
+    for (let i = 1; i < exported.elements.length; i += 1) {
+      expect(exported.elements[i - 1]!.index < exported.elements[i]!.index).toBe(true);
+    }
+    const exportedArrow = exported.elements.find((e) => e.id === "arr")!;
+    expect(exportedArrow.lastCommittedPoint).toBeNull();
+    expect(exportedArrow.startBinding).toBeNull();
   });
 });
 

@@ -53,6 +53,7 @@ describe("phone sketch server operations", () => {
           appState: { viewBackgroundColor: "#fff" },
           files: { "file-1": sampleFile },
           missingAssets: 0,
+          readOnly: true,
         },
       },
     });
@@ -64,6 +65,7 @@ describe("phone sketch server operations", () => {
       appState: { viewBackgroundColor: "#fff" },
       files: { "file-1": sampleFile },
       missingAssets: 0,
+      readOnly: true,
     });
 
     for (const refusal of ["missing", "too-large", "invalid"] as const) {

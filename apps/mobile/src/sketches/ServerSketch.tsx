@@ -72,7 +72,6 @@ function SketchScreen({ path }: { path: string }) {
   const { data } = useAccount();
   const signIn = useSignIn();
   const gap = useWorkspaceGap();
-  const editable = writesIn(data);
   const web = useRef<ComponentRef<typeof WebView>>(null);
 
   const [uri, setUri] = useState<string | null>(null);
@@ -82,6 +81,8 @@ function SketchScreen({ path }: { path: string }) {
   const [webPhase, setWebPhase] = useState<"idle" | "started" | "painted">("idle");
   const [edit, setEdit] = useState(CLEAN_EDIT);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const conflictReadOnly = readState.kind === "ready" && readState.scene.readOnly === true;
+  const editable = writesIn(data) && !conflictReadOnly;
 
   const sceneRef = useRef<SketchScene | null>(null);
   const loadedIntoWeb = useRef(false);
@@ -346,11 +347,23 @@ function SketchScreen({ path }: { path: string }) {
   };
 
   const strips = [
+    conflictReadOnly
+      ? {
+          key: "conflict-ro",
+          icon: "lock" as const,
+          text: workspaceWords.sketchConflictReadOnly,
+          action: undefined,
+          onAction: undefined,
+        }
+      : null,
     edit.error
       ? {
           key: "err",
           icon: "failed" as const,
-          text: `${workspaceWords.sketchSaveFailed} ${edit.error.text}`,
+          text:
+            edit.error.text === workspaceWords.sketchSaveFailed
+              ? edit.error.text
+              : `${workspaceWords.sketchSaveFailed} ${edit.error.text}`,
           action: edit.error.retryable ? documentWords.tryAgain : documentWords.dismiss,
           onAction: edit.error.retryable
             ? () => void performSave()
