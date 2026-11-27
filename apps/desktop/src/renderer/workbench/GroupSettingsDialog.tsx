@@ -10,8 +10,14 @@ import { useShownAfter } from "../ui/useShownAfter";
 
 type MemberLevel = "view" | "comment" | "edit";
 
-/** A Group's access as the relay lists it, or "no-members" when no one else is in the workspace. */
-export type GroupAccess = { level: GroupRuleLevel | null; memberLevel: MemberLevel } | "no-members";
+/**
+ * A Group's access as the relay lists it, or "no-members" when there are no
+ * rules to read, as in a workspace that never synced. `alone` says no one else
+ * is in the workspace yet. The rule still applies to whoever joins first.
+ */
+export type GroupAccess =
+  | { level: GroupRuleLevel | null; memberLevel: MemberLevel; alone: boolean }
+  | "no-members";
 
 type MembersList = {
   memberLevel: MemberLevel;
@@ -26,15 +32,13 @@ export const othersInWorkspace = (list: Pick<MembersList, "people" | "inviteLink
   list.people.some((person) => person.role !== "owner" && person.state !== "removed");
 
 /**
- * A Group's access from the Members list. Until someone else is in the workspace
- * or can join it, a Group with no rule hides nothing from anyone. A Group's own
- * rule still applies to the next person who joins, so it always shows.
+ * A Group's access from the Members list. The owner and admins can set it
+ * before anyone else joins, so the first person to join sees the Group as meant.
  */
 export function groupAccessFrom(list: MembersList, wireId: string): GroupAccess {
   if (list.groupRules === null) return "no-members";
   const level = list.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null;
-  if (level === null && !othersInWorkspace(list)) return "no-members";
-  return { level, memberLevel: list.memberLevel };
+  return { level, memberLevel: list.memberLevel, alone: !othersInWorkspace(list) };
 }
 
 // "default" follows the member level; the others set the Group's own rule.
@@ -133,6 +137,19 @@ export function GroupSettingsDialog(props: {
   const changed = ready !== null && next !== ready.level;
   const hiding = ready !== null && next === "none" && ready.level !== "none";
   const folderName = props.folderPath ? basenameOf(props.folderPath) : null;
+  const alone = (
+    <div
+      data-testid="chats-group-access-alone"
+      className="flex flex-wrap items-center gap-x-2 gap-y-1"
+    >
+      <p className="m-0 text-[13px] text-muted">Only you are in this workspace.</p>
+      {props.onInviteMembers ? (
+        <SecondaryButton size="compact" onClick={props.onInviteMembers}>
+          Invite members
+        </SecondaryButton>
+      ) : null}
+    </div>
+  );
 
   async function save() {
     if (busyRef.current || ready === null) return;
@@ -195,19 +212,10 @@ export function GroupSettingsDialog(props: {
               <div className="h-7" />
             )
           ) : access === "no-members" ? (
-            <div
-              data-testid="chats-group-access-alone"
-              className="flex flex-wrap items-center gap-x-2 gap-y-1"
-            >
-              <p className="m-0 text-[13px] text-muted">Only you are in this workspace.</p>
-              {props.onInviteMembers ? (
-                <SecondaryButton size="compact" onClick={props.onInviteMembers}>
-                  Invite members
-                </SecondaryButton>
-              ) : null}
-            </div>
+            alone
           ) : ready ? (
             <>
+              {ready.alone ? alone : null}
               <GroupAccessPicker
                 level={next}
                 memberLevel={ready.memberLevel}

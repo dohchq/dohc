@@ -886,6 +886,54 @@ describe("ChatsView Group access marks", () => {
     );
   });
 
+  // The owner sets a Group's access before anyone else joins, from the row's menu.
+  it("opens Group settings from a Group's menu, and saves while the owner is alone", async () => {
+    const user = userEvent.setup();
+    const onShowFolder = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        ...groups,
+        channel({ id: "channel-team", name: "Team", wireId: "wire-team", folderPath: "Team" }),
+      ],
+      fileThreads: [],
+    });
+    bridgeMock.workspaceMembers.mockImplementation(async (input: { request: { action: string } }) =>
+      input.request.action === "group"
+        ? { status: "ready" }
+        : {
+            status: "ready",
+            view: {
+              memberLevel: "comment",
+              people: [{ role: "owner", state: "active" }],
+              groupRules: [],
+              inviteLink: null,
+            },
+          },
+    );
+    renderView(vi.fn(), vi.fn(), { onShowFolder });
+    const row = (name: string) =>
+      screen.getAllByTestId("chats-channel").find((entry) => entry.textContent === name)!;
+    await screen.findAllByTestId("chats-channel");
+    fireEvent.contextMenu(row("Team"), { clientX: 40, clientY: 60 });
+    await user.click(await screen.findByTestId("chat-row-menu-show-folder"));
+    expect(onShowFolder).toHaveBeenCalledExactlyOnceWith("Team");
+    fireEvent.contextMenu(row("Open"), { clientX: 40, clientY: 60 });
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
+    await user.click(screen.getByTestId("chat-row-menu-group-settings"));
+    const dialog = await screen.findByTestId("chats-group-settings-dialog");
+    expect(dialog.textContent).toContain("Open");
+    expect(dialog.textContent).toContain("Only you are in this workspace.");
+    await user.click(await screen.findByRole("radio", { name: "View only" }));
+    await user.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() =>
+      expect(bridgeMock.workspaceMembers).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        request: { action: "group", group: "wire-open", level: "view" },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("chats-group-settings-dialog")).toBeNull());
+  });
+
   // The page tells the shell, and the shell tells the navigator.
   it("reads the rules again when another Chats changes one", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });

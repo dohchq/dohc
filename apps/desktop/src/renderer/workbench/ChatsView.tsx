@@ -666,8 +666,8 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
-  // The channel whose Group settings are open, by id.
-  const [groupSettingsFor, setGroupSettingsFor] = useState<string | null>(null);
+  // The Group whose settings are open, from its header or its row's menu.
+  const [groupSettingsFor, setGroupSettingsFor] = useState<ChatChannelRecord | null>(null);
   // The session the members dialog opened in. Its adds stop once the account
   // changes, even an add that was already part of a running batch.
   const [sharePanelSession, setSharePanelSession] = useState(0);
@@ -2559,6 +2559,17 @@ export function ChatsView(props: {
       channel.wireId ? (joinedByWire.get(channel.wireId) ?? null) : null,
     [joinedByWire],
   );
+  // The owner, and an admin in a joined workspace, choose who among the
+  // members sees a Group. General, direct messages and agents' chats follow
+  // the member level, and a Group shared with you is its owner's to set. The
+  // relay decides either way.
+  const groupSettingsWireId = (channel: ChatChannelRecord): string | null =>
+    channel.kind === "channel" &&
+    channel.wireId &&
+    channel.wireId !== GENERAL_CHANNEL_WIRE_ID &&
+    (inJoinedWorkspace ? createsGroups : channelShares !== null && joinedFor(channel) === null)
+      ? channel.wireId
+      : null;
   // The share a Group row stands for, while that share lasts.
   const groupShareId = useCallback(
     (channel: ChatChannelRecord) => {
@@ -3430,6 +3441,16 @@ export function ChatsView(props: {
         leave: () => {
           if (rowMenu.shareId) void leaveShared(rowMenu.shareId);
         },
+        openGroupSettings: () => {
+          if (rowMenu.channel) setGroupSettingsFor(rowMenu.channel);
+        },
+        ...(props.onShowFolder
+          ? {
+              showFolder: () => {
+                if (rowMenu.channel?.folderPath) props.onShowFolder?.(rowMenu.channel.folderPath);
+              },
+            }
+          : {}),
         ...(props.onSetupAgent ? { openAgentSettings: props.onSetupAgent } : {}),
         setAgentEnabled: (enabled) => {
           if (rowMenu.agentId) void setAgentEnabled(rowMenu.agentId, enabled);
@@ -4481,6 +4502,22 @@ export function ChatsView(props: {
   // The row keeps one name while any agent exists, whether or not it's on.
   const hasAgent = (props.agentSetup?.agents.length ?? 0) > 0;
 
+  const settingsWireId = groupSettingsFor ? groupSettingsWireId(groupSettingsFor) : null;
+  const groupSettingsDialog =
+    groupSettingsFor && settingsWireId ? (
+      <GroupSettingsDialog
+        groupName={groupSettingsFor.name}
+        {...(groupSettingsFor.folderPath ? { folderPath: groupSettingsFor.folderPath } : {})}
+        load={() => loadGroupAccess(settingsWireId)}
+        save={(level) => saveGroupAccess(settingsWireId, level)}
+        {...(props.onShowFolder ? { onOpenFolder: props.onShowFolder } : {})}
+        {...(props.onOpenSettings
+          ? { onInviteMembers: () => props.onOpenSettings?.("members") }
+          : {})}
+        onClose={() => setGroupSettingsFor(null)}
+      />
+    ) : null;
+
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
@@ -4533,16 +4570,7 @@ export function ChatsView(props: {
       channelShares !== null &&
       channelJoined === null &&
       !!nav.channel.wireId;
-    // The owner, and an admin in a joined workspace, choose who among the
-    // members sees a Group. General, direct messages and agents' chats
-    // follow the member level. The relay decides either way.
-    const groupWireId =
-      nav.channel.kind === "channel" &&
-      nav.channel.wireId &&
-      nav.channel.wireId !== GENERAL_CHANNEL_WIRE_ID &&
-      (inJoinedWorkspace ? createsGroups : canShare)
-        ? nav.channel.wireId
-        : null;
+    const groupWireId = groupSettingsWireId(nav.channel);
     // The wide page carries the lane switch in the header. The panel can be
     // 240px, where the header's fixed controls already fill the row, so the
     // switch keeps its own row there.
@@ -4640,8 +4668,8 @@ export function ChatsView(props: {
                   aria-label="Group settings"
                   title="Group settings"
                   aria-haspopup="dialog"
-                  aria-expanded={groupSettingsFor === nav.channel.id}
-                  onClick={() => setGroupSettingsFor(nav.channel.id)}
+                  aria-expanded={groupSettingsFor?.id === nav.channel.id}
+                  onClick={() => setGroupSettingsFor(nav.channel)}
                   className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
                 >
                   <Settings size={16} strokeWidth={1.9} aria-hidden />
@@ -4742,19 +4770,7 @@ export function ChatsView(props: {
             onClose={() => setSharePanelOpen(false)}
           />
         ) : null}
-        {groupWireId && groupSettingsFor === nav.channel.id ? (
-          <GroupSettingsDialog
-            groupName={nav.channel.name}
-            {...(nav.channel.folderPath ? { folderPath: nav.channel.folderPath } : {})}
-            load={() => loadGroupAccess(groupWireId)}
-            save={(level) => saveGroupAccess(groupWireId, level)}
-            {...(props.onShowFolder ? { onOpenFolder: props.onShowFolder } : {})}
-            {...(props.onOpenSettings
-              ? { onInviteMembers: () => props.onOpenSettings?.("members") }
-              : {})}
-            onClose={() => setGroupSettingsFor(null)}
-          />
-        ) : null}
+        {groupSettingsDialog}
       </>
     );
     return (
@@ -5018,6 +5034,8 @@ export function ChatsView(props: {
               canAddPeople:
                 !inJoinedWorkspace && channelShares !== null && joined === null && !!channel.wireId,
               canLeave: joined !== null,
+              hasSettings: groupSettingsWireId(channel) !== null,
+              hasFolder: !!channel.folderPath,
             },
           })}
           trailing={
@@ -5398,6 +5416,7 @@ export function ChatsView(props: {
           onClose={() => setMembersFor(null)}
         />
       ) : null}
+      {groupSettingsDialog}
       {creatingGroup ? (
         <NewGroupDialog
           onCreate={createChannel}
