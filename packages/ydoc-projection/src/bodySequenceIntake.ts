@@ -16,8 +16,13 @@ import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
+  childrenOf,
   CONTAINER_ID,
+  HOLDS_BLOCKS,
   holdsBodySequence,
+  INLINE_ITEMS,
+  MAX_SEQUENCE_DEPTH,
+  ONLY_CHILD,
 } from "./bodySequenceStore.js";
 
 export interface BodySequenceIntakeRules {
@@ -649,4 +654,212 @@ export function bodySequenceChangeLimit(
       weight,
     );
   return undefined;
+}
+
+interface Run {
+  readonly marks: number;
+  readonly shown: string;
+}
+interface Place {
+  used: boolean;
+  last: Run | undefined;
+}
+interface Leaf {
+  readonly tag: string;
+  readonly held: Place;
+  readonly after: Place;
+}
+interface ReadMarks extends Run {
+  readonly nodes: number;
+  readonly generation: number;
+}
+
+const stored = (holder: { readonly _map: Map<string, Y.Item> } | undefined, key: string) => {
+  const item = holder?._map.get(key);
+  return item && !item.deleted && item.content instanceof Y.ContentAny
+    ? { value: item.content.arr.at(-1) as unknown }
+    : undefined;
+};
+const isWidth = (width: unknown) =>
+  typeof width === "bigint"
+    ? width >= 0n && width <= BigInt(Number.MAX_SAFE_INTEGER)
+    : typeof width === "number" && Number.isFinite(width) && width >= 0;
+const MAX_COLUMN_WIDTHS = 1000;
+
+/**
+ * The nodes the engine's Markdown writer spends reading the body of a note whose body is one
+ * sequence, counted as `crates/dohc-engine-collab/src/ydoc/body_sequence.rs` counts them: each
+ * entry it reads of each line's path, each container it opens and each list item it gives a
+ * paragraph, each line, run of letters, mark of a run, inline item, attribute and column width,
+ * and a paragraph for letters with no line to hold them or for a note with no line at all.
+ */
+export function bodySequenceEngineNodes(note: Y.Doc): number {
+  const schema = getDohcProseMirrorSchema();
+  const containers = note.share.get(BODY_CONTAINERS_FIELD);
+  const markNames = Object.keys(schema.marks).filter((name) => name !== "code");
+  const linkAttributes = Object.entries(schema.marks.link!.spec.attrs ?? {});
+  let nodes = 0;
+  const attributes = (kind: string, from: (name: string) => { value: unknown } | undefined) => {
+    for (const name of Object.keys(schema.nodes[kind]?.spec.attrs ?? {})) {
+      const held = from(name);
+      if (!held) continue;
+      nodes += 1;
+      if (name !== "colwidth" || !Array.isArray(held.value)) continue;
+      if (held.value.length > MAX_COLUMN_WIDTHS) continue;
+      for (const width of held.value as unknown[]) {
+        nodes += 1;
+        if (!isWidth(width)) break;
+      }
+    }
+  };
+  const marks = new Map<string, Record<string, unknown>>();
+  let generation = 0;
+  let read: ReadMarks | undefined;
+  let newestRun: number | undefined;
+  const readMarks = (): ReadMarks => {
+    const names = marks.has("code") ? ["code"] : markNames.filter((name) => marks.has(name));
+    let spent = names.length;
+    const shown = names.map((name) => {
+      if (name !== "link") return [name];
+      const attrs = marks.get(name)!;
+      return linkAttributes.map(([key, spec]) => {
+        if (!Object.hasOwn(attrs, key)) return spec.default as unknown;
+        spent += 1;
+        const value = attrs[key];
+        return value === null || typeof value === "string" ? value : (spec.default as unknown);
+      });
+    });
+    return { marks: names.length, shown: JSON.stringify(shown), nodes: spent, generation };
+  };
+
+  const open: { id: string; kind: string; first?: string }[] = [];
+  let topHolds = false;
+  let leaf: Leaf | undefined;
+  const newLeaf = (tag: string): Leaf => ({
+    tag,
+    held: { used: false, last: undefined },
+    after: { used: false, last: undefined },
+  });
+  const holdsLetters = (at: Leaf) =>
+    !at.after.used && (at.tag === "paragraph" || at.tag === "heading" || at.tag === "codeBlock");
+  const holdsInlineItems = (at: Leaf) =>
+    !at.after.used && (at.tag === "paragraph" || at.tag === "heading");
+  const placeFor = (holds: (at: Leaf) => boolean): Place => {
+    if (!leaf) {
+      nodes += 1;
+      leaf = newLeaf("paragraph");
+    }
+    if (holds(leaf)) return leaf.held;
+    if (!leaf.after.used) nodes += 1;
+    return leaf.after;
+  };
+  const placed = (tag: string) => {
+    const parent = open.at(-1);
+    if (parent) parent.first ??= tag;
+    else topHolds = true;
+  };
+  const closeLeaf = () => {
+    if (!leaf) return;
+    placed(leaf.tag);
+    if (leaf.after.used) placed("paragraph");
+    leaf = undefined;
+  };
+  const closeTo = (depth: number) => {
+    while (open.length > depth) {
+      const closed = open.pop()!;
+      const item = closed.kind === "listItem" || closed.kind === "taskItem";
+      if (item && closed.first !== "paragraph") nodes += 1;
+      placed(closed.kind);
+    }
+  };
+  const pathOf = (value: unknown) => {
+    const path: { id: string; kind: string }[] = [];
+    if (!Array.isArray(value)) return path;
+    let parent: string | null = null;
+    for (const id of (value as unknown[]).slice(0, MAX_SEQUENCE_DEPTH)) {
+      nodes += 1;
+      if (typeof id !== "string" || !CONTAINER_ID.test(id)) break;
+      if (path.some((frame) => frame.id === id)) break;
+      const recorded = stored(containers, id)?.value;
+      if (typeof recorded !== "string") break;
+      const kind: string = (parent !== null && ONLY_CHILD[parent]) || recorded;
+      if (!childrenOf(parent).has(kind)) break;
+      path.push({ id, kind });
+      parent = kind;
+    }
+    while (path.length > 0 && !HOLDS_BLOCKS.has(path.at(-1)!.kind)) path.pop();
+    return path;
+  };
+  const boundary = (element: Y.XmlElement) => {
+    closeLeaf();
+    const type = stored(element, "type")?.value;
+    const leafType = typeof type === "string" ? schema.nodes[type] : undefined;
+    const known = leafType?.isBlock && (leafType.isTextblock || leafType.isLeaf);
+    const tag = known ? leafType!.name : "paragraph";
+    const path = pathOf(stored(element, "path")?.value);
+    let shared = 0;
+    while (
+      shared < Math.min(open.length, path.length) &&
+      open[shared]!.id === path[shared]!.id &&
+      open[shared]!.kind === path[shared]!.kind
+    )
+      shared += 1;
+    closeTo(shared);
+    for (const frame of path.slice(shared)) {
+      nodes += 1;
+      attributes(frame.kind, (name) => stored(containers, `${frame.id}.${name}`));
+      open.push({ ...frame });
+    }
+    nodes += 1;
+    attributes(tag, (name) => stored(element, name));
+    leaf = newLeaf(tag);
+  };
+  const letters = (text: string) => {
+    if (text === "") return;
+    const unmarked = leaf !== undefined && leaf.tag === "codeBlock" && holdsLetters(leaf);
+    if (!unmarked) read ??= readMarks();
+    const marked = unmarked ? undefined : read;
+    const place = placeFor(holdsLetters);
+    place.used = true;
+    const last = place.last;
+    const joins =
+      last !== undefined &&
+      (marked === undefined
+        ? last.marks === 0
+        : newestRun === marked.generation ||
+          (last.marks === marked.marks && last.shown === marked.shown));
+    newestRun = marked?.generation;
+    if (joins) return;
+    nodes += 1 + (marked?.nodes ?? 0);
+    place.last = marked ?? { marks: 0, shown: "[]" };
+  };
+  const inlineItem = (element: Y.XmlElement) => {
+    nodes += 1;
+    attributes(element.nodeName, (name) => stored(element, name));
+    const place = placeFor(holdsInlineItems);
+    place.used = true;
+    place.last = undefined;
+  };
+
+  for (let item = note.share.get(BODY_SEQUENCE_FIELD)?._start ?? null; item; item = item.right) {
+    if (item.deleted) continue;
+    const content = item.content;
+    if (content instanceof Y.ContentString) letters(content.str);
+    else if (content instanceof Y.ContentFormat) {
+      if (content.key !== "code" && !markNames.includes(content.key)) continue;
+      const value = content.value as unknown;
+      if (typeof value === "object" && value !== null && !Array.isArray(value))
+        marks.set(content.key, value as Record<string, unknown>);
+      else marks.delete(content.key);
+      read = undefined;
+      generation += 1;
+    } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const element = content.type;
+      if (element.nodeName === BLOCK_ELEMENT) boundary(element);
+      else if (INLINE_ITEMS.has(element.nodeName)) inlineItem(element);
+    }
+  }
+  closeLeaf();
+  closeTo(0);
+  return topHolds ? nodes : nodes + 1;
 }

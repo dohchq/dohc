@@ -18,6 +18,7 @@ import {
 import {
   bodySequenceChangeLimit,
   bodySequenceChangeRefusal,
+  bodySequenceEngineNodes,
   bodySequenceRoomPolicy,
   bodySequenceStateRefusal,
   type BodySequenceIntakeRules,
@@ -792,8 +793,8 @@ class ProjectionBudget {
     this.consumeNode();
   }
 
-  consumeNode(): void {
-    this.nodes += 1;
+  consumeNode(count = 1): void {
+    this.nodes += count;
     if (this.nodes > MAX_PROJECTION_NODES) refuse("capacity-refused");
   }
 
@@ -1473,6 +1474,7 @@ function validatePublicState(
   );
   const budget = new ProjectionBudget();
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set());
+  if (bodySequence) budget.consumeNode(bodySequenceEngineNodes(scratch));
   const storedBody = bodySequence ? undefined : bodyFingerprint(body, budget);
   const frontmatterSnapshot = getDohcYDocFrontmatter(scratch);
   if (storedBody) validateBody(body, storedBody, topology.bodyHasActiveItem);

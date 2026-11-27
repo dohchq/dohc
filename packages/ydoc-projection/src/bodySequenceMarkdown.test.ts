@@ -545,7 +545,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
       MAX_PROJECTION_NODES - 1,
       MAX_PROJECTION_NODES + 64,
     ]);
-    expect(registered(over).kind).toBe("accepted");
+    expect(registered(over)).toEqual({ kind: "refused: capacity-refused" });
   }, 120_000);
 
   it("a table in 61 quotes, over the engine's node budget, made in format 1", () => {
@@ -564,6 +564,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
     expect(nodes).toBe(295_552);
     expectFormat1(markdown);
     expect(registered(withItsSource(inFormat1(markdown), markdown)).kind).toBe("accepted");
+    expect(registered(inFormat2ByHand(markdown))).toEqual({ kind: "refused: capacity-refused" });
   });
 
   it("headings in 32 lists, past the save's value visits and the engine's node budget, made in format 1", () => {
