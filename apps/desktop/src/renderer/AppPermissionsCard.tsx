@@ -445,6 +445,7 @@ export function AppAccessSummary({
   approved,
   external = null,
   approvedExternal = null,
+  onServer = false,
   failed,
   onRetry,
 }: {
@@ -452,6 +453,7 @@ export function AppAccessSummary({
   approved: readonly AppCapability[] | null;
   external?: readonly AppExternalOperation[] | null;
   approvedExternal?: readonly AppExternalOperation[] | null;
+  onServer?: boolean;
   failed: boolean;
   onRetry(): void;
 }) {
@@ -481,6 +483,7 @@ export function AppAccessSummary({
                   key={operation.name}
                   operation={operation}
                   approved={approved === null ? null : (approvedExternal ?? [])}
+                  shared={onServer}
                 />
               ))}
             </div>

@@ -29,6 +29,7 @@ export interface ServedExternalApp {
   publicationId: string;
   workspaceId: string;
   authorityRevision: number;
+  local: boolean;
   external: AppExternalOperation[];
   caller: DatasetAuthority["caller"];
 }
@@ -136,12 +137,14 @@ export function createAppExternalCalls(options: {
             throw unavailable(
               `Secret ${name} must be a header value allowed for ${operation.host}. Fix it in Settings > Secrets.`,
             );
-          const approved = approvedSecretBindings(
-            options.storage as StorageContext,
-            served.publicationId,
-            served.authorityRevision,
-          )[name];
-          if (approved !== workspaceSecretApprovalBinding(stored.summary))
+          if (
+            !served.local &&
+            approvedSecretBindings(
+              options.storage as StorageContext,
+              served.publicationId,
+              served.authorityRevision,
+            )[name] !== workspaceSecretApprovalBinding(stored.summary)
+          )
             throw unavailable(
               `Secret ${name} was replaced after you shared this app. Stop sharing it, then share it again to approve the new secret.`,
             );

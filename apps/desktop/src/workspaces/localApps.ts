@@ -6,6 +6,7 @@ import type { LocalAppLaunchBackend } from "./localAppLaunch";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { createLocalCollectionApps } from "./localCollectionApps";
 import type { createLocalDatasetApps } from "./localDatasetApps";
+import type { createServerDatasetApps } from "./serverDatasetApps";
 import type { createLocalUnconnectedApps } from "./localUnconnectedApps";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 
@@ -18,6 +19,7 @@ export function createLocalApps(
   onPublicationChanged?: () => void,
   localBudget?: () => boolean,
   external?: LocalAppExternal,
+  onServer?: () => Pick<ReturnType<typeof createServerDatasetApps>, "external"> | null,
 ) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
@@ -31,7 +33,10 @@ export function createLocalApps(
   };
   // Ending or replacing a Dataset app's authority ends its binding in the same commit.
   const displace = (displaced: LocalAppRow | undefined, commit: () => void) =>
-    displaced?.kind === "dataset" ? dataset.withdrawBinding(displaced, commit) : commit();
+    displaced?.kind === "dataset" ||
+    (displaced?.kind === "unconnected" && displaced.candidate.external && onServer?.())
+      ? dataset.withdrawBinding(displaced, commit)
+      : commit();
   const backend: LocalAppLaunchBackend = {
     browserPublication(publicationId) {
       kind(publicationId);
@@ -62,6 +67,13 @@ export function createLocalApps(
           code: "external_not_approved",
           message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,
         });
+      const server = onServer?.();
+      if (server) {
+        const blocked = external.unavailable();
+        if (blocked)
+          throw new AppBackendRuntimeError({ code: "external_unavailable", message: blocked });
+        return server.external(publicationId, input, signal);
+      }
       return external.call(operation, input.input, signal, () =>
         kind(publicationId, input.authorityRevision),
       );
@@ -93,6 +105,14 @@ export function createLocalApps(
           : "Apps can call outside services only in your own workspaces."
         : null;
       if (blocked) throw new Error(blocked);
+      if (
+        candidate.external &&
+        candidate.capabilities[0]?.kind === "collection-create" &&
+        onServer?.()
+      )
+        throw new Error(
+          "Apps that create Collection files can't call outside services in synced workspaces.",
+        );
       // Replacing a Collection app first settles the responses it admitted.
       await collection.settleRoot(candidate.appRoot);
       const declared = candidate.capabilities[0];

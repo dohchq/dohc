@@ -18,6 +18,10 @@ import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { sendCollectionsUp } from "./collectionMove";
 import { createServerCollectionsTransport } from "./serverDatasetApps";
 import {
+  sealWorkspaceSecret,
+  workspaceSecretKeyring,
+} from "../../../../services/sync-relay/src/workspaceSecretCrypto";
+import {
   definition,
   id,
   operationSource,
@@ -106,6 +110,10 @@ async function computerWithApp(latencyMs = 0) {
       workspaceRoot,
       compile: createDatasetFixtureCompiler(),
       collectionsServer: () => server,
+      external: {
+        unavailable: () => null,
+        call: () => Promise.reject(new Error("Sent from this computer.")),
+      },
     });
     cleanups.push(() => host.close());
     return host;
@@ -740,4 +748,200 @@ it("tags 404 not_found responses on workspace local-apps withdrawals so retries 
     caught = error;
   }
   expect(isDatasetServerNotFound(caught)).toBe(true);
+});
+
+it("withdraws an app's outside calls on the server when a version that uses a Collection replaces it", async () => {
+  const f = await computerWithApp();
+  const manifest = f.files.get("app/app.publish.json")!;
+  const { dataset: _, ...unconnected } = JSON.parse(manifest) as Record<string, unknown>;
+  f.files.set(
+    "app/app.publish.json",
+    JSON.stringify({
+      ...unconnected,
+      external: {
+        events: {
+          method: "GET",
+          url: "https://us.posthog.com/api/events/",
+          secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+        },
+      },
+    }),
+  );
+  const outside = await f.host.apps.activate(await f.prepareApp(), new AbortController().signal);
+  await expect(
+    f.host.apps.external!(
+      outside.publicationId,
+      { authorityRevision: outside.authorityRevision, operation: "events", input: {} },
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({ refusal: { code: "external_unavailable" } });
+  const onServer = () =>
+    f.relay.storage.db
+      .prepare(
+        "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+      )
+      .get(outside.publicationId)?.candidate;
+  expect(onServer()).toContain("us.posthog.com");
+  f.files.set("app/app.publish.json", manifest);
+  await f.host.apps.activate(await f.prepareApp(), new AbortController().signal);
+  await expect.poll(onServer).toBe("");
+});
+
+it("sends a synced workspace's outside call through its server, which adds the secret, and withdraws the app there too", async () => {
+  const sent: unknown[] = [];
+  const relay = await startTestRelay({
+    appExternalTransport: {
+      resolve: async (rawUrl) => {
+        const url = new URL(rawUrl);
+        return {
+          href: url.href,
+          url,
+          canonicalHost: url.hostname,
+          address: "93.184.216.34",
+          family: 4,
+        };
+      },
+      read: async (request) => {
+        sent.push(request.headers.Authorization);
+        return {
+          status: 200,
+          contentType: "application/json",
+          contentEncoding: null,
+          body: Buffer.from('{"events":3}'),
+        };
+      },
+    },
+  });
+  cleanups.push(() => relay.close());
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-server-external-"));
+  cleanups.push(() => rm(workspaceRoot, { recursive: true, force: true }));
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const server = createServerCollectionsTransport("w", async (path, body, signal) => {
+    const response = await fetch(`${relay.origin}${path}`, {
+      method: "POST",
+      headers: { authorization: "Bearer owner", "content-type": "application/json" },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    const value = (await readDatasetResponse(
+      response,
+      datasetResponseAction(path) ?? "describe",
+      new AbortController().signal,
+    )) as { code?: string } | null;
+    if (!response.ok)
+      throw markDatasetServerNotFound(new Error(String(response.status)), response.status, value);
+    return value;
+  });
+  let paused: string | null = null;
+  const host = await createLocalDatasetHost({
+    holder: unguardedCollections,
+    localPersonId: () => "person-local",
+    workspaceId: "w",
+    workspaceRoot,
+    compile: createDatasetFixtureCompiler(),
+    collectionsServer: () => server,
+    external: {
+      unavailable: () => paused,
+      call: () => Promise.reject(new Error("Sent from this computer.")),
+    },
+  });
+  cleanups.push(() => host.close());
+  const files = new Map([
+    [
+      "stats/app.publish.json",
+      JSON.stringify({
+        entryPath: "main.ts",
+        inputs: ["main.ts"],
+        packageMap: {},
+        external: {
+          events: {
+            method: "GET",
+            url: "https://us.posthog.com/api/events/",
+            secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+          },
+        },
+      }),
+    ],
+    ["stats/main.ts", "export {};"],
+  ]);
+  const app = await prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "stats", versionId: "main" },
+    {
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+      assertCurrent() {},
+      resolveDatasetRevision: async () => revision,
+    },
+  );
+  const published = await host.apps.activate(app, new AbortController().signal);
+  const call = (approved = published) =>
+    host.apps.external!(
+      approved.publicationId,
+      { authorityRevision: approved.authorityRevision, operation: "events", input: {} },
+      new AbortController().signal,
+    );
+  const onServer = (publicationId: string) =>
+    expect.poll(
+      () =>
+        relay.storage.db
+          .prepare(
+            "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+          )
+          .get(publicationId)?.candidate,
+    );
+  await expect(call()).rejects.toMatchObject({
+    refusal: {
+      code: "external_unavailable",
+      message: "Secret POSTHOG_KEY isn't in Settings > Secrets.",
+    },
+  });
+  const keyring = workspaceSecretKeyring({ linkKey: "server-collections-test-key" })!;
+  const secret = {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    name: "POSTHOG_KEY",
+    usage: "http-header" as const,
+    allowedHosts: ["us.posthog.com"],
+  };
+  relay.storage.upsertWorkspaceSecret({
+    ...secret,
+    mode: "create",
+    keyId: keyring.activeId,
+    seal: (generation) =>
+      sealWorkspaceSecret({
+        ...secret,
+        keyring,
+        keyId: keyring.activeId,
+        generation,
+        plaintext: "phx_synced",
+      }),
+    nowMs: 10,
+  });
+  expect(await call()).toEqual({ status: 200, data: { events: 3 } });
+  expect(sent).toEqual(["Bearer phx_synced"]);
+  paused = "Sync is paused for this workspace.";
+  await expect(call()).rejects.toMatchObject({ refusal: { code: "external_unavailable" } });
+  expect(sent).toHaveLength(1);
+  paused = null;
+  files.set("stats/main.ts", "export const version = 2;");
+  const updated = await host.apps.activate(
+    await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "stats", versionId: "main" },
+      {
+        deferredWrites: [],
+        adapter: sourceCaptureAdapter(files),
+        compile: compileClosedApp,
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        resolveDatasetRevision: async () => revision,
+      },
+    ),
+    new AbortController().signal,
+  );
+  await onServer(published.publicationId).toBe("");
+  expect(await call(updated)).toEqual({ status: 200, data: { events: 3 } });
+  await host.apps.withdraw(updated.publicationId, updated.authorityRevision);
+  await onServer(updated.publicationId).toBe("");
 });

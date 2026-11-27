@@ -717,6 +717,101 @@ it("runs a shared app's outside calls on the server with the secret its owner ap
   expect((await call("count", f.publicHeaders, 3)).status).toBe(200);
 });
 
+it("runs the outside calls of an app approved on the owner's computer, for the owner alone, until it is withdrawn", async () => {
+  const sent: SafeOutboundRequest[] = [];
+  let clientKind: "browser" | "desktop" = "browser";
+  const f = await httpFixture(undefined, false, limits, definition, {
+    resolveAccountSession: async (request) => ({
+      userId: request.headers.get("authorization")!.slice(7),
+      sessionId: "session",
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind,
+    }),
+    appExternalTransport: {
+      resolve: async (rawUrl) => {
+        const url = new URL(rawUrl);
+        return {
+          href: url.href,
+          url,
+          canonicalHost: url.hostname,
+          address: "93.184.216.34",
+          family: 4,
+        };
+      },
+      read: async (request) => {
+        sent.push(request);
+        return {
+          status: 200,
+          contentType: "application/json",
+          contentEncoding: null,
+          body: Buffer.from('{"events":3}'),
+        };
+      },
+    },
+  });
+  const keyring = workspaceSecretKeyring({ linkKey: "dataset-http-test-key" })!;
+  const secret = {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    name: "POSTHOG_KEY",
+    usage: "http-header" as const,
+    allowedHosts: ["us.posthog.com"],
+  };
+  f.storage.upsertWorkspaceSecret({
+    ...secret,
+    mode: "create",
+    keyId: keyring.activeId,
+    seal: (generation) =>
+      sealWorkspaceSecret({
+        ...secret,
+        keyring,
+        keyId: keyring.activeId,
+        generation,
+        plaintext: "phx_local",
+      }),
+    nowMs: 10,
+  });
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const candidate = {
+    ...published,
+    capabilities: [],
+    external: parseAppExternalDeclaration({
+      events: {
+        method: "GET",
+        url: "https://us.posthog.com/api/events/",
+        secret: { name: "POSTHOG_KEY", header: "Authorization", prefix: "Bearer " },
+      },
+    }),
+  };
+  expect(await (await f.http("w/local-apps", { localApp: candidate })).json()).toMatchObject({
+    error: "Approve an app that calls outside services from the dohc desktop app.",
+  });
+  clientKind = "desktop";
+  const approved = await f.http("w/local-apps", { localApp: candidate });
+  expect(approved.status).toBe(200);
+  const { publicationId, authorityRevision } = (await approved.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  const call = (as: string) =>
+    f.http(
+      `w/app-publications/${publicationId}/backend/external`,
+      { authorityRevision, operation: "events", input: {} },
+      { authorization: `Bearer ${as}` },
+    );
+  expect(await (await call("owner")).json()).toEqual({ status: 200, data: { events: 3 } });
+  expect(sent[0]!.headers).toMatchObject({ Authorization: "Bearer phx_local" });
+  for (const as of ["helper", "stranger"]) expect((await call(as)).status).toBe(404);
+  expect((await f.http("w/local-apps", { publicationId, enabled: false })).status).toBe(200);
+  expect((await call("owner")).status).toBe(404);
+  expect(sent).toHaveLength(1);
+});
+
 it("runs an app on the owner's computer as that app, within its approval, for the owner alone", async () => {
   const f = await httpFixture();
   await f.activate();
@@ -781,18 +876,6 @@ it("runs an app on the owner's computer as that app, within its approval, for th
       })
     ).status,
   ).toBe(400);
-  const [external] = parseAppExternalDeclaration({
-    events: {
-      method: "GET",
-      url: "https://us.posthog.com/api/events/",
-      secret: { name: "POSTHOG_KEY", header: "Authorization" },
-    },
-  });
-  const outside = await f.http(`${f.path}/binding`, {
-    localApp: { ...candidate, external: [external] },
-  });
-  expect(outside.status).toBe(400);
-  expect(await outside.text()).toContain("outside services");
   expect((await f.http(`${f.path}/binding`, { publicationId: appId, enabled: false })).status).toBe(
     200,
   );

@@ -244,6 +244,55 @@ test("@app-external-shared a share-link visitor runs the app's approved outside 
     expect(bodies.length).toBeGreaterThan(0);
     for (const body of bodies) expect(body).not.toContain(SECRET);
     expect(shared.failures).toEqual([]);
+
+    await review();
+    const local = publication.getByTestId("app-access-external");
+    await expect(local.filter({ hasText: "recentEvents" })).toContainText("Your dohc server");
+    await themed(page, publication.getByTestId("app-access"), (theme) =>
+      info.outputPath(`synced-outside-call-review-${theme}.png`),
+    );
+    await publication.getByTestId("app-publication-approve").click();
+    await expect(publication).toBeHidden();
+    await expect(page.getByTestId("app-view-webview")).toBeVisible({ timeout: 20_000 });
+    const owned = desktop;
+    await expect
+      .poll(
+        async () =>
+          owned.app.evaluate(async ({ webContents }) => {
+            const view = webContents
+              .getAllWebContents()
+              .find(
+                (contents) =>
+                  contents.getType() === "webview" &&
+                  /^http:\/\/127\.0\.0\.1:\d+\/bootstrap(?:#|$)/.test(contents.getURL()),
+              );
+            const frame = view?.mainFrame.framesInSubtree.find(
+              (entry) => entry.url === "about:srcdoc",
+            );
+            if (!frame) return {};
+            return JSON.parse(
+              (await frame.executeJavaScript(
+                "document.getElementById('out')?.textContent || '{}'",
+                true,
+              )) as string,
+            ) as Record<string, unknown>;
+          }),
+        { timeout: 30_000 },
+      )
+      .toMatchObject({
+        events: { ok: true, value: { status: 200 } },
+        ownerOnly: { ok: true, value: { status: 200 } },
+      });
+    await page.screenshot({ path: info.outputPath("synced-outside-call-app.png") });
+    expect(service.received.slice(1)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "POST",
+          path: "/api/projects/42/delete/",
+          headers: expect.objectContaining({ authorization: `Bearer ${SECRET}` }),
+        }),
+      ]),
+    );
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     try {

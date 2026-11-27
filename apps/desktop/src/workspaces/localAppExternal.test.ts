@@ -99,7 +99,13 @@ describe("local app outside calls", () => {
       "isn't allowed for us.posthog.com",
     ],
     [{ secrets: secrets({}, false).store }, "keychain is unavailable"],
-    [{ unavailable: () => "Apps in synced workspaces can't call outside services yet." }, "synced"],
+    [
+      {
+        unavailable: () =>
+          "Sync is paused for this workspace. Resume sync before this app calls outside services.",
+      },
+      "Sync is paused",
+    ],
   ])("refuses before sending when the secret can't be used: %#", async (options, message) => {
     const t = transport();
     await expect(call({ ...options, transport: t.value })).rejects.toMatchObject({

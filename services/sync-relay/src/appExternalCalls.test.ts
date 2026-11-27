@@ -19,6 +19,7 @@ const served = (caller: ServedExternalApp["caller"]): ServedExternalApp => ({
   publicationId: "p".repeat(64),
   workspaceId: "w",
   authorityRevision: 1,
+  local: false,
   external,
   caller,
 });

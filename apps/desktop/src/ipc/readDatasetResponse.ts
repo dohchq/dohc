@@ -15,7 +15,7 @@ export function datasetResponseAction(path: string): string | null {
   if (dataset) return dataset[2] ?? (dataset[1] ? "describe" : "list");
   if (/^\/sync\/[^/]+\/local-apps$/.test(path)) return "local-app";
   return (
-    /^\/sync\/[^/]+\/app-publications\/[0-9a-f]{64}\/backend\/(invoke|attempt|upload|file)$/.exec(
+    /^\/sync\/[^/]+\/app-publications\/[0-9a-f]{64}\/backend\/(invoke|attempt|upload|file|external)$/.exec(
       path,
     )?.[1] ?? null
   );
@@ -53,7 +53,7 @@ export async function readDatasetResponse(
     return { ...value, profile };
   if (
     response.status === 409 &&
-    action === "invoke" &&
+    (action === "invoke" || action === "external") &&
     value &&
     typeof value === "object" &&
     !Array.isArray(value)

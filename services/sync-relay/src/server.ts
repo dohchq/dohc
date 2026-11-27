@@ -524,6 +524,12 @@ export function createSyncRelayHandler({
   const appEventWaits = datasetHost
     ? createAppEventWaits(storage, datasetHost.datasetRevision)
     : undefined;
+  const fromDesktop = (request: Request, userId: string) => async () => {
+    const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+    if (!sessionResolver) return false;
+    const session = await bearerAccountSession(storage, sessionResolver, request);
+    return session.clientKind === "desktop" && session.userId === userId;
+  };
   const respondToDatasetApp = datasetHost
     ? createDatasetAppRoutes(datasetHost, storage, {
         limits: appBackendAdmissionLimits,
@@ -1681,12 +1687,17 @@ export function createSyncRelayHandler({
             userId: actor.userId,
           });
         }
-        return await respondToDataset(request, route, {
-          kind: "named",
-          workspaceId: route.workspaceId,
-          userId: actor.userId,
-          ...(grant === null ? {} : { grantId: parseShareId(grant) }),
-        });
+        return await respondToDataset(
+          request,
+          route,
+          {
+            kind: "named",
+            workspaceId: route.workspaceId,
+            userId: actor.userId,
+            ...(grant === null ? {} : { grantId: parseShareId(grant) }),
+          },
+          fromDesktop(request, actor.userId),
+        );
       }
       if (route.route === "member-apps") {
         if (!respondToMemberApps) throw notFound();
@@ -1722,12 +1733,7 @@ export function createSyncRelayHandler({
           request,
           route,
           actor.userId,
-          async () => {
-            const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
-            if (!sessionResolver) return false;
-            const session = await bearerAccountSession(storage, sessionResolver, request);
-            return session.clientKind === "desktop" && session.userId === actor.userId;
-          },
+          fromDesktop(request, actor.userId),
         );
         // Withdrawing, reactivating, and changing Collection approval each move the authority revision.
         if (answer.ok && "publicationId" in route && route.action !== "read")

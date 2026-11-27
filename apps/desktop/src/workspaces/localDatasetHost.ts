@@ -1982,6 +1982,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           },
           () => !options.collectionsServer?.(),
           preview ? undefined : options.external,
+          () => (options.collectionsServer?.() ? onServer : null),
         ),
       };
     };

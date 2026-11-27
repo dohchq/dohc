@@ -6799,8 +6799,8 @@ function localAppExternalFor(workspaceId: string): LocalAppExternal {
       const entry = findWorkspace(workspaceId);
       if (entry === null || entry.shareView !== undefined)
         return "Apps can call outside services only in your own workspaces.";
-      if (entry.remote !== undefined || entry.pausedRemote !== undefined)
-        return "Apps in synced workspaces can't call outside services yet.";
+      if (entry.remote === undefined && entry.pausedRemote !== undefined)
+        return "Sync is paused for this workspace. Resume sync before this app calls outside services.";
       return null;
     },
     ...(origin ? { transport: loopbackDeclaredHttpsTransport(origin) } : {}),
