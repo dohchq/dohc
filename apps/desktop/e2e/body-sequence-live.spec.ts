@@ -176,7 +176,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       await expect.poll(() => paragraphs(ownerEditor)).toEqual(NOTES[note]);
       await expect(ownerEditor).toHaveAttribute("data-note-format", "2");
       for (const person of people) {
-        await person.page.close();
+        await person.context.close();
+        person.context = await shared.browser.newContext();
         person.page = await person.context.newPage();
         const { page } = person;
         page.on("pageerror", (error) => shared.failures.push(error.message));
@@ -244,7 +245,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       await Promise.all([offline(one, false), offline(two, false)]);
       await saved(one, two);
       await press(one, "aabb", "End", "z");
-      await everyoneReads("joinSame", ["aabbz"], "aabbz\n");
+      await press(two, "aabbz", "End", "y");
+      await everyoneReads("joinSame", ["aabbzy"], "aabbzy\n");
     });
 
     await test.step("2. one person joins a line while another splits it", async () => {
@@ -287,7 +289,6 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
 
     await test.step("5. the person who typed X undoes it", async () => {
       await two.page.keyboard.press("ControlOrMeta+z");
-      await saved(two);
       await everyoneReads("joinType", ["abc"], "abc\n");
     });
 
