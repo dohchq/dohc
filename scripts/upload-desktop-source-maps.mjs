@@ -1,13 +1,38 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The flags below are the ones @posthog/cli 0.18.10 reads. Its install
-// script downloads the binary, so pnpm must allow that script to run.
-export const POSTHOG_CLI = "@posthog/cli@0.18.10";
-const CLI = ["dlx", "--allow-build=@posthog/cli", POSTHOG_CLI];
+// The flags below are the ones @posthog/cli 0.18.10 reads. Each archive is
+// that release's build for a platform releases build on, pinned by the
+// SHA-256 its sha256.sum lists.
+const POSTHOG_CLI_RELEASE =
+  "https://github.com/PostHog/posthog/releases/download/posthog-cli/v0.18.10";
+export const POSTHOG_CLI_ARCHIVES = {
+  "darwin-arm64": {
+    name: "posthog-cli-aarch64-apple-darwin.tar.gz",
+    sha256: "ac3610273be3c7bfd31b0e7f81d8b35119543bf66b99f669d1ec50abbb36d0da",
+    binary: "posthog-cli-aarch64-apple-darwin/posthog-cli",
+  },
+  "linux-x64": {
+    name: "posthog-cli-x86_64-unknown-linux-gnu.tar.gz",
+    sha256: "29f2d4409f08205bab7d52f9cc919e964ea2c867ec568b3acdd9ee3eb4149c3d",
+    binary: "posthog-cli-x86_64-unknown-linux-gnu/posthog-cli",
+  },
+  "win32-x64": {
+    name: "posthog-cli-x86_64-pc-windows-msvc.zip",
+    sha256: "14018e60a9c4bcd6feebe6e0e01017769bea0cb802e597c8879fdf8a5503472f",
+    binary: "posthog-cli.exe",
+  },
+};
+// Git's tar can come first on a Windows PATH, and it cannot read zip files.
+export const TAR =
+  process.platform === "win32" ? join(process.env.SystemRoot ?? "", "System32", "tar.exe") : "tar";
+const SIGNING_SETTING = /^(WIN_)?CSC_|^APPLE_/i;
 const DIST_PATTERN = /^[\w.-]{1,64}$/;
 // The folders whose scripts error reports name. The CLI writes a chunk ID
 // into each of their scripts, and the installer must ship those files.
@@ -24,19 +49,17 @@ const REQUIRED_POSTHOG_SETTINGS = ["POSTHOG_CLI_API_KEY", "POSTHOG_CLI_PROJECT_I
  * release name, version, and build match the release and dist the app
  * reports.
  */
-export function sourceMapUpload(env, platform = process.platform) {
+export function sourceMapUpload(env) {
   const childEnv = { ...env };
   for (const name of OPTIONAL_POSTHOG_SETTINGS) {
     if (!env[name]?.trim()) delete childEnv[name];
   }
-  // The CLI's Windows installer unzips with Windows PowerShell, which cannot load
-  // Expand-Archive from the PowerShell 7 folders a pwsh step puts on PSModulePath.
   for (const name of Object.keys(childEnv)) {
-    if (platform === "win32" && name.toUpperCase() === "PSMODULEPATH") delete childEnv[name];
+    if (SIGNING_SETTING.test(name)) delete childEnv[name];
   }
   // A dry run uploads nothing, but installs and runs the CLI as a release does.
   if (env.DOHC_SOURCE_MAPS_DRY_RUN === "true")
-    return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
+    return { args: ["--version"], env: childEnv, dryRun: true };
   if (!env.DOHC_POSTHOG_KEY?.trim()) {
     return {
       skip: "DOHC_POSTHOG_KEY is not set, so this build sends no error reports and needs no source maps.",
@@ -55,7 +78,6 @@ export function sourceMapUpload(env, platform = process.platform) {
     throw new Error(`DOHC_DESKTOP_DIST '${dist}' is not a dist the app accepts.`);
   return {
     args: [
-      ...CLI,
       "sourcemap",
       "process",
       ...REPORTED_CODE.flatMap((directory) => ["--directory", directory]),
@@ -89,22 +111,57 @@ export function scriptsWithoutChunkIds(directories) {
   return missing;
 }
 
+/** Downloads the CLI archive into `directory`, checks its SHA-256 before anything reads it, and unpacks it. Returns the CLI's path. */
+export async function installPosthogCli(
+  directory,
+  archive = POSTHOG_CLI_ARCHIVES[`${process.platform}-${process.arch}`],
+  download = fetch,
+) {
+  if (!archive) {
+    throw new Error(
+      `@posthog/cli has no pinned archive for ${process.platform}-${process.arch}. Releases build on ${Object.keys(POSTHOG_CLI_ARCHIVES).join(", ")}.`,
+    );
+  }
+  const url = `${POSTHOG_CLI_RELEASE}/${archive.name}`;
+  const response = await download(url);
+  if (!response.ok) throw new Error(`Downloading ${url} failed with HTTP ${response.status}.`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== archive.sha256) {
+    throw new Error(`${archive.name} has SHA-256 ${sha256}, not the pinned ${archive.sha256}.`);
+  }
+  const path = join(directory, archive.name);
+  await writeFile(path, bytes);
+  const unpacked = spawnSync(TAR, ["-xf", path, "-C", directory], { stdio: "inherit" });
+  if (unpacked.status !== 0) {
+    throw new Error(
+      `Unpacking ${archive.name} failed${unpacked.error ? `: ${unpacked.error.message}` : "."}`,
+    );
+  }
+  return join(directory, archive.binary);
+}
+
 /** Injects and uploads this build's source maps, or says why it needs none. A dry run only runs the CLI. */
-export function uploadSourceMaps(env, spawn = spawnSync, directories = REPORTED_CODE) {
+export async function uploadSourceMaps(
+  env,
+  { spawn = spawnSync, download = fetch, archive, directories = REPORTED_CODE } = {},
+) {
   const upload = sourceMapUpload(env);
   if (upload.skip) {
     console.log(upload.skip);
     return;
   }
-  const result = spawn("pnpm", upload.args, {
-    env: upload.env,
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
-  if (result.status !== 0) {
-    throw new Error(
-      `The source map upload failed${result.error ? `: ${result.error.message}` : ` with exit code ${result.status}`}.`,
-    );
+  const directory = await mkdtemp(join(tmpdir(), "dohc-posthog-cli-"));
+  try {
+    const cli = await installPosthogCli(directory, archive, download);
+    const result = spawn(cli, upload.args, { env: upload.env, stdio: "inherit" });
+    if (result.status !== 0) {
+      throw new Error(
+        `The source map upload failed${result.error ? `: ${result.error.message}` : ` with exit code ${result.status}`}.`,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
   if (upload.dryRun) return;
   const missing = scriptsWithoutChunkIds(directories);
@@ -117,7 +174,7 @@ export function uploadSourceMaps(env, spawn = spawnSync, directories = REPORTED_
 
 if (import.meta.main) {
   try {
-    uploadSourceMaps(process.env);
+    await uploadSourceMaps(process.env);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

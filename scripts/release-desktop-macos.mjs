@@ -72,6 +72,7 @@ const RELEASE_VARIABLES = [
   "DOHC_DESKTOP_DIST",
   "DESKTOP_VERSION",
   "DOHC_SMOKE_PACKAGE_DIRECTORY",
+  "DOHC_SOURCE_MAPS_DRY_RUN",
 ];
 
 export function parseMacReleaseArgs(argv) {
@@ -872,8 +873,8 @@ async function buildMacFiles(plan, { root, step, run, keychainStatus, interactiv
   const keychain = { keychainStatus, step, run, interactive, cancelled };
   // A short first unlock checks the identity and the profile and reads the
   // PostHog key into memory. The install, the builds, and the source map
-  // upload, which fetches @posthog/cli outside the lockfile, then run with
-  // the keychain locked.
+  // upload, which downloads a pinned @posthog/cli build, then run with the
+  // keychain locked.
   let signing = plan;
   if (plan.signs) {
     await unlockReleaseKeychain(plan, "Checking the signing identity", keychain);
