@@ -488,7 +488,11 @@ describe("capability identities and exposure", () => {
         const label = `${group} ${name}`;
         const parsed = parseCliArguments([group, name, ...CLI_DISPATCH_ARGUMENTS[label]!], {});
         if ("help" in parsed) throw new Error(`Expected socket dispatch for ${label}.`);
-        expect(CLI_CAPABILITIES[parsed.verb], label).toContain(verb.capabilityId);
+        if (verb.capabilityId === null) expect(socketVerbs, label).not.toContain(parsed.verb);
+        else
+          expect(CLI_CAPABILITIES[parsed.verb as keyof typeof CLI_CAPABILITIES], label).toContain(
+            verb.capabilityId,
+          );
       }
     }
   });

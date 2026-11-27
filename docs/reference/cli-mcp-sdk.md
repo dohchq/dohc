@@ -1690,9 +1690,10 @@ dohc document set-fields <record> [options]
 
 Set fields on a Collection record.
 
-The change lands in the record's frontmatter, and record history attributes it to the agent. Use dohc_set_record_fields for a value that is not text.
+The change lands in the record's frontmatter, and record history attributes it to the agent.
 
 - `--field <name=value>`: Set this field to this text. Repeat for more fields.
+- `--fields-json <json>`: Set fields from a JSON object, such as {"points":3,"done":true,"tags":["a"],"due":null}.
 - `--agent <name>`: Record this agent name with the change.
 
 With `--json`, prints `{ schemaVersion, ok: true, recordPath }`.
@@ -1836,6 +1837,73 @@ dohc document outside-changes [options]
 List live notes whose file changed outside dohc.
 
 With `--json`, prints `{ schemaVersion, outsideChanges: { path, firstObservedAtMs }[] }`.
+
+### `dohc collection`
+
+Query, read, and create Collection records, and check a collection.yaml file.
+
+Name a Collection by its folder. Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. Field values are JSON. Set fields on a record with document set-fields.
+
+#### `dohc collection query`
+
+```sh
+dohc collection query <collection> [options]
+```
+
+List a Collection's records and their field values.
+
+- `--filter <json>`: Keep the records that match, such as {"field":"status","operator":"equals","value":"Open"}. The operator is equals or contains.
+- `--sort <field[:desc]>`: Sort by this field, ascending unless it ends in :desc. Repeat to break ties.
+- `--group-by <field>`: Group the records by this field.
+- `--resolve-relations`: Add the label of each record a relation field names.
+- `--limit <count>`: List at most this many records, up to 500.
+- `--cursor <json>`: Continue from the nextCursor an earlier query printed.
+
+With `--json`, prints `{ schemaVersion, ok: true, collection: { path, status, reasons }, records: { id, path, conflicted, values }[], groups: { value, records }[] | null, nextCursor: { sortValues, recordPath, recordId } | null }`.
+
+#### `dohc collection read-record`
+
+```sh
+dohc collection read-record <collection> <record> [options]
+```
+
+Read one record of a Collection and the history of its fields.
+
+Name the record by its id, as collection query prints it.
+
+- `--history-limit <count>`: List at most this many field changes, up to 500. The default is 50.
+- `--before <history-id>`: List the changes before this historyId from an earlier read.
+
+With `--json`, prints `{ schemaVersion, ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] }`.
+
+#### `dohc collection create-record`
+
+```sh
+dohc collection create-record <collection> <name> [options]
+```
+
+Create a record: a new Markdown file in the Collection's folder.
+
+The name is the file name without .md.
+
+- `--field <name=value>`: Set this field to this text. Repeat for more fields.
+- `--fields-json <json>`: Set fields from a JSON object, such as {"points":3,"done":true,"tags":["a"],"due":null}.
+- `--agent <name>`: Record this agent name with the change.
+- `--record-id <id>`: Give the record this id: rec_ and 26 characters from a to z and 2 to 7.
+
+With `--json`, prints `{ schemaVersion, ok: true, recordId, recordPath, kept? }`.
+
+#### `dohc collection validate`
+
+```sh
+dohc collection validate <path> [options]
+```
+
+Check a collection.yaml file and list its problems.
+
+Runs without the dohc app. Exits with status 1 when the file has problems. Each problem names a code and a JSON Pointer into the file.
+
+With `--json`, prints `{ schemaVersion, ok, path, diagnostics: { code, path, line?, automation? }[] }`.
 
 ### `dohc chat`
 
@@ -3125,7 +3193,7 @@ With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path,
 
 ### `dohc automation`
 
-Press Button fields, read an automation's runs, and try a failed run again.
+Press Button fields, read an automation's runs, try a failed run again, and check an automations.yaml file.
 
 Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
 
@@ -3224,6 +3292,18 @@ Name the record by its id, or a dataset record by its primary key as JSON. The p
 
 With `--json`, prints `{ schemaVersion, ok: true, run, outcome, error, waiting }` or `{ schemaVersion, ok: true, relayed: true }`.
 
+#### `dohc automation validate`
+
+```sh
+dohc automation validate <path> [options]
+```
+
+Check an automations.yaml file and list its problems.
+
+Runs without the dohc app. Exits with status 1 when the file has problems. Each problem names a code, a JSON Pointer into the file, and the automation it is in.
+
+With `--json`, prints `{ schemaVersion, ok, path, diagnostics: { code, path, line?, automation? }[] }`.
+
 ### `dohc account`
 
 Review and delete the server account the dohc app is connected to.
@@ -3259,11 +3339,23 @@ With `--json`, prints `{ schemaVersion, ok: true, finished, email, server, disco
 
 ### `dohc workspace`
 
-Search pages, Collections, records, and chats across this workspace.
+List the workspaces on this computer, and search pages, Collections, records, and chats across this workspace.
 
-Requires the original workspace; received shares and mounted folders are refused. Paths in --path-prefix and --collection are relative to the workspace root.
+Search requires the original workspace; received shares and mounted folders are refused. Paths in --path-prefix and --collection are relative to the workspace root.
 
 Works on the owning workspace only; standalone received shares and mounted shared folders are refused. `complete` is false when `indexBuilding` or `policyDegraded` is true, when `sharedChannelRowsUncovered` is non-zero, or when a short query exceeds its scan bound. `mountsCovered` is false when received folders are mounted under `shared-with-me/`. `truncated` is true when the response hit its 64 KiB wire cap.
+
+#### `dohc workspace info`
+
+```sh
+dohc workspace info [options]
+```
+
+List the workspaces on this computer: each one's id, kind, and folder.
+
+Runs without the dohc app. Marks as current the workspace --workspace names, or else the one this folder is in.
+
+With `--json`, prints `{ schemaVersion, workspaces: { kind, workspaceId, rootPath, current }[] }`.
 
 #### `dohc workspace search`
 

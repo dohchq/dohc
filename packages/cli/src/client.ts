@@ -115,6 +115,12 @@ function endpointCandidates(
   }).map((stateDir) => candidateForStateDir(stateDir, platform));
 }
 
+export function cliStateDirs(options: CliClientOptions = {}): string[] {
+  return endpointCandidates(options, options.platform ?? process.platform).map(
+    (candidate) => candidate.stateDir,
+  );
+}
+
 async function canRead(path: string): Promise<boolean> {
   try {
     await access(path, fsConstants.R_OK);
