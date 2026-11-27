@@ -666,7 +666,6 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
-  // The Group whose settings are open, from its header or its row's menu.
   const [groupSettingsFor, setGroupSettingsFor] = useState<ChatChannelRecord | null>(null);
   // The session the members dialog opened in. Its adds stop once the account
   // changes, even an add that was already part of a running batch.
@@ -1597,10 +1596,9 @@ export function ChatsView(props: {
           workspaceId,
           request: { action: "list" },
         });
-        return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-members";
+        return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-rules";
       } catch (cause) {
-        // A workspace that never synced has no rules to set. Any other failure offers Try again.
-        if (refusalCode(cause) === WORKSPACE_NOT_SYNCED) return "no-members";
+        if (refusalCode(cause) === WORKSPACE_NOT_SYNCED) return "no-rules";
         throw cause;
       }
     },
@@ -1653,8 +1651,7 @@ export function ChatsView(props: {
     if (!view || channel.kind !== "channel" || !channel.wireId) return null;
     if (channel.wireId === GENERAL_CHANNEL_WIRE_ID) return null;
     const access = groupAccessFrom(view, channel.wireId);
-    if (access === "no-members" || (access.level !== "view" && access.level !== "none"))
-      return null;
+    if (access === "no-rules" || (access.level !== "view" && access.level !== "none")) return null;
     return <GroupAccessMark level={access.level} {...(size ? { size } : {})} />;
   };
   const saveGroupAccess = useCallback(
@@ -2568,17 +2565,10 @@ export function ChatsView(props: {
       channel.wireId ? (joinedByWire.get(channel.wireId) ?? null) : null,
     [joinedByWire],
   );
-  // A Group shared with you carries its owner's folder path, not one on this
-  // computer. Like channelIsLocked, a wire id the share lookup hasn't answered
-  // yet (undefined) counts as shared until it does.
   const folderIsLocal = (channel: ChatChannelRecord) =>
     inJoinedWorkspace ||
     !channel.wireId ||
     (channelShares !== null && joinedByWire.get(channel.wireId) === null);
-  // The owner, and an admin in a joined workspace, choose who among the
-  // members sees a Group. General, direct messages and agents' chats follow
-  // the member level, and a Group shared with you is its owner's to set. The
-  // relay decides either way.
   const groupSettingsWireId = (channel: ChatChannelRecord): string | null =>
     channel.kind === "channel" &&
     channel.wireId &&

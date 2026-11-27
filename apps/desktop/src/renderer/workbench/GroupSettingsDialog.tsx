@@ -10,14 +10,9 @@ import { useShownAfter } from "../ui/useShownAfter";
 
 type MemberLevel = "view" | "comment" | "edit";
 
-/**
- * A Group's access as the relay lists it, or "no-members" when there are no
- * rules to read, as in a workspace that never synced. `alone` says no one else
- * is in the workspace yet. The rule still applies to whoever joins first.
- */
 export type GroupAccess =
   | { level: GroupRuleLevel | null; memberLevel: MemberLevel; alone: boolean }
-  | "no-members";
+  | "no-rules";
 
 type MembersList = {
   memberLevel: MemberLevel;
@@ -36,7 +31,7 @@ export const othersInWorkspace = (list: Pick<MembersList, "people" | "inviteLink
  * before anyone else joins, so the first person to join sees the Group as meant.
  */
 export function groupAccessFrom(list: MembersList, wireId: string): GroupAccess {
-  if (list.groupRules === null) return "no-members";
+  if (list.groupRules === null) return "no-rules";
   const level = list.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null;
   return { level, memberLevel: list.memberLevel, alone: !othersInWorkspace(list) };
 }
@@ -131,7 +126,7 @@ export function GroupSettingsDialog(props: {
 
   const loading = access === null && !readFailed;
   const skeletonShown = useShownAfter(loading, 150);
-  const ready = access !== null && access !== "no-members" ? access : null;
+  const ready = access !== null && access !== "no-rules" ? access : null;
   // The level Save sends: the picked one, else the Group's own.
   const next = chosen === null ? (ready?.level ?? null) : chosen === "member" ? null : chosen;
   const changed = ready !== null && next !== ready.level;
@@ -211,7 +206,7 @@ export function GroupSettingsDialog(props: {
             ) : (
               <div className="h-7" />
             )
-          ) : access === "no-members" ? (
+          ) : access === "no-rules" ? (
             alone
           ) : ready ? (
             <>
@@ -276,7 +271,7 @@ export function GroupSettingsDialog(props: {
           ) : null}
           {/* With no one else in the workspace there is nothing to save. */}
           <div className="flex justify-end gap-2">
-            {access === "no-members" ? (
+            {access === "no-rules" ? (
               <SecondaryButton data-testid="chats-group-settings-close" onClick={props.onClose}>
                 Close
               </SecondaryButton>

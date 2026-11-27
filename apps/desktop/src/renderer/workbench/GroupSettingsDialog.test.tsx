@@ -95,7 +95,7 @@ describe("GroupSettingsDialog", () => {
   });
 
   it("offers only Close when there are no rules to read", async () => {
-    const { save, onClose } = open("no-members");
+    const { save, onClose } = open("no-rules");
     expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
       "Only you are in this workspace.",
     );
@@ -106,7 +106,6 @@ describe("GroupSettingsDialog", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  // The owner sets who can see the Group before the first person joins.
   it("lets the owner choose access while no one else is in the workspace", async () => {
     const { save, onClose } = open({ level: null, memberLevel: "comment", alone: true });
     expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
@@ -196,14 +195,13 @@ describe("groupAccessFrom", () => {
     ).toEqual({ level: null, memberLevel: "comment", alone: true });
   });
 
-  // Only the owner and admins get the rules.
   it("has nothing to offer without the rules", () => {
     expect(
       groupAccessFrom(
         { memberLevel: "comment", people: [owner], groupRules: null, inviteLink: null },
         "g1",
       ),
-    ).toBe("no-members");
+    ).toBe("no-rules");
   });
 
   it("reads the Group's rule once someone else is invited", () => {

@@ -22,9 +22,7 @@ export type ChatRowMenuTarget =
       archived: boolean;
       canAddPeople: boolean;
       canLeave: boolean;
-      // Whether you choose who among the members sees this Group.
       hasSettings: boolean;
-      // Whether the Group was made with a folder.
       hasFolder: boolean;
     }
   // A direct conversation. Block names the one other person; a group has none.

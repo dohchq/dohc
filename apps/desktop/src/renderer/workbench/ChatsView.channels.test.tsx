@@ -887,7 +887,6 @@ describe("ChatsView Group access marks", () => {
     );
   });
 
-  // The owner sets a Group's access before anyone else joins, from the row's menu.
   it("opens Group settings from a Group's menu, and saves while the owner is alone", async () => {
     const user = userEvent.setup();
     const onShowFolder = vi.fn();
@@ -935,8 +934,6 @@ describe("ChatsView Group access marks", () => {
     await waitFor(() => expect(screen.queryByTestId("chats-group-settings-dialog")).toBeNull());
   });
 
-  // An activity refresh shows a Group it just learned of before the share
-  // lookup says whether it's shared with you.
   it("offers Show folder on a new Group only once the share lookup says it's this computer's", async () => {
     const team = channel({
       id: "channel-team",
