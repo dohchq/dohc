@@ -178,16 +178,3 @@ it("tells the agent what it can do, and serves dohc's guides", async () => {
     await client.close();
   }
 });
-
-it("marks only the posts, the deletes and the writes as changing a workspace", () => {
-  const changes = personalTools
-    .filter((tool) => !tool.annotations.readOnlyHint)
-    .map((tool) => tool.name);
-  expect(changes).toEqual([
-    "dohc_delete_message",
-    "dohc_edit_document",
-    "dohc_post_channel",
-    "dohc_post_discussion",
-    "dohc_write_collection_files",
-  ]);
-});

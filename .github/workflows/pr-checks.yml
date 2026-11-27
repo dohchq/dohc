@@ -160,6 +160,9 @@ jobs:
               - 'docs/reference/cli-mcp-sdk.md'
               # packages/mcp's eval case test validates YAML examples in the public skill.
               - 'skills/dohc/references/automations.md'
+              # share-web serves these as personal MCP guides and tests its copy against them.
+              - 'skills/dohc/SKILL.md'
+              - 'skills/dohc/references/collections-and-datasets.md'
               # Source-backed example apps are compiled and staged by the desktop scripts.
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'

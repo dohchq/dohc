@@ -627,39 +627,34 @@ export function createPersonalAgentToolRoutes(input: {
       /[\u0000-\u001f\u007f]/u.test(path)
     )
       throw badRequest("path is invalid");
-    const at = (reach: PersonalReach) => {
-      if (pathLevel(workspaceFileReach(reach.selector), path) === null) return null;
-      // The path sorts before everything under it, so the first file is the one at it.
-      const [found] = storage.readCurrentFileState({
+    const reads = (reach: PersonalReach) =>
+      pathLevel(workspaceFileReach(reach.selector), path) !== null;
+    const holds = (sha256: string) =>
+      storage.currentFileBlobByteLength({
         workspaceId,
         versionId: MAIN_VERSION_ID,
         selectorPaths: [path],
-        limit: 1,
-      }).files;
-      if (found?.path !== path) return null;
-      const byteLength = storage.currentFileBlobByteLength({
-        workspaceId,
-        versionId: MAIN_VERSION_ID,
-        selectorPaths: [path],
-        sha256: found.blobSha256,
+        sha256,
         epochLogFloor: storage.getEpochLogFloor(workspaceId),
         visible: (candidate) => candidate === path,
       });
-      return { ...found, byteLength };
-    };
-    const found = at(reachIn(authority, workspaceId));
-    if (!found) throw notFound();
+    if (!reads(reachIn(authority, workspaceId))) throw notFound();
+    // The path sorts before everything under it, so the first file is the one at it.
+    const [found] = storage.readCurrentFileState({
+      workspaceId,
+      versionId: MAIN_VERSION_ID,
+      selectorPaths: [path],
+      limit: 1,
+    }).files;
+    if (found?.path !== path) throw notFound();
     return stream(
       authority,
       workspaceId,
       found.blobSha256,
-      found.byteLength,
+      holds(found.blobSha256),
       { "x-dohc-content-kind": found.contentKind },
       signal,
-      (reach) => {
-        const now = at(reach);
-        return now?.blobSha256 === found.blobSha256 && now.byteLength === found.byteLength;
-      },
+      (reach) => reads(reach) && holds(found.blobSha256) !== null,
     );
   }
 
