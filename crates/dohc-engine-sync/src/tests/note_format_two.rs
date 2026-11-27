@@ -1769,6 +1769,33 @@ fn bad_ids_fail_one_by_one_and_the_pass_reaches_the_note_after_them() {
 }
 
 #[test]
+fn an_empty_id_in_the_first_batch_fails_and_the_next_batch_resumes_after_it() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    exec(
+        &mut store,
+        "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws','',1); \
+         INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,updated_at_ms) \
+         VALUES('ws','main','','richdoc',1)",
+    );
+    let first = convert_all(&mut store, None, 1, &NoLiveLeases);
+    assert_eq!(
+        first
+            .failed
+            .iter()
+            .map(|(object_id, _, _)| object_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![""]
+    );
+    assert!(first.converted.is_empty());
+    assert_eq!(first.resume_after.as_deref(), Some(""));
+    let second = convert_all(&mut store, first.resume_after.as_deref(), 1, &NoLiveLeases);
+    assert_eq!(
+        (second.converted, second.resume_after),
+        (vec![key.clone()], None)
+    );
+}
+
+#[test]
 fn a_note_open_in_this_workspace_folder_is_skipped_as_open_here() {
     let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
     let registry = dohc_engine_collab::LeaseRegistry::new();
