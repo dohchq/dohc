@@ -1521,8 +1521,8 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
   ).not.toContainEqual(expect.objectContaining({ operationId: id(6) }));
 });
 
-async function adminRulesFixture() {
-  const f = await memberFixture();
+async function adminRulesFixture(dataGrant = true) {
+  const f = await memberFixture(dataGrant);
   const renamed = (n: number) => {
     const next = structuredClone(definition);
     next.tables[0]!.fields[1]!.name = `Name ${n}`;
@@ -1564,6 +1564,138 @@ async function adminRulesFixture() {
     ).toEqual({ ok: true });
   return { ...f, renamed, prepare, approve, demote };
 }
+
+it("lets an active Admin read every Collection without a grant until their next request after they're demoted, and never write", async () => {
+  const f = await adminRulesFixture(false);
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+  f.admin();
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  expect(f.host.describe(ana, scope).operations.map((operation) => operation.operationId)).toEqual([
+    id(6),
+  ]);
+  expect((await f.read()).result).toBe("edit");
+  await expect(
+    f.invoke(ana, id(7), { id: "x", name: "y" }, undefined, "admin-edit"),
+  ).rejects.toMatchObject(refused);
+  await expect(f.invoke(ana, id(6), {}, f.app(), "admin-app-read")).rejects.toMatchObject(refused);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare(
+        `INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES('ana-edit','s','user','ana',NULL,'edit',1,'active',1,NULL,NULL)`,
+      )
+      .run(),
+  );
+  await expect(
+    f.invoke({ ...ana, grantId: "ana-edit" }, id(6), {}, undefined, "edit-share-read"),
+  ).rejects.toMatchObject(refused);
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  f.demote();
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+});
+
+it("tells someone who isn't an Admin that the server refused their rules request, and an Admin that the Owner's computer keeps the Collection", async () => {
+  const f = await adminRulesFixture();
+  const route = createDatasetRoutes(f.host, f.storage, { nowMs: () => 10 });
+  const approval = (datasetId: string, auth = ana) =>
+    route(
+      new Request("https://relay.test/approval"),
+      { route: "dataset", workspaceId: "w", datasetId, action: "approval" },
+      auth as Extract<AppBackendAuth, { kind: "named" }>,
+    ).then(
+      (response) => response.status,
+      (error: { code: string }) => error.code,
+    );
+  expect(await approval(id(1))).toBe("members_forbidden");
+  expect(await approval(id(40))).toBe("members_forbidden");
+  f.admin();
+  expect(await approval(id(1))).toBe(200);
+  expect(await approval(id(40))).toBe("dataset_kept_by_owner");
+  const elsewhere = { ...ana, grantId: "another-grant" };
+  const named = (auth: object) => auth as Extract<AppBackendAuth, { kind: "named" }>;
+  expect(f.host.memberAdmin(named(ana), "w")).toBe(true);
+  expect(f.host.memberAdmin(named({ ...ana, grantId: undefined }), "w")).toBe(true);
+  expect(await approval(id(40), { ...ana, grantId: undefined })).toBe("dataset_kept_by_owner");
+  expect(f.host.memberAdmin(named({ ...ana, launch: {} }), "w")).toBe(false);
+  expect(f.host.memberAdmin(named(elsewhere), "w")).toBe(false);
+  expect(await approval(id(1), elsewhere)).toBe("not_found");
+  expect(await approval(id(40), elsewhere)).toBe("not_found");
+  f.demote();
+  expect(await approval(id(40))).toBe("members_forbidden");
+});
+
+it("lets an Admin read back a Collection whose reads their change left Owner-only, find one with only writes and bulk reads, and still never write", async () => {
+  const f = await adminRulesFixture(false);
+  f.admin();
+  const revision = describeDatasetRevision({
+    definition: {
+      ...definition,
+      operations: definition.operations.map((operation) =>
+        operation.operationId === id(6) ? { ...operation, access: "owner" as const } : operation,
+      ),
+    },
+    revision: 2,
+    schemaSql,
+    operationSource: memberSource,
+  });
+  await f.approve(
+    ana,
+    await f.host.prepareMigration(ana, {
+      workspaceId: "w",
+      revision,
+      schemaSql,
+      operationSource: memberSource,
+      expected: f.host.approvedArtifacts(owner, scope).cursor,
+      migrationSql: "SELECT 1;",
+    }),
+  );
+  const run = (operationId: string, input = {}, idempotencyKey = "admin-read") =>
+    f.host.invoke(ana, {
+      ...scope,
+      revision: 2,
+      revisionSha256: revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey,
+    });
+  expect((await run(id(6))).result).toBe("edit");
+  await expect(run(id(7), { id: "x", name: "y" }, "admin-write")).rejects.toMatchObject(refused);
+  const writes = describeDatasetRevision({
+    definition: {
+      ...definition,
+      datasetId: id(41),
+      schemaPath: "signups/schema.sql",
+      operationsPath: "signups/operations.js",
+      operations: definition.operations.map((operation) =>
+        operation.readOnly
+          ? { ...operation, access: "owner" as const, profile: "bulk" as const }
+          : operation,
+      ),
+    },
+    revision: 1,
+    schemaSql,
+    operationSource: memberSource,
+  });
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: writes,
+    schemaSql,
+    operationSource: memberSource,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(f.storage, "dataset-signups", null, {
+    path: "signups/dataset.json",
+    text: JSON.stringify({ datasetId: id(41) }),
+  });
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toContain(id(41));
+  expect(f.host.describe(ana, { workspaceId: "w", datasetId: id(41) }).operations).toEqual([]);
+  f.demote();
+  await expect(run(id(6), {}, "demoted-read")).rejects.toMatchObject(refused);
+  expect(f.listed().datasets).toEqual([]);
+});
 
 it("lets an Admin create a Collection and approve its rules as themselves, never a Member", async () => {
   const f = await adminRulesFixture();

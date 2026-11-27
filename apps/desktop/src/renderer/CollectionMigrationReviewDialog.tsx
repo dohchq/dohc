@@ -41,6 +41,8 @@ export interface CollectionMigrationReviewDialogProps {
   initialPreparation?: DatasetMigrationPreparation;
   /** Native field controls prepare generated changes without asking for source paths. */
   generatedChange?: boolean;
+  /** Who approves: an Admin has no Collection History or recovery export, and a former Admin can't approve. */
+  reviewer?: "owner" | "admin" | "former-admin";
   onClose(): void;
   onPrepare(
     input: { workspaceId: string; datasetId: string; datasetPath: string; migrationPath: string },
@@ -368,6 +370,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
     };
   }, [preparation, previewTotals, removedStructure]);
   const ApproveButton = hasDangerConfirm ? DangerButton : PrimaryButton;
+  const owner = (props.reviewer ?? "owner") === "owner";
   async function run(kind: "prepare" | "approve"): Promise<void> {
     if (!alive.current || locked.current) return;
     if (kind === "prepare" && !props.generatedChange) {
@@ -697,8 +700,12 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                   <p className="m-0 font-medium text-ink">{warningHeadline}</p>
                   <p className="m-0 text-muted">
                     {hasConfirmedLoss
-                      ? "Collection History cannot restore removed records, dropped fields, or cleared or overwritten values after approval. To keep a copy, choose Export recovery before you approve."
-                      : "Check the records above to confirm your values moved. Collection History cannot restore removed or overwritten values after approval. To keep a copy, choose Export recovery before you approve."}
+                      ? owner
+                        ? "Collection History cannot restore removed records, dropped fields, or cleared or overwritten values after approval. To keep a copy, choose Export recovery before you approve."
+                        : "Removed records, dropped fields, and cleared or overwritten values can't be restored after approval."
+                      : owner
+                        ? "Check the records above to confirm your values moved. Collection History cannot restore removed or overwritten values after approval. To keep a copy, choose Export recovery before you approve."
+                        : "Check the records above to confirm your values moved. Removed or overwritten values can't be restored after approval."}
                   </p>
                 </div>
               </div>
@@ -777,7 +784,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                 : candidateMatches
                   ? "Review changed values before approval. Changed rules require renewed app and collaborator approval."
                   : "Changed rules require renewed app and collaborator approval."}
-              {!warningHeadline
+              {!warningHeadline && owner
                 ? namesOnly && historyCanReverse
                   ? " Collection History can reverse name and button changes."
                   : historyCanReverse
@@ -798,9 +805,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                 I reviewed this change and its effect on existing data
               </label>
             )}
-            {invalid ? (
+            {invalid || props.reviewer === "former-admin" ? (
               <p role="alert" className="m-0 text-[12px] text-danger">
-                {invalid}
+                {props.reviewer === "former-admin"
+                  ? "You're no longer an Admin of this workspace, so you can't change its Collections' rules."
+                  : invalid}
               </p>
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">
@@ -810,12 +819,14 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
               <SecondaryButton disabled={busy} onClick={() => void discard()}>
                 Discard review
               </SecondaryButton>
-              <ApproveButton
-                disabled={busy || (!confirmed && !namesOnly) || !candidateMatches}
-                onClick={() => void run("approve")}
-              >
-                {busy ? "Applying…" : "Approve change"}
-              </ApproveButton>
+              {props.reviewer === "former-admin" ? null : (
+                <ApproveButton
+                  disabled={busy || (!confirmed && !namesOnly) || !candidateMatches}
+                  onClick={() => void run("approve")}
+                >
+                  {busy ? "Applying…" : "Approve change"}
+                </ApproveButton>
+              )}
             </div>
           </>
         )}

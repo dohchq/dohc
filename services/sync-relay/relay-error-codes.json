@@ -68,6 +68,7 @@
   { "code": "member_exists", "status": 409 },
   { "code": "member_removed", "status": 409 },
   { "code": "members_forbidden", "status": 403 },
+  { "code": "dataset_kept_by_owner", "status": 404 },
   { "code": "direct_blocked", "status": 403 },
   { "code": "direct_message_id_taken", "status": 409 },
   { "code": "direct_rate_limited", "status": 429 },

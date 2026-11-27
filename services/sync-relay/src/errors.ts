@@ -73,6 +73,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   member_exists: 409,
   member_removed: 409,
   members_forbidden: 403,
+  dataset_kept_by_owner: 404,
   direct_blocked: 403,
   direct_message_id_taken: 409,
   direct_rate_limited: 429,
@@ -185,6 +186,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   member_removed:
     "That account was removed from this workspace. Let it back in from the Members page.",
   members_forbidden: "Only the owner or an admin can do this.",
+  dataset_kept_by_owner: "This Collection is kept on the Owner's computer, not on this server.",
   direct_blocked: "You can't message this person.",
   direct_message_id_taken: "Another message already uses this id.",
   direct_rate_limited: "You have sent a lot of messages. Wait a minute, then try again.",

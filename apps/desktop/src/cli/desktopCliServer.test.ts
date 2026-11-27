@@ -363,6 +363,7 @@ function fixture(
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    memberRoleOf: vi.fn((): "admin" | "member" | undefined => undefined),
     sharedViewHistory: vi.fn(() => {
       throw new Error("No shared view History configured");
     }),
@@ -1246,6 +1247,9 @@ describe("desktop CLI workspace context", () => {
       work({ queryCollectionRecords } as unknown as VersionedLiveAdapter);
     const context = await f.create().openCliWorkspace(f.workspace);
     expect(context.joined).toBe(true);
+    expect(context.admin?.()).toBe(false);
+    vi.mocked(f.dependencies.memberRoleOf).mockReturnValue("admin");
+    expect(context.admin?.()).toBe(true);
     await f.create().startDesktopCliServer();
     expect(f.options().listWorkspaces()).toContainEqual({
       workspaceId: "workspace",

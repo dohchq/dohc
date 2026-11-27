@@ -961,6 +961,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         }
         "automation_host_rate_limited" | "notice_rate_limited" => RelayError::HttpStatus(429),
         "automation_press_rate_limited" => RelayError::HttpStatus(429),
+        "dataset_kept_by_owner" => RelayError::HttpStatus(404),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "personal_agent_unavailable" => RelayError::HttpStatus(503),
         "presence_capacity" => RelayError::PresenceCapacity,

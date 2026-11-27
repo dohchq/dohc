@@ -350,7 +350,7 @@ describe("a dataset table's saved views", () => {
   const renderPage = (owner: boolean, onError = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1537,7 +1537,7 @@ it.each([
     backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline } });
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -1551,6 +1551,32 @@ it.each([
     expect(screen.queryByText("Opening Collection…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
+  },
+);
+
+it.each([
+  { role: "owner", fields: true, recovery: true },
+  { role: "admin", fields: true, recovery: false },
+  { role: "member", fields: false, recovery: false },
+] as const)(
+  "offers the $role the rule controls they can use",
+  async ({ role, fields, recovery }) => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    render(
+      <ConnectedTransactionalCollection
+        role={role}
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+    await screen.findByLabelText("Collection view state");
+    expect(!!screen.queryByRole("button", { name: "Fields and names" })).toBe(fields);
+    expect(!!screen.queryByRole("button", { name: "Export recovery" })).toBe(recovery);
   },
 );
 
@@ -1747,7 +1773,7 @@ it.each([
   });
   render(
     <ConnectedTransactionalCollection
-      owner={owner}
+      role={owner ? "owner" : "member"}
       workspaceId="workspace-a"
       datasetPath="data/dataset.json"
       tableId={id(2)}
@@ -2964,10 +2990,10 @@ describe("who approved a Collection's rules", () => {
     needsOwnerConfirmation = false,
     revisionSha256 = dataset.revisionSha256,
   ) => ({ kind: "approval", revisionSha256, approvedBy, needsOwnerConfirmation });
-  const renderPage = (owner: boolean, onError = vi.fn(), onSettled = vi.fn()) =>
+  const renderPage = (owner: boolean | "admin", onError = vi.fn(), onSettled = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        owner={owner}
+        role={owner === "admin" ? "admin" : owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -3020,6 +3046,40 @@ describe("who approved a Collection's rules", () => {
     expect(backend.dataset).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: "approval" }),
     );
+  });
+
+  it("follows a role change while the page is open", async () => {
+    answer(approval(formerAda));
+    const page = (role: "admin" | "member") => (
+      <ConnectedTransactionalCollection
+        role={role}
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />
+    );
+    const view = render(page("member"));
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+    view.rerender(page("admin"));
+    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
+    view.rerender(page("member"));
+    await waitFor(() => expect(screen.queryByTestId("collection-approved-by")).toBeNull());
+  });
+
+  it("names the approver to an Admin, and leaves confirming to the Owner", async () => {
+    answer(approval(formerAda, true));
+    renderPage("admin");
+    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
   });
 
   it("stops naming who approved them when reading that again fails", async () => {

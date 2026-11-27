@@ -36,7 +36,7 @@ import { MemberAppRefusal } from "./storage/memberApps";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendRoute } from "./appBackendRoutes";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
-import { badRequest, notFound, relayError } from "./errors";
+import { badRequest, notFound, relayError, RelayError } from "./errors";
 import type { AppEventWaits } from "./appEventWaits";
 import { parseLinkLogHold } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
@@ -482,7 +482,9 @@ export function createDatasetRoutes(
       {
         dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]),
         participant: auth.userId,
-        organizer: storage.workspaceIsOwnedBy(route.workspaceId, auth.userId),
+        organizer:
+          storage.workspaceIsOwnedBy(route.workspaceId, auth.userId) ||
+          host.memberAdmin(auth, route.workspaceId),
       },
       route.action,
       options.nowMs(),
@@ -924,11 +926,40 @@ export function createDatasetRoutes(
         host.setDataGrant(auth, { ...scope, grantId: text(body.grantId), grant });
         return { ok: true };
       });
+    } catch (error) {
+      if (
+        error instanceof RelayError &&
+        error.code === "not_found" &&
+        GOVERNANCE_ACTIONS.includes(route.action) &&
+        !storage.workspaceIsOwnedBy(route.workspaceId, auth.userId) &&
+        storage.workspaceRoleOf(route.workspaceId, auth.userId)?.role !== "admin"
+      )
+        throw relayError("members_forbidden");
+      if (
+        error instanceof RelayError &&
+        error.code === "not_found" &&
+        GOVERNANCE_ACTIONS.includes(route.action) &&
+        route.datasetId &&
+        host.memberAdmin(auth, route.workspaceId) &&
+        !host.keeps(route.workspaceId, route.datasetId)
+      )
+        throw relayError("dataset_kept_by_owner");
+      throw error;
     } finally {
       release();
     }
   };
 }
+
+const GOVERNANCE_ACTIONS: readonly string[] = [
+  "artifacts",
+  "approval",
+  "activate",
+  "prepare-migration",
+  "migration-preview-page",
+  "approve-migration",
+  "discard-migration",
+];
 
 // Who pressed for the verified person: the person, or their agent at its
 // run's chain depth. The agent is provenance only; access is the person's.

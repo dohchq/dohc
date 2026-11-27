@@ -417,7 +417,7 @@ describe("share-level tool profiles", () => {
     },
   );
 
-  it("sends an Admin's Collection defaults from a joined workspace to the desktop, and nothing else from the dataset actions", async () => {
+  it("sends an Admin's Collection defaults and reads from a joined workspace to the desktop, and no other dataset action", async () => {
     const sent: Array<{ verb: string; args: unknown }> = [];
     const { client } = await connectedToolNames({
       ...base,
@@ -446,18 +446,35 @@ describe("share-level tool profiles", () => {
       },
     });
     expect(set.structuredContent).toEqual({ kind: "grant-updated" });
-    const described = await client.callTool({
+    await client.callTool({
       name: "dohc_collection_access",
       arguments: {
         request: { action: "describe", workspaceId: "ws", datasetPath: "tasks/dataset.json" },
       },
     });
-    expect(described.isError).toBe(true);
+    const queried = await client.callTool({
+      name: "dohc_collection_access",
+      arguments: {
+        request: {
+          action: "sql",
+          workspaceId: "ws",
+          datasetPath: "tasks/dataset.json",
+          sql: "SELECT * FROM private",
+        },
+      },
+    });
+    expect(queried.isError).toBe(true);
     expect(sent).toEqual([
       {
         verb: "dataset",
         args: expect.objectContaining({
           request: expect.objectContaining({ action: "setDefaults", defaults }),
+        }),
+      },
+      {
+        verb: "dataset",
+        args: expect.objectContaining({
+          request: expect.objectContaining({ action: "describe" }),
         }),
       },
     ]);

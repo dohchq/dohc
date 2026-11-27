@@ -116,6 +116,7 @@ Other input and result fields remain excluded. Choose **Undo edit** to restore t
 
 Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
+On a workspace the server hosts, an Admin can list and describe every Collection there and run its read-only actions, Owner-only ones included, without a grant. Their agents get the same reads. Changes to records still need a grant or a default.
 Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) also lists each verb's result, and shows how an app page calls an approved operation.
 For React, backend hooks, UI components, and charts without vendoring `node_modules`, see the [built-in app kit reference](../reference/app-kit.md).

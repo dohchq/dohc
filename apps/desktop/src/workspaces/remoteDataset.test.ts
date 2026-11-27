@@ -448,8 +448,18 @@ it("checks the deletion review scope, token, acknowledgment and returned identit
   f.relay.mockResolvedValue({ deleted: true, datasetId: id(9) });
   await expect(f.data.deleteDataset!(value)).rejects.toThrow(/did not confirm/);
 });
-it("reads and confirms a Collection's approval on the server, checking what it answers", async () => {
+it("creates, reads and confirms a Collection's approval on the server, checking what it answers", async () => {
   const f = fixture();
+  f.relay.mockResolvedValue(revision);
+  expect(await f.data.activate({ revision, schemaSql: "SQL", operationSource: "RULES" })).toEqual(
+    revision,
+  );
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/activate`);
+  const calls = f.relay.mock.calls.length;
+  await expect(
+    f.data.activate({ revision, schemaSql: "CHANGED", operationSource: "RULES" }),
+  ).rejects.toThrow();
+  expect(f.relay).toHaveBeenCalledTimes(calls);
   const approval = {
     revisionSha256: revision.revisionSha256,
     approvedBy: { role: "admin" as const, name: null, former: true, approvedAtMs: 1 },

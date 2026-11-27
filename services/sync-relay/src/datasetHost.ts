@@ -1131,7 +1131,24 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         ? { ...owner(auth, auth.workspaceId), agent: auth.agent }
         : owner(auth, auth.workspaceId);
     if (!auth.grantId || auth.agent) throw notFound();
-    return launched(auth, named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId));
+    const authority = launched(
+      auth,
+      named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId),
+    );
+    return adminOf(auth)
+      ? {
+          ...authority,
+          authorityToken: hash(JSON.stringify([authority.authorityToken, "admin"])),
+          adminReads: true,
+        }
+      : authority;
+  }
+  function adminOf(auth: Extract<AppBackendAuth, { kind: "named" }>) {
+    return (
+      !auth.launch &&
+      workspaceRoleOf(storage, auth.workspaceId, auth.userId)?.role === "admin" &&
+      auth.grantId === workspaceMemberGrantId(storage, auth.workspaceId, auth.userId)
+    );
   }
   function publication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     current();
@@ -1733,6 +1750,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       );
     }
     return {
+      /** An active Admin acting as themselves or on their own member grant, not through a phone launch. */
+      memberAdmin: (auth: Extract<AppBackendAuth, { kind: "named" }>, workspaceId: string) =>
+        auth.workspaceId === workspaceId &&
+        adminOf({
+          ...auth,
+          grantId:
+            auth.grantId ?? workspaceMemberGrantId(storage, workspaceId, auth.userId) ?? undefined,
+        }),
+      keeps: (workspaceId: string, datasetId: string) =>
+        storage.db
+          .prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?")
+          .get(workspaceId, datasetId) !== undefined,
       automations: createDatasetAutomations({
         host,
         storage,
@@ -1756,6 +1785,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             auth.workspaceId,
             verified.principalKey,
             verified.authorityToken,
+            adminOf(auth),
           ]),
         );
         // Stream metadata only: no record counts, source, or other principals' grants enter the response.

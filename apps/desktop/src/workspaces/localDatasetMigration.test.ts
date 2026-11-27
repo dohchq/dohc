@@ -21,6 +21,8 @@ import {
 import { deferred } from "../testing/deferred";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { unguardedCollections } from "../testing/collectionsHolder";
+import { createLocalDatasetMigrations } from "./localDatasetMigration";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -335,6 +337,66 @@ describe("owner Collection migration", () => {
         adapter: f.adapter,
       }),
     ).rejects.toThrow(/migrationPath/i);
+  });
+});
+
+describe("a joined Admin's Collection change", () => {
+  it("sends the captured rule files to the Owner's workspace before the server prepares them, and stops when they don't arrive", async () => {
+    const f = fixture();
+    f.next();
+    f.files.set("items/migration.sql", `﻿${f.files.get("items/migration.sql")}`);
+    const revision = describeDatasetRevision({
+      definition,
+      revision: 1,
+      schemaSql: schema,
+      operationSource: source,
+    });
+    const cursor = {
+      workspaceId: "owner",
+      datasetId: id(1),
+      hostEpoch: "epoch",
+      approvedRevisionHash: revision.revisionSha256,
+      revision: 1,
+      digest: "0".repeat(64),
+    };
+    const deliverSources = vi.fn(async (_files: Record<string, string>) => {});
+    const prepareMigrationCandidate = vi.fn(async () => {
+      throw new Error("The server prepared it.");
+    });
+    const migrations = createLocalDatasetMigrations({
+      workspaceId: "owner",
+      sourceWorkspaceId: "w",
+      deliverSources,
+      assertCurrent() {},
+      approvedArtifacts: () => ({ revision, cursor, active: true }),
+      prepareMigrationCandidate,
+      approveMigrationCandidate: vi.fn(),
+      discardMigrationCandidate: vi.fn(),
+    });
+    const prepare = () =>
+      migrations.prepareMigration({
+        datasetId: id(1),
+        descriptorPath: "items/dataset.json",
+        migrationPath: "items/migration.sql",
+        adapter: f.adapter,
+      });
+    await expect(prepare()).rejects.toThrow("The server prepared it.");
+    expect(deliverSources).toHaveBeenCalledWith(
+      Object.fromEntries(
+        [
+          "items/dataset.json",
+          definition.schemaPath,
+          definition.operationsPath,
+          "items/migration.sql",
+        ].map((path) => [path, f.files.get(path)]),
+      ),
+    );
+    expect(deliverSources.mock.invocationCallOrder[0]).toBeLessThan(
+      prepareMigrationCandidate.mock.invocationCallOrder[0]!,
+    );
+    deliverSources.mockRejectedValueOnce(new Error("The server refused items/migration.sql."));
+    await expect(prepare()).rejects.toThrow("The server refused items/migration.sql.");
+    expect(prepareMigrationCandidate).toHaveBeenCalledOnce();
   });
 });
 

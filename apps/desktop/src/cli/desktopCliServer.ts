@@ -332,6 +332,7 @@ interface DesktopCliServerDependencies<State> {
   // A share view's scope, or null for a workspace this computer owns. A
   // membership is a view of a whole workspace: a joined workspace.
   sharedViewOf(workspaceId: string): ShareViewWriteScope | null;
+  memberRoleOf(workspaceId: string): "admin" | "member" | undefined;
   // A share view's History: what its share imported, from its own store.
   sharedViewHistory(
     workspace: PhysicalWorkspace<RegistryEntry>,
@@ -445,6 +446,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     currentDaemon,
     agentDispatchStoreHandleFor,
     sharedViewOf,
+    memberRoleOf,
     shareProjection,
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
@@ -798,6 +800,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
       joined: sharedViewOf(workspace.workspaceId)?.membership === true,
+      admin: () => memberRoleOf(workspace.workspaceId) === "admin",
       makeWorkReference: async (target) => {
         const made = await withEngineAdapter(workspace, (adapter) =>
           adapter.makeWorkReference({

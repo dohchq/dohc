@@ -410,6 +410,16 @@ through recovery and kept without the id when the account is deleted. A former
 Admin's approval keeps running until the Owner confirms it, which records the
 Owner without migrating. See [ADR 0021](adr/0021-admin-collection-approvals-and-demotion-policy.md).
 
+An active Admin also reads every relay-hosted Collection: the relay adds the
+Collection's read-only operations, Owner-only ones included, to the Admin's own
+data authority on each request, after checking the role and that the caller
+holds that Admin's member grant. A Collection with only writes is still listed
+and described. The Admin's agents get the same reads through the desktop.
+Launches, links, publications, and Member apps gain nothing, and writes still
+need a grant or a default. A demoted Admin loses the reads on the next request.
+The offline access fingerprint changes, and the desktop keys saved pages by role,
+so cached reads are dropped even offline.
+
 ## Automation edits do not widen access
 
 An automation can reach only what all its Collection's editors can reach.

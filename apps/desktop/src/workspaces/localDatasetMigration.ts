@@ -32,6 +32,8 @@ export interface PrepareLocalDatasetMigration {
 const maximumBytes = 256 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const decode = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
+const decodeAsStored = (value: Uint8Array) =>
+  new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(value);
 const allowed = (path: string) =>
   isShareablePath(path) &&
   !isSharedWithMePath(path) &&
@@ -46,6 +48,9 @@ const sameCursor = (a: DatasetCursor, b: DatasetCursor) =>
 
 interface MigrationAuthority {
   workspaceId: string;
+  sourceWorkspaceId: string;
+  /** Returns once the workspace the rules run in holds these captured files. */
+  deliverSources?(files: Record<string, string>): Promise<void>;
   assertCurrent(): void;
   approvedArtifacts(
     datasetId: string,
@@ -157,7 +162,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           await current(previous.cursor);
           input.signal?.throwIfAborted();
           const metadata = await input.adapter.captureSourceMetadata({
-            workspaceId: dependencies.workspaceId,
+            workspaceId: dependencies.sourceWorkspaceId,
             versionId: "main",
             paths,
             bounds: { maxInputFiles: 4, maxInputBytes: maximumBytes * 4 },
@@ -167,7 +172,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           await current(previous.cursor);
           input.signal?.throwIfAborted();
           if (
-            metadata.workspaceId !== dependencies.workspaceId ||
+            metadata.workspaceId !== dependencies.sourceWorkspaceId ||
             files.length !== paths.length ||
             new Set(files.map((file) => file.path)).size !== paths.length ||
             files.some(
@@ -227,6 +232,10 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           if (!migrationSql.trim() || migrationSql.includes("\0"))
             throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
         }
+        await dependencies.deliverSources?.(
+          Object.fromEntries(captured.files.map((file) => [file.path, decodeAsStored(file.bytes)])),
+        );
+        await current(previous.cursor);
         const candidate = DatasetMigrationCandidate.parse(
           await dependencies.prepareMigrationCandidate({
             workspaceId: dependencies.workspaceId,

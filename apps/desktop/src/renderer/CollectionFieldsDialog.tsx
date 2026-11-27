@@ -39,6 +39,7 @@ export interface CollectionFieldsDialogProps {
   retry?: { change: DatasetSchemaChange } | null;
   /** Try again on a failed change. The Collection may have changed since this dialog opened, so the page reads it first. */
   onRetry?(change: DatasetSchemaChange): void;
+  reviewer?: CollectionMigrationReviewDialogProps["reviewer"];
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [
@@ -213,6 +214,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
         datasetId={props.dataset.datasetId}
         initialPreparation={review.preparation}
         generatedChange
+        reviewer={props.reviewer}
         onPrepare={(_input, signal) => props.onPrepare(review.change, signal)}
         onApprove={async (input, signal) => {
           await props.onApprove(input, signal);

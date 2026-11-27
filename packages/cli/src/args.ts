@@ -1980,7 +1980,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Set the actions each workspace level gets in a Collection by default.",
     notes: [
       "defaults names view, comment, and edit operationIds, with revision and revisionSha256. Read them from permissions rules.",
-      "An Admin runs permissions, setGrant, removeGrant, and setDefaults in a workspace they joined.",
+      "An Admin runs list, describe, invoke, permissions, setGrant, removeGrant, and setDefaults in a workspace they joined. invoke runs reads, and a write needs a grant that holds it.",
       "View and Comment get only reads. No level gets an owner-only action.",
     ],
   },

@@ -724,6 +724,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
       withdrawShareChanges: withdrawShareChangesHandler,
     },
     shareViewEdited: directWrites.edited,
+    pushNow: directWrites.pushNow,
     recordCreated: (workspaceId: string) => {
       void directWrites.pushNow(workspaceId);
     },

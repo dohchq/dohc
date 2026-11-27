@@ -18,7 +18,11 @@ import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
-import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import {
+  describeApprovedDataset,
+  type DatasetDefinition,
+  type DatasetRevision,
+} from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateDatasetSchema } from "../workspaces/datasetGenerator";
@@ -149,7 +153,11 @@ function fixture(
   collectionPlace?: () => Promise<DatasetPlace>,
   extra: Pick<
     Parameters<typeof createDatasetHandler>[0],
-    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock" | "governanceForWorkspace"
+    | "historyPeople"
+    | "readShareLinkPublication"
+    | "withMainVersionLock"
+    | "governanceForWorkspace"
+    | "writeSharedSources"
   > = {},
 ) {
   const abort = new AbortController();
@@ -807,6 +815,9 @@ it("allows named Collection data actions without opening a local owner store or 
     approval: vi.fn(async () => {
       throw datasetOwnerOnlyError();
     }),
+    governance() {
+      throw datasetOwnerOnlyError();
+    },
   };
   const f = fixture(undefined, named as unknown as NamedDatasetData);
   f.workspace.shareView = { shareId: "shared" };
@@ -2026,6 +2037,134 @@ it("reads who approved a Collection's rules, and lets only its Owner confirm the
   ).rejects.toThrow("Open the original workspace to manage this Collection.");
   expect(governed.confirmApproval).toHaveBeenCalledTimes(1);
   expect(localHost).not.toHaveBeenCalled();
+});
+
+it("creates an Admin's Collection on the joined workspace's server from the rule files it sends", async () => {
+  const activate = vi.fn(async ({ revision }: { revision: DatasetRevision }) => revision);
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const withMainVersionLock = vi.fn(async () => {
+    throw new Error("Unexpected version lock.");
+  });
+  const sent = new Map<string, string>();
+  const writeSharedSources = vi.fn(async (_workspace: unknown, files: Record<string, string>) => {
+    for (const [path, text] of Object.entries(files)) sent.set(path, text);
+  });
+  const named = { governance: () => ({ workspaceId: "owner-workspace", data: { activate } }) };
+  const f = fixture(
+    undefined,
+    named as unknown as NamedDatasetData,
+    undefined,
+    localHost,
+    undefined,
+    {
+      withMainVersionLock: withMainVersionLock as never,
+      writeSharedSources,
+    },
+  );
+  f.workspace.shareView = { shareId: "s" };
+  const definition = {
+    ...f.revision.definition,
+    datasetId: "00000000-0000-4000-8000-000000000042",
+    name: "Guests",
+    schemaPath: "guests/schema.sql",
+    operationsPath: "guests/operations.js",
+  };
+  const create = { workspaceId: "workspace", action: "create", definition };
+  expect(await f.handler("cli", create)).toMatchObject({
+    kind: "approved",
+    revision: { datasetId: definition.datasetId, revision: 1 },
+  });
+  const [[{ schemaSql, operationSource }]] = activate.mock.calls as unknown as [
+    [{ schemaSql: string; operationSource: string }],
+  ];
+  expect(sent.get("guests/schema.sql")).toBe(schemaSql);
+  expect(sent.get("guests/operations.js")).toBe(operationSource);
+  expect(sent.has("guests/dataset.json")).toBe(true);
+  expect(writeSharedSources).toHaveBeenCalledWith(
+    f.workspace,
+    expect.any(Object),
+    "create",
+    expect.any(AbortSignal),
+  );
+  expect(f.createSources).not.toHaveBeenCalled();
+  expect(withMainVersionLock).not.toHaveBeenCalled();
+  expect(localHost).not.toHaveBeenCalled();
+
+  writeSharedSources.mockRejectedValueOnce(
+    new Error(
+      "The server refused guests/dataset.json: Only the Owner or an Admin can change this Collection's rules. The Collection's rules didn't change. Fix the file, then try again.",
+    ),
+  );
+  await expect(f.handler("cli", create)).rejects.toThrow("Only the Owner or an Admin");
+  expect(activate).toHaveBeenCalledOnce();
+
+  await expect(
+    f.handler(
+      "agent",
+      {
+        action: "approveMigration",
+        workspaceId: "workspace",
+        preparationId: datasetId,
+        revisionSha256: f.revision.revisionSha256,
+        approvalDigest: "a".repeat(64),
+      },
+      { depth: 1 },
+    ),
+  ).rejects.toThrow("Automations cannot approve");
+  await expect(f.handler("agent", create, { depth: 1 })).rejects.toThrow(
+    "Automations cannot approve",
+  );
+  expect(writeSharedSources).toHaveBeenCalledTimes(2);
+
+  const unwired = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
+  unwired.workspace.shareView = { shareId: "s" };
+  await expect(unwired.handler("cli", create)).rejects.toThrow(
+    "Open the original workspace to manage this Collection.",
+  );
+  expect(activate).toHaveBeenCalledOnce();
+});
+
+it("refuses an Admin's field change while the joined copy holds rule edits that aren't approved, and puts back the approved files when the change stops", async () => {
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const writeSharedSources = vi.fn(async (_workspace: unknown, files: Record<string, string>) => {
+    for (const [path, text] of Object.entries(files)) f.sources.set(path, text);
+  });
+  const data = { approvedArtifacts: async () => f.host.approvedArtifacts() };
+  const named = { governance: () => ({ workspaceId: "owner-workspace", data }) };
+  const f = fixture(
+    undefined,
+    named as unknown as NamedDatasetData,
+    undefined,
+    localHost,
+    undefined,
+    { writeSharedSources },
+  );
+  f.workspace.shareView = { shareId: "s" };
+  f.sources.set("data/schema.sql", "SCHEMA\nCREATE TABLE drafts(id TEXT);");
+  f.sources.set("data/operations.js", "﻿OPERATIONS");
+  const change = {
+    action: "prepareSchemaChange",
+    workspaceId: "workspace",
+    datasetPath: "data/dataset.json",
+    revision: 1,
+    revisionSha256: f.revision.revisionSha256,
+    change: { kind: "renameCollection", name: "Guests" },
+  };
+  await expect(f.handler("window", change)).rejects.toThrow(
+    "This Collection's rule files have edits that aren't approved yet.",
+  );
+  expect(writeSharedSources).not.toHaveBeenCalled();
+  f.sources.set("data/schema.sql", "SCHEMA");
+  const original = Object.fromEntries(f.sources);
+  await expect(f.handler("window", change)).rejects.toThrow();
+  expect(writeSharedSources).toHaveBeenCalledTimes(2);
+  expect(writeSharedSources.mock.calls[0]![1]["data/dataset.json"]).toContain('"name": "Guests"');
+  expect(writeSharedSources.mock.calls[1]![1]).toEqual(original);
+  expect(Object.fromEntries(f.sources)).toMatchObject(original);
 });
 
 it("computes generatedSources on historyRevision from both schemaSql and operationSource", async () => {

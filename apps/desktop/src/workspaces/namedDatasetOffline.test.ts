@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
-import { createNamedDatasetCacheRegistry } from "./namedDatasetCache";
+import { createNamedDatasetCacheRegistry, savedPagesAuthority } from "./namedDatasetCache";
 import { createNamedDatasetData } from "./namedDataset";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
 
@@ -366,4 +366,25 @@ it("fences in-memory metadata after fingerprint, local authority, revocation and
   expect(await narrowed.peek("metadata")).toBeNull();
   await f.registry().credentialsChanged("f".repeat(64));
   await expect(cache.peek("metadata")).rejects.toThrow(/account changed/);
+});
+
+it("drops pages an Admin saved once the desktop knows they're a Member, even offline", async () => {
+  const f = await fixture(),
+    marker = { shareId: "share", grantedSelector: "members", ended: false },
+    scope = (role: string) =>
+      f.registry().scope({
+        owner,
+        binding: ["workspace", "share"],
+        localAuthority: savedPagesAuthority({ ...marker, role }),
+        assertCurrent() {},
+      }),
+    admin = scope("admin");
+  await admin.accept(fingerprint, await admin.begin());
+  await admin.put("rows", result, fingerprint);
+  expect(await scope("admin").read("rows")).toMatchObject({ value: result });
+  const member = scope("member");
+  expect(await member.peek("rows")).toBeNull();
+  expect(await member.read("rows")).toBeNull();
+  await f.restart();
+  expect(await scope("admin").read("rows")).toBeNull();
 });

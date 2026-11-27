@@ -99,6 +99,7 @@ import {
   createWorkspaceForget,
 } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
+import { writeSharedCollectionRules } from "./workspaces/sharedCollectionRules";
 import {
   createDesktopWorkspaceCallbacks,
   type DesktopWorkspaceCallbacksDependencies,
@@ -108,6 +109,7 @@ import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetRes
 import {
   CollectionMoveUnfinishedError,
   CollectionServerUnreachableError,
+  datasetOwnerOnlyError,
   ipcWireError,
   T3_CODE_CANNOT_ALLOW_HERE,
   markDatasetServerNotFound,
@@ -203,7 +205,10 @@ import {
   type RemoteDatasetData,
 } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
-import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
+import {
+  createNamedDatasetCacheRegistry,
+  savedPagesAuthority,
+} from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
@@ -1441,6 +1446,7 @@ const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
 // Main's queue of direct pushes, once the IPC handlers are registered.
 let shareDirectWrites: {
   shareViewEdited(workspaceId: string): void;
+  pushNow(workspaceId: string): Promise<void>;
   recordCreated(workspaceId: string): void;
 } | null = null;
 
@@ -8573,6 +8579,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  memberRoleOf,
   sharedViewHistory: (workspace) =>
     sharedViewHistory(
       receivedShareEngine.storeFor({
@@ -11414,11 +11421,12 @@ function registerIpcHandlers(): void {
         shareId?: unknown;
         grantedSelector?: unknown;
         ended?: unknown;
+        role?: unknown;
       } | null;
       const cache = namedDatasetPages.scope({
         owner: datasetCopyOwnerKey(credentials),
         binding: [workspace.workspaceId, workspace.rootPath, marker?.shareId, credentials.relayUrl],
-        localAuthority: [marker?.grantedSelector, marker?.ended ?? false],
+        localAuthority: savedPagesAuthority(marker),
         assertCurrent: () => {
           signal.throwIfAborted();
           if (credentialGeneration !== credentialCacheGeneration)
@@ -11531,6 +11539,64 @@ function registerIpcHandlers(): void {
             mainVersionLocks.delete(workspace.workspaceId);
           }
         }
+      });
+    },
+    writeSharedSources: async (
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      files: Record<string, string>,
+      mode: "create" | "change" | "send",
+      signal: AbortSignal,
+    ) => {
+      const resolved = resolveRegisteredShareViewFilesTarget(workspace, {
+        kind: "standalone",
+        workspaceId: workspace.workspaceId,
+      });
+      const grant = recordedShareSelector(resolved?.grantedSelector);
+      if (memberRoleOf(workspace.workspaceId) !== "admin" || !resolved?.shareId || !grant)
+        throw datasetOwnerOnlyError();
+      const shareId = resolved.shareId;
+      await writeSharedCollectionRules({
+        workspaceId: workspace.workspaceId,
+        files,
+        mode,
+        shareViewFiles,
+        withLease: (work) => withStaleSensitiveWorkspaceOperation(workspace.rootPath, work),
+        push: async () => {
+          if (!shareDirectWrites) throw new Error("dohc is still starting. Try again.");
+          await shareDirectWrites.pushNow(workspace.workspaceId);
+        },
+        delivery: (paths) =>
+          requireEngineSessions().run(
+            {
+              workspaceId: resolved.storeWorkspaceId,
+              rootPath: resolved.rootPath,
+              shareMount: true,
+              attachmentId: workspace.attachmentId,
+            },
+            async (binding) =>
+              z
+                .record(
+                  z.string(),
+                  z.object({
+                    state: z.enum(["pending", "accepted", "refused"]),
+                    contentHash: z.string().nullable(),
+                    reason: z.string().optional(),
+                  }),
+                )
+                .parse(
+                  await new WorkspaceDaemonRequester(binding.client).request(
+                    "share.direct.statuses",
+                    {
+                      workspaceId: resolved.storeWorkspaceId,
+                      shareId,
+                      paths,
+                      grantedSelector: engineGrantedSelector(grant),
+                    },
+                    { workspace: binding.workspace },
+                  ),
+                ),
+          ),
+        signal,
       });
     },
     createSources: async (

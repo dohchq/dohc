@@ -58,7 +58,8 @@ import { display, parsePage, type TransactionalRow } from "./transactionalCollec
 import { CollectionApprovedBy, ConfirmApprovalNotice } from "./collections/CollectionApproval";
 
 export interface ConnectedTransactionalCollectionProps {
-  owner?: boolean;
+  /** An Admin also changes the Collection's rules. A member uses its records. */
+  role?: "owner" | "admin" | "member";
   workspaceId: string;
   datasetPath: string;
   tableId: string;
@@ -116,8 +117,11 @@ function ScopedCollection({
   onOpenRecordChange,
   initialRecordPanelWidth,
   onRecordPanelWidthChange,
-  owner = true,
+  role = "owner",
 }: ConnectedTransactionalCollectionProps) {
+  const owner = role === "owner",
+    governs = role !== "member",
+    reviewer = owner ? "owner" : governs ? "admin" : "former-admin";
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
@@ -423,7 +427,7 @@ function ScopedCollection({
     key: `${datasetPath}\0${datasetId}`,
     manual: true,
     load: async (): Promise<DatasetApproval | null> => {
-      if (!owner || !datasetId) return null;
+      if (!governs || !datasetId) return null;
       const result = await bridge()
         .dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "approval" })
         .catch(() => null);
@@ -447,7 +451,7 @@ function ScopedCollection({
     refreshedFor.current = approvalRead.revisionSha256;
     void refresh();
   }, [approvalRead, dataset, refresh]);
-  const toConfirm = shownApproval?.needsOwnerConfirmation ? shownApproval : null;
+  const toConfirm = owner && shownApproval?.needsOwnerConfirmation ? shownApproval : null;
   const [confirming, setConfirming] = useState(false);
   const confirmApproval = async (confirmed: DatasetApproval) => {
     setConfirming(true);
@@ -577,7 +581,7 @@ function ScopedCollection({
     onNotice: (message, undo) => onNotice?.(message, undo),
     onOpenFile,
     onOpenScheduleSettings,
-    onOpenFields: owner
+    onOpenFields: governs
       ? () => {
           setViewingHistory(false);
           setEditingFields(true);
@@ -814,8 +818,8 @@ function ScopedCollection({
           onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
           onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
           onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
-          onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
-          onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
+          onReviewSchema={governs && !copy?.offline ? () => setEditingFields(true) : undefined}
+          onAddDateField={governs && !copy?.offline ? () => setEditingFields("date") : undefined}
           onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
           onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
           onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
@@ -1118,6 +1122,7 @@ function ScopedCollection({
           tableId={tableId}
           onError={onError}
           addType={editingFields === "date" ? "date" : undefined}
+          reviewer={reviewer}
           buttonStates={buttonStates}
           onChooseButton={table ? chooseButton : undefined}
           onButtonAdded={table ? chooseButton : undefined}
@@ -1174,6 +1179,7 @@ function ScopedCollection({
       {reviewingSchema && (
         <CollectionMigrationReviewDialog
           initialPreparation={historyRestore}
+          reviewer={reviewer}
           workspaceId={workspaceId}
           datasetId={datasetId}
           datasetPath={datasetPath}

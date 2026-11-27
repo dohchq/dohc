@@ -1336,15 +1336,15 @@ const LISTED_CAPABILITIES = {
   ),
   "dataset.list": capability("List Collections.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.describe": capability("Show a Collection's tables, fields, and operations.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.types.write": capability(
     "Write TypeScript types for a Collection's tables and operations.",
@@ -1538,9 +1538,9 @@ const LISTED_CAPABILITIES = {
   ),
   "dataset.create": capability("Write source for a new Collection, ready to approve.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.prepare": capability("Capture existing Collection source for review.", {
     ipc: ["dataset"],
@@ -1562,9 +1562,9 @@ const LISTED_CAPABILITIES = {
   }),
   "dataset.migration.prepare": capability("Prepare new source and migration SQL for review.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.change.ask": capability(
     "Write a prepared Collection change to a file a chat message can ask a person to apply.",
@@ -1577,33 +1577,33 @@ const LISTED_CAPABILITIES = {
   ),
   "dataset.migration.preview": capability("Read more records a prepared migration changes.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.schema.change.prepare": capability("Prepare one field, table, or name change.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.migration.approve": capability("Apply a reviewed migration.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.migration.discard": capability("Discard a prepared migration.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.operation.invoke": capability("Run an approved operation.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.operation.cancel": capability("Request cancellation of a running operation.", {
     ipc: ["dataset"],

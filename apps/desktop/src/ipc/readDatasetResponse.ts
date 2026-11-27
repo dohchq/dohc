@@ -11,7 +11,9 @@ import {
 /** The answer readDatasetResponse reads for a request to the server's Collection routes or an app's change routes, or null for another route. */
 export function datasetResponseAction(path: string): string | null {
   const dataset =
-    /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+    /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+(?:-[a-z]+)*))?)?(?:\?|$)/.exec(
+      path,
+    );
   if (dataset) return dataset[2] ?? (dataset[1] ? "describe" : "list");
   if (/^\/sync\/[^/]+\/local-apps$/.test(path)) return "local-app";
   return (
@@ -43,7 +45,11 @@ export async function readDatasetResponse(
             action === "describe" ||
             action === "permissions" ||
             action === "lifecycle" ||
-            action === "delete-preview"
+            action === "delete-preview" ||
+            action === "prepare-migration" ||
+            action === "migration-preview-page" ||
+            action === "history-revision" ||
+            action === "pending-attempts"
           ? 2 * 1024 * 1024
           : action === "invoke"
             ? resultBytes + APP_BACKEND_CATCH_UP_BYTES + 4096

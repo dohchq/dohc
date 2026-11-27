@@ -3047,6 +3047,46 @@ describe("CLI socket server", () => {
       expect(dataset).toHaveBeenCalledOnce();
     });
 
+    it("lets a joined Admin's agent list, describe and invoke a Collection, and stops once they're a Member", async () => {
+      const dataset = vi.fn(async () => ({
+        kind: "list" as const,
+        datasets: [],
+        nextCursor: null,
+      }));
+      let admin = true;
+      joinAs("view");
+      context = { ...context, dataset, admin: () => admin };
+      const target = { workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" };
+      const reads = [
+        { action: "list" as const, workspaceId: WORKSPACE_ID },
+        { ...target, action: "describe" as const },
+        {
+          ...target,
+          action: "invoke" as const,
+          operationId: "00000000-0000-4000-8000-000000000001",
+          revision: 1,
+          revisionSha256: "a".repeat(64),
+          input: { limit: 10 },
+          idempotencyKey: "read-1",
+        },
+      ];
+      for (const request of reads)
+        await expect(invoke("dataset", { ...args(), request })).resolves.toMatchObject({
+          kind: "list",
+        });
+      await expect(
+        invoke("dataset", { ...args(), request: { ...target, action: "sql", sql: "SELECT 1" } }),
+      ).rejects.toThrow("Collections require the owning workspace.");
+      admin = false;
+      for (const request of reads)
+        await expect(invoke("dataset", { ...args(), request })).rejects.toThrow(
+          "Collections require the owning workspace.",
+        );
+      expect(
+        dataset.mock.calls.map((call) => (call as unknown as [{ action: string }])[0].action),
+      ).toEqual(["list", "describe", "invoke"]);
+    });
+
     it("writes Collection types and lists Personal apps from a subfolder of a joined workspace", async () => {
       const personal = join(tmpdir(), "personal-apps", WORKSPACE_ID);
       const dataset = vi.fn(async () => ({
