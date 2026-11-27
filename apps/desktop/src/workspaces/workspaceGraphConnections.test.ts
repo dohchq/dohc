@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { LinksConnectionsResult, SHARE_OMITTED_CONNECTIONS } from "@dohc/workspace-contracts/links";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { expect, it, vi } from "vitest";
+import { standaloneShareCollectionSource } from "./receivedShareCollections";
+import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import type { RegistryEntry } from "./registryStore";
 import {
   createWorkspaceGraphConnections,
@@ -68,6 +71,22 @@ automations:
           Name: '=record.Name'
 `;
 
+const shareEngine = createReceivedShareEngineAccess({
+  sessions: () =>
+    new EngineWorkspaceSessions({
+      currentClient: () => {
+        throw Error("unused client");
+      },
+    }),
+  relayClient: () => {
+    throw Error("unused relay");
+  },
+  createStores: () => {
+    throw Error("unused store");
+  },
+});
+type Entry = RegistryEntry & { attachmentId: symbol };
+
 function workspace(files: Record<string, string>, overrides: Partial<RegistryEntry> = {}) {
   const listing = () =>
     Object.entries(files).map(([path, text]) => ({
@@ -102,12 +121,16 @@ function workspace(files: Record<string, string>, overrides: Partial<RegistryEnt
       nextCursor: null,
     })),
   };
+  const engines: unknown[] = [];
   const approvals: GraphApproval[] = [
     { appRoot: "apps/board", targets: ["collection:Tasks"], manifestSha256: null },
   ];
   const deps = {
-    withAdapter: async <T>(_workspace: RegistryEntry, run: (value: never) => Promise<T>) =>
-      run(adapter as never),
+    withAdapter: async <T>(engine: unknown, run: (value: never) => Promise<T>) => {
+      engines.push(engine);
+      return run(adapter as never);
+    },
+    receivedCollections: (entry: Entry) => standaloneShareCollectionSource(entry, shareEngine),
     apps: vi.fn(async () => [
       {
         root: "apps/board",
@@ -119,8 +142,20 @@ function workspace(files: Record<string, string>, overrides: Partial<RegistryEnt
     approvals: vi.fn(async () => approvals),
     groups: vi.fn(async () => [{ id: "ch-1", kind: "channel", name: "Trip", slug: "trip" }]),
   };
-  const entry = { workspaceId: "ws", rootPath: "root", ...overrides } as RegistryEntry;
-  return { adapter, deps, approvals, entry, reader: createWorkspaceGraphConnections(deps) };
+  const entry = {
+    workspaceId: "ws",
+    rootPath: "root",
+    attachmentId: Symbol("ws"),
+    ...overrides,
+  } as Entry;
+  return {
+    adapter,
+    deps,
+    approvals,
+    entry,
+    engines,
+    reader: createWorkspaceGraphConnections(deps),
+  };
 }
 
 const FILES = {
@@ -293,15 +328,116 @@ it("keeps one malformed manifest from failing the graph", async () => {
   expect(result.edges.filter((edge) => edge.approval === "requested")).toEqual([]);
 });
 
-it("lists nothing for a received share and never reads its engine", async () => {
-  const { reader, entry, adapter, deps } = workspace(FILES, {
-    shareView: { shareId: "s" } as RegistryEntry["shareView"],
+const grant = (paths: string[]) => ({ paths, versionId: null, access: "view" as const });
+const received = (grantedSelector: unknown, extra: object = {}) => ({
+  shareView: {
+    shareId: "s",
+    granterEmail: null,
+    genericChatWritable: false,
+    grantedSelector,
+    ...extra,
+  } as RegistryEntry["shareView"],
+});
+
+it("shows a received share's Collections, records, and Relations from its own store", async () => {
+  const { reader, entry, adapter, deps, engines } = workspace(
+    FILES,
+    received(grant(["Tasks", "People"])),
+  );
+  const result = LinksConnectionsResult.parse(await reader.connections(entry));
+  expect(result).toEqual({
+    scope: "workspace",
+    nodes: [
+      {
+        id: "collection:People",
+        kind: "document-collection",
+        path: "People",
+        title: "People",
+        recordCount: 0,
+      },
+      {
+        id: "collection:Tasks",
+        kind: "document-collection",
+        path: "Tasks",
+        title: "Task list",
+        recordCount: 1,
+      },
+    ],
+    edges: [{ source: "collection:Tasks", target: "collection:People", kind: "relation" }],
+    records: [{ collection: "collection:Tasks", paths: ["Tasks/one.md"] }],
+    complete: true,
+    mountsCovered: true,
   });
-  expect(await reader.connections(entry)).toEqual(SHARE_OMITTED_CONNECTIONS);
+  expect(engines).toEqual([
+    { workspaceId: "ws", rootPath: "root", shareMount: true, attachmentId: entry.attachmentId },
+  ]);
   expect(adapter.listTextFileMetadata).not.toHaveBeenCalled();
+  expect(adapter.readTextFile).not.toHaveBeenCalled();
   expect(deps.apps).not.toHaveBeenCalled();
   expect(deps.approvals).not.toHaveBeenCalled();
   expect(deps.groups).not.toHaveBeenCalled();
+});
+
+it("leaves out a Relation to a Collection outside the grant, with nothing of it", async () => {
+  const { reader, entry } = workspace(FILES, received(grant(["Tasks"])));
+  const result = await reader.connections(entry);
+  expect(result.nodes.map((node) => node.id)).toEqual(["collection:Tasks"]);
+  expect(result.edges).toEqual([]);
+  expect(JSON.stringify(result)).not.toMatch(/people/i);
+});
+
+it("counts only the records a grant names when it does not cover the Collection's folder", async () => {
+  const { reader, entry, adapter } = workspace(
+    FILES,
+    received(grant(["Tasks/collection.yaml", "Tasks/one.md"])),
+  );
+  adapter.getCollection.mockResolvedValue({
+    path: "Tasks",
+    schema: { name: "Task list", fields: [] },
+    recordCount: 2,
+  } as never);
+  adapter.queryCollectionRecords.mockResolvedValue({
+    records: [{ path: "Tasks/one.md" }, { path: "Tasks/two.md" }],
+    nextCursor: { recordPath: "Tasks/three.md" },
+  } as never);
+  const result = await reader.connections(entry);
+  expect(result.nodes).toMatchObject([{ id: "collection:Tasks", recordCount: 1 }]);
+  expect(result.records).toEqual([{ collection: "collection:Tasks", paths: ["Tasks/one.md"] }]);
+  expect(result.complete).toBe(true);
+  expect(JSON.stringify(result)).not.toMatch(/two|three/);
+});
+
+it("drops what a narrowed, ended, or unreadable grant no longer covers on the next read", async () => {
+  const { reader, entry } = workspace(FILES, received(grant(["Tasks", "People"])));
+  expect((await reader.connections(entry)).nodes).toHaveLength(2);
+  const narrowed = { ...entry, ...received(grant(["People"])) };
+  const after = await reader.connections(narrowed);
+  expect(after.nodes.map((node) => node.id)).toEqual(["collection:People"]);
+  expect(after.edges).toEqual([]);
+  expect(after.records).toEqual([]);
+  const ended = { ...entry, ...received(grant(["Tasks", "People"]), { ended: true }) };
+  expect(await reader.connections(ended)).toEqual(SHARE_OMITTED_CONNECTIONS);
+  const removal = (shareId: string) => ({
+    ...entry,
+    ...received(grant(["Tasks", "People"])),
+    confirmedRemovedShares: [{ shareId, removedAtMs: 1 }],
+  });
+  expect(await reader.connections(removal("s"))).toEqual(SHARE_OMITTED_CONNECTIONS);
+  expect((await reader.connections(removal("other"))).nodes).toHaveLength(2);
+  const malformed = { ...removal("other"), confirmedRemovedShares: "s" } as unknown as typeof entry;
+  expect(await reader.connections(malformed)).toEqual(SHARE_OMITTED_CONNECTIONS);
+  expect(await reader.connections({ ...entry, ...received(grant([])) })).toEqual(
+    SHARE_OMITTED_CONNECTIONS,
+  );
+});
+
+it("lists nothing for a joined workspace and never reads its engine", async () => {
+  const { reader, entry, engines } = workspace(
+    FILES,
+    received({ paths: [], versionId: null, access: "edit", wholeWorkspace: true }),
+  );
+  expect(await reader.connections(entry)).toEqual(SHARE_OMITTED_CONNECTIONS);
+  expect(engines).toEqual([]);
 });
 
 it("reuses the answer until a structural file, a record, or an approval changes", async () => {
@@ -326,7 +462,7 @@ it("reuses the answer until a structural file, a record, or an approval changes"
 it("reports mounted shares as uncovered once one is added", async () => {
   const { reader, entry } = workspace(FILES);
   expect((await reader.connections(entry)).mountsCovered).toBe(true);
-  const mounted = { ...entry, shareMounts: [{}] } as unknown as RegistryEntry;
+  const mounted = { ...entry, shareMounts: [{}] } as unknown as Entry;
   expect((await reader.connections(mounted)).mountsCovered).toBe(false);
 });
 

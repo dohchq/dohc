@@ -106,6 +106,27 @@ export function collectionListSources(
   ];
 }
 
+export function standaloneShareCollectionSource(
+  workspace: Workspace,
+  shareEngine: ShareEngine,
+): CollectionReadSource | null {
+  const target = resolveRegisteredShareViewFilesTarget(workspace, {
+    kind: "standalone",
+    workspaceId: workspace.workspaceId,
+  });
+  const grant = recordedShareSelector(target?.grantedSelector);
+  const removals: unknown = workspace.confirmedRemovedShares;
+  const removed =
+    removals !== undefined &&
+    (!Array.isArray(removals) ||
+      removals.some(
+        (removal) => removal?.shareId === undefined || removal.shareId === target?.shareId,
+      ));
+  return target && !target.ended && !removed && grant && !grant.wholeWorkspace
+    ? receivedSource(workspace, shareEngine)
+    : null;
+}
+
 export function mountedCollectionSchema(
   schema: CollectionSchema,
   prefix: string,

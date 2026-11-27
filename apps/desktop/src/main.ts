@@ -701,6 +701,7 @@ import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
   type WorkspaceAuthorityLease,
+  type PhysicalWorkspace,
   type WorkspaceAuthorityOperation,
   type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
@@ -842,6 +843,7 @@ import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
+import { standaloneShareCollectionSource } from "./workspaces/receivedShareCollections";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
 import { createReceivedShareRecord } from "./workspaces/receivedShareRecordCreation";
 import {
@@ -4481,8 +4483,10 @@ async function withEngineAdapter<T>(
 }
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
-const workspaceConnections = createWorkspaceGraphConnections<RegistryEntry>({
+const workspaceConnections = createWorkspaceGraphConnections<PhysicalWorkspace<RegistryEntry>>({
   withAdapter: withEngineAdapter,
+  receivedCollections: (workspace) =>
+    standaloneShareCollectionSource(workspace, receivedShareEngine),
   apps: async ({ rootPath }) =>
     listSiteRoots(rootPath, {
       files: (await workspaceFilesWorker.list(rootPath)).files.filter(

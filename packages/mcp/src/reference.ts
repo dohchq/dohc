@@ -688,8 +688,6 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
   dohc_search_workspace:
     "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
-  dohc_links_connections:
-    "Connections are kept only in the original workspace. Shared profiles do not offer this read.",
   dohc_plan_agent_run_undo:
     "Only the original workspace plans an agent run undo. Shared profiles do not offer this read.",
   dohc_inbox_list:

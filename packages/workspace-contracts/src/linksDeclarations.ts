@@ -57,9 +57,9 @@ export const LINKS_DECLARATIONS = {
     },
     mcp: {
       tool: "dohc_links_connections",
-      levels: ["owner"],
+      levels: EVERY_MCP_LEVEL,
       description:
-        "Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share returns scope share-omitted with nothing listed.",
+        "Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share lists only its shared Collections, their records, and Relations between them. An ended share, a joined workspace, or a call from inside shared-with-me returns scope share-omitted with nothing listed.",
     },
   },
   linksIn: {

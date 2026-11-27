@@ -392,9 +392,7 @@ Returns `{ kind, reference, link }`.
 
 ### `dohc_links_connections`
 
-Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share returns scope share-omitted with nothing listed.
-
-Connections are kept only in the original workspace. Shared profiles do not offer this read.
+Read how the workspace's Collections, Datasets, apps, automations, and Groups connect, from files on this computer. approval says whether an app's data access is approved on this computer or only requested in app.publish.json. records lists each Collection's record files. complete is false when the answer was cut to fit 64 KiB. A received share lists only its shared Collections, their records, and Relations between them. An ended share, a joined workspace, or a call from inside shared-with-me returns scope share-omitted with nothing listed.
 
 No arguments.
 
