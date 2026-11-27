@@ -17,7 +17,9 @@ import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-c
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
+import type { AgentMemory, MemoryTurn } from "./agentMemory";
 import { randomBytes, randomUUID } from "node:crypto";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
@@ -61,6 +63,7 @@ const RUNNER_START_FAILURE = "runner failed to start";
 // A restrict that landed between the trust lookup and the spawn.
 const RESTRICTED_AT_START = "restricted-mode";
 const RUN_TIMEOUT = "timed out after";
+const MEMORY_MISSING = "memory-missing";
 
 // How a run ended, read from its saved record. A clean exit is "finished"
 // only once the run's reply is known, so it stays "exited" here.
@@ -175,6 +178,8 @@ function runFailureReason(
   outcome: FailedOutcome,
   nodeAvailable?: ReplyRuntimeAvailability,
 ): string {
+  if (run.failureReason === MEMORY_MISSING)
+    return "Claude Code no longer had its memory of this workspace, so it starts fresh. Try again.";
   if (needsNodeJs(outcome, nodeAvailable)) {
     return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
@@ -273,6 +278,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // The person's agents, in the order the settings file lists them.
   readDispatchAgents(): Promise<Agent[]>;
   readRunLogKeepDays?(): Promise<AgentRunLogsSettings["keepDays"]>;
+  agentMemory?: AgentMemory;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(workspace: ChatDispatchWorkspace): Promise<void | (() => Promise<void>)>;
   // The thread names the chat target, so a shared-channel push can cover the
@@ -350,6 +356,7 @@ interface LiveRun {
   agentName: string;
   child: RunnerProcess;
   logPath: string;
+  memory: MemoryTurn | null;
   timeoutMinutes: number;
   timeout: ReturnType<typeof setTimeout>;
   presenceHeartbeat: ReturnType<typeof setInterval> | null;
@@ -493,6 +500,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const selfTestReservations = new Set<string>();
   // End records of self-tests whose runner has exited. stop() waits for them.
   const selfTestEnds = new Set<Promise<void>>();
+  const memoryEnds = new Set<Promise<void>>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
   // notice that Restricted Mode holds a request, and main's dialog on their
@@ -779,9 +787,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         exitCode: exitCode ?? signalExitCode(signal),
       };
     }
-    const intent = live.terminalIntent;
+    let intent = live.terminalIntent;
     if (!intent) return false;
     const dispatch = options.dispatchStoreFor(live.workspace);
+    if (
+      !live.terminalDurable &&
+      intent.kind === "complete" &&
+      intent.exitCode !== 0 &&
+      (await forgetMissingMemory(live).catch((error: unknown) => {
+        reportError(error);
+        return false;
+      }))
+    ) {
+      intent = live.terminalIntent = {
+        kind: "fail",
+        exitCode: intent.exitCode,
+        reason: MEMORY_MISSING,
+      };
+      await markRunFailureHandled(live.workspace, live.claim.run).catch(reportError);
+    }
     if (!live.terminalDurable) {
       let linkedMessages: string[] | null = null;
       // A quiet run that posts nothing ends with no notice. Nothing is owed,
@@ -857,6 +881,29 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     // Try again waits for the process to exit, so read the run again.
     notifyRunUpdated(live.workspace, live.claim.run.threadId);
     await releaseLiveWorkspace(live);
+    return true;
+  }
+
+  async function forgetMissingMemory(live: LiveRun): Promise<boolean> {
+    if (!live.memory?.resume || !options.agentMemory) return false;
+    const log = await open(live.logPath, "r");
+    let tail: string;
+    try {
+      const { size } = await log.stat();
+      const length = Math.min(size, 16_384);
+      const { buffer } = await log.read(Buffer.alloc(length), 0, length, size - length);
+      tail = buffer.toString("utf8");
+    } finally {
+      await log.close();
+    }
+    // Claude Code's words for a session it no longer has.
+    if (!tail.includes(`No conversation found with session ID: ${live.memory.sessionId}`))
+      return false;
+    await options.agentMemory.forget(
+      live.workspace.workspaceId,
+      live.claim.run.agentId,
+      live.memory.sessionId,
+    );
     return true;
   }
 
@@ -1242,6 +1289,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(workspace);
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
     runReservations.add(workspace.workspaceId);
+    let unstarted: { agentId: string; sessionId: string } | null = null;
     try {
       // A claim from before a lost response can name an agent turned off since.
       if (!agent) throw new Error("this agent is off or no longer set up");
@@ -1283,6 +1331,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
       }
+      const memory =
+        profile?.tool === "claude" && agent.memory && dohcTools === "all" && options.agentMemory
+          ? await options.agentMemory.take({
+              workspaceId: workspace.workspaceId,
+              agentId: agent.id,
+              memoryId: agent.memory,
+              triggerMessageId: claim.run.triggerMessageId,
+            })
+          : null;
+      if (memory) unstarted = { agentId: agent.id, sessionId: memory.sessionId };
       const child = await spawnConfiguredRunner({
         rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
@@ -1293,6 +1351,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         profile,
         dohcTools,
         shell: agent.allowShell === true,
+        ...(memory ? { memory } : {}),
         prompt: buildRunnerPrompt(
           markdown,
           claim.run.threadId,
@@ -1308,6 +1367,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           assertMayStart();
         },
       });
+      unstarted = null;
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
       }, agent.timeoutMinutes * 60_000);
@@ -1317,6 +1377,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         agentName: agent.name,
         child,
         logPath,
+        memory,
         timeoutMinutes: agent.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
@@ -1329,6 +1390,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
+      if (memory)
+        child.onExit(() => {
+          const ended = Promise.resolve(
+            options.agentMemory?.finish(workspace.workspaceId, agent.id, memory.sessionId),
+          )
+            .catch(reportError)
+            .finally(() => memoryEnds.delete(ended));
+          memoryEnds.add(ended);
+        });
       child.onExit((code, signal) => {
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, code, signal)) {
@@ -1354,6 +1424,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
+      if (unstarted) {
+        await options.agentMemory
+          ?.release(
+            workspace.workspaceId,
+            unstarted.agentId,
+            unstarted.sessionId,
+            claim.run.triggerMessageId,
+          )
+          .catch(reportError);
+      }
       // A restrict that landed while the run was starting stops it here. Its
       // request goes back in line, where the next drain holds it, or starts
       // it when the workspace is trusted again. That costs one attempt; when
@@ -2424,6 +2504,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await Promise.all(quitTerminations);
     await Promise.all([
       ...selfTestEnds,
+      ...memoryEnds,
       ...selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)),
     ]);
     await Promise.all([
