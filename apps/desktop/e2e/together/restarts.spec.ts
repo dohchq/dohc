@@ -93,8 +93,6 @@ test("the relay is killed and started again while two people type", async ({ sta
   await expect(editor(two.page)).toContainText("ONEAFTER", { timeout: 60_000 });
 
   // No word that a page showed is missing: not from the two pages, a new reader's page, or the stored file.
-  // The server saves each person's words apart, so for a moment the stored file, and a reader, can
-  // hold one person's newest word and not yet the other's older one. Each word must come, once.
   const once = Object.fromEntries(words.map((word) => [word, 1]));
   const counts = (text: string) =>
     Object.fromEntries(words.map((word) => [word, text.split(word).length - 1]));
