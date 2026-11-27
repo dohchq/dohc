@@ -181,6 +181,7 @@ const PostRequest = z
 const LocalRow = z.object({
   refusalCoordinates: NoticeRow.shape.refusalCoordinates,
   pendingRefusalDismissals: z.array(RefusalCoordinate).optional(),
+  refusalReason: z.string().optional(),
   noticeId: NoticeRow.shape.noticeId,
   kind: NoticeRow.shape.kind,
   workspaceId: NoticeRow.shape.workspaceId,
@@ -899,9 +900,11 @@ export function createNoticeStore(deps: {
         for (const refusal of notices) {
           const previous = previousRows.get(refusal.noticeId);
           const currentKeys = new Set(refusal.refusalCoordinates.map(coordinateKey));
-          const pendingRefusalDismissals = (previous?.pendingRefusalDismissals ?? []).filter(
-            (row) => currentKeys.has(coordinateKey(row)),
-          );
+          const pendingRefusalDismissals = (
+            previous?.refusalReason === refusal.reason
+              ? (previous.pendingRefusalDismissals ?? [])
+              : []
+          ).filter((row) => currentKeys.has(coordinateKey(row)));
           if (pendingRefusalDismissals.length > 0) {
             try {
               await deps.dismissRefusal?.(workspaceId, refusal.noticeId, pendingRefusalDismissals);
@@ -963,6 +966,7 @@ export function createNoticeStore(deps: {
               kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
               refusalCoordinates,
               pendingRefusalDismissals,
+              refusalReason: refusal.reason,
               title: chatRefused
                 ? "The server did not accept a chat message"
                 : newerFormat
