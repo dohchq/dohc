@@ -423,7 +423,7 @@ function GraphSearch(props: {
         aria-expanded={shown}
         aria-controls="graph-search-results"
         aria-activedescendant={activeMatch ? `graph-search-option-${activeMatch.index}` : undefined}
-        placeholder="Search files"
+        placeholder="Search items"
         value={props.value}
         onChange={(event) => {
           props.onChange(event.target.value);
@@ -470,7 +470,7 @@ function GraphSearch(props: {
         <ul
           id="graph-search-results"
           role="listbox"
-          aria-label="Matching files"
+          aria-label="Matching items"
           className="dohc-popover dohc-pop-in absolute right-0 top-8 z-20 w-72 rounded-lg border border-line bg-panel p-1"
         >
           {matches.map(({ node, index }, position) => (
@@ -893,13 +893,13 @@ export function GraphView(props: {
   const filtered =
     model.filteredNodeCount < graph.nodes.length || model.filteredLinkCount < graph.edges.length;
   const more = walking && scopedState.graph !== null ? "+" : "";
-  const fileCount = filtered
-    ? `${model.filteredNodeCount.toLocaleString()} of ${plural(graph.nodes.length, "file")}`
-    : `${graph.nodes.length.toLocaleString()}${more} file${graph.nodes.length === 1 && !more ? "" : "s"}`;
+  const itemCount = filtered
+    ? `${model.filteredNodeCount.toLocaleString()} of ${plural(graph.nodes.length, "item")}`
+    : `${graph.nodes.length.toLocaleString()}${more} item${graph.nodes.length === 1 && !more ? "" : "s"}`;
   const linkCount = filtered
     ? `${model.filteredLinkCount.toLocaleString()} of ${plural(graph.edges.length, "link")}`
     : `${graph.edges.length.toLocaleString()}${more} link${graph.edges.length === 1 && !more ? "" : "s"}`;
-  const counts = `${fileCount} · ${linkCount}`;
+  const counts = `${itemCount} · ${linkCount}`;
   const notice = coverageNotice(graph);
   const empty = !loadingBlank && graph.nodes.length === 0 && scopedState.status !== "error";
 
@@ -951,7 +951,7 @@ export function GraphView(props: {
           className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] tabular-nums text-muted"
         >
           <output data-testid="graph-doc-count" className="shrink-0">
-            {fileCount}
+            {itemCount}
           </output>
           <span aria-hidden className="text-subtle">
             ·
@@ -1070,7 +1070,7 @@ export function GraphView(props: {
           deferredSearch.trim() &&
           variant === "page" ? (
             <p className="absolute inset-x-0 top-1/2 text-center text-sm text-muted">
-              {`No files match "${deferredSearch.trim()}".`}
+              {`No items match "${deferredSearch.trim()}".`}
             </p>
           ) : null}
           {settingsOpen ? (

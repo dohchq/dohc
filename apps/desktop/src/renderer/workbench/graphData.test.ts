@@ -103,6 +103,16 @@ describe("chat mentions", () => {
       { source: "chat-thread:t", target: "report.pdf", kind: "chat-mentions-file" },
     ]);
   });
+
+  it("names a post in a Group for its Group", () => {
+    const mention = {
+      attachment: { objectId: "pdf", pathHint: "report.pdf" },
+      thread: { id: "t", title: "" },
+      channelName: "Trip",
+    } as ChatFileMentionRecord;
+    const graph = withChatMentions(files([]), [mention]);
+    expect(graph.nodes.find((node) => node.path === "chat-thread:t")?.title).toBe("Trip");
+  });
 });
 
 describe("workspace connections", () => {

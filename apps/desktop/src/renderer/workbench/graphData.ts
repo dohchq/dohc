@@ -178,7 +178,7 @@ export function withChatMentions(graph: GraphData, mentions: ChatFileMentionReco
       path: thread,
       kind: "chat-thread",
       threadId: row.thread.id,
-      title: row.thread.title,
+      title: row.thread.title || row.channelName || "",
       channelId: row.channelId,
       channelWireId: row.channelWireId,
       channelName: row.channelName,

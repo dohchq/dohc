@@ -42,7 +42,7 @@ export type GraphDisplay = {
   linkThickness: number;
 };
 export const DEFAULT_DISPLAY: GraphDisplay = {
-  arrows: false,
+  arrows: true,
   textFade: 0.5,
   nodeSize: 0.5,
   linkThickness: 0.5,

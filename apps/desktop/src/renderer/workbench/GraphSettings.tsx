@@ -263,7 +263,7 @@ export function GraphSettings(props: {
         })}
         <Row label="Orphans">
           <SwitchControl
-            label="Show files with no links"
+            label="Show items with no links"
             checked={value.orphans}
             onChange={(orphans) => onChange({ ...value, orphans })}
           />
