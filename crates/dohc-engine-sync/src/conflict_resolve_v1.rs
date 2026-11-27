@@ -7726,6 +7726,54 @@ mod tests {
             .expect("edit blob")
     }
 
+    fn successor_edit_envelope(
+        store: &mut EngineStore,
+        successor: &str,
+        with_field: bool,
+    ) -> ReplicationEnvelope {
+        let edit = format_two_successor_edit(store, successor);
+        let mut payload = json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false});
+        if !with_field {
+            payload
+                .as_object_mut()
+                .expect("payload")
+                .remove("isBaseState");
+        }
+        let mut next = imported_envelope(2, "ydoc.update", payload);
+        next.relay_seq = Some(3);
+        next
+    }
+
+    fn always_reading(with_field: bool) -> (Vec<(i64, String)>, String) {
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+            let parent = imported_envelope(0, "conflict.resolve", built.value);
+            crate::apply_conflict_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+                .expect("the successor installs");
+            let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
+            let next = successor_edit_envelope(&mut store, &successor, with_field);
+            for op in [child, next] {
+                crate::apply_replication_envelope(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                )
+                .expect("the op applies");
+            }
+            assert_eq!(active_claim(&store, &key), Some(successor));
+            (
+                kept_rows_and_notices(&store).1,
+                projected_ydoc_text(&mut store, &key),
+            )
+        })
+    }
+
     fn kept_successor_with_edit(
         moved: bool,
         arrive_reading: bool,
@@ -7754,16 +7802,7 @@ mod tests {
             verified.primary,
             crate::ApplyDisposition::Applied(_)
         ));
-        let edit = format_two_successor_edit(&mut store, &successor);
-        let mut payload = json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false});
-        if !with_field {
-            payload
-                .as_object_mut()
-                .expect("payload")
-                .remove("isBaseState");
-        }
-        let mut next = imported_envelope(2, "ydoc.update", payload);
-        next.relay_seq = Some(3);
+        let next = successor_edit_envelope(&mut store, &successor, with_field);
         let arrive = |store: &mut EngineStore| {
             crate::apply_replication_envelope(
                 store,
@@ -7870,9 +7909,10 @@ mod tests {
                 child,
             } = kept_successor_with_edit(moved, arrive_reading, with_field);
             assert_eq!(replay_reading(&mut store), 2, "{case}");
-            assert_eq!(kept_rows_and_notices(&store), (0, vec![]), "{case}");
+            assert_eq!(kept_rows_and_notices(&store).0, 0, "{case}");
             assert_eq!(deferred_rows(&store), 0, "{case}");
             if moved {
+                assert_eq!(kept_rows_and_notices(&store).1, vec![], "{case}");
                 assert_eq!(active_claim(&store, &key), predecessor, "{case}");
                 assert_eq!(divergence_state(&store), (1, 1), "{case}");
                 let archived = archived_successor_text(&store);
@@ -7887,6 +7927,11 @@ mod tests {
                 assert!(
                     text.contains('z') && text.contains("resolved"),
                     "{case}: {text}"
+                );
+                assert_eq!(
+                    (kept_rows_and_notices(&store).1, text),
+                    always_reading(with_field),
+                    "{case}"
                 );
             }
             let result = moments(&store, "moment-result");
