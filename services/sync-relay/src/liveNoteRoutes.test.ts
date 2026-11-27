@@ -1,9 +1,11 @@
 import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
+import { parseRedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
+import { createLiveMembershipRegistry } from "./liveMembership.js";
 import { createLiveNoteRoutes } from "./liveNoteRoutes.js";
 import type { StorageContext } from "./storage/context.js";
 import { appendLiveRoomEdit } from "./storage/liveRoomEdits.js";
@@ -20,12 +22,40 @@ afterEach(() => {
 function quietNote() {
   const f = registered({ deployment: true });
   open.push(f);
-  f.write((db) => db.exec(`UPDATE sync_relay_live_documents SET admission_state='closed'`));
   const document = f.input.evidence.document;
   const storage = f.storage as unknown as StorageContext;
+  const sessions = createLiveMembershipRegistry(
+    { maxSessions: 8, maxMembers: 8, maxSnapshotBytes: 153 },
+    (read) => read(),
+  );
+  const join = () =>
+    sessions.join({
+      ticket: parseRedeemedLiveTicket({
+        ticketId: "ticket",
+        audience: "https://share.invalid",
+        authority: {
+          principalKind: "named",
+          principalId: "reader",
+          grantId: "grant",
+          grantGeneration: 4,
+        },
+        binding: {
+          ...document,
+          currentPath: f.input.evidence.currentPath,
+          selectorPaths: ["docs"],
+          restoreFenceGeneration: 1,
+        },
+        hostEpoch: 1,
+        mintedAtMs: 0,
+        expiresAtMs: 30_000,
+        redeemedAtMs: 1,
+      }),
+      invalidated: new AbortController().signal,
+      assertCurrent() {},
+    });
   const list = async (workspaceId = "workspace", userId = "owner") =>
     (
-      (await createLiveNoteRoutes(f.storage)(
+      (await createLiveNoteRoutes(f.storage, (workspace) => sessions.liveObjects(workspace))(
         new Request("https://relay.invalid/"),
         { route: "live-notes", workspaceId },
         userId,
@@ -41,7 +71,7 @@ function quietNote() {
           created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes,generation,state,since_ms,changed_by) VALUES (?,?,?,'owner',NULL,'epoch','stream',1,1,1,1,64,1,?,1,'server')`)
         .run(workspaceId, document.objectId, f.input.evidence.currentPath, state),
     );
-  return { f, document, storage, list, listed, enrol };
+  return { f, document, storage, join, list, listed, enrol };
 }
 
 it("lists nothing for a note that is not live anywhere on the relay", async () => {
@@ -49,10 +79,12 @@ it("lists nothing for a note that is not live anywhere on the relay", async () =
   expect(await list()).toEqual([]);
 });
 
-it("lists a note whose current lineage takes live edits", async () => {
-  const { f, list, listed } = quietNote();
-  f.write((db) => db.exec(`UPDATE sync_relay_live_documents SET admission_state='open'`));
+it("lists a note while someone has it open for live editing, and not once they leave", async () => {
+  const { join, list, listed } = quietNote();
+  const session = join();
   expect(await list()).toEqual(listed("session"));
+  session.close();
+  expect(await list()).toEqual([]);
 });
 
 it("lists a note with a hosted activation", async () => {
@@ -101,6 +133,19 @@ it("lists a paused note", async () => {
     pausedAtMs: 1,
   });
   expect(await list()).toEqual(listed("pause"));
+});
+
+it("lists a stopped enrolment until the host has drained it", async () => {
+  const { f, enrol, list, listed } = quietNote();
+  enrol("workspace", "live");
+  f.write((db) =>
+    db.exec(
+      `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,state='off',reason='stopped',owner_stop='retire'`,
+    ),
+  );
+  expect(await list()).toEqual(listed("enrolment"));
+  f.write((db) => db.exec(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=2`));
+  expect(await list()).toEqual([]);
 });
 
 it("lists a note enrolled with the automation host once it has started", async () => {

@@ -42,6 +42,20 @@ const join = (
   });
 
 describe("live membership", () => {
+  it("names the workspace's notes that have a session until the last one closes", () => {
+    const registry = createLiveMembershipRegistry(policy, (read) => read());
+    const first = join(registry, "one"),
+      second = join(registry, "two"),
+      other = join(registry, "three", "grant-a", "object-b");
+    expect(registry.liveObjects("workspace")).toEqual(new Set(["object-a", "object-b"]));
+    expect(registry.liveObjects("elsewhere")).toEqual(new Set());
+    first.close();
+    other.close();
+    expect(registry.liveObjects("workspace")).toEqual(new Set(["object-a"]));
+    second.close();
+    expect(registry.liveObjects("workspace")).toEqual(new Set());
+  });
+
   it("joins different grants to the same document without exposing credentials or identities", () => {
     const registry = createLiveMembershipRegistry(policy, (read) => read()),
       first = join(registry, "private-ticket-one");

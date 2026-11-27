@@ -1632,26 +1632,28 @@ function registerValidatedBaseline(
   });
 }
 
-const lineageEndings = (oneObject: boolean) => {
+const lineageEndings = (oneObject: boolean, undrained = false) => {
   const object = oneObject ? " AND object_id=?" : "";
   return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
     UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${object}
     UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${object}
-    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND state<>'starting'`;
+    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND state<>'starting'${undrained ? " AND (state<>'off' OR host_drained_at_ms IS NULL)" : ""}`;
 };
 
 export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
 export type RelayLiveNote = { objectId: string; path: string | null; kinds: RelayLiveNoteKind[] };
 
-export function relayLiveNotes(storage: StorageContext, workspaceId: string): RelayLiveNote[] {
+export function relayLiveNotes(
+  storage: StorageContext,
+  workspaceId: string,
+  sessions: ReadonlySet<string>,
+): RelayLiveNote[] {
   const rows = storage.readTx(() =>
     storage.db
       .prepare(`SELECT DISTINCT e.object_id,e.kind,(SELECT d.current_path FROM sync_relay_live_documents d
           WHERE d.workspace_id=? AND d.main_version_id='main' AND d.object_id=e.object_id
           ORDER BY d.lineage_state='current' DESC,d.registered_at_ms DESC LIMIT 1) AS path
-        FROM (${lineageEndings(false)}
-          UNION ALL SELECT 'session',object_id FROM sync_relay_live_documents
-          WHERE workspace_id=? AND main_version_id='main' AND lineage_state='current' AND admission_state='open') e
+        FROM (${lineageEndings(false, true)} UNION ALL SELECT 'session',value FROM json_each(?)) e
         ORDER BY e.object_id,e.kind`)
       .all(
         workspaceId,
@@ -1662,7 +1664,7 @@ export function relayLiveNotes(storage: StorageContext, workspaceId: string): Re
         workspaceId,
         "main",
         workspaceId,
-        workspaceId,
+        JSON.stringify([...sessions]),
       ),
   );
   const notes = new Map<string, RelayLiveNote>();

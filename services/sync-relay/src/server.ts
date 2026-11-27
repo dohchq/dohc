@@ -208,6 +208,7 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
+  liveSessions?: (workspaceId: string) => ReadonlySet<string>;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
@@ -340,6 +341,7 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   liveRooms = () => undefined,
+  liveSessions = () => new Set(),
   heldDocumentHost = () => undefined,
   storage,
   resolveActor,
@@ -1432,7 +1434,7 @@ export function createSyncRelayHandler({
 
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
   const respondToLivePauses = createLiveRoomPauseRoutes(storage);
-  const respondToLiveNotes = createLiveNoteRoutes(storage);
+  const respondToLiveNotes = createLiveNoteRoutes(storage, liveSessions);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,

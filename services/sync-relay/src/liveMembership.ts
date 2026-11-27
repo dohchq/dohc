@@ -51,6 +51,14 @@ export function createLiveMembershipRegistry(
   const tickets = new Set<string>(),
     groups = new Map<string, Group>();
   return {
+    liveObjects(workspaceId: string): Set<string> {
+      const objects = new Set<string>();
+      for (const key of groups.keys()) {
+        const [workspace, , objectId] = JSON.parse(key) as string[];
+        if (workspace === workspaceId) objects.add(objectId!);
+      }
+      return objects;
+    },
     join(input: {
       ticket: RedeemedLiveTicket;
       invalidated: AbortSignal;
