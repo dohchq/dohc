@@ -1365,7 +1365,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           ? await options.agentMemory.take({
               workspaceId: workspace.workspaceId,
               agentId: agent.id,
-              memoryId: agent.memory,
+              // Codex keeps a thread's folders from its first run, so other launch arguments start a new thread.
+              memoryId:
+                profile.tool === "codex"
+                  ? `${agent.memory} ${JSON.stringify(profile.arguments ?? [])}`
+                  : agent.memory,
               triggerMessageId: claim.run.triggerMessageId,
             })
           : null;
@@ -1421,11 +1425,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runReservations.delete(workspace.workspaceId);
       if (memory)
         child.onExit(() => {
-          const ended = endMemory(
-            workspace.workspaceId,
-            agent.id,
-            memory,
-            profile?.tool === "codex" ? logPath : null,
+          const ended = enqueue(workspace.workspaceId, () =>
+            endMemory(
+              workspace.workspaceId,
+              agent.id,
+              memory,
+              profile?.tool === "codex" ? logPath : null,
+            ),
           )
             .catch(reportError)
             .finally(() => memoryEnds.delete(ended));
