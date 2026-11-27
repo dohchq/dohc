@@ -197,6 +197,28 @@ it("adds runners' memory to a relay that has chat wakes, once, keeping its runne
   }
 });
 
+it("opens a relay whose runners gained memory before its migration was marked", async () => {
+  const storage = await testStorage();
+  const path = storagePath(storage);
+  closeTestStorage(storage);
+  const interrupted = inspectDatabase(path);
+  interrupted
+    .prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?")
+    .run(MEMORY_MARKER);
+  interrupted.close();
+
+  const reopened = reopenTestStorage(path);
+  closeTestStorage(reopened);
+  const db = inspectDatabase(path);
+  try {
+    expect(
+      db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MEMORY_MARKER),
+    ).toBeDefined();
+  } finally {
+    db.close();
+  }
+});
+
 it("deletes runners and wakes with their workspace, keeps retries' bindings, and deletes everything of an account with it", async () => {
   const storage = await relay();
   const context = storage as StorageContext;

@@ -21,6 +21,7 @@ import {
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { accountDisplayName } from "./accountDisplayName";
+import { browserWakeSources, resolveWakeTargets, TooManyWakeCandidates } from "./chatWakes";
 import {
   linkChatOrigin,
   LINK_CHAT_MESSAGE_ID_PREFIX,
@@ -48,6 +49,7 @@ import {
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import type { BrowserPostWakes } from "./storage/chatWakes";
 import { deletedMessageKey } from "./storage/messageDeletes";
 import { commentFileOf, currentFileAt, type CommentFile } from "./storage/personalAgentChat";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
@@ -712,6 +714,31 @@ export function createNamedRecipientChat(options: {
             (!replying || threadLane !== "chat" || !parentMessageId.isWellFormed())
           )
             throw badRequest("invalid parent");
+          let wakes: BrowserPostWakes | undefined;
+          if (
+            owned &&
+            !storage.fetchChatMessage({
+              workspaceId: share.workspaceId,
+              originId: storedOrigin,
+              messageId,
+            })
+          ) {
+            const nowMs = options.nowMs();
+            const post = { accountId: actor.userId, workspaceId: share.workspaceId, threadId };
+            const write = replying
+              ? { kind: "reply" as const, body, threadId, parentMessageId }
+              : { kind: "start" as const, body, lane: threadLane, channelId: channelWireId ?? "" };
+            try {
+              const { targets } = await resolveWakeTargets(
+                browserWakeSources(storage, { ...post, lane: threadLane, nowMs }),
+                actor.userId,
+                write,
+              );
+              wakes = { ...post, targets, nowMs };
+            } catch (error) {
+              throw error instanceof TooManyWakeCandidates ? badRequest(error.message) : error;
+            }
+          }
 
           const append = async () => {
             const createdAtMs = options.nowMs();
@@ -768,7 +795,9 @@ export function createNamedRecipientChat(options: {
               { route: "share-log", shareId },
               actor,
               messageId,
-              owned ? { originId: storedOrigin, authorize: () => action("append") } : undefined,
+              owned
+                ? { originId: storedOrigin, authorize: () => action("append"), wakes }
+                : undefined,
             );
           };
           const result = await append();

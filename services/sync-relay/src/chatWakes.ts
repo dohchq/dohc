@@ -1,10 +1,9 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatWakeCandidate } from "@dohc/workspace-contracts/chat-wakes";
-import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
+import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { shownName } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
 import type { JsonValue } from "@dohc/workspace-engine-client";
-import type { WriteCommand } from "./accountChatWrites";
 import type { Verdict } from "./operationPublication";
 import type { SyncRelayStorage } from "./storage";
 import type { ChatRunner, ChatWakeTarget, OperationWakeChange } from "./storage/chatWakes";
@@ -13,7 +12,8 @@ import type { ChatRunner, ChatWakeTarget, OperationWakeChange } from "./storage/
 // before the write's first engine stage, from the account's declared
 // computers, and frozen in the operation's command; a replay never resolves
 // them again. Publication turns them into wake rows in the transaction that
-// records the message published.
+// records the message published. The owner's browser post resolves them the
+// same way, from the relay's log, and its append writes the rows.
 
 /** The targets a message wakes, as its operation keeps them. `unmatched`: an agent it answers matched no computer, or several. */
 export type FrozenWakes = { targets: ChatWakeTarget[]; unmatched: boolean };
@@ -30,29 +30,45 @@ export class TooManyWakeCandidates extends Error {
   }
 }
 
+/** What resolution reads of a message. */
+type WakeMessage = Pick<ChatMessage, "author" | "authorUserId" | "authorAgentId">;
+
 /** What resolution reads, through the reads' secret-file filter. A hidden thread or message is null, as a missing one. */
 export interface WakeSources {
   /** The account's enabled agents on its computers in the workspace. */
   runners: readonly ChatRunner[];
-  message(messageId: string): Promise<ChatMessage | null>;
-  thread(threadId: string): Promise<ChatThread | null>;
+  message(messageId: string): Promise<WakeMessage | null>;
+  thread(threadId: string): Promise<Pick<ChatThread, "channelId" | "lane"> | null>;
   /** A visible thread's first message. */
-  opening(threadId: string): Promise<ChatMessage | null>;
+  opening(threadId: string): Promise<WakeMessage | null>;
   /** The agent of an agent's DM, or null for any other channel. */
   dmAgent(channelId: string): Promise<string | null>;
   /** The newest message `pick` keeps in the channel's threads, replies included, within a bounded read. */
-  latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource>;
+  latest(channelId: string, pick: (message: WakeMessage) => boolean): Promise<DmSource>;
 }
 
 /** A DM's newest source, when the bounded read covered every message; otherwise no source at all. */
-export type DmSource = { complete: true; message: ChatMessage | null } | { complete: false };
+export type DmSource = { complete: true; message: WakeMessage | null } | { complete: false };
 
-type AgentMessage = ChatMessage & { authorAgentId: string };
+/** What resolution reads of a write. A phone write's command is one. */
+export type WakeWrite =
+  | { kind: "react" }
+  | { kind: "start"; body: string; lane: ChatThreadLane; channelId: string }
+  | { kind: "reply"; body: string; threadId: string; parentMessageId?: string }
+  | {
+      kind: "answer";
+      body: string;
+      threadId: string;
+      parentMessageId?: string;
+      questionId: string;
+    };
+
+type AgentMessage = WakeMessage & { authorAgentId: string };
 
 // Only the account's own agent's message names an agent to wake. A participant's or a personal agent's never does.
 const accountAgent =
   (accountId: string) =>
-  (message: ChatMessage | null | undefined): message is AgentMessage =>
+  (message: WakeMessage | null | undefined): message is AgentMessage =>
     message?.author.kind === "agent" &&
     message.authorUserId === accountId &&
     typeof message.authorAgentId === "string" &&
@@ -64,10 +80,10 @@ const accountAgent =
 async function answeredMessages(
   sources: WakeSources,
   accountId: string,
-  write: Exclude<WriteCommand, { kind: "react" }>,
+  write: Exclude<WakeWrite, { kind: "react" }>,
 ): Promise<{ messages: AgentMessage[]; unread: boolean }> {
   const ours = accountAgent(accountId);
-  const found: Array<ChatMessage | null | undefined> = [];
+  const found: Array<WakeMessage | null | undefined> = [];
   let unread = false;
   const dm = async (channelId: string) => {
     const agentId = await sources.dmAgent(channelId);
@@ -123,7 +139,7 @@ const agentKey = (agentId: string, displayName: string) =>
 export async function resolveWakeTargets(
   sources: WakeSources,
   accountId: string,
-  write: WriteCommand,
+  write: WakeWrite,
 ): Promise<FrozenWakes> {
   const runners = sources.runners.filter((runner) => runner.enabled);
   if (write.kind === "react" || runners.length === 0) return NO_WAKES;
@@ -173,6 +189,41 @@ export async function resolveWakeTargets(
   if (targets.reduce((total, target) => total + target.candidates.length, 0) > MAX_WAKE_CANDIDATES)
     throw new TooManyWakeCandidates();
   return { targets, unmatched };
+}
+
+/**
+ * What resolution reads for the owner's browser post in `threadId`, from the
+ * relay's log. A browser reaches only Groups and file Comments, never a DM,
+ * and a message counts only from that thread, as one of the owner's computers
+ * wrote it.
+ */
+export function browserWakeSources(
+  storage: Pick<
+    SyncRelayStorage,
+    "enabledChatRunners" | "findThreadFirstMessageId" | "ownerComputerMessage"
+  >,
+  post: {
+    accountId: string;
+    workspaceId: string;
+    threadId: string;
+    lane: ChatThreadLane;
+    nowMs: number;
+  },
+): WakeSources {
+  const { workspaceId, threadId } = post;
+  const message = async (messageId: string) =>
+    storage.ownerComputerMessage(workspaceId, threadId, messageId);
+  return {
+    runners: storage.enabledChatRunners(post),
+    message,
+    thread: async () => ({ lane: post.lane }),
+    opening: async () => {
+      const first = storage.findThreadFirstMessageId(workspaceId, threadId);
+      return first === undefined ? null : message(first);
+    },
+    dmAgent: async () => null,
+    latest: async () => ({ complete: true, message: null }),
+  };
 }
 
 /** The wakes an operation's command froze. A command without them wakes nothing. */

@@ -30,6 +30,7 @@ import {
   applyCurrentFileOp,
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
+import { insertBrowserWakesInTransaction, type BrowserPostWakes } from "./chatWakes";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import { forgetCollectionFilePresence } from "./collectionFilePresence";
 import { forgetDeletedOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
@@ -854,6 +855,7 @@ export function appendBrowserChatBatch(
     messageId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    wakes?: BrowserPostWakes;
   },
 ): AppendLogBatchResult {
   return storage.tx(
@@ -903,7 +905,14 @@ export function appendBrowserChatBatch(
           }),
         };
       });
-      return appendLogBatchInTransaction(storage, { ...input, ops });
+      const result = appendLogBatchInTransaction(storage, { ...input, ops });
+      if (!existing && input.wakes && result.inserted > 0)
+        insertBrowserWakesInTransaction(storage, {
+          ...input.wakes,
+          workspaceId: input.workspaceId,
+          messageId: input.messageId,
+        });
+      return result;
     },
     chatAppend(input.ops) ? NO_LIVE_AUTHORITY : undefined,
   );

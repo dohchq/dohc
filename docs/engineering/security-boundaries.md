@@ -36,7 +36,10 @@ reads what the owner's computer reads. It reaches only the link read routes
 account's workspaces at `/sync/members/workspaces`. It also reaches the
 named-chat routes for the Groups and file Comments an admin reaches. The owner
 posts there only as a person, under the relay's own `relay:owner-browser:`
-origin, and deletes messages there as an admin does. The owner's browser
+origin, and deletes messages there as an admin does. A new owner post wakes the
+owner's agents as the phone's does, in the append's transaction, after the relay
+checks ownership again. A member's or link holder's post never wakes them, and an
+agent message counts only from the owner's own computers. The owner's browser
 edits a page live as the owner's phone does, through the page open and the
 one-use ticket for `/sync/workspaces/<id>/live/owner`, without the phone's Show
 on phone switch. Its edits are the owner's own and never an agent's, and the

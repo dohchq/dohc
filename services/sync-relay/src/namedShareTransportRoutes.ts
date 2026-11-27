@@ -45,6 +45,7 @@ import {
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import type { BrowserPostWakes } from "./storage/chatWakes";
 import type { MemberReach } from "./storage/memberReach";
 import { StaleReferenceCollection } from "./storage/workReferences";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -56,12 +57,16 @@ export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
 
-/** The owner's browser post, which only the relay's named chat sends. `authorize` throws once the owner's access ends. */
+/**
+ * The owner's browser post, which only the relay's named chat sends. `authorize` throws once the owner's access ends.
+ * `wakes` become rows with a new message, in its append.
+ */
 export interface OwnerBrowserPost {
   originId: string;
   authorize(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
     share: { shareId: string; workspaceId: string };
   };
+  wakes?: BrowserPostWakes;
 }
 
 /** What a share reaches, without its level. */
@@ -620,7 +625,11 @@ export function createNamedShareTransportRoutes(
       const result =
         browserMessageId === undefined
           ? storage.appendLogBatch(batch)
-          : storage.appendBrowserChatBatch({ ...batch, messageId: browserMessageId });
+          : storage.appendBrowserChatBatch({
+              ...batch,
+              messageId: browserMessageId,
+              ...(owner?.wakes ? { wakes: owner.wakes } : {}),
+            });
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }

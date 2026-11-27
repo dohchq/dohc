@@ -33,8 +33,9 @@ export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 // declares again or a newer computer takes its place. Rows go with the
 // workspace.
 //
-// Wakes: one row per wake target of a published phone message, per
-// generation. It names the message and its actual thread by ID and holds no
+// Wakes: one row per wake target of a published phone message, or of the
+// owner's browser post, per generation. A browser post's message ID is its
+// operation ID. It names the message and its actual thread by ID and holds no
 // message text. `candidates_json` is the frozen list of computers that may
 // claim it: `[{installId, agentId, label, matched: {handle} | {displayName}}]`.
 // Only one computer wins a row. A retry adds the next generation.
@@ -139,9 +140,10 @@ function assertSchema(db: SqliteDb): void {
 export function initializeChatWakeSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?");
   if (marked.get(MARKER)) {
-    // SQLite adds the column after the last one, where SCHEMA has it.
     if (!marked.get(MEMORY_MARKER)) {
-      db.exec(`ALTER TABLE ${RUNNERS} ADD COLUMN ${MEMORY_COLUMN}`);
+      // SQLite adds the column after the last column, where SCHEMA has it.
+      if (!db.prepare(`SELECT 1 FROM pragma_table_info('${RUNNERS}') WHERE name = 'memory'`).get())
+        db.exec(`ALTER TABLE ${RUNNERS} ADD COLUMN ${MEMORY_COLUMN}`);
       db.prepare(
         "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
       ).run(MEMORY_MARKER, Date.now());
@@ -231,6 +233,14 @@ export interface DeclaredAgent {
 
 /** One wake target, frozen when its message was written. */
 export type ChatWakeTarget = { target: string; candidates: ChatWakeCandidate[] };
+
+/** The targets the owner's browser post wakes, resolved before its append and written with it. */
+export interface BrowserPostWakes {
+  accountId: string;
+  threadId: string;
+  targets: readonly ChatWakeTarget[];
+  nowMs: number;
+}
 
 /** What a recorded verdict does to its operation's wakes. Applied in the verdict's own transaction. */
 export interface OperationWakeChange {
@@ -528,6 +538,63 @@ export function enabledChatRunners(
   );
 }
 
+function insertWakeRows(
+  storage: StorageContext,
+  wake: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    messageId: string;
+    threadId: string;
+    held: boolean;
+    targets: readonly ChatWakeTarget[];
+  },
+  nowMs: number,
+): boolean {
+  const { accountId, workspaceId, messageId, held } = wake;
+  const exists = storage.db.prepare(
+    "SELECT 1 FROM sync_relay_chat_wakes WHERE account_id = ? AND workspace_id = ? AND message_id = ? AND target = ? AND generation = 1",
+  );
+  const insert = storage.db.prepare(
+    `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
+       candidates_json, state, change_seq, created_at_ms, waiting_since_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+  );
+  let changed = false;
+  for (const { target, candidates } of wake.targets) {
+    if (exists.get(accountId, workspaceId, messageId, target)) continue;
+    insert.run(
+      chatWakeId(accountId, workspaceId, messageId, target, 1),
+      accountId,
+      workspaceId,
+      wake.operationId,
+      messageId,
+      wake.threadId,
+      target,
+      JSON.stringify(candidates),
+      held ? "held" : "waiting",
+      bump(storage, accountId),
+      nowMs,
+      held ? null : nowMs,
+    );
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * The wake rows of the owner's browser post, in the transaction that appends
+ * it. The post's message ID stands for its operation, and nothing holds it.
+ */
+export function insertBrowserWakesInTransaction(
+  storage: StorageContext,
+  wake: BrowserPostWakes & { workspaceId: string; messageId: string },
+): void {
+  const { nowMs, ...rest } = wake;
+  if (insertWakeRows(storage, { ...rest, operationId: wake.messageId, held: false }, nowMs))
+    notifyChatWakeChange(storage, wake.accountId);
+}
+
 /**
  * Applies a verdict's wake change to an operation, inside the transaction
  * that records the verdict: a published message's targets become rows, and
@@ -545,36 +612,10 @@ export function applyOperationWakesInTransaction(
   nowMs: number,
 ): void {
   const { accountId, operationId, workspaceId } = operation;
-  let changed = false;
-  if (change.publish !== undefined && operation.messagePublished) {
-    const { messageId, threadId, held } = change.publish;
-    const exists = storage.db.prepare(
-      "SELECT 1 FROM sync_relay_chat_wakes WHERE account_id = ? AND workspace_id = ? AND message_id = ? AND target = ? AND generation = 1",
-    );
-    const insert = storage.db.prepare(
-      `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
-         candidates_json, state, change_seq, created_at_ms, waiting_since_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-    );
-    for (const { target, candidates } of change.publish.targets) {
-      if (exists.get(accountId, workspaceId, messageId, target)) continue;
-      insert.run(
-        chatWakeId(accountId, workspaceId, messageId, target, 1),
-        accountId,
-        workspaceId,
-        operationId,
-        messageId,
-        threadId,
-        target,
-        JSON.stringify(candidates),
-        held ? "held" : "waiting",
-        bump(storage, accountId),
-        nowMs,
-        held ? null : nowMs,
-      );
-      changed = true;
-    }
-  }
+  let changed =
+    change.publish !== undefined &&
+    operation.messagePublished &&
+    insertWakeRows(storage, { accountId, workspaceId, operationId, ...change.publish }, nowMs);
   if (change.release !== undefined) {
     const update = storage.db.prepare(
       `UPDATE sync_relay_chat_wakes SET state = 'waiting', waiting_since_ms = ?, prerequisite_message_id = ?, change_seq = ?

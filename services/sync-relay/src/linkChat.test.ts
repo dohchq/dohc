@@ -925,6 +925,30 @@ describe("link posts in a Group's channel", () => {
     ).toEqual([]);
   });
 
+  it("wakes none of the owner's agents, even when it names one", async () => {
+    const f = await fixture();
+    f.storage.replaceChatRunners({
+      accountId: OWNER,
+      workspaceId,
+      installId: "laptop",
+      computerLabel: "Laptop",
+      runners: [
+        { agentId: "claude", handle: "claude", displayName: "Claude", enabled: true, memory: true },
+      ],
+      nowMs: 2_000,
+    });
+    const link = await readWriteLink(f);
+    expect((await postChat(f, link.capability, { body: "@claude look" })).status).toBe(200);
+    expect(
+      f.storage.listWaitingChatWakes({
+        accountId: OWNER,
+        installId: "laptop",
+        since: 0,
+        nowMs: 2_000,
+      }).wakes,
+    ).toEqual([]);
+  });
+
   it("refuses a read-only link, including a link lowered to read-only", async () => {
     const f = await fixture();
     const readOnly = await groupLink(f, "read-only");

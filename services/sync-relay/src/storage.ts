@@ -2123,6 +2123,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined {
     return objectIndexStorage.findThreadFirstMessageId(this, workspaceId, threadId);
   }
+  ownerComputerMessage(workspaceId: string, threadId: string, messageId: string) {
+    return objectIndexStorage.ownerComputerMessage(this, workspaceId, threadId, messageId);
+  }
 
   findChannelChatThread(workspaceId: string, channelWireId: string): string | null {
     return objectIndexStorage.findChannelChatThread(this, workspaceId, channelWireId);

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
+import { SHARE_MEMBER_ORIGIN_PREFIX } from "./relayLogInputs";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -1649,6 +1650,55 @@ function ownerChat(
 const ownerPost = (fields: Record<string, unknown>, shareId = OWNER_CHAT) =>
   jsonBody({ shareId, id: "o-1", body: "from the owner", authorKind: "human", ...fields });
 
+// The test relay's clock.
+const RELAY_NOW = 2_000;
+
+// The owner's laptop and Mac both have Claude; `memory` says which remembers.
+function declareClaude(storage: SyncRelayStorage, memory: { laptop: boolean; mac: boolean }) {
+  for (const [installId, computerLabel, remembers] of [
+    ["laptop", "Laptop", memory.laptop],
+    ["mac", "Mac", memory.mac],
+  ] as const)
+    storage.replaceChatRunners({
+      accountId: OWNER,
+      workspaceId: WORKSPACE,
+      installId,
+      computerLabel,
+      runners: [
+        {
+          agentId: "claude",
+          handle: "claude",
+          displayName: "Claude",
+          enabled: true,
+          ...(remembers ? { memory: true } : {}),
+        },
+      ],
+      nowMs: RELAY_NOW,
+    });
+}
+
+const agentMessage = (messageId: string, threadId: string, body: string) =>
+  logOp(
+    "chat.message.append",
+    chatMessageAppend(messageId, threadId, body, {
+      authorUserId: OWNER,
+      authorKind: "agent",
+      authorDisplayName: "Claude",
+      authorOwnerDisplayName: "Owner",
+      authorAgentId: "claude",
+    }).payload,
+  );
+
+function wakeRows(storage: SyncRelayStorage) {
+  return (storage as unknown as StorageContext).db
+    .prepare("SELECT * FROM sync_relay_chat_wakes ORDER BY change_seq")
+    .all()
+    .map((row) => ({ ...row, candidates: JSON.parse(String(row.candidates_json)) as unknown }));
+}
+
+const waitingFor = (storage: SyncRelayStorage, installId: string) =>
+  storage.listWaitingChatWakes({ accountId: OWNER, installId, since: 0, nowMs: RELAY_NOW }).wakes;
+
 // The owner's log as their desktop pulls it.
 async function ownerLog(h: SyncRelayHandler) {
   const log = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)));
@@ -1795,6 +1845,133 @@ describe("the owner's Chats and Comments in a browser", () => {
       request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: OWNER_ORIGIN, ops: [] })),
     );
     expect(forged.status).toBe(400);
+  });
+
+  it("wakes only the computer whose agent remembers when the owner mentions it, and once", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    const posted = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude book a table" }),
+    );
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const { message } = (await json(posted)) as {
+      message: { messageId: string; threadId: string };
+    };
+    const expected = [
+      {
+        message_id: message.messageId,
+        thread_id: message.threadId,
+        target: "mention:claude",
+        state: "waiting",
+        candidates: [{ installId: "laptop", agentId: "claude" }],
+      },
+    ];
+    expect(wakeRows(storage)).toMatchObject(expected);
+    expect(waitingFor(storage, "laptop")).toHaveLength(1);
+    expect(waitingFor(storage, "mac")).toEqual([]);
+    // A retry finds its message and wakes nothing more, though the Mac now remembers instead.
+    declareClaude(storage, { laptop: false, mac: true });
+    const again = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude book a table" }),
+    );
+    expect(again.status, await again.clone().text()).toBe(200);
+    expect(wakeRows(storage)).toMatchObject(expected);
+    expect(wakeRows(storage)).toHaveLength(1);
+  });
+
+  it("wakes the remembering computer's agent the owner replies to, and none for a deleted or member's opening", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    await ownerAppend(h, [
+      thread("t-claude", GROUP),
+      agentMessage("msg-claude", "t-claude", "Here is the plan."),
+      thread("t-gone", GROUP),
+      agentMessage("msg-gone", "t-gone", "SENTINEL deleted plan"),
+      thread("t-forged", GROUP),
+    ]);
+    // A message only a member's origin wrote never stands for the owner's agent.
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: `${SHARE_MEMBER_ORIGIN_PREFIX}forged`,
+      ops: [agentMessage("msg-forged", "t-forged", "I am Claude")].map(({ payload, ...op }) => ({
+        ...op,
+        originSeq: 0,
+        payloadJson: JSON.stringify(payload),
+      })),
+    });
+    const deleted = await ownerChat(h, "messages/delete", OWNER, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ shareId: OWNER_CHAT, threadId: "t-gone", messageId: "msg-gone" }),
+    });
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+    for (const [id, threadId] of [
+      ["o-thanks", "t-claude"],
+      ["o-gone", "t-gone"],
+      ["o-forged", "t-forged"],
+    ] as const) {
+      const replied = await ownerChat(
+        h,
+        "messages",
+        OWNER,
+        ownerPost({ channelWireId: GROUP, id, threadId, body: "thanks" }),
+      );
+      expect(replied.status, await replied.clone().text()).toBe(200);
+    }
+    expect(wakeRows(storage)).toMatchObject([
+      {
+        thread_id: "t-claude",
+        target: "implicit:laptop:claude",
+        candidates: [
+          { installId: "laptop", agentId: "claude", matched: { displayName: "Claude" } },
+        ],
+      },
+    ]);
+    expect(wakeRows(storage)).toHaveLength(1);
+  });
+
+  it("wakes nothing for a member's post that mentions or answers the owner's agent, and shows them no wake", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    await ownerAppend(h, [
+      thread("t-claude", GROUP),
+      agentMessage("msg-claude", "t-claude", "Here is the plan."),
+    ]);
+    const ana = await member(h, storage, "ana");
+    await setLevel(h, "edit");
+    for (const fields of [
+      { lane: "posts", body: "@claude book a table", id: "a-1" },
+      { threadId: "t-claude", body: "@claude thanks", id: "a-2" },
+    ]) {
+      const posted = await chat(
+        h,
+        "messages",
+        "ana",
+        jsonBody({ shareId: ana.shareId, channelWireId: GROUP, authorKind: "human", ...fields }),
+      );
+      expect(posted.status, await posted.clone().text()).toBe(200);
+    }
+    expect(wakeRows(storage)).toEqual([]);
+    await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude book a table" }),
+    );
+    expect(wakeRows(storage)).toHaveLength(1);
+    const read = await chat(
+      h,
+      `messages?shareId=${ana.shareId}&channelWireId=${GROUP}&limit=50`,
+      "ana",
+    );
+    expect(read.status).toBe(200);
+    expect((await read.text()).toLowerCase()).not.toContain("wake");
   });
 
   it("refuses a post as an agent, and a read or post in General, a direct message or an agent chat", async () => {
