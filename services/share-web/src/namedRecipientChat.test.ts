@@ -749,3 +749,48 @@ it("answers a failed relay connection with 503", async () => {
   });
   expect((await web(request("messages", "alice", message))).status).toBe(503);
 });
+
+it("forwards the owner's wake read, and refuses a member's before the relay", async () => {
+  const f = await fixture();
+  f.storage.replaceChatRunners({
+    accountId: "owner",
+    workspaceId: "workspace",
+    installId: "laptop",
+    computerLabel: "Laptop",
+    runners: [{ agentId: "claude", handle: "claude", displayName: "Claude", enabled: true }],
+    nowMs: Date.now(),
+  });
+  const posted = await f.web.handle(
+    request("messages", "owner", {
+      ...message,
+      shareId: "owner:workspace",
+      body: "@claude book a table",
+    }),
+  );
+  expect(posted.status).toBe(200);
+  const { messageId, threadId } = (
+    (await posted.json()) as {
+      message: { messageId: string; threadId: string };
+    }
+  ).message;
+  const ask = { shareId: "owner:workspace", channelWireId: "wire", messageId, threadId };
+  const read = await f.web.handle(request("wakes", "owner", ask));
+  expect(read.status).toBe(200);
+  expect(await read.json()).toEqual({
+    shareId: "owner:workspace",
+    channelWireId: "wire",
+    messageId,
+    wakes: [{ wakeId: expect.any(String), state: "waiting", agentName: "Claude" }],
+  });
+  expect((await f.web.handle(request("wakes", "alice", ask))).status).toBe(404);
+  const sent = f.forwarded.length;
+  for (const refused of [
+    request("wakes", "alice", { ...ask, shareId: "share" }),
+    request(`wakes?shareId=owner:workspace&channelWireId=wire`, "owner"),
+  ]) {
+    const response = await f.web.handle(refused);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("wake");
+  }
+  expect(f.forwarded).toHaveLength(sent);
+});

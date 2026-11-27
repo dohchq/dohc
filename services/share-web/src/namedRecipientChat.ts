@@ -3,6 +3,7 @@ import {
   MAX_NAMED_CHAT_FOLLOW_REQUESTS,
 } from "@dohc/security-contract/share-discussion";
 import { readBoundedJson } from "@dohc/service-http";
+import { CHAT_WAKE_ID, ChatWakeState } from "@dohc/workspace-contracts/chat-wakes";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
   parseNamedLiveBrowserClientLimits,
@@ -71,6 +72,28 @@ function message(value: unknown): boolean {
     Number.isSafeInteger(value.createdAtMs) &&
     Number.isSafeInteger(value.relaySeq) &&
     Number(value.relaySeq) > 0
+  );
+}
+
+/** The wakes of one of the owner's posts: only its own fields, in a state the phone shows. */
+function wakesMatch(value: Record<string, unknown>): boolean {
+  return (
+    Object.keys(value).sort().join() ===
+      [typeof value.path === "string" ? "path" : "channelWireId", "messageId", "shareId", "wakes"]
+        .sort()
+        .join() &&
+    typeof (value.path ?? value.channelWireId) === "string" &&
+    typeof value.messageId === "string" &&
+    Array.isArray(value.wakes) &&
+    value.wakes.every(
+      (wake) =>
+        record(wake) &&
+        Object.keys(wake).sort().join() === "agentName,state,wakeId" &&
+        typeof wake.wakeId === "string" &&
+        CHAT_WAKE_ID.test(wake.wakeId) &&
+        ChatWakeState.safeParse(wake.state).success &&
+        (wake.agentName === null || typeof wake.agentName === "string"),
+    )
   );
 }
 
@@ -203,7 +226,8 @@ export function createNamedRecipientChatClient(options: {
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url),
       write = request.method === "POST",
-      deleting = url.pathname === "/api/named-chat/messages/delete";
+      deleting = url.pathname === "/api/named-chat/messages/delete",
+      waking = url.pathname === "/api/named-chat/wakes";
     const following = !write && url.pathname.endsWith("/messages") && url.searchParams.has("since");
     const pool = following ? followCalls : calls;
     if (
@@ -211,9 +235,10 @@ export function createNamedRecipientChatClient(options: {
         "/api/named-chat/channels",
         "/api/named-chat/messages",
         "/api/named-chat/messages/delete",
+        "/api/named-chat/wakes",
       ].includes(url.pathname) ||
       (request.method !== "GET" && (!write || url.pathname === "/api/named-chat/channels")) ||
-      (deleting && !write) ||
+      ((deleting || waking) && !write) ||
       request.signal.aborted ||
       request.headers.get("host") !== origin.host ||
       request.headers.get("sec-fetch-site") === "cross-site" ||
@@ -269,6 +294,8 @@ export function createNamedRecipientChatClient(options: {
             url.searchParams.get("workspaceId") ??
             (typeof key === "string" && key.startsWith("owner:") ? key.slice(6) : null);
           if (owned !== null && !/^[A-Za-z0-9_.:-]{1,256}$/u.test(owned)) return refuse();
+          // Wake status is the owner's alone: a member's or link holder's page never reaches the relay for it.
+          if (waking && owned === null) return refuse();
           const relayUrl = new URL(url.pathname.replace("/api/", "/sync/"), options.relayUrl);
           relayUrl.search = url.search;
           const response = await relay(
@@ -300,7 +327,9 @@ export function createNamedRecipientChatClient(options: {
             // A workspace share's follow names no Group and no file, and gets every Group it reaches.
             const onFile = url.searchParams.has("path");
             const everyGroup = following && !url.searchParams.has("channelWireId") && !onFile;
+            if (waking && (!wakesMatch(result) || result.shareId !== key)) return refuse();
             if (
+              !waking &&
               !resultMatches(
                 result,
                 url.pathname.endsWith("/channels"),

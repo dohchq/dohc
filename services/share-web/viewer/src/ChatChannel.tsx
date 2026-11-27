@@ -9,6 +9,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { chatWords } from "@dohc/interface-words/notices";
 import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 import { renderSafeMarkdown } from "./markdown";
 import { readDraft, writeDraft } from "./drafts";
@@ -19,6 +20,7 @@ import {
   mergeChatMessages,
   NamedChatError,
   type ChatPost,
+  type ChatWake,
   type DeletedChatMessage,
   type GroupType,
   type NamedChatAccess,
@@ -41,6 +43,94 @@ const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
 const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
 const EMPTY = "No messages in this channel yet.";
+const WAKE_READ_MS = 10_000;
+
+/** A wake's line, in the phone's words, without naming a computer. Held and queued show none, as on the phone. */
+function wakeText({ state, agentName }: ChatWake): string | null {
+  if (state === "waiting") return chatWords.wakeWaiting(agentName);
+  if (state === "claimed") return chatWords.wakeStarting(agentName, null);
+  if (state === "unclaimed") return chatWords.wakeNotStarted(agentName);
+  if (state === "unconfirmed") return chatWords.wakeUnconfirmed(agentName, null);
+  return null;
+}
+
+const settled = (wakes: readonly ChatWake[] | undefined) =>
+  wakes !== undefined &&
+  wakes.every((wake) => wake.state !== "waiting" && wake.state !== "claimed");
+
+type PostWakes = {
+  posts: readonly NamedChatMessage[];
+  wakes: ReadonlyMap<string, readonly ChatWake[]>;
+};
+const watched = new Map<string, PostWakes>();
+
+/**
+ * Where the agents stand that the reader's own posts from this page woke, for a client that reads them: read after
+ * each post, then every 10 seconds while the tab shows and any is waiting or starting. A failed read keeps the last
+ * lines, and the next read tries again. The lines last while the page does, kept by conversation.
+ */
+function usePostWakes(
+  read: ChatChannelClient["wakes"],
+  key: string | undefined,
+  deleted: (messageId: string) => boolean,
+) {
+  const kept = key === undefined ? undefined : watched.get(key);
+  const [posts, setPosts] = useState(kept?.posts ?? []),
+    [wakes, setWakes] = useState(kept?.wakes ?? new Map<string, readonly ChatWake[]>());
+  const known = useRef(wakes),
+    reader = useRef(read),
+    gone = useRef(deleted);
+  reader.current = read;
+  gone.current = deleted;
+  useEffect(() => {
+    if (key !== undefined && posts.length > 0) watched.set(key, { posts, wakes });
+  }, [key, posts, wakes]);
+  useEffect(() => {
+    if (posts.length === 0) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined,
+      reading = false;
+    const tick = async () => {
+      timer = undefined;
+      if (reading || document.visibilityState === "hidden") return;
+      reading = true;
+      const next = new Map(known.current);
+      const watching = () =>
+        posts.filter((post) => !gone.current(post.messageId) && !settled(next.get(post.messageId)));
+      await Promise.all(
+        watching().map((post) =>
+          reader.current!(post, controller.signal).then(
+            (found) => void next.set(post.messageId, found),
+            () => undefined,
+          ),
+        ),
+      );
+      reading = false;
+      if (controller.signal.aborted) return;
+      known.current = next;
+      setWakes(next);
+      if (watching().length > 0) timer = setTimeout(() => void tick(), WAKE_READ_MS);
+    };
+    const visible = () => {
+      if (document.visibilityState !== "visible") return;
+      clearTimeout(timer);
+      void tick();
+    };
+    document.addEventListener("visibilitychange", visible);
+    void tick();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [posts]);
+  return {
+    wakes,
+    watch: (post: NamedChatMessage) => {
+      if (read) setPosts((current) => [...current, post]);
+    },
+  };
+}
 
 /** A 401 or 404 ends the channel for this account; other failures leave it open. */
 export function ended(error: unknown): Ended | null {
@@ -121,12 +211,14 @@ function ChatMessage({
   replies,
   canReply,
   readerUserId,
+  wakes,
   onDelete,
 }: {
   message: NamedChatMessage;
   replies?: Replies;
   canReply: boolean;
   readerUserId: string | undefined;
+  wakes?: readonly ChatWake[] | undefined;
   onDelete?: () => void;
 }) {
   // Attachments are out of scope, so no image source is allowed.
@@ -184,6 +276,17 @@ function ChatMessage({
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
+      {!deleted &&
+        wakes?.map((wake) => {
+          const text = wakeText(wake);
+          return (
+            text && (
+              <p key={wake.wakeId} className="chat-wake">
+                {text}
+              </p>
+            )
+          );
+        })}
       {/* A person who can't post has nothing to reply with, and a deleted message nothing to reply to,
           as on the desktop. So only a thread with replies opens, or one holding an unsent reply to copy. */}
       {replies && ((canReply && !deleted) || replies.count > 0 || replies.drafted) && (
@@ -450,6 +553,8 @@ export interface ChatChannelClient {
     hasMore: boolean;
   }>;
   post(post: ChatPost, signal: AbortSignal): Promise<NamedChatMessage>;
+  /** Only the owner's page has it: where the agents a post woke stand. */
+  wakes?(message: NamedChatMessage, signal: AbortSignal): Promise<ChatWake[]>;
   /** Where the reader can delete: their own messages, or any for the owner or an admin. The relay decides. */
   remove?: {
     can(message: NamedChatMessage): boolean;
@@ -538,6 +643,11 @@ export function ChannelView({
     remove = client.remove;
   const [posting, setPosting] = useState(false),
     [postError, setPostError] = useState<{ text: string; retry: boolean } | null>(null);
+  const postWakes = usePostWakes(client.wakes, draftKey, (messageId) =>
+    messagesRef.current.some(
+      (message) => message.messageId === messageId && message.deletedAtMs !== undefined,
+    ),
+  );
   const mounted = useRef<AbortController | null>(null),
     follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]),
@@ -824,6 +934,7 @@ export function ChannelView({
       if (key !== null) writeDraft(key, "");
       if (currentKey.current === key) setDraftText("");
       receive([message], true);
+      postWakes.watch(message);
     } catch (error) {
       if (controller.signal.aborted) return;
       const reason = ended(error);
@@ -842,7 +953,12 @@ export function ChannelView({
         return;
       }
       if (status === 409) intent.current = null;
-      const refusal = error instanceof NamedChatError ? error.reason : null,
+      const refusal =
+          error instanceof NamedChatError
+            ? error.code === "too_many_wakes"
+              ? chatWords.wakeTooMany
+              : error.reason
+            : null,
         code = error instanceof NamedChatError ? error.code : null;
       // A lost answer, a busy server or a pause can pass. Any other refusal in words says what to do instead of trying again.
       const retry =
@@ -1011,6 +1127,7 @@ export function ChannelView({
                     replies={view?.replies.get(message.relaySeq)}
                     canReply={access === "read-write"}
                     readerUserId={client.readerUserId}
+                    wakes={postWakes.wakes.get(message.messageId)}
                     {...(remove?.can(message)
                       ? {
                           onDelete: () =>

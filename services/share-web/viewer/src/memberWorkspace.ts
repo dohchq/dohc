@@ -13,6 +13,7 @@ import {
   normalizeChatBody,
   postNamedChatMessage,
   readNamedChatHistory,
+  readNamedChatWakes,
   type DeletedChatMessage,
   type NamedChatChannel,
   type NamedChatComments,
@@ -93,6 +94,12 @@ function memberRemove(
   };
 }
 
+/** Only the owner's page, keyed `owner:<workspace>`, reads where its posts' agents stand. */
+const ownerWakes = (place: NamedChatPlace): Pick<ChatChannelClient, "wakes"> =>
+  place.shareId.startsWith("owner:")
+    ? { wakes: (message, signal) => readNamedChatWakes(place, message, signal) }
+    : {};
+
 /** A current file's Comments: read, followed and posted by the file's path. */
 export function commentsClient(comments: NamedChatComments, moderates: boolean): ChatChannelClient {
   return {
@@ -102,6 +109,7 @@ export function commentsClient(comments: NamedChatComments, moderates: boolean):
     readHistory: (before, signal) => readNamedChatHistory(comments, before, signal),
     follow: (since, holdMs, signal) => followNamedChat(comments, since, holdMs, signal),
     post: (post, signal) => postNamedChatMessage(comments, post, signal),
+    ...ownerWakes(comments),
     normalize: (text) => normalizeChatBody(text, comments),
     tooLong: (text) => chatBodyTooLong(text, comments),
   };
@@ -354,6 +362,7 @@ export function createGroupFollow(options: {
         readHistory: (before, signal) => readNamedChatHistory(group, before, signal),
         follow: (since, _holdMs, signal) => followGroup(group.channelWireId, since, signal),
         post: (post, signal) => postNamedChatMessage(group, post, signal),
+        ...ownerWakes(group),
         normalize: (text) => normalizeChatBody(text, group),
         tooLong: (text) => chatBodyTooLong(text, group),
       };

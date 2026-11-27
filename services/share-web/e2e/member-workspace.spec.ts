@@ -451,6 +451,29 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
       ownerOps.find((op) => op.opKind === "chat.thread.create" && op.threadId === thanks!.threadId),
     ).toMatchObject({ channelWireId: "wire-planning" });
     await ownerPage.screenshot({ path: testInfo.outputPath("owner-chat.png") });
+    // The owner mentions their agent, whose only computer is offline. Only the owner's page says it waits.
+    storage.replaceChatRunners({
+      accountId: "owner",
+      workspaceId,
+      installId: "laptop",
+      computerLabel: "Ana's laptop",
+      runners: [{ agentId: "claude", handle: "claude", displayName: "Claude", enabled: true }],
+      nowMs: Date.now(),
+    });
+    await ownerChats
+      .getByRole("textbox", { name: "Message" })
+      .fill("@claude book the Sintra train");
+    await ownerChats.getByRole("button", { name: "Send", exact: true }).click();
+    const waiting = ownerChats.locator(".chat-message", { hasText: "book the Sintra train" });
+    await expect(waiting.locator(".chat-wake")).toHaveText("Claude is waiting for a computer");
+    await expect(ownerChats.getByText("Ana's laptop")).toHaveCount(0);
+    await waiting.screenshot({ path: testInfo.outputPath("owner-wake-light.png") });
+    await ownerPage.emulateMedia({ colorScheme: "dark" });
+    await waiting.screenshot({ path: testInfo.outputPath("owner-wake-dark.png") });
+    await ownerPage.emulateMedia({ colorScheme: "light" });
+    await page.goto(`${viewer}/s/workspace/${encodeURIComponent(grantId!.grantId)}`);
+    await expect(chats.getByText("@claude book the Sintra train")).toBeVisible();
+    await expect(page.locator(".chat-wake")).toHaveCount(0);
     // A write from the owner's computer reaches the open page without a reload.
     await write("trip/budget.md", "# Budget\n\nHotel 780, flights 640, train 30.");
     await expect(ownerPage.getByText("Hotel 780, flights 640, train 30.")).toBeVisible();

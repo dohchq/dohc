@@ -1,4 +1,5 @@
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 
 // Client for share-web's named recipient chat HTTP. The README section "Named recipient chat HTTP" is the contract.
 export const CHAT_PAGE_LIMIT = 50;
@@ -357,6 +358,42 @@ export async function postNamedChatMessage(
   });
   if (!answers(value, channel)) throw invalid();
   return chatMessage(value.message);
+}
+
+/** Where one agent a post wakes stands, for the owner's page. */
+export type ChatWake = Pick<PhoneChatWake, "wakeId" | "state" | "agentName">;
+
+/** The wakes of the owner's own post. Only the owner's page asks; the relay refuses anyone else. */
+export async function readNamedChatWakes(
+  place: NamedChatPlace,
+  message: Pick<NamedChatMessage, "messageId" | "threadId">,
+  signal: AbortSignal,
+): Promise<ChatWake[]> {
+  const value = await chatRequest("/api/named-chat/wakes", signal, {
+    ...coordinates(place),
+    threadId: message.threadId,
+    messageId: message.messageId,
+  });
+  if (
+    !answers(value, place) ||
+    value.messageId !== message.messageId ||
+    !Array.isArray(value.wakes)
+  )
+    throw invalid();
+  return value.wakes.map((wake: unknown): ChatWake => {
+    if (
+      !record(wake) ||
+      typeof wake.wakeId !== "string" ||
+      typeof wake.state !== "string" ||
+      (wake.agentName !== null && typeof wake.agentName !== "string")
+    )
+      throw invalid();
+    return {
+      wakeId: wake.wakeId,
+      state: wake.state as ChatWake["state"],
+      agentName: wake.agentName,
+    };
+  });
 }
 
 /** The body the relay stores, or null when it would refuse it. */

@@ -244,6 +244,9 @@ export const chatWords = {
     `If ${computer ?? "that computer"} already started ${name ?? "an agent"}, it may run twice.`,
   /** A Try again on a wake failed or was refused: the line keeps its state, with Try again. */
   wakeRetryFailed: "dohc could not retry this agent.",
+  /** The browser's: the relay refused a post whose mentions and replies would start too many agents on the account's computers. */
+  wakeTooMany:
+    "dohc could not send this message. It would start too many agents on your computers. Mention fewer agents.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).
