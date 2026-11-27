@@ -34,6 +34,7 @@ import {
   newPageTabPath,
   openMomentDiff,
   openTab,
+  openTabInBackground,
   openTabOnce,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -345,6 +346,22 @@ describe("tabs", () => {
     expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(
       VERSIONS_TAB_PATH,
     );
+  });
+
+  it("opens a tab in the background, leaving the shown tab and focused group as they were", () => {
+    const collection = transactionalCollectionTabPath("trip/dataset.json", "budget");
+    const form = siteTabPath("apps/trip-form");
+    let state = withTabs("a.md", collection);
+    state = openTabInBackground(state, form);
+    expect(activeGroup(state).tabs.map((tab) => tab.path)).toEqual(["a.md", collection, form]);
+    expect(activeTabPath(state)).toBe(collection);
+    expect(openTabInBackground(state, form)).toEqual(state);
+
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    state = openTabInBackground(state, siteTabPath("apps/other"), DEFAULT_EDITOR_GROUP_ID);
+    expect(state.activeEditorGroup).toBe("right");
+    expect(state.editorGroups[0].activeTab).toBe(collection);
+    expect(openTabInBackground(defaultWorkbenchState(), form).editorGroups[0].activeTab).toBe(form);
   });
 
   it("keeps Chats in its existing editor group", () => {

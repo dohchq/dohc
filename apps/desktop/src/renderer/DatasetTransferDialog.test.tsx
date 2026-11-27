@@ -36,6 +36,7 @@ const baseProps: DatasetCsvTransferDialogProps = {
   },
   invoke: vi.fn(async () => ({ result: null })),
   onSave: vi.fn(async () => undefined),
+  onDiscard: vi.fn(async () => undefined),
   onClose: vi.fn(),
   onError: vi.fn(),
 };

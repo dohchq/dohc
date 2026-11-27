@@ -93,6 +93,39 @@ export function parseDatasetCsv(text: string): CsvTable {
   return { headers: rows[0]!, rows: rows.slice(1) };
 }
 
+const TITLE_HEADERS = new Set(["name", "title", "item", "task", "label"]);
+const normalHeader = (text: string) => text.trim().toLowerCase();
+export function suggestCsvMapping(
+  csv: CsvTable,
+  fields: readonly TransactionalField[],
+  operation: DatasetOperation | undefined,
+): Array<string | null> {
+  const allowed = fields.filter((field) => operation?.fieldIds.includes(field.fieldId));
+  const used = new Set<string>();
+  const mapping = csv.headers.map((header) => {
+    const field = allowed.find(
+      (field) =>
+        !used.has(field.fieldId) &&
+        (field.fieldId === header || normalHeader(field.name) === normalHeader(header)),
+    );
+    if (field) used.add(field.fieldId);
+    return field?.fieldId ?? null;
+  });
+  const title = fields.find((field) => !field.generated);
+  if (!title || title.type !== "text" || !allowed.includes(title) || used.has(title.fieldId))
+    return mapping;
+  const named = csv.headers.findIndex(
+    (header, column) => mapping[column] === null && TITLE_HEADERS.has(normalHeader(header)),
+  );
+  const cells = csv.rows.map((row) => row[0]?.trim() ?? "").filter(Boolean);
+  const textFirst =
+    mapping[0] === null &&
+    cells.length > 0 &&
+    cells.every((cell) => /\p{L}/u.test(cell) && !/^(true|false)$/i.test(cell));
+  const column = named !== -1 ? named : textFirst ? 0 : -1;
+  if (column !== -1) mapping[column] = title.fieldId;
+  return mapping;
+}
 function convert(field: TransactionalField, raw: string): AppBackendJson | undefined {
   if (raw === "") {
     if (Object.hasOwn(field, "default")) return undefined;

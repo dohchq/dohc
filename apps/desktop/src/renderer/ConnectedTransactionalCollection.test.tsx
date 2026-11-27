@@ -44,6 +44,9 @@ const render = (ui: ReactElement) =>
 const backend = vi.hoisted(() => ({
   dataset: vi.fn(),
   createWorkspaceFile: vi.fn(),
+  deleteWorkspacePath: vi.fn(async (_input: { workspaceId: string; relativePath: string }) => ({
+    trashed: true,
+  })),
   listCollections: vi.fn(),
   // The owner's page reads the table's saved views. Unless a test saves some, the workspace has no views file.
   readWorkspaceText: vi.fn(
@@ -1412,7 +1415,30 @@ describe("connected CSV transfers", () => {
       operationId: id(4),
       idempotencyKey: report.rows[0].idempotencyKey,
     });
-    expect(screen.getByText(`Saved in this workspace: ${request.relativePath}`)).toBeTruthy();
+    await waitFor(() =>
+      expect(backend.deleteWorkspacePath).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        relativePath: request.relativePath,
+      }),
+    );
+    expect(screen.getByText(/1 accepted · 0 refused/)).toBeTruthy();
+    expect(screen.queryByText(`Saved in this workspace: ${request.relativePath}`)).toBeNull();
+  });
+  it("keeps the retry report when a row is not confirmed", async () => {
+    backend.createWorkspaceFile.mockImplementation(async (input: { relativePath: string }) => ({
+      path: input.relativePath,
+    }));
+    await setup();
+    backend.dataset.mockImplementation(async (input) =>
+      input.action === "describe"
+        ? { kind: "description", dataset }
+        : Promise.reject(Error("Offline")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save retry report and import" }));
+    await screen.findByText(/0 accepted · 0 refused · 1 uncertain/);
+    const path = backend.createWorkspaceFile.mock.calls[0]![0].relativePath;
+    expect(screen.getByText(`Saved in this workspace: ${path}`)).toBeTruthy();
+    expect(backend.deleteWorkspacePath).not.toHaveBeenCalled();
   });
   it("does not begin import or repaint after the workspace changes during report save", async () => {
     const saved = deferred<{ path: string }>();

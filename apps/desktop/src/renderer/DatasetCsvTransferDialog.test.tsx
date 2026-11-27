@@ -50,7 +50,8 @@ function setup() {
         signal: AbortSignal,
       ) => Promise<void>
     >(async () => undefined),
-    invoke = vi.fn(async () => ({ result: { rows: [], nextCursor: null } }));
+    invoke = vi.fn(async () => ({ result: { rows: [], nextCursor: null } })),
+    onDiscard = vi.fn(async () => undefined);
   render(
     <DatasetCsvTransferDialog
       workspaceId="workspace-a"
@@ -58,6 +59,7 @@ function setup() {
       tableId={id(2)}
       invoke={invoke}
       onSave={onSave}
+      onDiscard={onDiscard}
       onClose={vi.fn()}
       onError={vi.fn()}
     />,
@@ -78,6 +80,23 @@ describe("DatasetCsvTransferDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save retry report and import" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
     expect(onSave).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ["a title header", "Item,Amount\nHotel,3", [id(3), id(4)]],
+    ["a first text column", "Where,Amount\nHotel,3", [id(3), id(4)]],
+    ["a differently cased Name", "amount,name\n3,Hotel", [id(4), id(3)]],
+    ["a real Name column", "Item,Name,Amount\nHotel,Tokyo,3", ["", id(3), id(4)]],
+    ["a first number column", "Cost,Where\n3,Hotel", ["", ""]],
+  ])("maps the Collection's first text field from %s", (_label, text, fields) => {
+    setup();
+    fireEvent.change(screen.getByLabelText("CSV text"), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview CSV" }));
+    expect(
+      fields.map(
+        (_, index) =>
+          (screen.getByLabelText(`Field for column ${index + 1}`) as HTMLSelectElement).value,
+      ),
+    ).toEqual(fields);
   });
   it("exports through the selected read action and saves the governed CSV", async () => {
     const { onSave, invoke } = setup();

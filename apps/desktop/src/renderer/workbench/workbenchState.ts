@@ -751,6 +751,25 @@ export function openTabOnce(
   return open ? activateTab(state, open.id, path) : openTab(state, path, targetGroupId);
 }
 
+export function openTabInBackground(
+  state: WorkbenchState,
+  path: string,
+  targetGroupId: string = state.activeEditorGroup,
+): WorkbenchState {
+  const next = openTab(state, path, targetGroupId);
+  if (next === state) return state;
+  return {
+    ...next,
+    activeEditorGroup: state.activeEditorGroup,
+    editorGroups: next.editorGroups.map((group) => {
+      const before = state.editorGroups.find((candidate) => candidate.id === group.id)?.activeTab;
+      return before && group.tabs.some((tab) => tab.path === before)
+        ? { ...group, activeTab: before }
+        : group;
+    }),
+  };
+}
+
 // Open or reactivate a tab in the requested group, or in the focused group.
 // A path is unique within a group and can be open in several groups.
 export function openTab(
