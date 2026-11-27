@@ -46,3 +46,6 @@ pub(super) mod links;
 
 #[cfg(test)]
 mod held_change_tests;
+
+#[cfg(test)]
+mod note_format_tests;

@@ -4050,7 +4050,7 @@ mod successor_validation_tests {
 
     #[test]
     fn document_sql_resource_failures_keep_storage_class() {
-        for code in [5, 6, 10, 13, 14, 7, 3, 8] {
+        for code in [5, 6, 10, 13, 14, 7, 3, 8, 11, 26] {
             let error = map_sql(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(code),
                 None,

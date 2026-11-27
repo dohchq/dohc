@@ -1405,6 +1405,52 @@ impl ActorHandle {
         .await
     }
 
+    /// Convert up to `budget` main notes after `after` to format 2, skipping
+    /// notes open under `here` and the relay's live notes in `elsewhere`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn convert_notes(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        after: Option<String>,
+        budget: usize,
+        here: dohc_engine_collab::LeaseRegistry,
+        elsewhere: HashSet<String>,
+        now_ms: i64,
+    ) -> Result<dohc_engine_sync::FormatTwoPass, RuntimeError> {
+        self.run(move |store, cache| {
+            convert_notes_on_store(
+                store,
+                cache,
+                &workspace_id,
+                after.as_deref(),
+                budget,
+                &here,
+                &elsewhere,
+                &root_dir,
+                now_ms,
+            )
+        })
+        .await
+    }
+
+    /// How many notes the workspace's main version holds.
+    pub async fn main_note_count(&self, workspace_id: String) -> Result<i64, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id=?1 \
+                         AND version_id='main' AND content_kind='richdoc'",
+                        [&workspace_id],
+                        |row| row.get(0),
+                    )
+                })
+                .map_err(|error| RuntimeError::Storage(StorageError::persist_public(error)))
+        })
+        .await
+    }
+
     pub async fn ydoc_close_session(
         &self,
         key: DocKey,
@@ -4489,6 +4535,10 @@ impl ActorHandle {
 #[path = "markdown_hold_tests.rs"]
 mod markdown_hold_tests;
 
+#[cfg(test)]
+#[path = "note_format_tests.rs"]
+mod note_format_tests;
+
 pub(super) fn refresh_head_materialized_in(
     conn: &rusqlite::Connection,
     key: &DocKey,
@@ -4639,40 +4689,92 @@ fn close_projection(
     // A reopened seed can import an engine-written head whose earlier
     // close cleared last_settled_sha. Prove these source bytes still
     // belong to this object and are on disk before allowing its prune.
-    let materialized_seed_source_sha256 = if let Some(root_dir) = root_dir
-        && let Some(path) = marker.path.as_deref()
-        && let Some(seed_source) =
-            dohc_engine_collab::read_pristine_seed_lineage_source(store, key)?
-        && store.read_with(|conn| -> Result<bool, StorageError> {
-            conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM snapshots \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-                       AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
-                       AND metadata_origin <> ?6)",
-                params![
-                    key.workspace_id,
-                    key.version_id,
-                    key.object_id,
-                    path,
-                    seed_source,
-                    dohc_engine_domain::store::CAPTURE_ORIGIN
-                ],
-                |row| row.get(0),
-            )
-            .map_err(StorageError::persist_public)
-        })?
-        && matches!(
-            probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext),
-            ProjectionTargetState::Text { sha256 } if sha256 == seed_source
-        ) {
-        Some(seed_source)
-    } else {
-        None
+    let materialized_seed_source_sha256 = match (root_dir, marker.path.as_deref()) {
+        (Some(root_dir), Some(path)) => materialized_seed_proof(store, key, path, root_dir)?,
+        _ => None,
     };
     Ok(Some(dohc_engine_collab::CloseProjection {
         sha256: hex_sha256(projection.content.as_bytes()),
         materialized_seed_source_sha256,
     }))
+}
+
+/// The seed source a note's file still holds, when the note's pristine seed
+/// imported those bytes for this object and they are on disk at `path`.
+pub(crate) fn materialized_seed_proof(
+    store: &EngineStore,
+    key: &DocKey,
+    path: &str,
+    root_dir: &std::path::Path,
+) -> Result<Option<String>, CollabError> {
+    let Some(seed_source) = dohc_engine_collab::read_pristine_seed_lineage_source(store, key)?
+    else {
+        return Ok(None);
+    };
+    let recorded = store.read_with(|conn| -> Result<bool, StorageError> {
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                   AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
+                   AND metadata_origin <> ?6)",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                path,
+                seed_source,
+                dohc_engine_domain::store::CAPTURE_ORIGIN
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::persist_public)
+    })?;
+    let on_disk = recorded
+        && matches!(
+            probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text { sha256 } if sha256 == seed_source
+        );
+    Ok(on_disk.then_some(seed_source))
+}
+
+/// The relay's live notes, by object id.
+struct OpenElsewhere<'a>(&'a HashSet<String>);
+
+impl dohc_engine_sync::LeaseProbe for OpenElsewhere<'_> {
+    fn is_live(&self, key: &DocKey) -> bool {
+        self.0.contains(&key.object_id)
+    }
+}
+
+/// One step of the Convert notes operation over the writer store. A writer
+/// cache entry for a lineage the step replaced or pruned is forgotten.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn convert_notes_on_store(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    after: Option<&str>,
+    budget: usize,
+    here: &dohc_engine_collab::LeaseRegistry,
+    elsewhere: &HashSet<String>,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+) -> Result<dohc_engine_sync::FormatTwoPass, RuntimeError> {
+    let pass = dohc_engine_sync::convert_notes_to_format_two(
+        store,
+        workspace_id,
+        after,
+        budget,
+        here,
+        &OpenElsewhere(elsewhere),
+        &|store, key, path| materialized_seed_proof(store, key, path, root_dir),
+        &NoFaults,
+        now_ms,
+    );
+    if !matches!(&pass, Ok(pass) if pass.converted.is_empty()) {
+        cache.clear();
+    }
+    Ok(pass?)
 }
 
 /// Name the settlement work an unload must wait for: the condition a

@@ -1929,6 +1929,7 @@ mod tests {
             "sync.pullHosted",
             "sync.remoteChanges",
             "sync.firstExportsHeldOpen",
+            "sync.convertNotes",
             "sync.push",
             "sync.recoverOrigin",
             "versionedBinary.read",

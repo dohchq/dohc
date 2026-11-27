@@ -1023,6 +1023,16 @@ mod tests {
                 "engine: internal refusal: INTERNAL corrupt-lineage",
             ),
             (
+                RuntimeError::Collab(CollabError::Storage(StorageError::corrupt_public(
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
+                        None,
+                    ),
+                ))),
+                "state-corrupt",
+                "engine: internal refusal: INTERNAL state-corrupt",
+            ),
+            (
                 RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
                     std::io::Error::other("missing search table"),
                 ))),
