@@ -227,7 +227,14 @@ fn a_kept_base_of_a_returning_note_waits_while_another_spelling_holds_its_path()
     replay_reading(&mut store);
     reading_body_sequence_here(|| sync_parking(&client, &mut store));
     assert_eq!(kept_of(&store, "doc-a"), 2);
-    assert!(is_parked(&store, "doc-a"));
+    assert!(hold(&store, "doc-a").is_some());
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM snapshots WHERE object_id='doc-a'"
+        ),
+        0
+    );
     feed.unshare("doc-c");
     reading_body_sequence_here(|| sync_parking(&client, &mut store));
     reading_body_sequence_here(|| sync_parking(&client, &mut store));
@@ -279,8 +286,29 @@ fn a_hosted_kept_base_refused_for_its_size_keeps_its_claim_and_refuses_a_later_e
     replay_reading(&mut store);
     reading_body_sequence_here(|| sync(&client, &mut store));
     let reasons = kept_reasons_of(&store, "doc-a");
-    assert_eq!(reasons.len(), 1, "{reasons:?}");
-    assert!(reasons[0].contains("projection exceeds"), "{reasons:?}");
+    let marker =
+        dohc_engine_collab::read_marker(&store, &DocKey::new("ws", "main", "doc-a").unwrap())
+            .unwrap()
+            .and_then(|marker| marker.lineage_claim_id);
+    let pending = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT 'refusal '||origin_id||'/'||origin_seq||' '||substr(reason_message,1,80) \
+                   FROM replication_pending_refusals \
+                 UNION ALL SELECT 'kept '||origin_id||'/'||origin_seq||' '||replayed||' '||substr(reason,1,80) \
+                   FROM replication_refused_ydoc_blobs \
+                 UNION ALL SELECT 'log '||origin_id||'/'||origin_seq||' '||op_kind||' '||COALESCE(apply_disposition,'-') \
+                   FROM replication_log \
+                 UNION ALL SELECT 'deferred '||origin_id||'/'||origin_seq FROM ydoc_deferred_updates",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    assert!(
+        marker.is_none() && reasons.len() == 1 && reasons[0].contains("projection exceeds"),
+        "{marker:?} {reasons:?} {pending:?}"
+    );
     ydoc_row(
         client.transport(),
         ("writer", 0),
