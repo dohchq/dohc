@@ -1888,7 +1888,6 @@ The name is the file name without .md.
 
 - `--field <name=value>`: Set this field to this text. Repeat for more fields.
 - `--fields-json <json>`: Set fields from a JSON object, such as {"points":3,"done":true,"tags":["a"],"due":null}.
-- `--agent <name>`: Record this agent name with the change.
 - `--record-id <id>`: Give the record this id: rec_ and 26 characters from a to z and 2 to 7.
 
 With `--json`, prints `{ schemaVersion, ok: true, recordId, recordPath, kept? }`.

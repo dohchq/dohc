@@ -92,13 +92,21 @@ describe("collection commands", () => {
         "status=Open",
         "--fields-json",
         JSON.stringify(typed),
-        "--agent",
-        "Nova",
       ],
       request,
     });
     await executeCli({
-      argv: ["document", "set-fields", "tasks/launch.md", "--fields-json", JSON.stringify(typed)],
+      argv: [
+        "document",
+        "set-fields",
+        "tasks/launch.md",
+        "--field",
+        "note=x",
+        "--field",
+        "note=y",
+        "--fields-json",
+        JSON.stringify(typed),
+      ],
       request,
     });
     expect(request.mock.calls.map(([call]) => call)).toEqual([
@@ -109,12 +117,14 @@ describe("collection commands", () => {
           collectionPath: "tasks",
           name: "launch",
           fields: { status: "Open", ...typed },
-          agent: "Nova",
         }),
       }),
       expect.objectContaining({
         verb: "collectionSetFields",
-        args: expect.objectContaining({ recordPath: "tasks/launch.md", fields: typed }),
+        args: expect.objectContaining({
+          recordPath: "tasks/launch.md",
+          fields: { note: "y", ...typed },
+        }),
       }),
     ]);
   });
@@ -127,7 +137,9 @@ describe("collection commands", () => {
     [["collection", "create-record", "tasks", "a", "--record-id", "r1"], "invalid recordId"],
     [["document", "set-fields", "a.md", "--fields-json", "[1]"], "takes a JSON object"],
     [["document", "set-fields", "a.md", "--fields-json", '{"id":"x"}'], "engine-owned"],
-    [["document", "set-fields", "a.md", "--field", "a=1", "--fields-json", '{"a":1}'], "once"],
+    [["document", "set-fields", "a.md", "--field", "a=1", "--fields-json", '{"a":1}'], "not both"],
+    [["document", "set-fields", "a.md", "--field", "a=1", "--fields-json", "null"], "JSON object"],
+    [["collection", "create-record", "tasks", "a", "--agent", "Nova"], "--agent"],
   ])("refuses %j before it reaches the app", async (argv, refusal) => {
     const run = await executeCli({ argv, request: noSocket });
     expect(run.exitCode).toBe(1);

@@ -589,22 +589,23 @@ const recordFieldFlags: readonly CliFlag[] = [
     value: "json",
     text: 'Set fields from a JSON object, such as {"points":3,"done":true,"tags":["a"],"due":null}.',
   },
-  { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
 
 function recordFields(input: VerbInput): Record<string, unknown> {
-  const named = allValues(input, "--field").map((entry): [string, unknown] => {
-    const at = entry.indexOf("=");
-    if (at <= 0) fail("--field takes name=value");
-    return [entry.slice(0, at), entry.slice(at + 1)];
-  });
-  const json = jsonFlag(input, "--fields-json") ?? {};
+  const named = Object.fromEntries(
+    allValues(input, "--field").map((entry) => {
+      const at = entry.indexOf("=");
+      if (at <= 0) fail("--field takes name=value");
+      return [entry.slice(0, at), entry.slice(at + 1)];
+    }),
+  );
+  const json = jsonFlag(input, "--fields-json");
+  if (json === undefined) return named;
   if (typeof json !== "object" || json === null || Array.isArray(json))
     fail("--fields-json takes a JSON object");
-  const entries = [...named, ...Object.entries(json)];
-  const names = new Set(entries.map(([name]) => name));
-  if (names.size < entries.length) fail("set each field once");
-  return Object.fromEntries(entries);
+  if (Object.keys(json).some((name) => name in named))
+    fail("set each field with --field or --fields-json, not both");
+  return { ...named, ...json };
 }
 
 function socketCommand(verb: CollectionVerb, given: Record<string, unknown>): CliCommandBody {
@@ -709,7 +710,10 @@ const DOCUMENT_VERBS = {
     capabilityId: "collection.record.edit",
     summary: "Set fields on a Collection record.",
     operands: "<record>",
-    flags: recordFieldFlags,
+    flags: [
+      ...recordFieldFlags,
+      { name: "--agent", value: "name", text: "Record this agent name with the change." },
+    ],
     notes: [
       "The change lands in the record's frontmatter, and record history attributes it to the agent.",
     ],
@@ -1576,7 +1580,6 @@ const COLLECTION_VERBS = {
         name,
         fields: recordFields(input),
         recordId: lastValue(input, "--record-id"),
-        ...chatAgent(input),
       });
     },
   },
