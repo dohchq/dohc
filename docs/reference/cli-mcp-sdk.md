@@ -496,11 +496,11 @@ Read one dohc Chat thread, or one group's stream. With `threadId`: its messages 
 - `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
 - `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, reactions?, agentRequests?, authorReported?, work? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, optionDetails?, chosenOption?, resolvedByMessageId?, reactions?, agentRequests?, authorReported?, work? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll: give each choice as a short label, or as `{ label, detail }` with a one-line explanation, and keep the choices out of `body` so people read them once; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -509,7 +509,7 @@ Changes the workspace, so a shared view does not offer it.
 - `body`: `string`. Required.
 - `attachments`: `string[]`
 - `needsDecision`: `boolean`
-- `options`: `string[]`
+- `options`: `(string | { label: string, detail?: string })[]`
 - `runId`: `string`
 - `model`: `string`
 - `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
@@ -529,7 +529,7 @@ Changes the workspace, so a shared view does not offer it.
 - `body`: `string`
 - `attachments`: `string[]`
 - `needsDecision`: `boolean`
-- `options`: `string[]`
+- `options`: `(string | { label: string, detail?: string })[]`
 - `runId`: `string`
 - `model`: `string`
 - `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
@@ -2085,7 +2085,7 @@ Show a thread or message and mark the thread read, or show a group's posts and c
 - `--before <position>`: For a group, show the page older than this position, as printed after older:.
 - `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported?, work? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionOptionDetails?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported?, work? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 

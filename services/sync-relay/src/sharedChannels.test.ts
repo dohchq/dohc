@@ -809,6 +809,34 @@ describe("shared channels (MU-C4)", () => {
       ),
     );
     expect(bom.status).toBe(200);
+    for (const optionDetails of [
+      ["only one"],
+      ["x".repeat(301), null],
+      ["two\nlines", null],
+      [7, null],
+      ["\uD800", null],
+    ]) {
+      const badDetails = await h(
+        request(
+          MEMBER_A,
+          `/sync/shares/${shareA}/log`,
+          jsonBody({
+            originId: "origin-member-a",
+            ops: [
+              {
+                ...decision("msg-a-1", {
+                  options: ["Friday", "Monday"],
+                  optionDetails,
+                  chosenOption: "Monday",
+                }),
+                originSeq: 4,
+              },
+            ],
+          }),
+        ),
+      );
+      expect(badDetails.status, JSON.stringify(optionDetails)).toBe(403);
+    }
     const padded = await h(
       request(
         MEMBER_A,

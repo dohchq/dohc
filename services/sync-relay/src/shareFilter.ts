@@ -1065,6 +1065,7 @@ const SERVED_CHAT_FIELDS = {
     "resolvedByMessageId",
     "atMs",
     "options",
+    "optionDetails",
     "chosenOption",
   ],
   "chat.attachment.add": ["attachmentId", "threadId", "messageId", "targetKind", "createdAtMs"],
@@ -1236,7 +1237,7 @@ const CHAT_TEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
     "work",
   ],
   "chat.reaction.set": ["emoji", "authorDisplayName"],
-  "chat.decision.set": ["options", "chosenOption"],
+  "chat.decision.set": ["options", "optionDetails", "chosenOption"],
   "chat.message.tombstone": ["authorDisplayName", "authorOwnerDisplayName"],
 };
 
@@ -1281,6 +1282,13 @@ function withheldLinks(
   const payload = { ...served };
   for (const field of CHAT_TEXT_FIELDS[opKind]!) {
     if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
+  }
+  if (Array.isArray(payload.optionDetails)) {
+    payload.optionDetails = payload.optionDetails.map((detail: unknown) =>
+      typeof detail === "string" && trimLikeEngine(detail).length > MAX_POLL_OPTION_DETAIL_UNITS
+        ? null
+        : detail,
+    );
   }
   return { ...decision, payload };
 }
@@ -1428,7 +1436,12 @@ function withoutDeletedWords(
   const messageId = collectString(served?.messageId);
   if (!served || !threadId || !messageId || !chat.messageDeleted(threadId, messageId))
     return decision;
-  const { options: _options, chosenOption: _chosenOption, ...rest } = served;
+  const {
+    options: _options,
+    optionDetails: _optionDetails,
+    chosenOption: _chosenOption,
+    ...rest
+  } = served;
   return { ...decision, payload: rest };
 }
 
@@ -1675,6 +1688,19 @@ function shareReadDecision(
 // replica, so it is refused here instead.
 const MAX_POLL_OPTIONS = 12;
 const MAX_POLL_OPTION_UNITS = 200;
+const MAX_POLL_OPTION_DETAIL_UNITS = 300;
+function pollDetailsValid(details: unknown, optionCount: number): boolean {
+  if (details === undefined || details === null) return true;
+  if (!Array.isArray(details)) return false;
+  if (details.length === 0) return true;
+  if (details.length !== optionCount) return false;
+  return details.every((detail) => {
+    if (detail === null) return true;
+    if (typeof detail !== "string" || !detail.isWellFormed()) return false;
+    const trimmed = trimLikeEngine(detail);
+    return trimmed.length <= MAX_POLL_OPTION_DETAIL_UNITS && !/[\r\n]/u.test(trimmed);
+  });
+}
 // Rust's `str::trim` strips Unicode White_Space; JavaScript's `trim` also
 // strips U+FEFF, which is not White_Space. The relay trims the way the
 // engine does, or a legitimate resolve could be refused here.
@@ -1707,6 +1733,7 @@ function decisionPollFieldsValid(payload: unknown): boolean {
       normalized.push(trimmed);
     }
   }
+  if (!pollDetailsValid(record.optionDetails, normalized.length)) return false;
   if (chosen !== undefined) {
     // The engine compares the pick as written against the trimmed choices.
     if (typeof chosen !== "string" || record.state !== "resolved" || normalized.length === 0)

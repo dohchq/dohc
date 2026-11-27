@@ -926,12 +926,12 @@ impl EngineService {
                     .await?
             }
             "chats.threads.start" => {
-                self.chats_threads_start(
+                Box::pin(self.chats_threads_start(
                     &ctx,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
-                )
+                ))
                 .await?
             }
             "chats.threads.create" => {
@@ -976,12 +976,12 @@ impl EngineService {
                     .await?
             }
             "chats.messages.send" => {
-                self.chats_messages_send(
+                Box::pin(self.chats_messages_send(
                     &ctx,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
-                )
+                ))
                 .await?
             }
             "chats.decisions.resolve" => {

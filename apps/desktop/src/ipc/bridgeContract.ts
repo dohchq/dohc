@@ -2917,6 +2917,8 @@ export const ChatDecisionRecord = z.object({
   atMs: z.number(),
   // A poll's choices, in order. Absent for a bare question.
   options: z.array(z.string().min(1).max(200)).max(12).optional(),
+  // One explanation per choice, in the same order. Absent when the poll has none.
+  optionDetails: z.array(z.string().min(1).max(300).nullable()).max(12).optional(),
   chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;

@@ -253,6 +253,7 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
                 body: "local".into(),
                 needs_decision: false,
                 options: vec![],
+                option_details: Vec::new(),
                 attachments: vec![LocalAttachmentInput {
                     object_id: "local".into(),
                     path_hint: None,

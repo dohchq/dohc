@@ -127,6 +127,21 @@ describe("post and send", () => {
       { body: "Pick", options: ["x".repeat(201)] },
       "Each choice is one line of at most 200 characters.",
     ],
+    [
+      "an explanation for only some choices",
+      { body: "Pick", options: ["Monday", "Tuesday"], optionDetails: ["Early"] },
+      "Give one explanation per choice, or none.",
+    ],
+    [
+      "a two-line explanation",
+      { body: "Pick", options: ["Monday", "Tuesday"], optionDetails: ["Ear\nly", null] },
+      "Each explanation is one line of at most 300 characters.",
+    ],
+    [
+      "a long explanation",
+      { body: "Pick", options: ["Monday", "Tuesday"], optionDetails: [null, "x".repeat(301)] },
+      "Each explanation is one line of at most 300 characters.",
+    ],
   ] as const)("refuses %s before the host is asked", async (_case, message, reason) => {
     const { store, host } = trip();
     await expect(postToGroup(host, { channelId: "channel-trip", ...message })).rejects.toThrow(
@@ -155,6 +170,18 @@ describe("post and send", () => {
       needsDecision: false,
       options: [],
     });
+    await postToGroup(host, {
+      channelId: "channel-trip",
+      body: "Where?",
+      options: ["Lisbon", "Porto"],
+      optionDetails: [" By the sea ", "  "],
+    });
+    await postToGroup(host, {
+      channelId: "channel-trip",
+      body: "Who?",
+      options: ["Ana", "Cy"],
+      optionDetails: [null, " "],
+    });
     expect(commands).toEqual([
       {
         start: {
@@ -166,6 +193,18 @@ describe("post and send", () => {
       },
       { start: { channelId: "channel-trip", lane: "posts", body: "Ready?", needsDecision: true } },
       { start: { channelId: "channel-trip", lane: "posts", body: "Hello" } },
+      {
+        start: {
+          channelId: "channel-trip",
+          lane: "posts",
+          body: "Where?",
+          options: ["Lisbon", "Porto"],
+          optionDetails: ["By the sea", null],
+        },
+      },
+      {
+        start: { channelId: "channel-trip", lane: "posts", body: "Who?", options: ["Ana", "Cy"] },
+      },
     ]);
   });
 

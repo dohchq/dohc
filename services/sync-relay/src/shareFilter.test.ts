@@ -1097,11 +1097,16 @@ describe("chat share op filter", () => {
       resolvedByMessageId: "m2",
       atMs: 3,
       options: ["A", "B"],
+      optionDetails: ["The first", null],
       chosenOption: "B",
     });
     expect(poll.allowed).toBe(true);
     if (!poll.allowed) return;
-    expect(poll.payload).toMatchObject({ options: ["A", "B"], chosenOption: "B" });
+    expect(poll.payload).toMatchObject({
+      options: ["A", "B"],
+      optionDetails: ["The first", null],
+      chosenOption: "B",
+    });
   });
 
   it("allows exactly the granted channel's chat ops and nothing else", () => {
@@ -1473,6 +1478,7 @@ describe("chat share op filter", () => {
           state: "open",
           atMs: 1,
           options: [linked, "Keep"],
+          optionDetails: [linked, null],
           chosenOption: linked,
         }),
         resolver,
@@ -1513,6 +1519,24 @@ describe("chat share op filter", () => {
       expect(decision.allowed).toBe(true);
       expect(JSON.stringify(decision.allowed && decision.payload)).not.toContain("finance");
     }
+    const near = `${"x".repeat(300 - linked.length)}${linked}`;
+    const longer = filterOpForShare(
+      group,
+      "chat.decision.set",
+      JSON.stringify({
+        threadId: "thread-in",
+        messageId: "m1",
+        state: "open",
+        atMs: 1,
+        options: ["Go", "Stay"],
+        optionDetails: [near, "Short"],
+      }),
+      resolver,
+    );
+    expect(longer.allowed && (longer.payload as { optionDetails: unknown }).optionDetails).toEqual([
+      null,
+      "Short",
+    ]);
     const append = filterOpForShareAppend(
       channelShare,
       "chat.message.append",

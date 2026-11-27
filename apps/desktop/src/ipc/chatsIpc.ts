@@ -168,6 +168,9 @@ function chatDecisionForIpc(decision: StoreDecision): ChatDecisionRecord {
     state: decision.state,
     ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+    ...(decision.optionDetails && decision.optionDetails.length > 0
+      ? { optionDetails: [...decision.optionDetails] }
+      : {}),
     ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
     atMs: decision.atMs,
   };

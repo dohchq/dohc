@@ -98,7 +98,9 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
 }
 
 export function renderDecisionOptions(message: CliShowMessage): string[] {
-  return (message.decisionOptions ?? []).map((option) =>
-    option === message.decisionChosenOption ? `- [x] ${option}` : `- [ ] ${option}`,
-  );
+  return (message.decisionOptions ?? []).map((option, index) => {
+    const detail = message.decisionOptionDetails?.[index];
+    const line = detail ? `${option} — ${detail}` : option;
+    return option === message.decisionChosenOption ? `- [x] ${line}` : `- [ ] ${line}`;
+  });
 }

@@ -57,6 +57,8 @@ struct ChatMessageSendParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    option_details: Option<Vec<Option<String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
@@ -379,6 +381,8 @@ struct DecisionWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    option_details: Option<&'a [Option<String>]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     chosen_option: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_by_message_id: Option<&'a str>,
@@ -391,6 +395,8 @@ pub(super) fn decision_json(decision: &ChatDecision) -> Value {
         state: decision.state.as_str(),
         at_ms: decision.at_ms,
         options: (!decision.options.is_empty()).then_some(decision.options.as_slice()),
+        option_details: (!decision.option_details.is_empty())
+            .then_some(decision.option_details.as_slice()),
         chosen_option: decision.chosen_option.as_deref(),
         resolved_by_message_id: decision.resolved_by_message_id.as_deref(),
     })
@@ -631,6 +637,7 @@ impl EngineService {
                     body: params.body,
                     needs_decision: params.needs_decision,
                     options: params.options.unwrap_or_default(),
+                    option_details: params.option_details.unwrap_or_default(),
                     attachments: params
                         .attachments
                         .unwrap_or_default()
@@ -1102,6 +1109,7 @@ mod tests {
             resolved_by_message_id: None,
             at_ms: 12,
             options: Vec::new(),
+            option_details: Vec::new(),
             chosen_option: None,
         };
         assert_eq!(
@@ -1112,6 +1120,7 @@ mod tests {
             state: ChatDecisionState::Resolved,
             resolved_by_message_id: Some("answer".to_owned()),
             options: vec!["yes".to_owned(), "no".to_owned()],
+            option_details: vec![None, Some("Wait for the fix".to_owned())],
             chosen_option: Some("no".to_owned()),
             ..open
         };
@@ -1123,6 +1132,7 @@ mod tests {
                 "state": "resolved",
                 "atMs": 12,
                 "options": ["yes", "no"],
+                "optionDetails": [null, "Wait for the fix"],
                 "chosenOption": "no",
                 "resolvedByMessageId": "answer",
             })

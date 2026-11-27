@@ -214,6 +214,7 @@ const postArgsSchema = z
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
     options: z.array(z.string().min(1)).max(12).optional(),
+    optionDetails: z.array(z.string().nullable()).max(12).optional(),
     body: z.string().min(1),
     agent: documentAgentNameSchema.optional(),
   })
@@ -229,6 +230,7 @@ const replyArgsSchema = z
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
     options: z.array(z.string().min(1)).max(12).optional(),
+    optionDetails: z.array(z.string().nullable()).max(12).optional(),
     resolve: z.string().min(1).optional(),
     choose: z.string().min(1).optional(),
     body: z.string().min(1),
@@ -1461,6 +1463,7 @@ const cliShowMessageSchema = z
     parentMessageId: z.string().min(1).optional(),
     decisionState: z.enum(["open", "resolved"]).optional(),
     decisionOptions: z.array(z.string()).optional(),
+    decisionOptionDetails: z.array(z.string().nullable()).optional(),
     decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
@@ -1892,6 +1895,7 @@ const rawChatMessageSchema = z
     needsDecision: z.boolean(),
     decisionState: z.enum(["open", "resolved"]).optional(),
     options: z.array(z.string()).optional(),
+    optionDetails: z.array(z.string().nullable()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
     // The message's active reactions, oldest first per cell. Absent when it has none.

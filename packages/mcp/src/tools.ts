@@ -2592,8 +2592,9 @@ interface ChatWriteInput {
   // Workspace-relative paths of tracked files to attach.
   attachments?: string[];
   needsDecision?: boolean;
-  // A poll's choices; implies a decision.
-  options?: string[];
+  // A poll's choices; implies a decision. A choice may carry a short
+  // explanation shown under it.
+  options?: (string | { label: string; detail?: string })[];
   // Links the message to a local agent run for provenance.
   runId?: string;
   // What the agent reports about work it does outside dohc.
@@ -2629,6 +2630,18 @@ export function reportedAgent(
   };
 }
 
+function pollArgs(options: ChatWriteInput["options"]) {
+  if (options === undefined) return {};
+  const labels = options.map((option) => (typeof option === "string" ? option : option.label));
+  const details = options.map((option) =>
+    typeof option === "string" ? null : (option.detail ?? null),
+  );
+  return {
+    options: labels,
+    ...(details.some((detail) => detail !== null) ? { optionDetails: details } : {}),
+  };
+}
+
 function chatWriteArgs(
   ctx: ToolContext,
   input: ChatWriteInput,
@@ -2641,7 +2654,7 @@ function chatWriteArgs(
     ...(reported !== undefined ? { reported } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
-    ...(input.options !== undefined ? { options: input.options } : {}),
+    ...pollArgs(input.options),
     ...(input.work !== undefined ? { work: input.work } : {}),
     body: input.body,
   };

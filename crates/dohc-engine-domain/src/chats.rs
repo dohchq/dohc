@@ -138,6 +138,7 @@ const MAX_CHANNEL_PURPOSE_CHARS: usize = 200;
 /// many characters.
 const MAX_POLL_OPTIONS: usize = 12;
 const MAX_POLL_OPTION_CHARS: usize = 200;
+const MAX_POLL_OPTION_DETAIL_CHARS: usize = 300;
 const MAX_CHANNEL_FOLDER_PATH_CHARS: usize = 512;
 const MAX_DISPLAY_NAME_CHARS: usize = 200;
 /// Opaque relay user-id char cap (`normalizeAuthorUserId`).
@@ -606,6 +607,9 @@ pub struct ChatDecision {
     pub at_ms: i64,
     /// A poll's choices, in order. Empty for a bare question.
     pub options: Vec<String>,
+    /// A short explanation for each choice, in the same order. Empty when the
+    /// poll has none.
+    pub option_details: Vec<Option<String>>,
     /// The choice the answer named, when the poll had choices.
     pub chosen_option: Option<String>,
 }
@@ -1024,6 +1028,8 @@ pub struct StartChannelThread {
     pub needs_decision: bool,
     /// A poll's choices. Implies `needs_decision`.
     pub options: Vec<String>,
+    /// An explanation for each choice, in order, or empty.
+    pub option_details: Vec<Option<String>>,
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
@@ -1085,6 +1091,8 @@ pub struct SendMessage {
     pub needs_decision: bool,
     /// A poll's choices. Implies `needs_decision`.
     pub options: Vec<String>,
+    /// An explanation for each choice, in order, or empty.
+    pub option_details: Vec<Option<String>>,
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
@@ -3521,7 +3529,8 @@ impl<'a> LinkedChatStore<'a> {
         }
         let title = normalize_optional_thread_title(input.title.as_deref())?;
         let options_c = normalize_poll_options(&input.options)?;
-        let options_fingerprint = options_c.join("\u{0}");
+        let details_c = normalize_poll_option_details(&options_c, &input.option_details)?;
+        let options_fingerprint = poll_fingerprint(&options_c, &details_c);
         let display_name = normalize_display_name(&input.author_display_name)?;
         let owner_name = normalize_agent_owner_name(
             input.author_kind != ChatActorKind::Human,
@@ -3851,6 +3860,7 @@ impl<'a> LinkedChatStore<'a> {
                     ChatDecisionState::Open,
                     None,
                     &options_c,
+                    &details_c,
                     None,
                     now,
                 )?;
@@ -3987,7 +3997,8 @@ impl<'a> LinkedChatStore<'a> {
         };
         let body = normalize_body(&input.body)?;
         let options_c = normalize_poll_options(&input.options)?;
-        let options_fingerprint = options_c.join("\u{0}");
+        let details_c = normalize_poll_option_details(&options_c, &input.option_details)?;
+        let options_fingerprint = poll_fingerprint(&options_c, &details_c);
         let attachments = normalize_attachments(&input.attachments)?;
         let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
@@ -4242,6 +4253,7 @@ impl<'a> LinkedChatStore<'a> {
                     ChatDecisionState::Open,
                     None,
                     &options_c,
+                    &details_c,
                     None,
                     now,
                 )?;
@@ -4409,6 +4421,7 @@ impl<'a> LinkedChatStore<'a> {
                 ChatDecisionState::Resolved,
                 Some(&input.resolved_by_message_id),
                 &current.options,
+                &current.option_details,
                 chosen.as_deref(),
                 at_ms,
             )?;
@@ -4451,7 +4464,7 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms, \
-                            d.options_json, d.chosen_option \
+                            d.options_json, d.chosen_option, d.option_details_json \
                      FROM chat_decisions d \
                      JOIN chat_messages m ON m.workspace_id = d.workspace_id \
                        AND m.thread_id = d.thread_id AND m.message_id = d.message_id \
@@ -8604,22 +8617,25 @@ fn upsert_decision_lww(
     state: ChatDecisionState,
     resolved_by_message_id: Option<&str>,
     options: &[String],
+    option_details: &[Option<String>],
     chosen_option: Option<&str>,
     at_ms: i64,
     origin_id: &str,
     origin_seq: i64,
 ) -> Result<bool, DomainError> {
     let options_json = encode_poll_options(options);
+    let option_details_json = encode_poll_option_details(option_details);
     let updated = tx.execute(
         "INSERT INTO chat_decisions \
          (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq, \
-          options_json,chosen_option) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+          options_json,chosen_option,option_details_json) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) \
          ON CONFLICT(workspace_id,message_id) DO UPDATE SET \
            thread_id=excluded.thread_id,state=excluded.state,\
            resolved_by_message_id=excluded.resolved_by_message_id,at_ms=excluded.at_ms,\
            origin_id=excluded.origin_id,origin_seq=excluded.origin_seq,\
-           options_json=excluded.options_json,chosen_option=excluded.chosen_option \
+           options_json=excluded.options_json,chosen_option=excluded.chosen_option,\
+           option_details_json=excluded.option_details_json \
          WHERE excluded.at_ms > chat_decisions.at_ms \
             OR (excluded.at_ms = chat_decisions.at_ms AND \
                 (CASE excluded.state WHEN 'resolved' THEN 1 ELSE 0 END) > \
@@ -8639,7 +8655,8 @@ fn upsert_decision_lww(
             origin_id,
             origin_seq,
             options_json,
-            chosen_option
+            chosen_option,
+            option_details_json
         ],
     )
     .map_err(DomainError::sql_persist)?;
@@ -8698,6 +8715,67 @@ pub fn normalize_poll_options(options: &[String]) -> Result<Vec<String>, DomainE
     Ok(out)
 }
 
+/// Trim and bound a poll's explanations: none without choices, one entry per
+/// choice, each one line of at most 300 characters. A blank entry is none,
+/// and a poll whose entries are all none has none.
+pub fn normalize_poll_option_details(
+    options: &[String],
+    details: &[Option<String>],
+) -> Result<Vec<Option<String>>, DomainError> {
+    if details.is_empty() {
+        return Ok(Vec::new());
+    }
+    if details.len() != options.len() {
+        return Err(DomainError::chat(
+            "invalid-poll-options",
+            "Give one explanation per choice, or none.",
+        ));
+    }
+    let mut out = Vec::with_capacity(details.len());
+    for raw in details {
+        let detail = raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| !detail.is_empty());
+        if let Some(detail) = detail
+            && (detail.encode_utf16().count() > MAX_POLL_OPTION_DETAIL_CHARS
+                || detail.contains(['\n', '\r']))
+        {
+            return Err(DomainError::chat(
+                "invalid-poll-options",
+                "Each explanation is one line of at most 300 characters.",
+            ));
+        }
+        out.push(detail.map(str::to_owned));
+    }
+    if out.iter().all(Option::is_none) {
+        out.clear();
+    }
+    Ok(out)
+}
+
+fn poll_fingerprint(options: &[String], details: &[Option<String>]) -> String {
+    let mut fingerprint = options.join("\u{0}");
+    if !details.is_empty() {
+        fingerprint.push('\u{1}');
+        fingerprint.push_str(&serde_json::to_string(details).expect("strings encode"));
+    }
+    fingerprint
+}
+
+/// A poll's explanations on disk: a JSON array beside its choices, or null.
+pub fn encode_poll_option_details(details: &[Option<String>]) -> Option<String> {
+    (!details.is_empty()).then(|| serde_json::to_string(details).expect("strings encode"))
+}
+
+pub fn decode_poll_option_details(raw: Option<&str>) -> Result<Vec<Option<String>>, DomainError> {
+    raw.map_or(Ok(Vec::new()), |raw| {
+        serde_json::from_str(raw).map_err(|_| DomainError::StateCorrupt {
+            reason: "chat decision option details are corrupt",
+        })
+    })
+}
+
 /// The answer to a poll names one of its choices. A bare question takes
 /// no choice.
 fn validate_chosen_option(
@@ -8736,6 +8814,7 @@ fn journal_decision_set(
     state: ChatDecisionState,
     resolved_by_message_id: Option<&str>,
     options: &[String],
+    option_details: &[Option<String>],
     chosen_option: Option<&str>,
     at_ms: i64,
 ) -> Result<(), DomainError> {
@@ -8748,6 +8827,7 @@ fn journal_decision_set(
         state,
         resolved_by_message_id,
         options,
+        option_details,
         chosen_option,
         at_ms,
         &origin_id,
@@ -8765,6 +8845,9 @@ fn journal_decision_set(
         });
         if !options.is_empty() {
             payload["options"] = serde_json::json!(options);
+        }
+        if state == ChatDecisionState::Open && !option_details.is_empty() {
+            payload["optionDetails"] = serde_json::json!(option_details);
         }
         if let Some(chosen) = chosen_option {
             payload["chosenOption"] = serde_json::json!(chosen);
@@ -9194,7 +9277,7 @@ fn require_decision(
 ) -> Result<ChatDecision, DomainError> {
     conn.query_row(
         "SELECT thread_id, message_id, state, resolved_by_message_id, at_ms, \
-                options_json, chosen_option \
+                options_json, chosen_option, option_details_json \
          FROM chat_decisions WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
         params![workspace_id, thread_id, message_id],
         map_decision_row,
@@ -9613,6 +9696,7 @@ fn map_decision_row(
     let at_ms: i64 = row.get(4)?;
     let options_json: Option<String> = row.get(5)?;
     let chosen_option: Option<String> = row.get(6)?;
+    let option_details_json: Option<String> = row.get(7)?;
     Ok((|| {
         let state = ChatDecisionState::from_db(&state)?;
         if !persisted_safe_integer(at_ms) {
@@ -9621,6 +9705,7 @@ fn map_decision_row(
             });
         }
         let options = decode_poll_options(options_json.as_deref())?;
+        let option_details = decode_poll_option_details(option_details_json.as_deref())?;
         Ok(ChatDecision {
             thread_id,
             message_id,
@@ -9628,6 +9713,7 @@ fn map_decision_row(
             resolved_by_message_id,
             at_ms,
             options,
+            option_details,
             chosen_option,
         })
     })())

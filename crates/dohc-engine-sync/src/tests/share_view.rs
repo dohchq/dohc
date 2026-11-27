@@ -4691,6 +4691,7 @@ fn a_member_view_refuses_general_agent_chats_and_direct_messages() {
                 body: "private".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,

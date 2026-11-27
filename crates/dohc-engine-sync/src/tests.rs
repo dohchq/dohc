@@ -1348,6 +1348,7 @@ fn one_message_registers_more_than_one_reference_page_without_resending_acknowle
                 body,
                 needs_decision: false,
                 options: vec![],
+                option_details: Vec::new(),
                 attachments: vec![],
                 automation: None,
                 author_agent_id: None,

@@ -607,7 +607,7 @@ fn decisions_for_messages(
     let mut stmt = conn
         .prepare_cached(
             "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms, \
-                    d.options_json, d.chosen_option \
+                    d.options_json, d.chosen_option, d.option_details_json \
              FROM json_each(?2) ids \
              CROSS JOIN chat_decisions d ON d.workspace_id = ?1 AND d.message_id = ids.value",
         )

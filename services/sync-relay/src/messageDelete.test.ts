@@ -852,6 +852,7 @@ describe("a deleted message's poll", () => {
       state: "resolved",
       atMs: 5,
       options: ["the dock", "the pier"],
+      optionDetails: ["By the boats", null],
       chosenOption: "the pier",
     });
   const pollOf = (ops: Pulled["ops"], messageId: string) =>
@@ -879,6 +880,7 @@ describe("a deleted message's poll", () => {
       expect(pollOf(ops, messageId)).toEqual({ threadId, messageId, state: "resolved", atMs: 5 });
     expect(pollOf(ops, "m-kept")).toMatchObject({
       options: ["the dock", "the pier"],
+      optionDetails: ["By the boats", null],
       chosenOption: "the pier",
     });
 

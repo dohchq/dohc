@@ -24,6 +24,7 @@ export interface ChatMessageContent {
   body: string;
   needsDecision?: true;
   options?: string[];
+  optionDetails?: (string | null)[];
 }
 
 // Ids a caller fixes so that a retried write replays instead of writing twice.
@@ -116,6 +117,8 @@ export interface MessageInput extends ChatMessageIds {
   needsDecision?: boolean;
   // A poll's choices, which imply a decision.
   options?: readonly string[];
+  // One short explanation per choice, or null for a choice without one.
+  optionDetails?: readonly (string | null)[];
 }
 
 export interface StartInput extends MessageInput {
@@ -164,6 +167,7 @@ export interface Started {
 
 const MAX_POLL_OPTIONS = 12;
 const MAX_POLL_OPTION_LENGTH = 200;
+const MAX_POLL_OPTION_DETAIL_LENGTH = 300;
 
 // Rust's str::trim: Unicode White_Space only. String.prototype.trim differs,
 // stripping U+FEFF and keeping U+0085, so a choice the engine stores could fail here.
@@ -186,11 +190,30 @@ export function checkedContent(input: MessageInput): ChatMessageContent {
     if (seen.has(option)) throw new Error("Each choice appears once.");
     seen.add(option);
   }
+  const optionDetails = checkedDetails(options, input.optionDetails ?? []);
   return {
     body,
     ...(input.needsDecision ? { needsDecision: true as const } : {}),
     ...(options.length > 0 ? { options: [...options] } : {}),
+    ...(optionDetails.length > 0 ? { optionDetails } : {}),
   };
+}
+
+function checkedDetails(
+  options: readonly string[],
+  details: readonly (string | null)[],
+): (string | null)[] {
+  if (details.length === 0) return [];
+  if (details.length !== options.length)
+    throw new Error("Give one explanation per choice, or none.");
+  const checked = details.map((raw) => {
+    const detail = raw === null ? "" : engineTrim(raw);
+    if (detail.length > MAX_POLL_OPTION_DETAIL_LENGTH || /[\r\n]/u.test(detail)) {
+      throw new Error("Each explanation is one line of at most 300 characters.");
+    }
+    return detail || null;
+  });
+  return checked.some((detail) => detail !== null) ? checked : [];
 }
 
 function idsOf(input: ChatMessageIds): ChatMessageIds {

@@ -414,6 +414,63 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &file_chat_lane, &NoFaults));
 }
 
+#[test]
+fn a_poll_keeps_its_explanations_whichever_snapshot_arrives_first() {
+    let opened = envelope(
+        "asker",
+        0,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "poll-message",
+            "state": "open",
+            "atMs": 10,
+            "options": ["Friday", "Monday"],
+            "optionDetails": ["Before the launch", null]
+        }),
+    );
+    let answered = envelope(
+        "older-peer",
+        0,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "poll-message",
+            "state": "resolved",
+            "resolvedByMessageId": "answer-message",
+            "atMs": 20,
+            "options": ["Friday", "Monday"],
+            "chosenOption": "Monday"
+        }),
+    );
+    for order in [[&opened, &answered], [&answered, &opened]] {
+        let (_scratch, _path, mut engine) = open_store();
+        for operation in order {
+            apply_chat_envelope(&mut engine, operation, &NoFaults).expect("apply");
+        }
+        let row: (String, Option<String>, Option<String>) = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT state, chosen_option, option_details_json FROM chat_decisions \
+                     WHERE workspace_id = 'ws' AND message_id = 'poll-message'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("decision row");
+        assert_eq!(
+            row,
+            (
+                "resolved".to_owned(),
+                Some("Monday".to_owned()),
+                Some(r#"["Before the launch",null]"#.to_owned())
+            ),
+            "an answer from a build without explanations must not erase them"
+        );
+    }
+}
+
 fn assert_imported_thread_rejected(payload: serde_json::Value) {
     let (_scratch, _path, mut engine) = open_store();
     let operation = envelope("invalid-thread", 0, "chat.thread.create", payload);
@@ -2848,6 +2905,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 body: "This message stays local.".to_owned(),
                 needs_decision: true,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -2894,6 +2952,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 body: "This authored child must not export the local parent.".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -3051,6 +3110,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 body: "The valid thread must reach peers first.".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -3078,6 +3138,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 body: "The thread structure must export only once.".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -3947,6 +4008,7 @@ fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEn
                 body: "Can you tidy these?".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -5782,6 +5844,7 @@ fn a_tombstone_over_its_journaled_append_is_accepted_and_a_delete_comes_only_fro
                 body: "Mine to take back".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,

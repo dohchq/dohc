@@ -139,7 +139,9 @@ fn forget_poll(
     }
     tx.execute(
         "UPDATE chat_stage_receipts \
-         SET result_json = json_set(result_json, '$.options', json('[]'), '$.chosenOption', NULL) \
+         SET result_json = json_remove( \
+               json_set(result_json, '$.options', json('[]'), '$.chosenOption', NULL), \
+               '$.optionDetails') \
          WHERE workspace_id=?1 AND thread_id=?2 \
            AND json_extract(result_json, '$.messageId')=?3 \
            AND json_type(result_json, '$.options') IS NOT NULL",

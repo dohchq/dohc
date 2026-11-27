@@ -4995,6 +4995,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         needsDecision: request.args.needsDecision,
         ...(request.args.options ? { options: request.args.options } : {}),
+        ...(request.args.optionDetails ? { optionDetails: request.args.optionDetails } : {}),
       };
       // A chat-only group shows only its chat lane, so a post there joins it.
       const started =
@@ -5085,6 +5086,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         needsDecision: request.args.needsDecision,
         ...(request.args.options ? { options: request.args.options } : {}),
+        ...(request.args.optionDetails ? { optionDetails: request.args.optionDetails } : {}),
       };
       // The poll's choice is checked before the reply, so a wrong one posts nothing.
       const answered = decisionMessage

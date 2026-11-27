@@ -61,6 +61,8 @@ struct ChatThreadStartParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    option_details: Option<Vec<Option<String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
@@ -361,6 +363,7 @@ impl EngineService {
                     body: params.body,
                     needs_decision: params.needs_decision,
                     options: params.options.unwrap_or_default(),
+                    option_details: params.option_details.unwrap_or_default(),
                     attachments: params
                         .attachments
                         .unwrap_or_default()
