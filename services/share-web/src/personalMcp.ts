@@ -228,7 +228,6 @@ const pageArgs = () => ({
   limit: z.number().int().positive().max(100).optional(),
 });
 const READS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
-// A post's idempotencyKey and a write's submitId make a retry land once.
 const POSTS = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
 const REPLACES = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
 
@@ -244,7 +243,6 @@ const INSTRUCTIONS =
   "The guides at dohc://guides/ explain Collections and automations. They were written for dohc's desktop MCP server, " +
   "so some tools they name aren't here.";
 
-// Guides from skills/dohc, inlined when share-web is bundled.
 const GUIDES = [
   {
     name: "dohc",
@@ -493,7 +491,6 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     },
   );
 
-  // Bytes as the agent reads them: UTF-8 text where they decode, base64 otherwise.
   const settled = (bytes: Buffer, binary: boolean) => {
     if (!binary) {
       try {

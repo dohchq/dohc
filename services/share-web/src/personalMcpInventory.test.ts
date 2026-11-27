@@ -140,7 +140,6 @@ it("takes the share link tools' inputs where they mean the same thing", () => {
 });
 
 it("keeps the inlined guides the same as skills/dohc", async () => {
-  // Refresh after a guide changes: pnpm --filter @dohc/share-web exec vitest run personalMcpInventory -u
   const skills = new URL("../../../skills/dohc/", import.meta.url);
   const current = Object.fromEntries(
     GUIDE_FILES.map((file) => [file, readFileSync(new URL(file, skills), "utf8")]),

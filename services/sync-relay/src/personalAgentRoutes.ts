@@ -609,9 +609,6 @@ export function createPersonalAgentToolRoutes(input: {
     );
   }
 
-  // The bytes of the current file at a path the reach reads, found by the
-  // path itself, so a file past the file list's limit reads too. Each chunk
-  // checks again that the path still holds these bytes and the reach reads it.
   function file(
     authority: PersonalAuthority,
     body: Record<string, unknown>,
@@ -639,7 +636,6 @@ export function createPersonalAgentToolRoutes(input: {
         visible: (candidate) => candidate === path,
       });
     if (!reads(reachIn(authority, workspaceId))) throw notFound();
-    // The path sorts before everything under it, so the first file is the one at it.
     const [found] = storage.readCurrentFileState({
       workspaceId,
       versionId: MAIN_VERSION_ID,

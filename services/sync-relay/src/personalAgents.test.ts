@@ -2202,7 +2202,6 @@ describe("a personal agent's reads", () => {
   it("ends a stream by path at the next chunk once the path holds other bytes", async () => {
     const f = await fixture();
     const agent = await signIn(f);
-    // Long enough that the response's read-ahead holds only part of it.
     const content = "z".repeat(1_000_000);
     await putBlob(f.h, OWNER, WS_A, content);
     await appendLog(f.h, OWNER, WS_A, [
@@ -2220,7 +2219,6 @@ describe("a personal agent's reads", () => {
         beforeContent: content,
       }),
     ]);
-    // A chunk read ahead before the change may still arrive; the stream never finishes.
     const drain = async () => {
       while (!(await replaced.read()).done);
     };
