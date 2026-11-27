@@ -2,10 +2,16 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { access, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
+import { createBackgroundLiveStart, syncedNotePaths } from "./backgroundLiveStart";
+import { createRelaySyncEngine } from "./relaySyncEngine";
+import { RELAY_FETCH_TIMEOUT_MS, relayFetchWithTimeout } from "./sharedChannels";
+import { createShowOnPhone } from "./showOnPhone";
+import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -234,6 +240,271 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         expect(await onDisk(rootB, "by-agent.md"), "the agent's page leaves B").toBe(false);
         expect(await onDisk(rootA, "synced.md"), "the synced page leaves A").toBe(false);
       } finally {
+        await Promise.allSettled([b?.close(), a?.close()]);
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "replays renameTextFile with a caller requestId on both VersionedLiveAdapter and VersionedTextStore",
+    async () => {
+      const workspaceId = `two-daemon-rename-replay-${randomUUID()}`;
+      const root = await createTestScratch("dohc-rename-replay-");
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+        const { store } = createCaptureLiveStores(owner.workspace, owner.sessions);
+        await store.ensureMainVersion({ workspaceId });
+        await store.writeTextFile({
+          workspaceId,
+          versionId: "main",
+          path: "notes/original.md",
+          text: "hello\n",
+          metadata: { origin: "api" },
+        });
+        await store.writeTextFile({
+          workspaceId,
+          versionId: "main",
+          path: "notes/other.md",
+          text: "other\n",
+          metadata: { origin: "api" },
+        });
+
+        await owner.sessions.run(owner.workspace, async ({ client, workspace: handle }) => {
+          const adapter = new VersionedLiveAdapter(client, handle, { workspaceId });
+          const input = {
+            workspaceId,
+            versionId: "main",
+            fromPath: "notes/original.md",
+            toPath: "notes/adapter-moved.md",
+            requestId: "rename-adapter-replay",
+            metadata: { origin: "api" as const },
+          };
+          const first = await adapter.renameTextFile(input);
+          const replay = await adapter.renameTextFile(input);
+          expect(first.deduped).toBe(false);
+          expect(replay.deduped).toBe(true);
+          expect(replay.object.id).toBe(first.object.id);
+          expect(replay.moment.momentId).toBe(first.moment.momentId);
+          await expect(
+            adapter.renameTextFile({
+              ...input,
+              fromPath: "notes/other.md",
+              toPath: "notes/other-moved.md",
+            }),
+          ).rejects.toThrow("idempotency-key-reuse-mismatch");
+        });
+
+        const storeInput = {
+          workspaceId,
+          versionId: "main",
+          fromPath: "notes/adapter-moved.md",
+          toPath: "notes/store-moved.md",
+          requestId: "rename-store-replay",
+          metadata: { origin: "api" as const },
+        };
+        const firstStore = await store.renameTextFile(storeInput);
+        const replayStore = await store.renameTextFile(storeInput);
+        expect(replayStore.object.id).toBe(firstStore.object.id);
+        expect(replayStore.moment.id).toBe(firstStore.moment.id);
+        expect(replayStore.before).toMatchObject({
+          path: "notes/adapter-moved.md",
+          text: "hello\n",
+        });
+        expect(replayStore.after).toMatchObject({ path: "notes/store-moved.md", text: "hello\n" });
+        expect(
+          await store.readTextFile({
+            workspaceId,
+            versionId: "main",
+            path: "notes/adapter-moved.md",
+          }),
+        ).toBeNull();
+        expect(
+          await store.readTextFile({
+            workspaceId,
+            versionId: "main",
+            path: "notes/store-moved.md",
+          }),
+        ).toMatchObject({ text: "hello\n" });
+      } finally {
+        await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "warms a synced-in Markdown note in the background while skipping notes already live on the relay",
+    async () => {
+      const workspaceId = `two-daemon-synced-live-start-${randomUUID()}`;
+      const relay = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const rootA = await createTestScratch("dohc-synced-live-a-");
+      const rootB = await createTestScratch("dohc-synced-live-b-");
+      const plainText = "---\ntitle: synced\n---\nSynced\n======\n\n* one\n";
+      const liveText = "# Already live\n";
+      const serverHoldsLineage = (objectId: string) => {
+        const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+        try {
+          return (
+            relayDb
+              .prepare(
+                "SELECT 1 FROM sync_relay_log WHERE workspace_id=? AND op_kind='ydoc.update' AND json_extract(payload_json, '$.objectId')=? AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL LIMIT 1",
+              )
+              .get(workspaceId, objectId) !== undefined
+          );
+        } finally {
+          relayDb.close();
+        }
+      };
+      let a: LiveDaemonCapture | undefined;
+      let b: LiveDaemonCapture | undefined;
+      let syncB: ReturnType<typeof createRelaySyncEngine> | undefined;
+      let backgroundLiveStart: ReturnType<typeof createBackgroundLiveStart> | undefined;
+      try {
+        a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay });
+        await a.relay.claim();
+        await a.chats.ensureGeneralChannel({ workspaceId });
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+
+        b = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay });
+        await pullCaptured(b.relay, b.capture);
+
+        await writeAndCapture(a, rootA, "already-live.md", liveText);
+        await writeAndCapture(a, rootA, "synced-plain.md", plainText);
+        const plainObjectId = await a.capture.fileObjectIdForPath("synced-plain.md");
+        const liveObjectId = await a.capture.fileObjectIdForPath("already-live.md");
+        expect(plainObjectId).toBeTruthy();
+        expect(liveObjectId).toBeTruthy();
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+        expect(serverHoldsLineage(plainObjectId!)).toBe(false);
+        expect(serverHoldsLineage(liveObjectId!)).toBe(false);
+
+        const relayDb = new DatabaseSync(relayServer.dbPath);
+        try {
+          const ws = relayDb
+            .prepare(
+              "SELECT owner_user_id, replication_epoch, stream_identity FROM sync_relay_workspaces WHERE workspace_id=?",
+            )
+            .get(workspaceId) as {
+            owner_user_id: string;
+            replication_epoch: string;
+            stream_identity: string;
+          };
+          relayDb
+            .prepare(
+              `INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+                created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes,generation,state,since_ms,changed_by)
+                VALUES (?,?,?,?,NULL,?,?,1,1,1,1,64,1,'live',1,'server')`,
+            )
+            .run(
+              workspaceId,
+              liveObjectId!,
+              "already-live.md",
+              ws.owner_user_id,
+              ws.replication_epoch,
+              ws.stream_identity,
+            );
+        } finally {
+          relayDb.close();
+        }
+
+        const phoneErrors: unknown[] = [];
+        const showOnPhone = createShowOnPhone({
+          session: async () => ({
+            generation: 1,
+            relay: { ...relay, fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS) },
+            unauthorized: async () => undefined,
+          }),
+          onError: (_message, error) => phoneErrors.push(error),
+        });
+        expect(await showOnPhone.liveNotes(workspaceId)).toEqual(new Set([liveObjectId!]));
+
+        const startedPaths: string[] = [];
+        let liveNotesChecks = 0;
+        let pulledPlainDisk: { bytes: Buffer; modified: bigint } | undefined;
+        backgroundLiveStart = createBackgroundLiveStart({
+          eligible: () => true,
+          noteIdentity: async (targetWorkspaceId, path) =>
+            await b!.sessions.run(b!.workspace, async ({ client, workspace: handle }) => {
+              const resolved = await new VersionedLiveAdapter(client, handle, {
+                workspaceId: targetWorkspaceId,
+              }).resolveFiles({ workspaceId: targetWorkspaceId, targets: [{ path }] });
+              const file = resolved.results[0];
+              return resolved.versionId === "main" && file?.status === "found"
+                ? { versionId: resolved.versionId, objectId: file.objectId }
+                : null;
+            }),
+          showsOnPhone: async () => true,
+          relayLiveNotes: async (targetWorkspaceId, signal) => {
+            liveNotesChecks += 1;
+            return await showOnPhone.liveNotes(targetWorkspaceId, signal);
+          },
+          noteBytes: async (_targetWorkspaceId, path) =>
+            await stat(join(rootB, path)).then(
+              (entry) => entry.size,
+              () => null,
+            ),
+          isLossyNote: async () => false,
+          start: async (_targetWorkspaceId, path) => {
+            startedPaths.push(path);
+            const session = await b!.capture.openYDocSession({
+              path,
+              contentKind: "richdoc",
+              onRemoteUpdate: () => undefined,
+            });
+            await session.close();
+            if (session.lineageAtOpen === "absent") syncB?.queuePull();
+          },
+          onError: (_message, error) => phoneErrors.push(error),
+          quietMs: 50,
+          gapMs: 50,
+          maxWaitMs: 500,
+        });
+
+        syncB = createRelaySyncEngine({
+          rootDir: rootB,
+          relay,
+          operations: b.relay,
+          capture: b.capture,
+          onChange: () => undefined,
+          debounceMs: 50,
+          afterSuccessfulPull: async ({ fastForwardedPaths }) => {
+            const notes = syncedNotePaths(fastForwardedPaths);
+            if (notes.includes("synced-plain.md") && !pulledPlainDisk) {
+              const file = join(rootB, "synced-plain.md");
+              pulledPlainDisk = {
+                bytes: await readFile(file),
+                modified: (await stat(file, { bigint: true })).mtimeNs,
+              };
+            }
+            if (notes.length > 0) backgroundLiveStart!.note(workspaceId, notes);
+          },
+        });
+
+        await syncB.start();
+        await vi.waitFor(
+          () => {
+            expect(liveNotesChecks).toBeGreaterThanOrEqual(2);
+            expect(serverHoldsLineage(plainObjectId!)).toBe(true);
+          },
+          {
+            timeout: REAL_DAEMON_DEADLINE_MS,
+            interval: 50,
+          },
+        );
+        expect(startedPaths).toEqual(["synced-plain.md"]);
+        expect(serverHoldsLineage(liveObjectId!)).toBe(false);
+        expect(phoneErrors).toEqual([]);
+        expect(pulledPlainDisk?.bytes).toEqual(Buffer.from(plainText));
+        const afterFile = join(rootB, "synced-plain.md");
+        expect({
+          bytes: await readFile(afterFile),
+          modified: (await stat(afterFile, { bigint: true })).mtimeNs,
+        }).toEqual(pulledPlainDisk);
+      } finally {
+        await backgroundLiveStart?.stop();
+        await syncB?.stop();
         await Promise.allSettled([b?.close(), a?.close()]);
       }
     },

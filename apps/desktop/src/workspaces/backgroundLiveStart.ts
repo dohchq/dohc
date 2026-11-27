@@ -1,6 +1,12 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
+
+export interface BackgroundLiveStartIdentity {
+  versionId: string;
+  objectId: string;
+}
 
 export interface BackgroundLiveStart {
   note(workspaceId: string, paths: readonly string[]): void;
@@ -12,8 +18,9 @@ export interface BackgroundLiveStart {
 
 export interface BackgroundLiveStartOptions {
   eligible(workspaceId: string): boolean;
-  noteIdentity(workspaceId: string, path: string): Promise<string | null>;
+  noteIdentity(workspaceId: string, path: string): Promise<BackgroundLiveStartIdentity | null>;
   showsOnPhone(workspaceId: string): Promise<boolean>;
+  relayLiveNotes(workspaceId: string, signal: AbortSignal): Promise<ReadonlySet<string> | null>;
   noteBytes(workspaceId: string, path: string): Promise<number | null>;
   isLossyNote(workspaceId: string, path: string): Promise<boolean>;
   start(workspaceId: string, path: string): Promise<void>;
@@ -21,6 +28,19 @@ export interface BackgroundLiveStartOptions {
   quietMs?: number;
   maxWaitMs?: number;
   gapMs?: number;
+}
+
+export function syncedNotePaths(paths: readonly RelayMaterializedPath[]): string[] {
+  return paths
+    .filter(
+      (change) =>
+        change.versionId === "main" &&
+        change.operation === "write" &&
+        change.contentKind === "text" &&
+        liveDocumentKindForPath(change.path) === "richdoc" &&
+        classifyEngineFilePathForRead(change.path, process.platform).kind === "tracked",
+    )
+    .map((change) => change.path);
 }
 
 export const BACKGROUND_LIVE_START_MAX_QUEUED = 32;
@@ -37,7 +57,18 @@ interface InFlight {
   ended: Promise<void>;
 }
 
+const CANCELLED = Symbol("cancelled");
 const keyOf = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
+const identityKeyOf = (workspaceId: string, identity: BackgroundLiveStartIdentity) =>
+  `${workspaceId}\u0000${identity.versionId}\u0000${identity.objectId}`;
+const sameIdentity = (
+  left: BackgroundLiveStartIdentity,
+  right: BackgroundLiveStartIdentity | null | typeof CANCELLED,
+) =>
+  !!right &&
+  right !== CANCELLED &&
+  right.versionId === left.versionId &&
+  right.objectId === left.objectId;
 
 export function createBackgroundLiveStart(
   options: BackgroundLiveStartOptions,
@@ -77,24 +108,32 @@ export function createBackgroundLiveStart(
   }
 
   async function startNote({ workspaceId, path }: QueuedNote, cancel: AbortSignal): Promise<void> {
-    const cancelled = new Promise<typeof cancel>((resolve) =>
-      cancel.addEventListener("abort", () => resolve(cancel), { once: true }),
+    const cancelled = new Promise<typeof CANCELLED>((resolve) =>
+      cancel.addEventListener("abort", () => resolve(CANCELLED), { once: true }),
     );
-    const unlessCancelled = async <T>(answer: Promise<T>): Promise<T | typeof cancel> =>
+    const unlessCancelled = async <T>(answer: Promise<T>): Promise<T | typeof CANCELLED> =>
       await Promise.race([answer, cancelled]);
 
     if (!options.eligible(workspaceId)) return;
     const identity = await unlessCancelled(options.noteIdentity(workspaceId, path));
-    if (typeof identity !== "string" || started.has(keyOf(workspaceId, identity))) return;
+    if (!identity || identity === CANCELLED) return;
+    const identityKey = identityKeyOf(workspaceId, identity);
+    if (started.has(identityKey)) return;
     const shown = await unlessCancelled(options.showsOnPhone(workspaceId));
     if (shown !== true) return;
     const bytes = await unlessCancelled(options.noteBytes(workspaceId, path));
     if (typeof bytes !== "number" || bytes > WYSIWYG_MARKDOWN_THRESHOLD_BYTES) return;
     if ((await unlessCancelled(options.isLossyNote(workspaceId, path))) !== false) return;
     if (cancel.aborted || !options.eligible(workspaceId)) return;
+    const liveOnRelay = await unlessCancelled(options.relayLiveNotes(workspaceId, cancel));
+    if (liveOnRelay === CANCELLED || liveOnRelay === null || liveOnRelay.has(identity.objectId))
+      return;
+    if (!sameIdentity(identity, await unlessCancelled(options.noteIdentity(workspaceId, path))))
+      return;
+    if (cancel.aborted || !options.eligible(workspaceId)) return;
     await options.start(workspaceId, path);
-    const identityAfterStart = await options.noteIdentity(workspaceId, path).catch(() => null);
-    if (identityAfterStart === identity) remember(keyOf(workspaceId, identity));
+    if (sameIdentity(identity, await options.noteIdentity(workspaceId, path).catch(() => null)))
+      remember(identityKey);
   }
 
   function runOne(): void {

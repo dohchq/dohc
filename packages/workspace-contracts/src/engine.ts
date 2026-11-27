@@ -715,6 +715,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     fromPath: string;
     toPath: string;
+    requestId?: string;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     // Refused once this `capture.hold` ended.

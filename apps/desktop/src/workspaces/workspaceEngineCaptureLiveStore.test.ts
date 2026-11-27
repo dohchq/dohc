@@ -13,6 +13,7 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
@@ -1376,5 +1377,68 @@ describe("createCaptureLiveStores", () => {
       checked: 2,
     });
     expect(asked).toEqual([["ideas/new.md", "plans/2027/first.md"]]);
+  });
+
+  it("forwards renameTextFile requestId and replays without re-reading the moved source", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const binding: EngineWorkspaceBinding = {
+      client: clientFor((request) => loopback.sendRequest(request)),
+      workspace: WORKSPACE_ID,
+      localStateReady: true,
+    };
+    const sessions = {
+      async run<T>(
+        _workspace: EngineWorkspace,
+        operation: (entry: EngineWorkspaceBinding) => Promise<T>,
+      ): Promise<T> {
+        return await operation(binding);
+      },
+      rememberCaptureAuthor() {},
+      async closeWorkspace() {},
+    } as unknown as EngineWorkspaceSessions;
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "/tmp/workspace" },
+      sessions,
+    );
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "old.md",
+      text: "hello\n",
+      metadata: { origin: "api" },
+    });
+    await store.writeTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "other.md",
+      text: "other\n",
+      metadata: { origin: "api" },
+    });
+    const input = {
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      fromPath: "old.md",
+      toPath: "new.md",
+      requestId: "rename-store-key",
+      metadata: { origin: "api" as const },
+    };
+    const first = await store.renameTextFile(input);
+    const replay = await store.renameTextFile(input);
+    expect(replay.object.id).toBe(first.object.id);
+    expect(replay.moment.id).toBe(first.moment.id);
+    expect(replay.before).toMatchObject({ path: "old.md", text: "hello\n" });
+    expect(replay.after).toMatchObject({ path: "new.md", text: "hello\n" });
+    await expect(
+      store.renameTextFile({ ...input, fromPath: "other.md", toPath: "other-new.md" }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+    const renames = loopback.requests.filter(
+      (request) => request.method === VERSIONED_METHOD.textRename,
+    );
+    expect(renames.map((request) => request.idempotencyKey)).toEqual([
+      "rename-store-key",
+      "rename-store-key",
+      "rename-store-key",
+    ]);
   });
 });

@@ -830,6 +830,54 @@ describe("VersionedLiveAdapter", () => {
     expect(deletes.map((request) => request.idempotencyKey)).toEqual(["undo", "undo", "undo"]);
   });
 
+  it("seeds a rename's moment from its envelope key and replays only that payload", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter(
+      {
+        sendRequest: (request) => loopback.sendRequest(request),
+        close: () => undefined,
+      },
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    for (const path of ["old.md", "other.md"]) {
+      await adapter.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path,
+        text: path,
+        metadata: { origin: "api" },
+      });
+    }
+    const input = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      fromPath: "old.md",
+      toPath: "new.md",
+      requestId: "rename-key",
+      metadata: { origin: "api" as const },
+    };
+    const first = await adapter.renameTextFile(input);
+    const replay = await adapter.renameTextFile(input);
+    expect(first.deduped).toBe(false);
+    expect(replay.deduped).toBe(true);
+    expect(replay.moment.momentId).toBe(first.moment.momentId);
+    expect(replay.object.id).toBe(first.object.id);
+    await expect(
+      adapter.renameTextFile({ ...input, fromPath: "other.md", toPath: "other-new.md" }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+    const renames = loopback.requests.filter(
+      (request) => request.method === VERSIONED_METHOD.textRename,
+    );
+    expect(renames.map((request) => request.idempotencyKey)).toEqual([
+      "rename-key",
+      "rename-key",
+      "rename-key",
+    ]);
+    for (const request of renames) expect(request.params).not.toHaveProperty("requestId");
+  });
+
   it("refuses a body requestId beside the envelope key on every versioned mutation", async () => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter(

@@ -454,7 +454,7 @@ import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
-import { createBackgroundLiveStart } from "./workspaces/backgroundLiveStart";
+import { createBackgroundLiveStart, syncedNotePaths } from "./workspaces/backgroundLiveStart";
 import { createShowOnPhone } from "./workspaces/showOnPhone";
 import { holdsDeliveries } from "./workspaces/ownerLivePause";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
@@ -3739,9 +3739,11 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: ({ recovered, applied }) => {
+    afterSuccessfulPull: ({ recovered, applied, fastForwardedPaths }) => {
       // Waits rerun their inbox query, so only a pull that brought ops wakes them.
       if (applied) signalChatWrite(workspace.workspaceId);
+      const syncedNotes = syncedNotePaths(fastForwardedPaths);
+      if (syncedNotes.length > 0) backgroundLiveStart.note(workspace.workspaceId, syncedNotes);
       // A deferred wake's message or decision may have arrived. An empty pull brought nothing to wait for.
       void chatWakes.pulled({ applied, recovered });
       void noticeStore().sync();
@@ -9049,11 +9051,12 @@ const backgroundLiveStart = createBackgroundLiveStart({
       adapter.resolveFiles({ workspaceId, targets: [{ path }] }),
     );
     const file = resolved?.results[0];
-    return resolved && file?.status === "found"
-      ? `${resolved.versionId}\u0000${file.objectId}`
+    return resolved && resolved.versionId === "main" && file?.status === "found"
+      ? { versionId: resolved.versionId, objectId: file.objectId }
       : null;
   },
   showsOnPhone: (workspaceId) => showOnPhone.shows(workspaceId),
+  relayLiveNotes: (workspaceId, signal) => showOnPhone.liveNotes(workspaceId, signal),
   noteBytes: async (workspaceId, path) => {
     const rootPath = findWorkspace(workspaceId)?.rootPath;
     return rootPath ? await noteFileBytes(rootPath, path) : null;
