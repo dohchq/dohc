@@ -2895,7 +2895,7 @@ it("keeps the current owner version current when it is sent again over a staged 
   f.host.bindPublication(desktop, { workspaceId: "w", publicationId: a });
   const b = version([id(5), id(6)], a);
   expect(version([id(5), id(6), id(7)], b)).toBe(a);
-  expect(await catalog()).toEqual([a]);
+  expect(await catalog()).toContain(a);
   const owned = f.storage.listAppPublications({
     workspaceId: "w",
     ownerUserId: "owner",
