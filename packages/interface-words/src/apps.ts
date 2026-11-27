@@ -8,6 +8,8 @@ export const appWords = {
   approved: "Approved",
   /** A version, by its source revision's first characters. */
   version: (version: string) => `Version ${version}`,
+  privateCopy: "Private to you",
+  publishedCopy: "Published",
   published: (version: string, when: string) => `Version ${version}, published ${when}`,
 
   review: "Review app",

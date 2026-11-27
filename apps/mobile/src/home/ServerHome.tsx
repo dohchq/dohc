@@ -269,8 +269,9 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
 }
 
 /**
- * One version of an app, which opens its review. Alone, it shows its app's name; under its app, its version. Each
- * shows whether it waits for a review, and a Member app who made it.
+ * One version of an app, which opens its review. Alone, it shows its app's name; under its app, its version and
+ * whether it is private to the owner or published. Each shows whether it waits for a review, and a Member app who made
+ * it.
  */
 function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBefore: boolean }) {
   const { app, name, depth, approvedBefore } = props;
@@ -283,7 +284,11 @@ function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBef
     ? app.member.author
       ? appWords.sharedBy(app.member.author)
       : appWords.sharedByMember
-    : null;
+    : depth
+      ? app.owner
+        ? appWords.privateCopy
+        : appWords.publishedCopy
+      : null;
   const detail = state ?? "";
   return (
     <Pressable
@@ -297,7 +302,8 @@ function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBef
       accessibilityRole="button"
       accessibilityLabel={[
         name,
-        ...(made ? [made] : depth ? [version] : []),
+        ...(depth ? [version] : []),
+        ...(made ? [made] : []),
         ...(state ? [state] : app.approved ? [appWords.approved] : []),
       ].join(", ")}
     >
