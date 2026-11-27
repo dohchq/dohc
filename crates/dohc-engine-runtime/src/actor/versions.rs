@@ -1727,7 +1727,9 @@ fn materialize_page_on_store(
             let Some(head) = head.as_ref() else {
                 return Err(DomainError::ConflictStaleTarget.into());
             };
-            if approved.get(&change.path) != projection_preimage(&state).as_ref() {
+            if held.is_none()
+                && approved.get(&change.path) != projection_preimage(&state).as_ref()
+            {
                 if head.current(&state, secret) {
                     continue;
                 }
@@ -2155,6 +2157,7 @@ pub(super) mod tests {
             "edited.md",
             "appeared.md",
             "gone.md",
+            "held.md",
         ];
         for (index, path) in paths.into_iter().enumerate() {
             write_head(&mut store, &format!("doc-{index}"), path, "old\n", 2);
@@ -2169,9 +2172,29 @@ pub(super) mod tests {
             ("edited.md", "edited\n"),
             ("appeared.md", "outside\n"),
             ("gone.md", "head\n"),
+            ("held.md", "held\n"),
         ] {
             std::fs::write(scratch.join(path), disk).unwrap();
         }
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::capture_file_holds::record_in(
+                    tx,
+                    &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                        workspace_id: "ws".into(),
+                        source_version_id: "main".into(),
+                        object_id: "doc-6".into(),
+                        path: "held.md".into(),
+                        observed_sha256: dohc_engine_storage::hex_sha256(b"held\n"),
+                        observed_size: 5,
+                        reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(),
+                        observed_at_ms: 0,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )
+            })
+            .unwrap();
         let mut run = |approved: &[(&str, Preimage)]| {
             let approved: std::collections::HashMap<String, Preimage> = approved
                 .iter()
@@ -2201,6 +2224,7 @@ pub(super) mod tests {
             ("approved.md", sha("old\n")),
             ("current.md", sha("old\n")),
             ("absent.md", Preimage::Absent),
+            ("held.md", sha("held\n")),
         ])
         .unwrap();
         for (path, approved) in [
@@ -2225,7 +2249,8 @@ pub(super) mod tests {
                 "head\n",
                 "edited\n",
                 "outside\n",
-                "head\n"
+                "head\n",
+                "held\n"
             ]
         );
     }
