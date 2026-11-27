@@ -12,7 +12,7 @@ const failed = z.object({ ok: z.literal(false), reason: z.string() }).strict();
 export const OWNER_SETUP_REASON =
   "Only the owner's own agents set up the workspace, so shared profiles omit it. The handler refuses a shared view, a workspace the caller doesn't own, and any dohc agent run.";
 
-export const AutomationUseServerResult = z.union([
+const AutomationUseServerResult = z.union([
   z
     .object({
       ok: z.literal(true),
