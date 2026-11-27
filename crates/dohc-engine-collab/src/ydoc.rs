@@ -8711,49 +8711,15 @@ fn write_table_cell_breaks(markdown: &str) -> String {
         text.replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
             .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
     };
-    let bytes = markdown.as_bytes();
     let mut output = String::with_capacity(markdown.len());
-    let (mut plain, mut at) = (0, 0);
-    while at < bytes.len() {
-        match bytes[at] {
-            b'\\' => at += 2,
-            b'`' => {
-                let opened = at;
-                while bytes.get(at) == Some(&b'`') {
-                    at += 1;
-                }
-                if let Some(close) = closing_backtick_run(bytes, at, at - opened) {
-                    output.push_str(&spelled(&markdown[plain..opened]));
-                    output.push_str(&markdown[opened..close]);
-                    at = close;
-                    plain = close;
-                }
-            }
-            _ => at += 1,
-        }
+    let mut plain = 0;
+    for span in inline_code_spans(markdown) {
+        output.push_str(&spelled(&markdown[plain..span.start]));
+        output.push_str(&markdown[span.clone()]);
+        plain = span.end;
     }
     output.push_str(&spelled(&markdown[plain..]));
     output
-}
-
-/// The end of the first run of exactly `length` backticks from `from`, which
-/// closes a code span.
-fn closing_backtick_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
-    let mut at = from;
-    while at < bytes.len() {
-        if bytes[at] != b'`' {
-            at += 1;
-            continue;
-        }
-        let start = at;
-        while bytes.get(at) == Some(&b'`') {
-            at += 1;
-        }
-        if at - start == length {
-            return Some(at);
-        }
-    }
-    None
 }
 
 fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
@@ -11250,6 +11216,30 @@ mod projection_tests {
         assert_eq!(
             paragraph_markdown(vec![(&typed, marks(&["bold"])), (&typed, Attrs::new())]),
             format!("**{typed}**{typed}\n")
+        );
+    }
+
+    #[test]
+    fn a_large_table_cell_writes_its_breaks_in_one_pass() {
+        let mut cell = String::from("&lt;br&gt;");
+        let mut width = 1;
+        while cell.len() < 1_900_000 {
+            cell.push_str(&"`".repeat(width));
+            cell.push('a');
+            width += 1;
+        }
+        let started = std::time::Instant::now();
+        let written = write_table_cell_breaks(&cell);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            written,
+            cell.replacen("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR, 1)
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{} unmatched backtick runs in {} bytes took {elapsed:?}",
+            width - 1,
+            cell.len()
         );
     }
 
