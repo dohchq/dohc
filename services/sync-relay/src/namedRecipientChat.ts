@@ -714,7 +714,6 @@ export function createNamedRecipientChat(options: {
             (!replying || threadLane !== "chat" || !parentMessageId.isWellFormed())
           )
             throw badRequest("invalid parent");
-          // The owner's new message wakes their agents, as the phone's does. A retry finds its message, and wakes none.
           let wakes: BrowserPostWakes | undefined;
           if (
             owned &&

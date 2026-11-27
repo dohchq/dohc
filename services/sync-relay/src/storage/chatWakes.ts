@@ -538,7 +538,6 @@ export function enabledChatRunners(
   );
 }
 
-// One row per target of a published message, at generation 1, unless it has one. Inside a write transaction.
 function insertWakeRows(
   storage: StorageContext,
   wake: {
