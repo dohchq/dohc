@@ -60,7 +60,14 @@ export function AppRunScreen() {
   }, [apps]);
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <Stack.Screen options={{ title: running?.name ?? launching?.name ?? "" }} />
+      <Stack.Screen
+        options={{
+          title: running?.name ?? launching?.name ?? "",
+          headerTransparent: false,
+          headerStyle: { backgroundColor: theme.bg },
+          headerShadowVisible: false,
+        }}
+      />
       {running && AppWebView ? (
         <AndroidAppView
           key={running.key}
