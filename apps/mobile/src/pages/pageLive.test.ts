@@ -391,6 +391,17 @@ describe("drops", () => {
     expect(t.server.paths()).toEqual([OPEN]);
   });
 
+  it("stays stopped on any other changed binding, even with nothing unsent", async () => {
+    const t = await connected(ready(), ready());
+    t.fromPage(1)({
+      type: "state",
+      facts: { status: "quarantined", reason: "binding-changed", pendingUpdates: 0, unsent: false },
+    });
+    expect(t.live.state()).toMatchObject({ phase: "refused", reason: "binding-changed" });
+    t.live.retry();
+    expect(t.server.paths()).toEqual([OPEN]);
+  });
+
   it("closes the socket when the sign-in ends", async () => {
     const t = await connected();
     t.signIn.abort();
