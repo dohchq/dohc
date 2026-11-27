@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import type { ResolvedPos } from "@tiptap/pm/model";
+import { Fragment, Slice, type ResolvedPos } from "@tiptap/pm/model";
 import type { Command } from "@tiptap/pm/state";
 import {
   addColumnAfter,
@@ -28,10 +28,12 @@ import {
   exchange,
   page,
   person,
+  schema,
   stopEveryone,
   type Person,
 } from "./bodySequenceTestSupport.js";
 import { containerRulesBroken } from "./bodySequenceEditorTestSupport.js";
+import { inUnevenTable, isUnevenTable, unevenTableGuard } from "./bodySequenceTables.js";
 import {
   CONTAINER_ACTS,
   noteIn,
@@ -240,6 +242,63 @@ describe("table changes the editor writes", () => {
     a.expectMirror();
   });
 
+  it("turns a selected row into a caret in that row when someone else's column leaves the row short", () => {
+    const a = person(even, 10, "bare", [tableEditing(), unevenTableGuard()]);
+    const b = person(even, 20);
+    caretIn(a, "apple");
+    expect(addRowAfter(a.view.state, a.view.dispatch)).toBe(true);
+    caretIn(b, "name");
+    expect(addColumnAfter(b.view.state, b.view.dispatch)).toBe(true);
+    a.select([a.lines().indexOf("big") + 1, 0]);
+    a.view.dispatch(
+      a.view.state.tr.setSelection(
+        CellSelection.rowSelection(cellAround(a.view.state.selection.$from)!),
+      ),
+    );
+    for (const update of b.sent) a.receive(update);
+    const { selection } = a.view.state;
+    expect(isUnevenTable(a.view.state.doc.child(1))).toBe(true);
+    expect(selection).not.toBeInstanceOf(CellSelection);
+    expect(cellAround(selection.$head)!.index(-1)).toBe(2);
+    a.expectMirror();
+  });
+
+  it.each([
+    ["rows of 3, 2, 2 and 1 cells, where the paste would throw", [3, 2, 2, 1], "b2"],
+    ["rows of 1, 1 and 2 cells, where the paste would land in the wrong rows", [1, 1, 2], "a1"],
+  ])("pastes no cells into a table with %s, and says so", (_name, widths, at) => {
+    const ids = widths.map((width, row) =>
+      Array.from({ length: width }, (_, col) => `${"abcd"[row]!}${String(col + 1)}`),
+    );
+    const frames: Frame[] = [
+      ["TB", "table"],
+      ...ids.map((_, row): Frame => [`R${String(row)}`, "tableRow"]),
+      ...ids.flat().map((id): Frame => [id, "tableCell"]),
+    ];
+    const rows = ids.flatMap((cells, row) =>
+      cells.map((id): Row => [["TB", `R${String(row)}`, id], id]),
+    );
+    const told: BodySequenceUnwritten[] = [];
+    const guard = unevenTableGuard((why) => told.push(why));
+    const a = person(noteIn(frames, rows), 10, "bare", [guard, tableEditing()]);
+    const { tableRow, tableCell, paragraph } = schema.nodes;
+    const cell = (text: string) =>
+      tableRow!.create(null, tableCell!.create(null, paragraph!.create(null, schema.text(text))));
+    const cells = new Slice(Fragment.from([cell("x"), cell("y"), cell("z")]), 1, 1);
+    const lines = a.lines();
+    caretIn(a, at);
+    const paste = (slice: Slice) =>
+      a.view.someProp("handlePaste", (handle) =>
+        handle(a.view, new Event("paste") as ClipboardEvent, slice),
+      );
+    expect(paste(cells)).toBe(true);
+    expect(told).toEqual(["unwritable"]);
+    expect(a.sent).toEqual([]);
+    expect(a.lines()).toEqual(lines);
+    expect(paste(new Slice(Fragment.from(schema.text("typed")), 0, 0))).toBeFalsy();
+    expect(told).toEqual(["unwritable"]);
+  });
+
   it("writes a letter typed in an uneven table and refuses the repair the table plugin adds to it", () => {
     const a = person(uneven, 10, "bare", [tableEditing()]);
     a.select([2, 5]);
@@ -310,60 +369,59 @@ describe("a table change the room would refuse", () => {
   });
 });
 
-const thrownBeforeDispatch =
+const evenOnly =
   (act: Act): Act =>
   (a, next) => {
-    const { view } = a;
-    const dispatch = view.dispatch;
-    let dispatched = false;
-    view.dispatch = (transaction) => {
-      dispatched = true;
-      dispatch(transaction);
-    };
-    try {
-      return act(a, next);
-    } catch (error) {
-      if (dispatched) throw error;
-      return false;
-    } finally {
-      view.dispatch = dispatch;
-    }
+    const { $from, $head } = a.view.state.selection;
+    return !inUnevenTable($from) && !inUnevenTable($head) && act(a, next);
   };
 
-const TABLE_ACTS = (
+const withoutRowSpans =
+  (act: Act): Act =>
+  (a, next) => {
+    let spans = false;
+    a.view.state.doc.descendants((node) => !(spans ||= node.attrs.rowspan > 1));
+    return !spans && act(a, next);
+  };
+
+const inOneCell =
+  (act: Act): Act =>
+  (a, next) => {
+    const { $from, $to } = a.view.state.selection;
+    return cellAround($from)?.pos === cellAround($to)?.pos && act(a, next);
+  };
+
+const TABLE_ACTS = [
+  ["a row added under", evenOnly(run(addRowAfter))],
+  ["a row added above", evenOnly(run(addRowBefore))],
+  ["a column added after", run(addColumnAfter)],
+  ["a column added before", run(addColumnBefore)],
+  ["a row deleted", run(deleteRow)],
+  ["a column deleted", run(deleteColumn)],
+  ["the header row", evenOnly(run(toggleHeaderRow))],
+  ["the header column", evenOnly(run(toggleHeaderColumn))],
+  ["a header cell", run(toggleHeaderCell)],
   [
-    ["a row added under", run(addRowAfter)],
-    ["a row added above", run(addRowBefore)],
-    ["a column added after", run(addColumnAfter)],
-    ["a column added before", run(addColumnBefore)],
-    ["a row deleted", run(deleteRow)],
-    ["a column deleted", run(deleteColumn)],
-    ["the header row", run(toggleHeaderRow)],
-    ["the header column", run(toggleHeaderColumn)],
-    ["a header cell", run(toggleHeaderCell)],
-    [
-      "an alignment",
-      (a, next) =>
-        run(setCellAttr("align", ["left", "center", "right", null][Math.floor(next() * 4)]))(
-          a,
-          next,
-        ),
-    ],
-    [
-      "a width",
-      (a, next) => run(setCellAttr("colwidth", [40 + Math.floor(next() * 200)]))(a, next),
-    ],
-    ["a height", (a, next) => rowHeight(10 + Math.floor(next() * 90))(a, next)],
-    ["cells merged across", selectedCells("horiz", mergeCells)],
-    ["cells merged down", selectedCells("vert", mergeCells)],
-    ["a cell split", run(splitCell)],
-    ["a row moved", (a, next) => moved("row", (count) => Math.floor(next() * count))(a, next)],
-    [
-      "a column moved",
-      (a, next) => moved("column", (count) => Math.floor(next() * count))(a, next),
-    ],
-  ] satisfies [string, Act][]
-).map(([name, act]): [string, Act] => [name, thrownBeforeDispatch(act)]);
+    "an alignment",
+    (a, next) =>
+      run(setCellAttr("align", ["left", "center", "right", null][Math.floor(next() * 4)]))(a, next),
+  ],
+  ["a width", (a, next) => run(setCellAttr("colwidth", [40 + Math.floor(next() * 200)]))(a, next)],
+  ["a height", (a, next) => rowHeight(10 + Math.floor(next() * 90))(a, next)],
+  ["cells merged across", evenOnly(selectedCells("horiz", mergeCells))],
+  ["cells merged down", evenOnly(selectedCells("vert", mergeCells))],
+  ["a cell split", inOneCell(run(splitCell))],
+  [
+    "a row moved",
+    evenOnly(
+      withoutRowSpans((a, next) => moved("row", (count) => Math.floor(next() * count))(a, next)),
+    ),
+  ],
+  [
+    "a column moved",
+    evenOnly((a, next) => moved("column", (count) => Math.floor(next() * count))(a, next)),
+  ],
+] satisfies [string, Act][];
 
 playTogether(
   "table changes",
