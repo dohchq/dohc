@@ -45,11 +45,11 @@ function fixture(stored: Record<string, string>) {
         paths.map((path) => [path, { state: "accepted", contentHash: sha256(files.get(path)!) }]),
       ),
   );
-  const write = (next: Record<string, string>, exclusive = false) =>
+  const write = (next: Record<string, string>, mode: "create" | "change" | "send" = "change") =>
     writeSharedCollectionRules({
       workspaceId: "joined",
       files: next,
-      exclusive,
+      mode,
       shareViewFiles: shareViewFiles as never,
       withLease: (work) => work({} as never),
       push,
@@ -85,14 +85,14 @@ it("creates a new Collection's files only where nothing else is, and leaves the 
     "registrations/operations.js": "OPS",
     "registrations/dataset.json": "new",
   };
-  await expect(f.write(created, true)).rejects.toThrow(
+  await expect(f.write(created, "create")).rejects.toThrow(
     "A file is already at registrations/dataset.json. Choose another name for the Collection.",
   );
   expect(f.changes).toEqual([]);
   expect(f.files.get("registrations/dataset.json")).toBe("old");
   expect(f.push).not.toHaveBeenCalled();
   f.files.set("registrations/dataset.json", "new");
-  await f.write(created, true);
+  await f.write(created, "create");
   expect(f.changes).toEqual([{ kind: "create", path: "registrations/operations.js" }]);
 });
 
@@ -115,7 +115,7 @@ it("passes on the server's refusal, as a demoted Admin gets it", async () => {
     },
   });
   await expect(f.write({ "people/dataset.json": "new" })).rejects.toThrow(
-    "The server refused people/dataset.json: Only the Owner or an Admin can change this Collection's rules.",
+    "The server refused people/dataset.json: Only the Owner or an Admin can change this Collection's rules. The Collection's rules didn't change. Fix the file, then try again.",
   );
 });
 
@@ -141,4 +141,19 @@ it("stops before sending when a rule file changed while it saved", async () => {
     "people/dataset.json changed while dohc saved it. Try again.",
   );
   expect(f.push).not.toHaveBeenCalled();
+});
+
+it("sends a review's rule files as the copy holds them, and writes nothing when one changed since", async () => {
+  const f = fixture({ "people/dataset.json": "new", "people/0002.sql": "ALTER" });
+  await f.write({ "people/dataset.json": "new", "people/0002.sql": "ALTER" }, "send");
+  expect(f.changes).toEqual([]);
+  expect(f.delivery).toHaveBeenCalledWith(["people/0002.sql", "people/dataset.json"]);
+  f.files.set("people/0002.sql", "ALTER AGAIN");
+  await expect(
+    f.write({ "people/dataset.json": "new", "people/0002.sql": "ALTER" }, "send"),
+  ).rejects.toThrow(
+    "people/0002.sql changed while dohc read it for this review. Prepare it again.",
+  );
+  expect(f.changes).toEqual([]);
+  expect(f.push).toHaveBeenCalledOnce();
 });

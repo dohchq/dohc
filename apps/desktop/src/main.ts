@@ -205,7 +205,10 @@ import {
   type RemoteDatasetData,
 } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
-import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
+import {
+  createNamedDatasetCacheRegistry,
+  savedPagesAuthority,
+} from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
@@ -8576,6 +8579,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  memberRoleOf,
   sharedViewHistory: (workspace) =>
     sharedViewHistory(
       receivedShareEngine.storeFor({
@@ -11417,11 +11421,12 @@ function registerIpcHandlers(): void {
         shareId?: unknown;
         grantedSelector?: unknown;
         ended?: unknown;
+        role?: unknown;
       } | null;
       const cache = namedDatasetPages.scope({
         owner: datasetCopyOwnerKey(credentials),
         binding: [workspace.workspaceId, workspace.rootPath, marker?.shareId, credentials.relayUrl],
-        localAuthority: [marker?.grantedSelector, marker?.ended ?? false],
+        localAuthority: savedPagesAuthority(marker),
         assertCurrent: () => {
           signal.throwIfAborted();
           if (credentialGeneration !== credentialCacheGeneration)
@@ -11539,7 +11544,7 @@ function registerIpcHandlers(): void {
     writeSharedSources: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       files: Record<string, string>,
-      exclusive: boolean,
+      mode: "create" | "change" | "send",
       signal: AbortSignal,
     ) => {
       const resolved = resolveRegisteredShareViewFilesTarget(workspace, {
@@ -11553,7 +11558,7 @@ function registerIpcHandlers(): void {
       await writeSharedCollectionRules({
         workspaceId: workspace.workspaceId,
         files,
-        exclusive,
+        mode,
         shareViewFiles,
         withLease: (work) => withStaleSensitiveWorkspaceOperation(workspace.rootPath, work),
         push: async () => {

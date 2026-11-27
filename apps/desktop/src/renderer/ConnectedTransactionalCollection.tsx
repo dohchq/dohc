@@ -120,7 +120,8 @@ function ScopedCollection({
   role = "owner",
 }: ConnectedTransactionalCollectionProps) {
   const owner = role === "owner",
-    governs = role !== "member";
+    governs = role !== "member",
+    reviewer = owner ? "owner" : governs ? "admin" : "former-admin";
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
@@ -1121,6 +1122,7 @@ function ScopedCollection({
           tableId={tableId}
           onError={onError}
           addType={editingFields === "date" ? "date" : undefined}
+          reviewer={reviewer}
           buttonStates={buttonStates}
           onChooseButton={table ? chooseButton : undefined}
           onButtonAdded={table ? chooseButton : undefined}
@@ -1177,6 +1179,7 @@ function ScopedCollection({
       {reviewingSchema && (
         <CollectionMigrationReviewDialog
           initialPreparation={historyRestore}
+          reviewer={reviewer}
           workspaceId={workspaceId}
           datasetId={datasetId}
           datasetPath={datasetPath}

@@ -192,7 +192,7 @@ export function createDatasetHandler<
   writeSharedSources?(
     workspace: W,
     files: Record<string, string>,
-    exclusive: boolean,
+    mode: "create" | "change" | "send",
     signal: AbortSignal,
   ): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
@@ -506,14 +506,17 @@ export function createDatasetHandler<
             current();
           }
           const authorityWorkspaceId = shared?.workspaceId ?? input.workspaceId;
-          const writeSources = (files: Record<string, string>, exclusive = false) => {
+          const writeSources = (
+            files: Record<string, string>,
+            mode: "create" | "change" | "send" = "change",
+          ) => {
             if (!shared)
               return dependencies.createSources(operation.workspace, files, operation.signal);
             if (!dependencies.writeSharedSources) throw datasetOwnerOnlyError();
             return dependencies.writeSharedSources(
               operation.workspace,
               files,
-              exclusive,
+              mode,
               operation.signal,
             );
           };
@@ -830,6 +833,9 @@ export function createDatasetHandler<
           const migrationAuthority = {
             workspaceId: authorityWorkspaceId,
             sourceWorkspaceId: input.workspaceId,
+            ...(shared
+              ? { deliverSources: (files: Record<string, string>) => writeSources(files, "send") }
+              : {}),
             assertCurrent() {
               current();
               if (dependencies.currentCredentialGeneration?.() !== credentialGeneration)
@@ -1505,7 +1511,7 @@ export function createDatasetHandler<
               schemaSql,
               operationSource,
             });
-            await onMainLocked(() => writeSources(generated.files, true));
+            await onMainLocked(() => writeSources(generated.files, "create"));
             current();
             const approved = await shared.data.activate({
               revision,

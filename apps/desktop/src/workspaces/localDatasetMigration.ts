@@ -47,6 +47,8 @@ const sameCursor = (a: DatasetCursor, b: DatasetCursor) =>
 interface MigrationAuthority {
   workspaceId: string;
   sourceWorkspaceId: string;
+  /** Returns once the workspace the rules run in holds these captured files. */
+  deliverSources?(files: Record<string, string>): Promise<void>;
   assertCurrent(): void;
   approvedArtifacts(
     datasetId: string,
@@ -228,6 +230,10 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           if (!migrationSql.trim() || migrationSql.includes("\0"))
             throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
         }
+        await dependencies.deliverSources?.(
+          Object.fromEntries(captured.files.map((file) => [file.path, decode(file.bytes)])),
+        );
+        await current(previous.cursor);
         const candidate = DatasetMigrationCandidate.parse(
           await dependencies.prepareMigrationCandidate({
             workspaceId: dependencies.workspaceId,

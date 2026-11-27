@@ -387,6 +387,31 @@ describe("CollectionMigrationReviewDialog", () => {
     expect(screen.queryByText(/reverse rule changes/i)).toBeNull();
     expect(screen.getAllByText(/Collection History cannot restore/).length).toBe(1);
   });
+  it("points an Admin to nothing only the Owner has, and stops a former Admin from approving", () => {
+    const destructive = prep();
+    destructive.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 3,
+      afterRows: 2,
+      changedRows: 3,
+      deletedRows: 1,
+      beforeValues: { name: 3 },
+      afterValues: { name: 2, receipt: 2 },
+      clearedValues: { name: 0 },
+    };
+    const { rerender, props } = setup({ initialPreparation: destructive, reviewer: "admin" });
+    expect(screen.getByTestId("migration-destructive-warning").textContent).not.toMatch(
+      /Collection History|Export recovery/,
+    );
+    expect(screen.queryByText(/Collection History/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve change" })).toBeTruthy();
+    rerender(<CollectionMigrationReviewDialog {...props} reviewer="former-admin" />);
+    expect(screen.queryByRole("button", { name: "Approve change" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toBe(
+      "You're no longer an Admin of this workspace, so you can't change its Collections' rules.",
+    );
+    expect(props.onApprove).not.toHaveBeenCalled();
+  });
   it("reports unmatched primary-key changes honestly without claiming confirmed removal", () => {
     const rekeyed = prep();
     rekeyed.revision.definition.tables[0] = {

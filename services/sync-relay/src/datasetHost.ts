@@ -1135,9 +1135,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       auth,
       named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId),
     );
-    return request.datasetId === undefined || !adminOf(auth)
-      ? authority
-      : adminReads(authority, auth.workspaceId, request.datasetId);
+    return adminOf(auth)
+      ? {
+          ...authority,
+          authorityToken: hash(JSON.stringify([authority.authorityToken, "admin"])),
+          adminReads: true,
+        }
+      : authority;
   }
   function adminOf(auth: Extract<AppBackendAuth, { kind: "named" }>) {
     return (
@@ -1145,23 +1149,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       workspaceRoleOf(storage, auth.workspaceId, auth.userId)?.role === "admin" &&
       auth.grantId === workspaceMemberGrantId(storage, auth.workspaceId, auth.userId)
     );
-  }
-  function adminReads(
-    authority: DatasetAuthority,
-    workspaceId: string,
-    datasetId: string,
-  ): DatasetAuthority {
-    const reads = storage.db
-      .prepare(
-        "SELECT json_extract(o.value,'$.operationId') AS id FROM dohc_dataset_catalog c, json_each(c.revision_json,'$.definition.operations') o WHERE c.workspace_id=? AND c.dataset_id=? AND json_extract(o.value,'$.readOnly')=1",
-      )
-      .all(workspaceId, datasetId)
-      .map((row) => String(row.id));
-    return {
-      ...authority,
-      authorityToken: hash(JSON.stringify([authority.authorityToken, "admin"])),
-      defaultOperationIds: [...new Set([...(authority.defaultOperationIds ?? []), ...reads])],
-    };
   }
   function publication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     current();
@@ -1763,6 +1750,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       );
     }
     return {
+      /** An active Admin acting as themselves or on their own member grant, not through a phone launch. */
+      memberAdmin: (auth: Extract<AppBackendAuth, { kind: "named" }>, workspaceId: string) =>
+        auth.workspaceId === workspaceId &&
+        adminOf({
+          ...auth,
+          grantId:
+            auth.grantId ?? workspaceMemberGrantId(storage, workspaceId, auth.userId) ?? undefined,
+        }),
+      keeps: (workspaceId: string, datasetId: string) =>
+        storage.db
+          .prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?")
+          .get(workspaceId, datasetId) !== undefined,
       automations: createDatasetAutomations({
         host,
         storage,

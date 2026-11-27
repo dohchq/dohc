@@ -3,6 +3,7 @@ import { createNamedDatasetData } from "./namedDataset";
 import { SHARE_VIEW_REOPEN_MESSAGE } from "./shareViewMarker";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { markDatasetServerNotFound } from "../ipc/errorWords";
+import { datasetResponseAction } from "../ipc/readDatasetResponse";
 
 const marker = {
   shareId: "share",
@@ -157,7 +158,16 @@ it("reads who approved a Collection's rules on the owner's workspace, and says w
 });
 
 it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them or they're no longer an Admin", async () => {
-  const deps = { ...input(), relayJson: vi.fn(async (..._: unknown[]): Promise<unknown> => ({})) };
+  const refusal = { status: 404, code: "not_found" };
+  const deps = {
+    ...input(),
+    relayJson: vi.fn(async (_credentials: unknown, path: string): Promise<unknown> => {
+      const failure = new Error("Server words");
+      throw datasetResponseAction(path)
+        ? markDatasetServerNotFound(failure, refusal.status, refusal)
+        : failure;
+    }),
+  };
   const joined = {
     ...marker,
     grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
@@ -167,27 +177,34 @@ it("sends an Admin's Collection rules to the owner's workspace, and says when th
   const datasetId = "00000000-0000-4000-8000-000000000001";
   const governed = createNamedDatasetData({ ...deps, shareView: joined }).governance();
   expect(governed.workspaceId).toBe("owner-workspace");
-  deps.relayJson.mockRejectedValueOnce(
-    markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" }),
-  );
+  Object.assign(refusal, { status: 404, code: "dataset_kept_by_owner" });
   await expect(governed.data.approvedArtifacts!(datasetId)).rejects.toThrow(
     "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.",
   );
-  deps.relayJson.mockRejectedValueOnce(
-    markDatasetServerNotFound(new Error("Only the owner or an admin can do this."), 403, {
-      code: "members_forbidden",
-    }),
-  );
+  Object.assign(refusal, { status: 404, code: "not_found" });
   await expect(governed.data.approvedArtifacts!(datasetId)).rejects.toThrow(
+    "The server didn't find this Collection for you. Reopen the workspace, then try again.",
+  );
+  Object.assign(refusal, { status: 403, code: "members_forbidden" });
+  await expect(
+    governed.data.approveMigrationCandidate!({
+      workspaceId: "owner-workspace",
+      datasetId,
+      candidateId: datasetId,
+      checkpointSha256: "a".repeat(64),
+    }),
+  ).rejects.toThrow(
     "You're no longer an Admin of this workspace, so you can't change its Collections' rules.",
   );
-  expect(deps.relayJson).toHaveBeenCalledWith(
+  expect(deps.relayJson).toHaveBeenLastCalledWith(
     deps.credentials,
-    expect.stringMatching(/^\/sync\/owner-workspace\/datasets\//),
+    `/sync/owner-workspace/datasets/${datasetId}/approve-migration`,
     expect.anything(),
   );
-  for (const shareView of [marker, { ...joined, role: "member" }])
-    expect(() => createNamedDatasetData({ ...deps, shareView }).governance()).toThrow(
-      "Open the original workspace to manage this Collection.",
-    );
+  expect(() => createNamedDatasetData({ ...deps, shareView: marker }).governance()).toThrow(
+    "Open the original workspace to manage this Collection.",
+  );
+  expect(() =>
+    createNamedDatasetData({ ...deps, shareView: { ...joined, role: "member" } }).governance(),
+  ).toThrow("Open the original workspace to manage this Collection.");
 });

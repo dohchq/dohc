@@ -1590,16 +1590,16 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     expect(await dataset({ action: "list" })).toMatchObject({
       datasets: [{ datasetId: listed!.datasetId, name: "Guests" }],
     });
-    const fieldReview = async () => {
+    const fieldReview = async (from = "Name", to = "Guest") => {
       const guests = await openCollection(kai, "Registrations");
       await (await collectionCommand(guests, "Fields and names")).click();
       const fields = kai.getByRole("dialog", { name: "Fields and names" });
       await fields.getByLabel("Change", { exact: true }).selectOption("renameField");
-      await fields.getByLabel("Field", { exact: true }).selectOption({ label: "Name" });
-      await fields.getByLabel("Name", { exact: true }).fill("Guest");
+      await fields.getByLabel("Field", { exact: true }).selectOption({ label: from });
+      await fields.getByLabel("Name", { exact: true }).fill(to);
       await fields.getByRole("button", { name: "Review change", exact: true }).click();
       const review = kai.getByRole("dialog", { name: "Review Collection change" });
-      await expect(review.getByRole("region", { name: "Field changes" })).toContainText("Guest", {
+      await expect(review.getByRole("region", { name: "Field changes" })).toContainText(to, {
         timeout: 60_000,
       });
       return { guests, review };
@@ -1648,6 +1648,23 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
       );
     }).toPass({ timeout: 120_000, intervals: [2_000] });
     await themed(kai, "admin-created", async () => openCollection(kai, "Volunteers"));
+
+    // --- Kai stops being an Admin with a review open, and can't approve it ---
+    ({ review } = await fieldReview("Guest", "Attendee"));
+    await setRole(kaiId, "member");
+    const approve = review.getByRole("button", { name: "Approve change", exact: true });
+    if (await approve.isVisible()) await approve.click();
+    const notAdmin = kai
+      .getByText(
+        "You're no longer an Admin of this workspace, so you can't change its Collections' rules.",
+      )
+      .first();
+    await expect(notAdmin).toBeVisible({ timeout: 30_000 });
+    await kai.screenshot({ path: shot("former-admin-approve-dark") });
+    await kai.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+    await kai.screenshot({ path: shot("former-admin-approve-light") });
+    await expect(approve).toHaveCount(0, { timeout: 60_000 });
+    await setRole(kaiId, "admin");
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await admin.close();
     admin = null;

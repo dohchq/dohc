@@ -16,6 +16,7 @@ import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { joinedByAccount } from "./shareWriteGate";
 import {
   datasetOwnerOnlyError,
+  isDatasetServerKeptByOwner,
   isDatasetServerNotAdmin,
   isDatasetServerNotFound,
 } from "../ipc/errorWords";
@@ -25,6 +26,8 @@ const NOT_ADMIN =
   "You're no longer an Admin of this workspace, so you can't change its Collections' rules.";
 const KEPT_BY_OWNER =
   "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.";
+const NOT_FOUND =
+  "The server didn't find this Collection for you. Reopen the workspace, then try again.";
 const NOT_SHOWN =
   "The server didn't show you who approved this Collection's rules. You may no longer be an Admin, or the Owner keeps this Collection on their computer.";
 /** Source View/Edit and Collection data permissions are separate. The relay resolves the named grant. */
@@ -136,7 +139,8 @@ export function createNamedDatasetData(input: {
           relayJson: (credentials, path, init) =>
             input.relayJson(credentials, path, init).catch((error: unknown) => {
               if (isDatasetServerNotAdmin(error)) throw new Error(NOT_ADMIN);
-              throw isDatasetServerNotFound(error) ? new Error(KEPT_BY_OWNER) : error;
+              if (isDatasetServerKeptByOwner(error)) throw new Error(KEPT_BY_OWNER);
+              throw isDatasetServerNotFound(error) ? new Error(NOT_FOUND) : error;
             }),
         }),
       };

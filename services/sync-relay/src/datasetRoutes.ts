@@ -484,7 +484,7 @@ export function createDatasetRoutes(
         participant: auth.userId,
         organizer:
           storage.workspaceIsOwnedBy(route.workspaceId, auth.userId) ||
-          storage.workspaceRoleOf(route.workspaceId, auth.userId)?.role === "admin",
+          host.memberAdmin(auth, route.workspaceId),
       },
       route.action,
       options.nowMs(),
@@ -935,6 +935,15 @@ export function createDatasetRoutes(
         storage.workspaceRoleOf(route.workspaceId, auth.userId)?.role !== "admin"
       )
         throw relayError("members_forbidden");
+      if (
+        error instanceof RelayError &&
+        error.code === "not_found" &&
+        GOVERNANCE_ACTIONS.includes(route.action) &&
+        route.datasetId &&
+        host.memberAdmin(auth, route.workspaceId) &&
+        !host.keeps(route.workspaceId, route.datasetId)
+      )
+        throw relayError("dataset_kept_by_owner");
       throw error;
     } finally {
       release();

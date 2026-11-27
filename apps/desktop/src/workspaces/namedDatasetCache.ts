@@ -33,6 +33,13 @@ export type NamedDatasetPageCache = {
 };
 
 /** Recipient responses only. This file never contains a database, executable rules, or owner history. */
+/** What a joined copy's saved pages were read under. Pages saved under a wider grant, a share that ended since, or another role don't show. */
+export function savedPagesAuthority(
+  marker: { grantedSelector?: unknown; ended?: unknown; role?: unknown } | null,
+): unknown {
+  return [marker?.grantedSelector, marker?.ended ?? false, marker?.role ?? null];
+}
+
 export function createNamedDatasetCacheRegistry(options: {
   directory(): string;
   maxBytes?: number;

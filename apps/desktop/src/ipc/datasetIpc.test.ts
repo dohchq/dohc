@@ -2085,7 +2085,7 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
   expect(writeSharedSources).toHaveBeenCalledWith(
     f.workspace,
     expect.any(Object),
-    true,
+    "create",
     expect.any(AbortSignal),
   );
   expect(f.createSources).not.toHaveBeenCalled();
@@ -2094,7 +2094,7 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
 
   writeSharedSources.mockRejectedValueOnce(
     new Error(
-      "The server refused guests/dataset.json: Only the Owner or an Admin can change this Collection's rules.",
+      "The server refused guests/dataset.json: Only the Owner or an Admin can change this Collection's rules. The Collection's rules didn't change. Fix the file, then try again.",
     ),
   );
   await expect(f.handler("cli", create)).rejects.toThrow("Only the Owner or an Admin");

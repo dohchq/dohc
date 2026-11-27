@@ -484,6 +484,32 @@ const DATASET_ACCESS_OPTIONS = [
   datasetAction({ ...selection, action: z.literal("approval") }),
 ] as const;
 const DATASET_RULE_OPTIONS = {
+  list: datasetAction({
+    ...workspace,
+    action: z.literal("list"),
+    after: identity.optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+    includeArchived: z.boolean().optional(),
+  }),
+  describe: datasetAction({
+    ...selection,
+    action: z.literal("describe"),
+    includeArchived: z.boolean().optional(),
+  }),
+  invoke: datasetAction({
+    ...selection,
+    action: z.literal("invoke"),
+    operationId: identity,
+    revision: z.number().int().positive(),
+    revisionSha256: sha256,
+    input: inputJson("bulk"),
+    idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    invocationId: identity
+      .describe(
+        "A fresh id for this running request. cancelInvoke requests cancellation; retry with the same input and idempotencyKey.",
+      )
+      .optional(),
+  }),
   create: datasetAction({ ...workspace, action: z.literal("create"), definition }),
   prepareSchemaChange: datasetAction({
     ...pinned,
@@ -523,6 +549,9 @@ const DATASET_RULE_OPTIONS = {
 } as const;
 const DATASET_ADMIN_OPTIONS = [
   ...DATASET_ACCESS_OPTIONS,
+  DATASET_RULE_OPTIONS.list,
+  DATASET_RULE_OPTIONS.describe,
+  DATASET_RULE_OPTIONS.invoke,
   DATASET_RULE_OPTIONS.create,
   DATASET_RULE_OPTIONS.prepareSchemaChange,
   DATASET_RULE_OPTIONS.prepareMigration,
@@ -551,18 +580,8 @@ const DATASET_REQUEST_OPTIONS = [
     beforeRevision: z.number().int().positive().optional(),
     limit: z.number().int().min(1).max(100).optional(),
   }),
-  datasetAction({
-    ...workspace,
-    action: z.literal("list"),
-    after: identity.optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-    includeArchived: z.boolean().optional(),
-  }),
-  datasetAction({
-    ...selection,
-    action: z.literal("describe"),
-    includeArchived: z.boolean().optional(),
-  }),
+  DATASET_RULE_OPTIONS.list,
+  DATASET_RULE_OPTIONS.describe,
   datasetAction({ ...selection, action: z.literal("types") }),
   datasetAction({
     ...selection,
@@ -698,25 +717,12 @@ const DATASET_REQUEST_OPTIONS = [
   DATASET_RULE_OPTIONS.prepareSchemaChange,
   DATASET_RULE_OPTIONS.approveMigration,
   DATASET_RULE_OPTIONS.discardMigration,
-  datasetAction({
-    ...selection,
-    action: z.literal("invoke"),
-    operationId: identity,
-    revision: z.number().int().positive(),
-    revisionSha256: sha256,
-    input: inputJson("bulk"),
-    idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
-    invocationId: identity
-      .describe(
-        "A fresh id for this running request. cancelInvoke requests cancellation; retry with the same input and idempotencyKey.",
-      )
-      .optional(),
-  }),
+  DATASET_RULE_OPTIONS.invoke,
   datasetAction({ ...workspace, action: z.literal("cancelInvoke"), invocationId: identity }),
 ] as const;
 
 const DATASET_ACTIONS = DATASET_REQUEST_OPTIONS.map((option) => option.shape.action.value);
-/** What an Admin does to a Collection in a workspace they joined: its access, and its rules on the server. The server checks their role. */
+/** What an Admin does to a Collection in a workspace they joined: reads it, sets its access, and changes its rules on the server. The server checks their role. */
 export const DatasetAdminRequest = z.discriminatedUnion("action", DATASET_ADMIN_OPTIONS);
 export const DATASET_ADMIN_ACTIONS: ReadonlySet<string> = new Set(
   DATASET_ADMIN_OPTIONS.map((option) => option.shape.action.value),

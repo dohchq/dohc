@@ -142,7 +142,17 @@ describe("dataset MCP transport", () => {
     const send = vi.fn(),
       context: ToolContext = { root: "/workspace", home: "/home", request: send };
     for (const shareAccess of ["view", "comment", "edit"] as const)
-      expect(await dataset({ ...context, shareAccess }, request)).toMatchObject({ ok: false });
+      expect(
+        await dataset(
+          { ...context, shareAccess },
+          {
+            action: "sql",
+            workspaceId: "workspace",
+            datasetPath: "equipment/dataset.json",
+            sql: "SELECT * FROM private",
+          },
+        ),
+      ).toMatchObject({ ok: false });
     expect(await dataset(context, { ...request, sql: "SELECT * FROM private" })).toMatchObject({
       ok: false,
     });

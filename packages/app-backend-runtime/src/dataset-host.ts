@@ -187,6 +187,8 @@ export interface DatasetAuthority {
   };
   /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
   defaultOperationIds?: readonly string[];
+  /** A workspace Admin, checked by the host on this request: they discover every Collection and run each read-only operation, Owner-only ones included. Writes still need a grant or default. */
+  adminReads?: boolean;
   /**
    * The chain depth an automation caller's writes declare, one more than the
    * change that started its run. Required for that caller, refused for any
@@ -644,6 +646,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       beforeCommit: result.beforeCommit,
       operationCeiling: result.operationCeiling,
       defaultOperationIds: caller.kind === "named" ? result.defaultOperationIds : undefined,
+      adminReads: caller.kind === "named" && result.adminReads === true,
     };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
@@ -824,13 +827,18 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?",
         )
         .get(key.workspaceId, key.datasetId, verified.principalKey);
-      const defaults = verified.defaultOperationIds ?? [];
-      if (!row && !defaults.length) denied();
+      const defaults = verified.defaultOperationIds ?? [],
+        admin = verified.adminReads === true;
+      if (!row && !defaults.length && !admin) denied();
       let grant: StoredGrant | undefined;
       try {
         grant = row ? currentGrant(key, JSON.parse(String(row.grant_json)), approved) : undefined;
       } catch (error) {
-        if (!defaults.length || !(error instanceof DatasetHostError) || error.code !== "conflict")
+        if (
+          (!defaults.length && !admin) ||
+          !(error instanceof DatasetHostError) ||
+          error.code !== "conflict"
+        )
           throw error;
       }
       // A data grant supplies organizer authority without requiring source Edit.
@@ -842,9 +850,19 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         revisionSha256: approved.revisionSha256,
         operationIds: [...new Set([...(grant?.operationIds ?? []), ...defaults])],
       };
-      operations = boundOperations(JSON.stringify(binding), binding, approved, verified.caller);
+      operations = binding.operationIds.length
+        ? boundOperations(JSON.stringify(binding), binding, approved, verified.caller)
+        : [];
+      if (admin) {
+        const held = operations;
+        operations = approved.definition.operations.flatMap(
+          (operation) =>
+            held.find((value) => value.operationId === operation.operationId) ??
+            (operation.readOnly ? [operation] : []),
+        );
+      }
       token = row ? String(row.token) : "";
-      discover = defaults.length > 0 || grant!.discover;
+      discover = admin || defaults.length > 0 || grant!.discover;
     }
     const ceiling = verified.operationCeiling;
     if (ceiling)

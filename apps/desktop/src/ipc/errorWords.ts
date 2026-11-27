@@ -821,6 +821,11 @@ export const DATASET_SERVER_NOT_ADMIN = "dataset_not_admin";
 export function isDatasetServerNotAdmin(error: unknown): boolean {
   return parse(error).code === DATASET_SERVER_NOT_ADMIN;
 }
+/** Main's code for the server's answer to an Admin that a Collection is kept on the Owner's computer, not on the server. */
+export const DATASET_SERVER_KEPT_BY_OWNER = "dataset_kept_by_owner";
+export function isDatasetServerKeptByOwner(error: unknown): boolean {
+  return parse(error).code === DATASET_SERVER_KEPT_BY_OWNER;
+}
 /** Main's code for an owner's action on a Collection asked from a shared view, which only its owner can take. */
 export const DATASET_OWNER_ONLY = "dataset_owner_only";
 export function datasetOwnerOnlyError(): Error {
@@ -831,7 +836,7 @@ export function datasetOwnerOnlyError(): Error {
 export function isDatasetOwnerOnly(error: unknown): boolean {
   return parse(error).code === DATASET_OWNER_ONLY;
 }
-/** Gives a Collection route's 404 "not found" and its 403 role refusal their codes, so callers can name the cause. Their words stay. */
+/** Gives a Collection route's 404 "not found", its Owner's-computer answer, and its 403 role refusal their codes, so callers can name the cause. Their words stay. */
 export function markDatasetServerNotFound(
   failure: Error,
   status: number,
@@ -839,6 +844,8 @@ export function markDatasetServerNotFound(
 ): Error {
   if (status === 404 && body?.code === "not_found")
     return Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND });
+  if (status === 404 && body?.code === DATASET_SERVER_KEPT_BY_OWNER)
+    return Object.assign(failure, { code: DATASET_SERVER_KEPT_BY_OWNER });
   if (status === 403 && body?.code === "members_forbidden")
     return Object.assign(failure, { code: DATASET_SERVER_NOT_ADMIN });
   return failure;

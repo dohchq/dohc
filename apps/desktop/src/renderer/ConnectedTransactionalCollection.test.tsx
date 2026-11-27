@@ -3048,6 +3048,31 @@ describe("who approved a Collection's rules", () => {
     );
   });
 
+  it("follows a role change while the page is open", async () => {
+    answer(approval(formerAda));
+    const page = (role: "admin" | "member") => (
+      <ConnectedTransactionalCollection
+        role={role}
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />
+    );
+    const view = render(page("member"));
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+    view.rerender(page("admin"));
+    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
+    view.rerender(page("member"));
+    await waitFor(() => expect(screen.queryByTestId("collection-approved-by")).toBeNull());
+  });
+
   it("names the approver to an Admin, and leaves confirming to the Owner", async () => {
     answer(approval(formerAda, true));
     renderPage("admin");

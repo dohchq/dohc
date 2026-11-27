@@ -198,6 +198,7 @@ export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
 const MAX_REQUEST_BYTES = MAX_CLI_REQUEST_BYTES;
 const MAX_FTS_CANDIDATES = 50_000;
+const ADMIN_READS: ReadonlySet<string> = new Set(["list", "describe", "invoke"]);
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
 // A CLI request that has not answered by now loses its socket; work done for
@@ -565,6 +566,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   joined?: boolean;
+  admin?(): boolean;
   // Makes, or finds, the work reference that names `target` in this workspace.
   makeWorkReference?(target: WorkTargetInput): Promise<string>;
   // The shared files this shared view holds back, or null outside a shared view.
@@ -3521,13 +3523,15 @@ async function dispatchWorkspace(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath)
         throw new CliCommandError("Collection export requires an explicit savePath.");
+      const action = request.args.request.action;
       if (
         !context.dataset ||
         (context.readOnly &&
           !(
             context.joined &&
-            (DATASET_ADMIN_ACTIONS.has(request.args.request.action) ||
-              request.args.request.action === "types")
+            (ADMIN_READS.has(action)
+              ? context.admin?.() === true
+              : DATASET_ADMIN_ACTIONS.has(action) || action === "types")
           ))
       )
         throw new CliCommandError("Collections require the owning workspace.");

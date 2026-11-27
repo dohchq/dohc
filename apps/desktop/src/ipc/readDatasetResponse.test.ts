@@ -66,3 +66,23 @@ it("reads an owner bulk result with the relay's profile header", async () => {
     readDatasetResponse(Response.json(value, { headers }), "invoke", signal),
   ).resolves.toEqual({ ...value, profile: "bulk" });
 });
+
+it("recognizes hyphenated Collection routes so their refusals keep the server's code", async () => {
+  const route = "/sync/w/datasets/00000000-0000-4000-8000-000000000001";
+  for (const action of [
+    "prepare-migration",
+    "approve-migration",
+    "discard-migration",
+    "migration-preview-page",
+  ])
+    expect(datasetResponseAction(`${route}/${action}`)).toBe(action);
+  expect(datasetResponseAction(`${route}/approve-`)).toBeNull();
+  const signal = new AbortController().signal;
+  const review = JSON.stringify({ bytes: "a".repeat(1536 * 1024) });
+  expect(await readDatasetResponse(new Response(review), "prepare-migration", signal)).toEqual(
+    JSON.parse(review),
+  );
+  await expect(
+    readDatasetResponse(new Response(review), "approve-migration", signal),
+  ).rejects.toThrow(/limit/);
+});

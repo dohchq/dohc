@@ -39,6 +39,7 @@ function setup() {
       pendingAttempts,
       reconcileAttempt,
       cancelAttempt,
+      memberAdmin: () => false,
     } as unknown as RelayDatasetHost,
     nowMs: () => 10,
     resolveActor(request, workspaceId) {

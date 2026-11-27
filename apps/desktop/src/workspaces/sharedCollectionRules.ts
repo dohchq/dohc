@@ -15,8 +15,8 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 export async function writeSharedCollectionRules(input: {
   workspaceId: string;
   files: Record<string, string>;
-  /** Refuse a file already there with other text, as a new Collection does. */
-  exclusive: boolean;
+  /** create refuses a file already there with other text, as a new Collection does. send writes nothing: the copy already holds what a review read. */
+  mode: "create" | "change" | "send";
   shareViewFiles: Pick<ShareViewFiles, "read" | "change">;
   withLease<T>(work: (lease: Parameters<ShareViewFiles["change"]>[0]) => Promise<T>): Promise<T>;
   push(): Promise<void>;
@@ -38,7 +38,9 @@ export async function writeSharedCollectionRules(input: {
           throw error;
         });
       if (current?.kind === "text" && !current.truncated && current.text === text) continue;
-      if (current && input.exclusive)
+      if (input.mode === "send")
+        throw new Error(`${path} changed while dohc read it for this review. Prepare it again.`);
+      if (current && input.mode === "create")
         throw new Error(`A file is already at ${path}. Choose another name for the Collection.`);
       writes.push({ path, text, current });
     }
@@ -72,9 +74,7 @@ export async function writeSharedCollectionRules(input: {
     const status = statuses[path];
     if (status?.state === "refused")
       throw new Error(
-        status.reason
-          ? `The server refused ${path}: ${status.reason}`
-          : `The server refused ${path}.`,
+        `The server refused ${path}${status.reason ? `: ${status.reason.replace(/\.$/, "")}` : ""}. The Collection's rules didn't change. Fix the file, then try again.`,
       );
     if (status?.state !== "accepted" || status.contentHash !== sha256(text))
       throw new Error(NOT_SENT);
