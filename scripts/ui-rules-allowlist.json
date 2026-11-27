@@ -17,9 +17,6 @@
     },
     "apps/desktop/src/renderer/editor/mermaidRender.ts": {
       "raw-hex": 8
-    },
-    "apps/desktop/src/renderer/excalidrawDocument.ts": {
-      "raw-hex": 1
     }
   }
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DRAWING_ELEMENT_TYPES = [
+const DRAWING_ELEMENT_TYPES = [
   "rectangle",
   "ellipse",
   "diamond",
@@ -9,7 +9,7 @@ export const DRAWING_ELEMENT_TYPES = [
   "line",
   "frame",
 ] as const;
-export const MAX_DRAWING_CHANGES = 200;
+const MAX_DRAWING_CHANGES = 200;
 
 const DrawingPath = z.string().min(1).max(4096);
 const ElementId = z.string().min(1).max(200);
