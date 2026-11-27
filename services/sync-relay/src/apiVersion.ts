@@ -1,5 +1,5 @@
 import { RELAY_API_VERSION_HEADER, checkApiVersion } from "@dohc/workspace-contracts/relay-values";
-import { AUTOMATION_REPLICA_BEARER_PREFIX } from "./automationReplicaCredential";
+import { carriesAutomationReplicaBearer } from "./automationReplicaCredential";
 import { RelayError, relayError } from "./errors";
 import { parseRoute, type SyncRelayRoute } from "./relayRoute";
 
@@ -40,10 +40,7 @@ export function relayApiVersionsFor(
   engineMin: number,
 ): { min: number; max: number } {
   if (engineMin === RELAY_API_VERSIONS.min) return RELAY_API_VERSIONS;
-  if (
-    request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)
-  )
-    return RELAY_API_VERSIONS;
+  if (carriesAutomationReplicaBearer(request.headers)) return RELAY_API_VERSIONS;
   let route: SyncRelayRoute["route"];
   try {
     route = parseRoute(request).route;
@@ -58,8 +55,7 @@ export function relayApiVersionsFor(
 // A request names the relay API version it speaks. A request without the
 // header is read as version 1. This check only refuses: it runs before
 // authentication, reads only the route and the bearer's prefix, and never
-// grants anything. Every automation-replica bearer goes to the replica
-// handler, which verifies it, so its prefix alone lifts the engine minimum.
+// grants anything.
 export function relayApiVersionRefusal(
   headers: Headers,
   versions: { min: number; max: number } = RELAY_API_VERSIONS,

@@ -172,6 +172,7 @@ import { untilRelayAnswers } from "./relayAnswers";
 import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
   authorizeAutomationReplication,
+  carriesAutomationReplicaBearer,
 } from "./automationReplicaCredential";
 import { serverLogLine } from "./serverLogWords";
 import { createStartTimeline } from "./startTimeline";
@@ -883,9 +884,7 @@ const relayHandler = guardRelayResponses(storage, (request) => {
       serviceReplication?.(request) ??
       Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
     );
-  if (
-    request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)
-  )
+  if (carriesAutomationReplicaBearer(request.headers))
     return (
       automationReplication?.(request) ??
       Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))

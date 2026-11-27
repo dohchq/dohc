@@ -8,6 +8,12 @@ import {
 
 export const AUTOMATION_REPLICA_BEARER_PREFIX = "dohc-automation-v1.";
 
+export function carriesAutomationReplicaBearer(headers: Headers): boolean {
+  return (
+    headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`) ?? false
+  );
+}
+
 /**
  * The credential this server's automation replica of a workspace syncs with.
  * It is derived, never stored, under a label of its own, so it never verifies

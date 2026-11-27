@@ -142,7 +142,7 @@ describe("sync relay startup guards", () => {
     },
   );
 
-  it.each(["0", "3", "two"])(
+  it.each(["", "0", "3", "two"])(
     "refuses an invalid engine API minimum before opening storage: %j",
     async (value) => {
       const dbPath = join(await tempRoot("invalid-engine-api-min"), "relay.sqlite");
@@ -177,13 +177,14 @@ describe("sync relay startup guards", () => {
         ).json()) as { code?: string }
       ).code ?? "";
     expect(await codeFor("/sync/ws-a/log", "1")).toBe("api_version_too_old");
-    expect(
-      await codeFor(
-        "/sync/ws-a/log",
-        "1",
-        `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`,
-      ),
-    ).not.toMatch(/^api_version/);
+    const replica = await fetch(`${relay.baseUrl}/sync/ws-a/log`, {
+      headers: {
+        [RELAY_API_VERSION_HEADER]: "1",
+        authorization: `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`,
+      },
+    });
+    expect(replica.status).toBe(404);
+    expect(((await replica.json()) as { code?: string }).code ?? "").not.toMatch(/^api_version/);
     expect(await codeFor("/sync/ws-a/log", "2")).not.toMatch(/^api_version/);
     expect(await codeFor("/sync/account/sessions")).not.toMatch(/^api_version/);
   });
