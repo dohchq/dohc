@@ -1632,14 +1632,53 @@ function registerValidatedBaseline(
   });
 }
 
+const lineageEndings = (oneObject: boolean, forRead = false) => {
+  const object = oneObject ? " AND object_id=?" : "";
+  return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
+    UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${object}
+    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${object}
+    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND ${forRead ? "(state<>'off' OR host_drained_at_ms IS NULL)" : "state<>'starting'"}`;
+};
+
+export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
+export type RelayLiveNote = { objectId: string; kinds: RelayLiveNoteKind[] };
+
+export function relayLiveNotes(
+  storage: StorageContext,
+  workspaceId: string,
+  sessions: ReadonlySet<string>,
+): RelayLiveNote[] {
+  const rows = storage.readTx(() =>
+    storage.db
+      .prepare(`SELECT DISTINCT e.object_id,e.kind
+        FROM (${lineageEndings(false, true)} UNION ALL SELECT 'session',value FROM json_each(?)) e
+        ORDER BY e.object_id,e.kind`)
+      .all(
+        workspaceId,
+        "main",
+        workspaceId,
+        "main",
+        workspaceId,
+        "main",
+        workspaceId,
+        JSON.stringify([...sessions]),
+      ),
+  );
+  const notes = new Map<string, RelayLiveNote>();
+  for (const row of rows) {
+    const objectId = String(row.object_id);
+    const note = notes.get(objectId) ?? { objectId, kinds: [] };
+    note.kinds.push(row.kind as RelayLiveNoteKind);
+    notes.set(objectId, note);
+  }
+  return [...notes.values()];
+}
+
 function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
   return (
     storage.db
-      .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
-        UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
-        UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=? AND object_id=?
-        UNION ALL SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND state<>'starting' LIMIT 1`)
+      .prepare(`${lineageEndings(true)} LIMIT 1`)
       .get(
         workspaceId,
         mainVersionId,

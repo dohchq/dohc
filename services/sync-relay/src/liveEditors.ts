@@ -27,6 +27,15 @@ export class LiveEditors {
     };
   }
 
+  liveObjects(workspaceId: string): Set<string> {
+    const objects = new Set<string>();
+    for (const key of this.#connections.keys()) {
+      const [workspace, objectId] = JSON.parse(key) as [string, string];
+      if (workspace === workspaceId) objects.add(objectId);
+    }
+    return objects;
+  }
+
   connected(document: Document): boolean {
     return this.#connections.has(documentKey(document));
   }

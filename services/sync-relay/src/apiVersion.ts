@@ -24,6 +24,7 @@ const ENGINE_ROUTES: ReadonlySet<SyncRelayRoute["route"]> = new Set([
   "share-blob",
   "share-proposals",
   "share-collection-writes",
+  "live-notes",
 ]);
 
 export function engineApiMinimum(
