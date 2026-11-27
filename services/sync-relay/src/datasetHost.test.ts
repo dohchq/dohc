@@ -386,12 +386,14 @@ it("reads a share link's app manifest once per call and its warm rules never, ho
     .get()!.revision_json;
   const parse = JSON.parse;
   let ruleParses = 0;
-  vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+  const parses = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
     if (text === rules && String(new Error().stack).includes("dataset-host")) ruleParses++;
     return parse(text, reviver);
   });
   const blobs = vi.spyOn(f.storage, "getBlob");
-  await f.invoke({ ...link }, id(5), { name: "second" }, publicationId, "second");
+  await f
+    .invoke({ ...link }, id(5), { name: "second" }, publicationId, "second")
+    .finally(() => parses.mockRestore());
   expect(blobs.mock.calls.filter(([, sha256]) => sha256 === manifest)).toHaveLength(1);
   expect(ruleParses).toBe(0);
 });
