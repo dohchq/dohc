@@ -23,6 +23,7 @@ type Answer = {
   rulesChanged?: true;
 };
 type Attempt = { value: unknown; expectedVersion: number; revision: number; key: string };
+type Saved = { rowId: string; field: Field; undo?: { value: unknown } };
 type Editing = {
   rowId: string;
   fieldId: string;
@@ -32,8 +33,19 @@ type Editing = {
   attempt?: Attempt;
 };
 const EDITORS = new Set(["text", "url", "number", "checkbox", "date", "select"]);
+const NOTICES: Record<string, string> = {
+  uncertain: "dohc could not confirm the save. Try again to send the same change.",
+  stale: "This row changed since it loaded.",
+  gone: "This row is gone. Copy your value to keep it.",
+};
+const REFUSALS: Record<string, string> = { stale_record: "stale", not_found: "gone" };
 
-async function call(grantId: string, operation: string, args: object, signal: AbortSignal) {
+async function call(
+  grantId: string,
+  operation: string,
+  args: object,
+  signal = new AbortController().signal,
+) {
   const value = (await namedRequest("/api/named/collections", signal, {
     grantId,
     operation,
@@ -82,7 +94,7 @@ export function CollectionList(props: {
   }, [props.grantId, props.reload, attempt]);
   if (failed)
     return (
-      <p role="alert" className="named-collections-failed">
+      <p role="alert">
         dohc could not load Collections.{" "}
         <button className="named-link" onClick={() => setAttempt((n) => n + 1)}>
           Try again
@@ -122,21 +134,14 @@ export function CollectionTable(props: {
     [next, setNext] = useState<string | null>(null),
     [state, setState] = useState<"loading" | "slow" | "failed" | "no-read" | "ready">("loading"),
     [editing, setEditing] = useState<Editing | null>(null),
-    [saved, setSaved] = useState<{ rowId: string; field: Field; undo?: { value: unknown } } | null>(
-      null,
-    );
+    [saved, setSaved] = useState<Saved | null>(null);
   const reads = useRef<AbortController | null>(null),
     cells = useRef(new Map<string, HTMLButtonElement>()),
     refocus = useRef<string | null>(null);
   const table = described?.tables.find((table) => table.tableId === tableId);
-  const read = () => {
-    reads.current?.abort();
-    const controller = new AbortController();
-    reads.current = controller;
-    return controller;
-  };
   const load = async (after?: string, chosen = tableId) => {
-    const controller = read(),
+    reads.current?.abort();
+    const controller = (reads.current = new AbortController()),
       slow = setTimeout(() => setState((state) => (state === "loading" ? "slow" : state)), 150);
     if (!after) setState("loading");
     try {
@@ -182,13 +187,8 @@ export function CollectionTable(props: {
       })());
   useEffect(() => {
     props.onDirty(dirty);
+    return () => props.onDirty(false);
   }, [dirty]);
-  useEffect(
-    () => () => {
-      props.onDirty(false);
-    },
-    [],
-  );
   useEffect(() => {
     if (editing || !refocus.current) return;
     cells.current.get(refocus.current)?.focus();
@@ -220,22 +220,17 @@ export function CollectionTable(props: {
     setEditing(sending);
     let answer: Answer;
     try {
-      answer = (await call(
-        grantId,
-        "collectionEdit",
-        {
-          datasetId: collection.datasetId,
-          tableId: table.tableId,
-          recordId: row.id,
-          fieldId: field.fieldId,
-          value: attempt.value,
-          expectedVersion: attempt.expectedVersion,
-          revision: attempt.revision,
-          revisionSha256: described.revisionSha256,
-          idempotencyKey: attempt.key,
-        },
-        new AbortController().signal,
-      )) as Answer;
+      answer = (await call(grantId, "collectionEdit", {
+        datasetId: collection.datasetId,
+        tableId: table.tableId,
+        recordId: row.id,
+        fieldId: field.fieldId,
+        value: attempt.value,
+        expectedVersion: attempt.expectedVersion,
+        revision: attempt.revision,
+        revisionSha256: described.revisionSha256,
+        idempotencyKey: attempt.key,
+      })) as Answer;
     } catch {
       return setEditing({ ...sending, saving: false, notice: "uncertain" });
     }
@@ -268,27 +263,21 @@ export function CollectionTable(props: {
       });
       return void load();
     }
-    const code = answer.refused?.code;
+    const refused = answer.refused;
     setEditing({
       ...sending,
       saving: false,
-      notice:
-        code === "stale_record"
-          ? "stale"
-          : code === "not_found"
-            ? "gone"
-            : (answer.refused?.message ?? "uncertain"),
+      notice: (refused && REFUSALS[refused.code]) ?? refused?.message ?? "uncertain",
     });
   };
   const reloadRow = async (edit: Editing) => {
     if (!table) return;
     try {
-      const page = await call(
-        grantId,
-        "collectionRecords",
-        { datasetId: collection.datasetId, tableId: table.tableId, recordId: edit.rowId },
-        new AbortController().signal,
-      );
+      const page = await call(grantId, "collectionRecords", {
+        datasetId: collection.datasetId,
+        tableId: table.tableId,
+        recordId: edit.rowId,
+      });
       const current = (page.rows as Row[] | undefined)?.[0];
       if (!current) return setEditing({ ...edit, notice: "gone" });
       setRows((rows) => rows?.map((row) => (row.id === current.id ? current : row)) ?? null);
@@ -297,11 +286,10 @@ export function CollectionTable(props: {
       setEditing({ ...edit, notice: "dohc could not load the current row. Try again." });
     }
   };
-  if (state === "loading") return <section className="content named-collection" />;
-  if (state === "slow")
+  if (state === "loading" || state === "slow")
     return (
       <section className="content named-collection">
-        <p role="status">Loading records…</p>
+        {state === "slow" && <p role="status">Loading records…</p>}
       </section>
     );
   if (state === "failed")
@@ -321,13 +309,10 @@ export function CollectionTable(props: {
       if (event.key === "Escape") {
         event.preventDefault();
         close();
-      } else if (event.key === "Enter" && event.target instanceof HTMLSelectElement) {
-        event.currentTarget.requestSubmit();
-        event.preventDefault();
       } else if (
         event.key === "Enter" &&
-        event.target instanceof HTMLInputElement &&
-        event.target.type === "checkbox"
+        (event.target instanceof HTMLSelectElement ||
+          (event.target instanceof HTMLInputElement && event.target.type === "checkbox"))
       ) {
         event.currentTarget.requestSubmit();
         event.preventDefault();
@@ -338,14 +323,7 @@ export function CollectionTable(props: {
       if (!edit.saving) void save(edit, field);
     };
     const label = `${field.name}, ${shown(row.values[table!.fields[0]?.fieldId ?? ""]) || "this row"}`;
-    const notice =
-      edit.notice === "uncertain"
-        ? "dohc could not confirm the save. Try again to send the same change."
-        : edit.notice === "stale"
-          ? "This row changed since it loaded."
-          : edit.notice === "gone"
-            ? "This row is gone. Copy your value to keep it."
-            : edit.notice;
+    const notice = edit.notice && (NOTICES[edit.notice] ?? edit.notice);
     return (
       <form className="named-cell-editor" onSubmit={submit} onKeyDown={keys}>
         {field.type === "checkbox" ? (
@@ -372,15 +350,7 @@ export function CollectionTable(props: {
           <input
             aria-label={label}
             autoFocus
-            type={
-              field.type === "number"
-                ? "number"
-                : field.type === "date"
-                  ? "date"
-                  : field.type === "url"
-                    ? "url"
-                    : "text"
-            }
+            type={["number", "date", "url"].includes(field.type) ? field.type : "text"}
             step="any"
             value={String(edit.draft)}
             onChange={(event) => set(event.target.value)}
