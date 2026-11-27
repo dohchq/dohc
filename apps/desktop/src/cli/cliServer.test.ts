@@ -4165,6 +4165,9 @@ describe("CLI socket server", () => {
         fields: { status: "done" },
       }),
     ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("../tasks/a.md") });
+    await expect(invoke("documentRead", { cwd, actor: "agent", path: ".env.md" })).resolves.toEqual(
+      { ok: false, reason: expect.stringContaining("This file is protected") },
+    );
     await expect(
       invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" }),
     ).rejects.toThrow("not inside a dohc workspace");

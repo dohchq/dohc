@@ -85,7 +85,10 @@ import {
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import {
+  SECRET_READ_DENIED_REASON,
+  classifyEngineFilePathForRead,
+} from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 // The resolved-path rule lives in one place for every surface that decides
@@ -584,9 +587,6 @@ export async function listWorkspaceFiles(
 // Secret-backed files: dohc-controlled agent surfaces never share secret file
 // contents. The floor is the same classifyEngineFilePath rule the engine
 // enforces everywhere, and policy files can never unmark it.
-const SECRET_READ_DENIED_REASON =
-  "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
-
 function isSecretWorkspacePath(normalizedPath: string): boolean {
   // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
   // sees it (secret), where the write-side classifier would say "ignored"

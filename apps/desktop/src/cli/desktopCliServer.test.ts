@@ -2948,6 +2948,24 @@ it("reads a drawing from the caller's folder and answers with the caller's path"
     expect.objectContaining({ path: "nested/plan.excalidraw" }),
   );
   expect(JSON.parse(cli.stdout)).toMatchObject({ path: "plan.excalidraw" });
+  vi.mocked(f.dependencies.reads.drawingRead).mockClear();
+  const secret = await executeCli({
+    argv: ["drawing", "read", ".env.excalidraw"],
+    cwd: join(f.workspace.rootPath, "nested"),
+    env: {},
+    request: async (request) => {
+      const response = cliTransportResponseSchema.parse(
+        JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+        ),
+      );
+      if (!response.ok) throw new Error(response.error);
+      return response.result;
+    },
+  });
+  expect(secret.exitCode).not.toBe(0);
+  expect(secret.stderr).toContain("This file is protected");
+  expect(f.dependencies.reads.drawingRead).not.toHaveBeenCalled();
 });
 
 it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {

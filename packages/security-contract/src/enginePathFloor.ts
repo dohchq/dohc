@@ -7,6 +7,9 @@ import {
 } from "@dohc/workspace-core";
 import type { EngineFilePathClassification } from "@dohc/workspace-contracts/engine";
 
+export const SECRET_READ_DENIED_REASON =
+  "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
+
 const ENV_TEMPLATE_NAMES = new Set([".env.example", ".env.template", ".env.sample"]);
 
 export function classifyEngineFilePath(path: string): EngineFilePathClassification {

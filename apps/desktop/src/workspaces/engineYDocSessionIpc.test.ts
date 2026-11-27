@@ -3503,6 +3503,19 @@ describe("engine Y.Doc IPC adapter", () => {
       }
     });
 
+    it("refuses a document read whose link resolves to a secret file", async () => {
+      const h = harness(editableSession(), {
+        resolveDocumentPath: async (_workspace, path) =>
+          path === "notes/a.md" ? ".env.md" : ".env.excalidraw",
+      });
+      await expect(
+        h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }),
+      ).rejects.toThrow("This file is protected");
+      await expect(
+        h.ipc.readDocument({ workspaceId: "workspace-1", path: "plan.excalidraw", kind: "scene" }),
+      ).rejects.toThrow("This file is protected");
+    });
+
     it("reads the held document's state, or nothing when no editor holds it", async () => {
       const session = editableSession();
       const h = harness(session);

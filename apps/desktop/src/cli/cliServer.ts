@@ -6,7 +6,10 @@ import type { UndoAgentRunResult } from "@dohc/workspace-contracts/agent-run-und
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import {
+  SECRET_READ_DENIED_REASON,
+  classifyEngineFilePathForRead,
+} from "@dohc/security-contract/engine-path-floor";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import type {
   InboxAddInput,
@@ -2374,6 +2377,10 @@ function validateRequestPathSpellings(request: CliRequest): void {
 
 type CliPathMode = "read" | "write" | "materialize";
 
+function isSecretPath(path: string): boolean {
+  return classifyEngineFilePathForRead(path, process.platform).kind === "secret";
+}
+
 // Validate the caller spelling before rebasing, then validate workspace authority.
 async function callerPaths(context: Pick<CliWorkspaceContext, "rootPath">, cwd: string) {
   const root = await realpath(context.rootPath);
@@ -2825,7 +2832,7 @@ async function dispatch(
         break;
       case "fileDuplicate": {
         const path = paths.rebase(request.args.path, "materialize");
-        if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
+        if (isSecretPath(path))
           throw new CliCommandError("History cannot record secret files. Choose another file.");
         rebased = { ...request, args: { ...request.args, path } };
         break;
@@ -4254,6 +4261,8 @@ async function dispatchWorkspace(
     }
 
     case "documentRead":
+      if (isSecretPath(request.args.path))
+        return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
       try {
         return await readDocument(context.documents, request.args.path, process.platform);
       } catch (error) {
@@ -5379,9 +5388,9 @@ async function dispatchDeclaredRead(
     return (await callerPaths(workspace, cwd)).result(await read(workspace, input));
   if (request.verb === "drawingRead") {
     const paths = await callerPaths(workspace, cwd);
-    return paths.result(
-      await read(workspace, { ...input, path: paths.rebase(request.args.path, "read") }),
-    );
+    const path = paths.rebase(request.args.path, "read");
+    if (isSecretPath(path)) throw new CliCommandError(SECRET_READ_DENIED_REASON);
+    return paths.result(await read(workspace, { ...input, path }));
   }
   return read(workspace, input);
 }
