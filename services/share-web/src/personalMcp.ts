@@ -351,7 +351,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
   for (const guide of GUIDES) {
     server.registerResource(
       guide.name,
-      `dohc://guides/${guide.name}`,
+      `dohc://guides/${guide.file}`,
       { title: guide.title, description: guide.description, mimeType: "text/markdown" },
       (uri) => ({
         contents: [{ uri: uri.href, mimeType: "text/markdown", text: guides[guide.file] }],
@@ -513,7 +513,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     "dohc_read_file",
     {
       description:
-        "Read up to 256 KiB of a current file in a workspace you can reach, by its path or by its blobSha256 from dohc_list_files. " +
+        "Read up to 256 KiB of a current file in a workspace you can reach. Send either its path or its blobSha256 from dohc_list_files. " +
         "A path reads a file dohc_list_files left out when it was truncated. " +
         "Markdown may lag the live document. Binary files are base64 encoded.",
       annotations: READS,

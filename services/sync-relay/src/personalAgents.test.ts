@@ -2120,15 +2120,19 @@ describe("a personal agent's reads", () => {
     const agent = await signIn(f);
     await putBlob(f.h, OWNER, WS_A, "first");
     await putBlob(f.h, OWNER, WS_A, "PNG");
+    await putBlob(f.h, OWNER, WS_A, "spaced");
     await appendLog(f.h, OWNER, WS_A, [
       moment("notes/a.md", "first", { originSeq: 0 }),
       moment("notes/b.png", "PNG", {
         originSeq: 1,
         payload: { payloadAfterContentKind: "binary" },
       }),
+      moment("notes/ lead.md ", "spaced", { originSeq: 2 }),
     ]);
     const listed = await ok(await tool(f, agent, "files", { workspaceId: WS_A }));
-    expect(listed).toMatchObject({ truncated: true, files: [{ path: "notes/a.md" }] });
+    expect(listed).toMatchObject({ truncated: true, files: [{ path: "notes/ lead.md " }] });
+    const spaced = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/ lead.md " });
+    expect(await spaced.text()).toBe("spaced");
 
     const read = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/b.png" });
     expect(read.status).toBe(200);
@@ -2163,6 +2167,7 @@ describe("a personal agent's reads", () => {
       { workspaceId: WS_A },
       { workspaceId: WS_A, path: "" },
       { workspaceId: WS_A, path: 7 },
+      { workspaceId: WS_A, path: "notes/a.md\u0000" },
       { workspaceId: WS_A, path: "notes/a.md", sha256: "a".repeat(64) },
     ])
       expect((await tool(f, agent, "file", body)).status).toBe(400);

@@ -864,18 +864,13 @@ export function registerLiveDocumentTools(
   const { options } = scope;
   server.registerTool(
     "dohc_read_document",
-    {
-      description: readDescription,
-      annotations: LIVE_READ,
-      inputSchema: z.object({ path: livePath() }),
-    },
+    { description: readDescription, inputSchema: z.object({ path: livePath() }) },
     async ({ path }) => run(options, path),
   );
   server.registerTool(
     "dohc_edit_document",
     {
       description: LIVE_EDIT_DESCRIPTION,
-      annotations: LIVE_EDIT,
       inputSchema: z.object({ path: livePath(), ...liveEdit() }),
     },
     async ({ path, find, replacement }) => run(options, path, { find, replacement }),

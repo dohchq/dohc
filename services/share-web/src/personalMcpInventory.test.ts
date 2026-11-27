@@ -150,7 +150,7 @@ it("keeps the inlined guides the same as skills/dohc", async () => {
   );
 });
 
-it("tells the agent what it can do, and serves the guides from the bundle", async () => {
+it("tells the agent what it can do, and serves dohc's guides", async () => {
   const client = await connected();
   try {
     const instructions = client.getInstructions() ?? "";
@@ -163,11 +163,10 @@ it("tells the agent what it can do, and serves the guides from the bundle", asyn
     ])
       expect(instructions).toContain(words);
     const { resources } = await client.listResources();
-    expect(resources.map((resource) => resource.uri)).toEqual([
-      "dohc://guides/dohc",
-      "dohc://guides/collections-and-datasets",
-      "dohc://guides/automations",
-    ]);
+    expect(resources.map((resource) => resource.uri)).toEqual(
+      GUIDE_FILES.map((file) => `dohc://guides/${file}`),
+    );
+    expect(new URL("references/automations.md", resources[0]!.uri).href).toBe(resources[2]!.uri);
     const skills = new URL("../../../skills/dohc/", import.meta.url);
     for (const [index, file] of GUIDE_FILES.entries()) {
       const uri = resources[index]!.uri;

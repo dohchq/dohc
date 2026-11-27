@@ -619,7 +619,14 @@ export function createPersonalAgentToolRoutes(input: {
   ): Response {
     fields(body, ["workspaceId", "path"], []);
     const workspaceId = parseWorkspaceId(body.workspaceId);
-    const path = parseString(body.path, "path", MAX_SHARE_PATH_CHARS);
+    const path = body.path;
+    if (
+      typeof path !== "string" ||
+      !path ||
+      path.length > MAX_SHARE_PATH_CHARS ||
+      /[\u0000-\u001f\u007f]/u.test(path)
+    )
+      throw badRequest("path is invalid");
     const at = (reach: PersonalReach) => {
       if (pathLevel(workspaceFileReach(reach.selector), path) === null) return null;
       // The path sorts before everything under it, so the first file is the one at it.
