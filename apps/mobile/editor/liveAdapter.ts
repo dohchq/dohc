@@ -10,11 +10,6 @@ import {
   type ToPage,
 } from "../src/pages/liveBridge";
 
-// The page's side of a live connection, without the DOM: the provider, and the bridge to the app that owns its socket
-// (src/pages/liveBridge.ts). The provider is made on the first `connect` and reused on every later one, so its waiting
-// updates keep their IDs, until the relay replaces the note's lineage with nothing unsent. It is never seeded with the
-// text the app read, so it takes no edits until it is live.
-
 export type LiveProvider = ReturnType<typeof createNamedLiveProvider>;
 
 function unsent(made: LiveProvider) {

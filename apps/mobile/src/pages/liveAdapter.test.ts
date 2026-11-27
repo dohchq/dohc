@@ -223,7 +223,6 @@ describe("the page's live connection", () => {
   });
 
   const successor = { ...binding, lineageClaimId: "claim-2" };
-  /** The relay replaced the note's lineage while the page was away: its next sync names the new one. */
   async function replaced(t: ReturnType<typeof page>, typed = "") {
     const first = t.connect();
     await first.sync(document("base"));

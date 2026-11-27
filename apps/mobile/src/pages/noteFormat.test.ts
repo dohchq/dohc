@@ -231,25 +231,14 @@ describe("the live document", () => {
     expect(written()).toBe(0);
     expect(hoisted.posted).toContain("unsupportedFormat");
   });
-});
 
-describe("the live document on a note's new lineage", () => {
-  const follow = () => {
-    followLive({
-      body: new FakeElement() as unknown as HTMLElement,
-      readOnly: { destroy: () => undefined },
-      label: "Trip",
-      endEditing: vi.fn(),
-    });
-    return hoisted.adapter!.changed;
-  };
   const copy = () => {
     (window as unknown as { __dohcCopyMarkdown(): void }).__dohcCopyMarkdown();
     return hoisted.copied.at(-1);
   };
 
   it("binds the editor to the reopened provider's document, and the old editor and copying leave the old one", () => {
-    const changed = follow();
+    const { changed } = follow();
     changed(provider(sequenceNote()));
     const [first] = hoisted.mounted;
     const next = markdownToYDoc("Converted list", { bodySequence: true });
@@ -267,7 +256,7 @@ describe("the live document on a note's new lineage", () => {
   });
 
   it("still copies the old document while the page stays stopped with typing unsent", () => {
-    const changed = follow();
+    const { changed } = follow();
     const old = sequenceNote();
     changed(provider(old));
     changed({ ...provider(old), state: () => ({ status: "quarantined" }) } as LiveProvider);
