@@ -189,6 +189,7 @@ function ownerRequest(
   baseUrl: string,
   path: string,
   json?: unknown,
+  token = OWNER_TOKEN,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const call = request(
@@ -197,7 +198,7 @@ function ownerRequest(
         agent: false,
         method: json === undefined ? "GET" : "POST",
         headers: {
-          authorization: `Bearer ${OWNER_TOKEN}`,
+          authorization: `Bearer ${token}`,
           ...(json === undefined ? {} : { "content-type": "application/json" }),
         },
         // A hang guard: a relay that takes the request and never answers.
@@ -216,6 +217,52 @@ function ownerRequest(
     call.on("error", reject);
     call.end(json === undefined ? undefined : JSON.stringify(json));
   });
+}
+
+/** A file as the relay stores it now: the newest saved version in the workspace's log. */
+export async function relayStoredFile(
+  relay: Pick<SyncRelayHandle, "baseUrl" | "dbPath">,
+  workspaceId: string,
+  path: string,
+  token = OWNER_TOKEN,
+): Promise<string> {
+  const identity = relayAdoptedIdentity(relay.dbPath, workspaceId);
+  if (!identity) throw new Error("The workspace has no place on the relay yet.");
+  let since = 0;
+  let sha: string | undefined;
+  for (;;) {
+    const query = new URLSearchParams({ since: String(since), limit: "1000", ...identity });
+    const page = await ownerRequest(
+      relay.baseUrl,
+      `/sync/${workspaceId}/log?${query}`,
+      undefined,
+      token,
+    );
+    expect(page.status, page.body).toBe(200);
+    // A page can hold fewer rows than asked for, so the relay says whether more follow.
+    const answer = JSON.parse(page.body) as {
+      ops: Array<{
+        opKind: string;
+        payload: { path?: string; payloadAfterBlobSha256?: string | null };
+      }>;
+      nextCursor: number;
+      hasMore: boolean;
+    };
+    for (const op of answer.ops)
+      if (op.opKind === "moment.append" && op.payload.path === path)
+        sha = op.payload.payloadAfterBlobSha256 ?? undefined;
+    if (!answer.hasMore) break;
+    since = answer.nextCursor;
+  }
+  if (!sha) throw new Error(`The server stores no version of ${path}.`);
+  const blob = await ownerRequest(
+    relay.baseUrl,
+    `/sync/${workspaceId}/blobs/${sha}`,
+    undefined,
+    token,
+  );
+  expect(blob.status).toBe(200);
+  return blob.body;
 }
 
 async function reservePort(): Promise<number> {
@@ -382,41 +429,10 @@ export async function startTogetherStack(): Promise<TogetherStack> {
       };
     };
 
-    const storedFile = async (note: SharedNote): Promise<string> => {
-      const identity = relayAdoptedIdentity(relay.dbPath, WORKSPACE_ID);
-      if (!identity) throw new Error("The workspace has no place on the relay yet.");
-      // The newest saved version of the file is the last one in the workspace's log.
-      let since = 0;
-      let sha: string | undefined;
-      for (;;) {
-        const query = new URLSearchParams({ since: String(since), limit: "1000", ...identity });
-        const page = await ownerRequest(relay.baseUrl, `/sync/${WORKSPACE_ID}/log?${query}`);
-        expect(page.status, page.body).toBe(200);
-        // A page can hold fewer rows than asked for, so the relay says whether more follow.
-        const answer = JSON.parse(page.body) as {
-          ops: Array<{
-            opKind: string;
-            payload: { path?: string; payloadAfterBlobSha256?: string | null };
-          }>;
-          nextCursor: number;
-          hasMore: boolean;
-        };
-        for (const op of answer.ops)
-          if (op.opKind === "moment.append" && op.payload.path === note.path)
-            sha = op.payload.payloadAfterBlobSha256 ?? undefined;
-        if (!answer.hasMore) break;
-        since = answer.nextCursor;
-      }
-      if (!sha) throw new Error(`The server stores no version of ${note.path}.`);
-      const blob = await ownerRequest(relay.baseUrl, `/sync/${WORKSPACE_ID}/blobs/${sha}`);
-      expect(blob.status).toBe(200);
-      return blob.body;
-    };
-
     return {
       browser,
       shareNote,
-      storedFile,
+      storedFile: (note) => relayStoredFile(relay, WORKSPACE_ID, note.path),
       async killRelay() {
         relayOutput += tail(relay);
         await relay.kill();
