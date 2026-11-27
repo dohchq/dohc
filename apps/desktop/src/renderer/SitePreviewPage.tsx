@@ -154,6 +154,9 @@ export function SitePreviewPage(props: {
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
   version?: { id: string; name: string } | null;
   versionPending?: boolean;
+  // Opens Review app prepared for Workspace members once the app loads, as after Promote.
+  reviewForMembers?: boolean;
+  onReviewForMembersOpened?: () => void;
 }) {
   const versionPending = props.versionPending ?? false;
   const versionId = props.version?.id ?? "main";
@@ -311,6 +314,16 @@ export function SitePreviewPage(props: {
     declaresApp &&
     rawModes.every((mode) => mode === "static");
   const modes = useMemo(() => (needsPublication ? [] : rawModes), [needsPublication, rawModes]);
+  const [forMembers, setForMembers] = useState(false);
+  const promoted = useRef(false);
+  if (props.reviewForMembers) promoted.current = true;
+  const reviewable = !props.sharedView && site?.authority.kind === "workspace" && !versionPending;
+  useEffect(() => {
+    if (!props.reviewForMembers || !reviewable || props.visible === false) return;
+    setForMembers(true);
+    setReviewOpen(true);
+    props.onReviewForMembersOpened?.();
+  }, [props.reviewForMembers, reviewable, props.visible]);
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
   useEffect(() => {
@@ -599,6 +612,7 @@ export function SitePreviewPage(props: {
     const autoStartKey = `${siteContext}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
+    if (runsCode && promoted.current) return;
     if (!held) {
       void start(mode, false);
       return;
@@ -866,7 +880,9 @@ export function SitePreviewPage(props: {
               testId={needsPublication ? "app-view-review" : "site-preview-review"}
               disabled={versionPending}
               open={reviewOpen && !versionPending}
+              forMembers={forMembers}
               onOpenChange={(next) => {
+                if (!next) setForMembers(false);
                 if (!versionPending || !next) setReviewOpen(next);
               }}
               onLocalChange={localApprovalChanged}
