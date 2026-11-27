@@ -417,6 +417,7 @@ import {
   moveTab,
   moveTabToGroup,
   openTab,
+  openTabInBackground,
   openTabOnce,
   resizeEditorGroups,
   moveTabToNewGroup,
@@ -2300,7 +2301,7 @@ function WorkspaceShell(props: {
       const tabs = allTabs(wbRef.current);
       return tabs.length < MAX_OPEN_TABS || tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
     };
-    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, true);
+    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, openTabOnce);
     if (!(await openUnseenWhatsNewOnce(canOpen, open)) || workspaceIdRef.current !== id) return;
     // A restored file it covers no longer holds back the restored-surface
     // phase. A file in another group still shows and reports itself.
@@ -4541,11 +4542,11 @@ function WorkspaceShell(props: {
     [clearIdentity, reportShellFailure, reportAppNotice, openAppTab],
   );
   const openVirtualTab = useCallback(
-    (path: string, recent = false, once = false) => {
+    (path: string, recent = false, open: typeof openTab = openTab) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
-      const next = (once ? openTabOnce : openTab)(current, path, targetGroupId);
+      const next = open(current, path, targetGroupId);
       const targetAlreadyOwnsPath = current.editorGroups
         .find((group) => group.id === targetGroupId)
         ?.tabs.some((tab) => tab.path === path);
@@ -5031,7 +5032,7 @@ function WorkspaceShell(props: {
   }, [openVirtualTab]);
   // Opening it again goes to the open tab, in any group.
   const openVersionsTab = useCallback(() => {
-    openVirtualTab(VERSIONS_TAB_PATH, false, true);
+    openVirtualTab(VERSIONS_TAB_PATH, false, openTabOnce);
   }, [openVirtualTab]);
   const chatPaths = useMemo(
     () =>
@@ -9789,7 +9790,11 @@ function WorkspaceShell(props: {
                                                                 error,
                                                               ),
                                                             );
-                                                            openVirtualTab(siteTabPath(appRoot));
+                                                            openVirtualTab(
+                                                              siteTabPath(appRoot),
+                                                              false,
+                                                              openTabInBackground,
+                                                            );
                                                           }}
                                                         />
                                                       </Suspense>

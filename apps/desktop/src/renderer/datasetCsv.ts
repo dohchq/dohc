@@ -93,6 +93,44 @@ export function parseDatasetCsv(text: string): CsvTable {
   return { headers: rows[0]!, rows: rows.slice(1) };
 }
 
+const TITLE_HEADERS = new Set(["name", "title", "item", "task", "label"]);
+const normalHeader = (text: string) => text.trim().toLowerCase();
+const NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+export function suggestCsvMapping(
+  csv: CsvTable,
+  fields: readonly TransactionalField[],
+  operation: DatasetOperation | undefined,
+): Array<string | null> {
+  const allowed = fields.filter((field) => operation?.fieldIds.includes(field.fieldId));
+  const used = new Set<string>();
+  const mapping = csv.headers.map((header) => {
+    const field = allowed.find(
+      (field) =>
+        !used.has(field.fieldId) &&
+        (field.fieldId === header || normalHeader(field.name) === normalHeader(header)),
+    );
+    if (field) used.add(field.fieldId);
+    return field?.fieldId ?? null;
+  });
+  const title = fields.find((field) => !field.generated);
+  if (!title || title.type !== "text" || !allowed.includes(title) || used.has(title.fieldId))
+    return mapping;
+  const cells = (column: number) =>
+    csv.rows.map((row) => row[column]?.trim() ?? "").filter(Boolean);
+  const text = (cell: string) =>
+    /\p{L}/u.test(cell) && !NUMBER.test(cell) && !/^(true|false)$/i.test(cell);
+  const named = csv.headers.findIndex(
+    (header, column) =>
+      mapping[column] === null &&
+      TITLE_HEADERS.has(normalHeader(header)) &&
+      cells(column).some((cell) => !NUMBER.test(cell)),
+  );
+  const first = cells(0);
+  const column =
+    named !== -1 ? named : mapping[0] === null && first.length && first.every(text) ? 0 : -1;
+  if (column !== -1) mapping[column] = title.fieldId;
+  return mapping;
+}
 function convert(field: TransactionalField, raw: string): AppBackendJson | undefined {
   if (raw === "") {
     if (Object.hasOwn(field, "default")) return undefined;
@@ -103,10 +141,7 @@ function convert(field: TransactionalField, raw: string): AppBackendJson | undef
     case "text":
       return raw;
     case "number": {
-      if (
-        !/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim()) ||
-        !Number.isFinite(Number(raw))
-      )
+      if (!NUMBER.test(raw.trim()) || !Number.isFinite(Number(raw)))
         throw Error(`Enter a number for ${field.name}.`);
       return Number(raw);
     }

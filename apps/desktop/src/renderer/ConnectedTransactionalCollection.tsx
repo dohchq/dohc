@@ -1076,6 +1076,10 @@ function ScopedCollection({
               throw Error("The workspace changed while saving this file.");
             return result;
           }}
+          onDiscard={async (path, signal) => {
+            signal.throwIfAborted();
+            await bridge().deleteWorkspacePath({ workspaceId, relativePath: path });
+          }}
         />
       )}
       {managingAccess && (

@@ -10,6 +10,7 @@ import {
   parseDatasetCsv,
   previewDatasetCsv,
   runCsvImport,
+  suggestCsvMapping,
   type CsvImportPlan,
   type CsvInvoke,
   type CsvPreview,
@@ -27,6 +28,7 @@ export interface DatasetCsvTransferDialogProps {
     file: { name: string; content: string; contentType: string },
     signal: AbortSignal,
   ): Promise<void | { path: string }>;
+  onDiscard(path: string, signal: AbortSignal): Promise<void>;
   onClose(): void;
   onImported?(): void;
   onError(fallback: string, error: unknown, retry: (() => void) | null): void;
@@ -52,24 +54,17 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const [mode, setMode] = useState<"import" | "export">("import"),
     [createId, setCreateId] = useState(creates[0]?.operationId ?? ""),
     [readId, setReadId] = useState(reads[0]?.operationId ?? "");
-  function initialMapping(source: CsvTable | undefined) {
-    const used = new Set<string>();
-    return (
-      source?.headers.map((header) => {
-        const field = table?.fields.find(
-          (field) =>
-            creates[0]?.fieldIds.includes(field.fieldId) &&
-            (field.fieldId === header || field.name === header) &&
-            !used.has(field.fieldId),
-        );
-        if (field) used.add(field.fieldId);
-        return field?.fieldId ?? null;
-      }) ?? []
-    );
-  }
+  const suggest = (source: CsvTable | null | undefined, operationId: string) =>
+    source
+      ? suggestCsvMapping(
+          source,
+          table?.fields ?? [],
+          creates.find((operation) => operation.operationId === operationId),
+        )
+      : [];
   const [csv, setCsv] = useState<CsvTable | null>(props.initialSource?.table ?? null),
     [mapping, setMapping] = useState<Array<string | null>>(() =>
-      initialMapping(props.initialSource?.table),
+      suggest(props.initialSource?.table, createId),
     ),
     [draft, setDraft] = useState("");
   const [plan, setPlan] = useState<CsvImportPlan | null>(null),
@@ -79,6 +74,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const [exported, setExported] = useState<number | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const importPlan = useRef<CsvImportPlan | null>(null);
+  const report = useRef<string | null>(null);
   const alive = useRef(true),
     locked = useRef(false),
     active = useRef<AbortController | null>(null);
@@ -128,19 +124,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
       setInvalid(null);
       setPlan(null);
       importPlan.current = null;
-      const used = new Set<string>();
-      setMapping(
-        parsed.headers.map((header) => {
-          const field = table?.fields.find(
-            (field) =>
-              create?.fieldIds.includes(field.fieldId) &&
-              (field.fieldId === header || field.name === header) &&
-              !used.has(field.fieldId),
-          );
-          if (field) used.add(field.fieldId);
-          return field?.fieldId ?? null;
-        }),
-      );
+      setMapping(suggest(parsed, createId));
     } catch (error) {
       setInvalid(error instanceof Error ? error.message : "Check the CSV file.");
       setCsv(null);
@@ -174,6 +158,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
     const result = await props.onSave(file, signal);
     signal.throwIfAborted();
     if (alive.current && result) setSavedPath(result.path);
+    return result?.path ?? null;
   };
   const saveReport = (captured: CsvImportPlan, signal: AbortSignal) =>
     saveFile(
@@ -189,7 +174,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
     const captured =
       importPlan.current ?? plan ?? createCsvImportPlan(scope(create.operationId), preview.value!);
     if (!importPlan.current && !plan) {
-      await saveReport(captured, signal);
+      report.current = await saveReport(captured, signal);
       signal.throwIfAborted();
       if (!alive.current) return;
       setPlan(captured);
@@ -205,6 +190,23 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
     importPlan.current = result;
     setPlan(result);
     props.onImported?.();
+    const path = report.current;
+    if (!path || result.rows.some((row) => row.outcome !== "accepted")) return;
+    report.current = null;
+    await discardReport(path, signal).catch((error: unknown) => {
+      if (alive.current && !signal.aborted)
+        props.onError("dohc could not remove the retry report.", error, () => {
+          void task(
+            (signal) => discardReport(path, signal),
+            "dohc could not remove the retry report.",
+          );
+        });
+    });
+  }
+  async function discardReport(path: string, signal: AbortSignal) {
+    await props.onDiscard(path, signal);
+    signal.throwIfAborted();
+    if (alive.current) setSavedPath((current) => (current === path ? null : current));
   }
   const pending = plan?.rows.some(
     (row) => row.outcome === "pending" || row.outcome === "uncertain",
@@ -268,7 +270,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
                   disabled={busy || !!plan}
                   onChange={(event) => {
                     setCreateId(event.target.value);
-                    setMapping(csv?.headers.map(() => null) ?? []);
+                    setMapping(suggest(csv, event.target.value));
                   }}
                 >
                   {creates.map((operation) => (
@@ -442,10 +444,9 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
                   <SecondaryButton
                     disabled={busy}
                     onClick={() =>
-                      void task(
-                        (signal) => saveReport(plan, signal),
-                        "dohc could not save the import report.",
-                      )
+                      void task(async (signal) => {
+                        await saveReport(plan, signal);
+                      }, "dohc could not save the import report.")
                     }
                   >
                     Save updated report
