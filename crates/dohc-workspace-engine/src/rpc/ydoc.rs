@@ -4418,6 +4418,44 @@ mod tests {
         parked.close().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resync_whose_owed_write_fails_still_answers_with_the_pulled_edit() {
+        let parked = ParkedEdit::new("resync-owed-write-fails", true).await;
+        let session = parked.session.clone().expect("the editor's session");
+        let root = parked._scratch.path().to_path_buf();
+        let moved = root.with_extension("moved");
+        std::fs::rename(&root, &moved).expect("move the workspace folder");
+        let resynced = parked
+            .service
+            .ydoc_resync(
+                &RequestContext::unbounded(),
+                Some(parked.handle.clone()),
+                json!({ "sessionId": session }),
+                2,
+            )
+            .await;
+        let moved_db = moved.join(".dohc").join("engine").join("engine.db");
+        let owed: i64 = rusqlite::Connection::open_with_flags(
+            &moved_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("engine db")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'ydoc-mat_*' AND status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count owed writes");
+        std::fs::rename(&moved, &root).expect("move the workspace folder back");
+        let (_, egress) = resynced.expect("the committed resync answers");
+        shows_the_pulled_edit(&egress);
+        assert_eq!(parked.parked(), 0, "the resync took the pulled edit");
+        assert_eq!(owed, 1, "the write it could not land stays owed");
+        parked.close().await;
+    }
+
     /// An open or resync is cancelled after it committed the document's
     /// pulled edit, while its blob waits for egress budget. It answers with
     /// the document, edit included, and its blob ignores the cancellation.

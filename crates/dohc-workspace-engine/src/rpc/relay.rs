@@ -4140,6 +4140,95 @@ mod tests {
         state
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editors_are_asked_to_resync_once_the_terminal_pages_cursor_commits() {
+        use dohc_engine_sync::{AlwaysLive, LeaseProbe, NoLiveLeases, ReplicationEnvelope};
+        const WORKSPACE: &str = "resync-after-commit";
+        const PATH: &str = "notes/live.md";
+        let ctx = RequestContext::unbounded();
+        let relay = PagedRelay::start(Default::default());
+        lock(&relay.ops).push(PagedRelay::row(WORKSPACE, 0, "workspace.init", json!({})));
+        relay.release();
+        let f = CursorFixture::with_relay(WORKSPACE, false, relay.configuration()).await;
+        f.prepare().await;
+        f.service
+            .sync_claim(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "workspaceId": WORKSPACE }),
+            )
+            .await
+            .expect("claim");
+        f.pulled("live", PATH, "before").await;
+        let envelope = |origin_seq: i64, update: &str, base: &str| ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WORKSPACE.to_owned(),
+            origin_id: "editing-peer".to_owned(),
+            origin_seq,
+            relay_seq: Some(1_000 + origin_seq),
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main", "objectId": "live", "path": PATH,
+                "contentKind": "plaintext", "updateBlobSha256": update,
+                "lineageClaimId": base, "isBaseState": update == base
+            }),
+            recorded_at_ms: 100 + origin_seq,
+        };
+        let apply = |bytes: Vec<u8>, base: Option<&str>, parked: bool| {
+            let mut store =
+                dohc_engine_storage::EngineStore::open(f.open.actor.database_path(), 100)
+                    .expect("store");
+            let blob = store.put_binary_blob(&bytes).expect("blob");
+            let base = base.unwrap_or(&blob).to_owned();
+            let leases: &dyn LeaseProbe = if parked { &AlwaysLive } else { &NoLiveLeases };
+            dohc_engine_sync::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope(i64::from(parked), &blob, &base),
+                &dohc_engine_storage::NoFaults,
+                leases,
+            )
+            .expect("apply the envelope");
+            base
+        };
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "before");
+        let base = apply(doc.encode_full_state(), None, false);
+        let (opened, _) = f
+            .service
+            .ydoc_open(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+                1,
+            )
+            .await
+            .expect("the editor's session");
+        let session = opened["sessionId"].as_str().expect("session").to_owned();
+        apply(doc.plaintext_insert(6, " parked"), Some(&base), true);
+        let mut events = f.service.events().subscribe();
+        let mut asked = || {
+            let mut seen = false;
+            while let Ok(event) = events.try_recv() {
+                seen |= event.name == "ydoc.remoteUpdate"
+                    && event.payload["sessionId"] == session
+                    && event.payload["resyncRequired"] == true;
+            }
+            seen
+        };
+        let page = pull(&f).await.expect("the terminal page");
+        assert_eq!(page["hasMore"], json!(false));
+        assert!(
+            page["pendingCursor"].is_object(),
+            "the page issues a cursor"
+        );
+        assert!(!asked(), "no resync before the cursor commits");
+        commit_page(&f, &page).await.expect("commit the page");
+        assert!(asked(), "the committed page asks the editor to resync");
+        f.close().await;
+    }
+
     async fn held_second_page(workspace_id: &'static str) -> (PagedRelay, CursorFixture, String) {
         let (relay, f) = half_pull_fixture(workspace_id, true).await;
         relay.release();
