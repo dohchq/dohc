@@ -9,7 +9,7 @@ dohc keeps files, Markdown documents, structured Collections, automations, chat,
 
 ## Before your first call
 
-1. Through MCP, `dohc_dataset`, `dohc_collection_access`, and `dohc_publish_app` fill in `workspaceId` for the workspace the server serves. The CLI needs it: read it from the `dohc://workspace/info` resource or `dohc_list_workspaces`. Never guess `"local"`.
+1. Through MCP, `dohc_dataset`, `dohc_collection_access`, and `dohc_publish_app` fill in `workspaceId` for the workspace the server serves. The CLI needs it: read it from the `dohc://workspace/info` resource, `dohc_list_workspaces`, or `workspaceId` in `.dohc/manifest.json` at the workspace root. Never guess `"local"`.
 2. Keep the dohc desktop app open for writes, Collections, apps, chat, and Versions.
 3. For Markdown files (`.md`), use `dohc_create_document`, `dohc_read_document`, and `dohc_edit_document`. `dohc_write_file` refuses Markdown documents because live documents own their text.
 

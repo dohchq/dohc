@@ -248,6 +248,7 @@ const ADD = {
   idempotentHint: false,
   openWorldHint: false,
 } as const satisfies ToolAnnotations;
+const ADD_SERVER = { ...ADD, openWorldHint: true } as const satisfies ToolAnnotations;
 const CHANGE = { ...ADD, destructiveHint: true } as const satisfies ToolAnnotations;
 const CHANGE_SERVER = { ...CHANGE, openWorldHint: true } as const satisfies ToolAnnotations;
 
@@ -1134,7 +1135,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         path: z.string().min(1).max(4096),
       },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await listFileChats(ctx, args)),
   );
@@ -1145,7 +1146,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "Wait for this agent's unread requests without marking them read. In a run dohc started, they are the run's own requests, including replies in threads its agent posted in, and the ones it returns start no new run. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Otherwise, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
       inputSchema: chatWatchInputSchema.shape,
-      annotations: READ,
+      annotations: ADD_SERVER,
     },
     async (args, extra) => {
       if (waits >= 4)
@@ -1173,7 +1174,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         message: z.string().min(1).max(200).optional(),
         path: z.string().min(1).max(4096).optional(),
       },
-      annotations: READ,
+      annotations: ADD,
     },
     async (args) => text(await makeLink(ctx, args)),
   );
@@ -1196,7 +1197,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .optional(),
         limit: z.number().int().min(1).max(100).optional(),
       },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await readChat(ctx, args)),
   );
@@ -1207,7 +1208,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description:
         "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
-      annotations: ADD,
+      annotations: ADD_SERVER,
     },
     async () => text(await listGroups(ctx)),
   );
@@ -1223,7 +1224,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         type: z.enum(["posts", "chat", "both"]).optional(),
         level: z.enum(["comment", "view", "none"]).optional(),
       },
-      annotations: ADD,
+      annotations: ADD_SERVER,
     },
     async (args) => text(await createGroup(ctx, args)),
   );
@@ -1249,7 +1250,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
-      annotations: ADD,
+      annotations: ADD_SERVER,
     },
     async ({ model, ...args }) =>
       text(await startGroupChat(ctx, args, agentName(), reported(model))),
@@ -1268,7 +1269,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         runId: chatWriteInput.runId,
         model: chatWriteInput.model,
       },
-      annotations: ADD,
+      annotations: ADD_SERVER,
     },
     async ({ model, ...args }) =>
       text(await startFileChat(ctx, args, agentName(), reported(model))),
@@ -1288,7 +1289,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         body: chatWriteInput.body.optional(),
         nothingToReport: z.literal(true).optional(),
       },
-      annotations: CHANGE,
+      annotations: CHANGE_SERVER,
     },
     async ({ model, body, nothingToReport, ...args }) => {
       if (nothingToReport) {
@@ -1413,7 +1414,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         page: z.string().min(1).max(512).optional(),
         server: z.boolean().optional(),
       },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
@@ -1428,7 +1429,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         run: z.string().min(1).max(256),
         server: z.boolean().optional(),
       },
-      annotations: READ,
+      annotations: READ_SERVER,
     },
     async (args) => text(await readAutomationRun(ctx, args)),
   );

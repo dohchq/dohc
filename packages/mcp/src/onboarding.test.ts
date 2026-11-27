@@ -60,6 +60,17 @@ describe("MCP onboarding", () => {
       shareAccess: "edit",
     });
   });
+
+  it("finds the enclosing workspace when served from one of its folders", async () => {
+    const { root, home } = await workspace(true);
+    const client = await connect({ root: join(root, "apps", "rsvp"), home });
+    const { contents } = await client.readResource({ uri: "dohc://workspace/info" });
+    expect(JSON.parse(String((contents[0] as { text?: string }).text))).toMatchObject({
+      workspaceId: "ws-trip",
+      name: "Trip planner",
+      rootPath: root,
+    });
+  });
 });
 
 describe("tool annotations", () => {
