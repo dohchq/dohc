@@ -1322,10 +1322,10 @@ describe("what a format-2 note's body holds never decides a save", () => {
     first.destroy();
   });
 
-  it("a note marked as using CRLF line ends may be emptied, where a format-1 note is refused", () => {
+  it("a note marked as using CRLF line ends may be emptied, as a format-1 note may", () => {
     const { first, second } = inBothFormats([], { dohcMarkdownCrlf: true });
     expect(registered(second)).toBe("accepted");
-    expect(registered(first)).toBe(REFUSED_AT_REGISTRATION);
+    expect(registered(first)).toBe("accepted");
 
     const note = inBothFormats([[{ type: "paragraph" }, "one"]], { dohcMarkdownCrlf: true }).second;
     const held = room(note);
@@ -1373,17 +1373,17 @@ describe("what a later check still refuses of a note whose every change intake t
     expect(first.journal()).toBe(REFUSED_AT_SAVE);
   });
 
-  it("properties text the properties do not match, which the journal check cannot read at all, as for a format-1 note", () => {
+  it("properties text the properties do not match, which the journal check refuses, as for a format-1 note", () => {
     const other = (doc: Y.Doc) =>
       doc.getMap("meta").set("dohcFrontmatterSource", "status: other\n");
     const note = seededNote();
     const held = room(note);
     const kept = held.offer(changeMadeBy(note, 77, ({ doc }) => other(doc))!);
     expect(kept, "the room's check").toBeDefined();
-    expect(() => held.journal(kept!)).toThrow(/without rewriting the others/);
+    expect(held.journal(kept!)).toBe(REFUSED_AT_SAVE);
     const first = offeredToAFormat1Note(other);
     expect(first.room).toBe(true);
-    expect(first.journal).toThrow(/without rewriting the others/);
+    expect(first.journal()).toBe(REFUSED_AT_SAVE);
   });
 
   it.each([
