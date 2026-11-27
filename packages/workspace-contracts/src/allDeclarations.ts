@@ -1,6 +1,7 @@
 import { AGENT_RUN_HISTORY_DECLARATIONS } from "./agentRunHistoryDeclarations";
 import { CAPTURE_DECLARATIONS } from "./captureDeclarations";
 import { CHAT_DECLARATIONS } from "./chatDeclarations";
+import { DRAWING_DECLARATIONS } from "./drawingDeclarations";
 import { INBOX_DECLARATIONS } from "./inboxDeclarations";
 import { LINKS_DECLARATIONS } from "./linksDeclarations";
 import { MEMBER_APPS_DECLARATIONS } from "./memberAppsDeclarations";
@@ -17,6 +18,7 @@ export const DECLARATION_FAMILIES = {
   retrieval: RETRIEVAL_DECLARATIONS,
   agentRunHistory: AGENT_RUN_HISTORY_DECLARATIONS,
   memberApps: MEMBER_APPS_DECLARATIONS,
+  drawing: DRAWING_DECLARATIONS,
 } as const;
 
 // The type refuses these, but a cast can hide one from it.

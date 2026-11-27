@@ -1,5 +1,6 @@
 import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
+import { drawingOperations } from "./ipc/drawingOperations";
 import { linksOperations } from "./ipc/linksOperations";
 import { memberAppsReadOperations, memberAppsWriteOperations } from "./ipc/memberAppsOperations";
 import { retrievalOperations } from "./ipc/retrievalOperations";
@@ -211,6 +212,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(linksOperations, invoke),
   ...operationBridge(retrievalOperations, invoke),
   ...operationBridge(captureOperations, invoke),
+  ...operationBridge(drawingOperations, invoke),
   ...operationBridge(agentRunHistoryOperations, invoke),
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),

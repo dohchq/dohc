@@ -99,6 +99,20 @@ const LISTED_CAPABILITIES = {
   }),
   "links.in": capability("Read documents that link to a file.", { ipc: [], mcp: {} }),
   "links.resolve": capability("Resolve links from one document.", { ipc: [], mcp: {} }),
+  "drawing.read": capability("Read a drawing's elements, as an open canvas holds them.", {
+    ipc: [],
+    mcp: {},
+    mcpReason:
+      "Only the original workspace reads drawings live. Shared profiles omit this read; the socket refuses received shares and read-only workspaces.",
+  }),
+  "drawing.create": capability("Create a drawing, optionally with elements.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "drawing.edit": capability("Add, change, or delete a drawing's elements.", {
+    ipc: [],
+    mcp: {},
+  }),
   "inbox.list": capability("List items in the workspace Inbox Collection.", {
     ipc: [],
     mcp: {},

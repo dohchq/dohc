@@ -2669,7 +2669,7 @@ describe("raw file writes preserve live documents", () => {
     },
   );
 
-  it("names the tool that edits a Markdown document, and dohc for a scene", async () => {
+  it("names the tool that edits a Markdown document or a drawing", async () => {
     await withWorkspace(async (ctx) => {
       expect(await writeWorkspaceFile(ctx, { path: "note.md", content: "new" })).toMatchObject({
         ok: false,
@@ -2677,7 +2677,7 @@ describe("raw file writes preserve live documents", () => {
       });
       expect(
         await writeWorkspaceFile(ctx, { path: "scene.excalidraw", content: "{}" }),
-      ).toMatchObject({ ok: false, reason: expect.stringContaining("Edit it in dohc") });
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("dohc_edit_drawing") });
     });
   });
 

@@ -94,6 +94,7 @@ import type {
   LiveDocumentEditOrigin,
   LiveDocumentSessions,
 } from "../workspaces/engineYDocSessionIpc";
+import { createDrawing, editDrawing } from "../workspaces/drawingEdit";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import {
   historyPathAdmission,
@@ -583,6 +584,37 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             throw new Error("This workspace changed while this ran. Try again.");
           return action(operation, input);
         });
+    const writeNewFile = (
+      path: string,
+      text: string,
+      origin: LiveDocumentEditOrigin,
+      noun: "documents" | "drawings",
+    ) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+        operation.assertCurrent();
+        if (sharedViewOf(workspace.workspaceId)) {
+          throw new Error(`A shared view cannot create ${noun}.`);
+        }
+        const current = activity.engineCaptureFor(workspace.workspaceId);
+        if (!current)
+          throw new Error(
+            `dohc could not start the engine for this workspace, so it cannot create ${noun}. Restart dohc to try again.`,
+          );
+        const absolute = join(operation.workspace.rootPath, path);
+        try {
+          requirePublishedWrite(
+            path,
+            await current.writeAuthoredFile(absolute, text, agentWriteAuthor(origin), {
+              createOnly: true,
+            }),
+          );
+        } catch (error) {
+          if (error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
+          }
+          throw error;
+        }
+      });
     // A move or delete holds the workspace operation fileWrite holds.
     const withPathChange = async <Result>(
       requestId: string,
@@ -1111,34 +1143,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               ),
             };
           }
-          // An empty file written on the capture chain, which refuses a path
-          // that exists and records the agent as the file's author, and then
-          // the text through the new file's live session, like typing into it.
-          await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
-            operation.assertCurrent();
-            if (sharedViewOf(workspace.workspaceId)) {
-              throw new Error("A shared view cannot create documents.");
-            }
-            const current = activity.engineCaptureFor(workspace.workspaceId);
-            if (!current)
-              throw new Error(
-                "dohc could not start the engine for this workspace, so it cannot create documents. Restart dohc to try again.",
-              );
-            const absolute = join(operation.workspace.rootPath, path);
-            try {
-              requirePublishedWrite(
-                path,
-                await current.writeAuthoredFile(absolute, "", agentWriteAuthor(origin), {
-                  createOnly: true,
-                }),
-              );
-            } catch (error) {
-              if (error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
-                throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
-              }
-              throw error;
-            }
-          });
+          await writeNewFile(path, "", origin, "documents");
           try {
             await liveDocuments.editDocument({
               workspaceId: workspace.workspaceId,
@@ -1158,6 +1163,16 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           }
           return { path };
         },
+      },
+      drawings: {
+        create: ({ path, elements, origin }) =>
+          createDrawing(
+            liveDocuments,
+            { workspaceId: workspace.workspaceId, path, elements, origin },
+            (text) => writeNewFile(path, text, origin, "drawings"),
+          ),
+        edit: ({ path, edit, origin }) =>
+          editDrawing(liveDocuments, { workspaceId: workspace.workspaceId, path, edit, origin }),
       },
       ...(capture === null
         ? {}

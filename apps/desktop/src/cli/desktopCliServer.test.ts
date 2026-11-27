@@ -287,6 +287,12 @@ function fixture(
     reads: {
       chatFileMentions: vi.fn(async () => null),
       outsideChanges: vi.fn(async () => ({ outsideChanges: [] })),
+      drawingRead: vi.fn(async (_workspace, input: { path: string }) => ({
+        path: input.path,
+        live: false,
+        elements: [],
+        appState: {},
+      })),
       planUndoAgentRun: vi.fn(async (_workspace, input: { agentRunId: string }) => ({
         agentRunId: input.agentRunId,
         agentName: null,
@@ -406,6 +412,9 @@ function fixture(
       })),
       openSharedDocument: vi.fn<Dependencies["liveDocuments"]["openSharedDocument"]>(async () => {
         throw new Error("No shared session configured");
+      }),
+      editLiveDocument: vi.fn(async () => {
+        throw new Error("No live session configured");
       }),
     },
     trashItem: vi.fn(async () => {

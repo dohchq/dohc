@@ -187,6 +187,11 @@ import {
 } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type {
+  DrawingEdit,
+  DrawingElementInput,
+  DrawingWriteResult,
+} from "@dohc/workspace-contracts/drawing";
 import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
 import type { HeldSharePath } from "../workspaces/shareViewFiles";
 import type { CloudSyncFailure } from "../workspaces/relaySyncEngine";
@@ -310,6 +315,21 @@ export interface CliDocumentsPort extends DocumentsHost {
     markdown: string;
     origin: LiveDocumentEditOrigin;
   }): Promise<{ path: string }>;
+}
+
+type DrawingWrite = z.output<typeof DrawingWriteResult>;
+
+export interface CliDrawingsPort {
+  create(input: {
+    path: string;
+    elements: DrawingElementInput[];
+    origin: LiveDocumentEditOrigin;
+  }): Promise<DrawingWrite>;
+  edit(input: {
+    path: string;
+    edit: DrawingEdit;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<DrawingWrite>;
 }
 
 type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<
@@ -608,6 +628,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  drawings?: CliDrawingsPort;
   writeFiles?(
     files: CliFileWrite[],
     origin: LiveDocumentEditOrigin,
@@ -2266,6 +2287,37 @@ async function onceForRequestId(
   }
 }
 
+async function drawingWrite(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  completion: { replayed: boolean },
+  requestId: string | undefined,
+  input: unknown[],
+  write: (origin: LiveDocumentEditOrigin) => Promise<DrawingWrite>,
+): Promise<DrawingWrite> {
+  const run = async () => {
+    try {
+      const result = await write(documentEditOrigin(context, options, undefined));
+      if (result.ok) await notifyWrite(options, context);
+      return { done: result.ok, result };
+    } catch (error) {
+      return {
+        done: error instanceof LiveDocumentEditAppliedError,
+        result: mcpFailure(error, `dohc could not change ${String(input[1])}.`),
+      };
+    }
+  };
+  if (requestId === undefined) return (await run()).result;
+  return (await onceForRequestId(
+    context,
+    options,
+    requestId,
+    input,
+    run,
+    completion,
+  )) as DrawingWrite;
+}
+
 function refusePathColon(path: string): void {
   const segments = isAbsolute(path) ? path.replace(/^[A-Za-z]:[\\/]/, "") : path;
   if (segments.includes(":")) throw new CliCommandError(`path rejected (colon): ${path}`);
@@ -2539,6 +2591,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
   outsideChanges: "owner",
+  drawingRead: "owner",
   planUndoAgentRun: "owner",
   inboxList: "owner",
   workspaceSearch: "owner",
@@ -3198,6 +3251,7 @@ const DECLARED_WRITERS: {
     request: Extract<CliRequest, { verb: Verb }>,
     context: CliWorkspaceContext,
     options: CliServerOptions,
+    completion: { replayed: boolean },
   ) => Promise<z.input<DeclaredWriteOf<Verb>["socket"]["result"]>>;
 } = {
   // Try again, for anyone who may post in the conversation: the same
@@ -3351,6 +3405,42 @@ const DECLARED_WRITERS: {
   memberAppPromote: (request, context) => memberAppWrite(context, "promote", request.args),
   memberAppWithdraw: (request, context) => memberAppWrite(context, "withdraw", request.args),
   memberAppSharing: (request, context) => memberAppWrite(context, "sharing", request.args),
+  drawingCreate: async (request, context, options, completion) => {
+    const drawings = context.drawings;
+    if (!drawings) return { ok: false as const, reason: "Drawings are unavailable." };
+    const validated = validateUserMaterializePath(request.args.path, {
+      platform: process.platform,
+    });
+    if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+    const path = validated.normalized;
+    if (liveDocumentKindForPath(path) !== "scene")
+      return { ok: false as const, reason: `a drawing path ends in .excalidraw: ${path}` };
+    const elements = request.args.elements ?? [];
+    return await drawingWrite(
+      context,
+      options,
+      completion,
+      request.args.requestId,
+      ["create", path, elements],
+      (origin) => drawings.create({ path, elements, origin }),
+    );
+  },
+  drawingEdit: async (request, context, options, completion) => {
+    const drawings = context.drawings;
+    if (!drawings) return { ok: false as const, reason: "Drawings are unavailable." };
+    const { path: requested, requestId, ...edit } = request.args;
+    const validated = validateUserWritePath(requested);
+    if (!validated.ok) return cliPathRejected(validated.reason, requested);
+    const path = validated.normalized;
+    return await drawingWrite(
+      context,
+      options,
+      completion,
+      requestId,
+      ["edit", path, edit],
+      (origin) => drawings.edit({ path, edit, origin }),
+    );
+  },
   liveResume: async (request, context, options) => {
     const live = context.liveDocuments;
     if (!live || context.readOnly) return liveDocumentsUnavailable();
@@ -3410,8 +3500,9 @@ async function dispatchWorkspace(
       request: DeclaredWriteRequest,
       context: CliWorkspaceContext,
       options: CliServerOptions,
+      completion: { replayed: boolean },
     ) => Promise<unknown>;
-    return write(request, context, options);
+    return write(request, context, options, completion);
   }
   const chats = chatsHost(context, options);
   switch (request.verb) {
@@ -5284,6 +5375,10 @@ async function dispatchDeclaredRead(
   // Keep takes its path from the caller's folder, so list from there too.
   if (request.verb === "outsideChanges")
     return (await callerPaths(workspace, cwd)).result(await read(workspace, input));
+  if (request.verb === "drawingRead") {
+    const path = (await callerPaths(workspace, cwd)).rebase(request.args.path, "read");
+    return read(workspace, { ...input, path });
+  }
   return read(workspace, input);
 }
 

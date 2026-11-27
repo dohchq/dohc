@@ -2,6 +2,7 @@ import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLi
 import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import type { captureOperations } from "./captureOperations";
+import type { drawingOperations } from "./drawingOperations";
 import type { linksOperations } from "./linksOperations";
 import type { memberAppsReadOperations, memberAppsWriteOperations } from "./memberAppsOperations";
 import type { retrievalOperations } from "./retrievalOperations";
@@ -9541,6 +9542,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof retrievalOperations>,
     OperationBridge<typeof captureOperations>,
+    OperationBridge<typeof drawingOperations>,
     OperationBridge<typeof agentRunHistoryOperations>,
     OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,

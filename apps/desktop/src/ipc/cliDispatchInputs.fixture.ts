@@ -205,6 +205,9 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "member-apps withdraw": ["0000000000000000000000000000000000000000000000000000000000000000"],
   "member-apps sharing": ["on"],
   "links connections": [],
+  "drawing read": ["plan.excalidraw"],
+  "drawing create": ["plan.excalidraw", '[{"type":"rectangle","x":0,"y":0}]'],
+  "drawing edit": ["plan.excalidraw", '{"update":[{"id":"a","expectedVersion":1,"x":10}]}'],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>

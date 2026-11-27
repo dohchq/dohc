@@ -1,0 +1,147 @@
+import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
+import type { DrawingEdit } from "@dohc/workspace-contracts/drawing";
+import { planDrawingEdit, summarizeDrawing } from "./agentScene";
+import { foldScene } from "./index";
+
+function apply(doc: Y.Doc, edit: DrawingEdit) {
+  const plan = planDrawingEdit(doc, edit, 1_700_000_000_000);
+  if ("reason" in plan) throw new Error(plan.reason);
+  if (plan.update) Y.applyUpdate(doc, plan.update);
+  return plan.written;
+}
+
+function live(doc: Y.Doc) {
+  return summarizeDrawing(foldScene(doc).elements, false);
+}
+
+describe("planDrawingEdit", () => {
+  it("adds labelled, bound elements in order with Excalidraw's defaults", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "b", type: "ellipse", x: 400, y: 0 },
+        { id: "label", type: "text", x: 0, y: 0, text: "Start", containerId: "a" },
+        { id: "go", type: "arrow", x: 200, y: 50, start: "a", end: "b" },
+      ],
+    });
+    const scene = foldScene(doc).elements;
+    expect(scene.map((element) => element.id)).toEqual(["a", "b", "label", "go"]);
+    const [a, , label, go] = scene;
+    expect(a).toMatchObject({
+      version: 1,
+      angle: 0,
+      roughness: 1,
+      opacity: 100,
+      boundElements: [
+        { id: "label", type: "text" },
+        { id: "go", type: "arrow" },
+      ],
+    });
+    expect(typeof a!.seed).toBe("number");
+    expect(label).toMatchObject({
+      containerId: "a",
+      originalText: "Start",
+      textAlign: "center",
+      verticalAlign: "middle",
+      x: 100 - (label!.width as number) / 2,
+      y: 50 - (label!.height as number) / 2,
+    });
+    expect(go).toMatchObject({
+      startBinding: { elementId: "a", focus: 0, gap: 4 },
+      endBinding: { elementId: "b", focus: 0, gap: 4 },
+      points: [
+        [0, 0],
+        [160, 0],
+      ],
+      endArrowhead: "arrow",
+    });
+    expect(live(doc).find((element) => element.id === "go")).toMatchObject({ pointCount: 2 });
+  });
+
+  it("refuses a stale expectedVersion and changes nothing", () => {
+    const doc = new Y.Doc();
+    apply(doc, { add: [{ id: "a", type: "rectangle", x: 0, y: 0 }] });
+    const before = Y.encodeStateVector(doc);
+    const plan = planDrawingEdit(
+      doc,
+      {
+        add: [{ type: "text", x: 0, y: 0, text: "x" }],
+        update: [{ id: "a", expectedVersion: 0, x: 5 }],
+      },
+      0,
+    );
+    expect(plan).toEqual({ reason: expect.stringContaining("a is at version 1, not 0") });
+    expect(Y.encodeStateVector(doc)).toEqual(before);
+  });
+
+  it("moves a container's text with it and deletes the text with the container", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "label", type: "text", x: 0, y: 0, text: "Hi", containerId: "a" },
+        { id: "b", type: "diamond", x: 400, y: 0 },
+        { id: "go", type: "arrow", x: 200, y: 50, start: "a", end: "b" },
+      ],
+    });
+    const moved = apply(doc, { update: [{ id: "a", expectedVersion: 1, x: 100 }] });
+    expect(moved.map(({ id }) => id).sort()).toEqual(["a", "label"]);
+    const label = foldScene(doc).elements.find((element) => element.id === "label")!;
+    expect(label.x).toBe(200 - (label.width as number) / 2);
+
+    apply(doc, { delete: [{ id: "a", expectedVersion: 2 }] });
+    expect(live(doc).map((element) => element.id)).toEqual(["b", "go"]);
+    expect(live(doc).find((element) => element.id === "go")).not.toHaveProperty("startBinding");
+  });
+
+  it("converges with a concurrent canvas edit to another element", () => {
+    const owner = new Y.Doc();
+    apply(owner, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0 },
+        { id: "b", type: "rectangle", x: 300, y: 0 },
+      ],
+    });
+    const canvas = new Y.Doc();
+    Y.applyUpdate(canvas, Y.encodeStateAsUpdate(owner));
+    apply(canvas, { update: [{ id: "b", expectedVersion: 1, x: 999 }] });
+    apply(owner, { update: [{ id: "a", expectedVersion: 1, x: -50 }] });
+    Y.applyUpdate(owner, Y.encodeStateAsUpdate(canvas));
+    Y.applyUpdate(canvas, Y.encodeStateAsUpdate(owner));
+    expect(live(owner)).toEqual(live(canvas));
+    expect(live(owner).map(({ id, x }) => [id, x])).toEqual([
+      ["a", -50],
+      ["b", 999],
+    ]);
+  });
+
+  it("refuses text on a shape, points on a shape, and an unknown container", () => {
+    const doc = new Y.Doc();
+    for (const [edit, reason] of [
+      [{ add: [{ type: "rectangle", x: 0, y: 0, text: "x" }] }, "Only a text element takes text"],
+      [
+        {
+          add: [
+            {
+              type: "ellipse",
+              x: 0,
+              y: 0,
+              points: [
+                [0, 0],
+                [1, 1],
+              ],
+            },
+          ],
+        },
+        "Only an arrow or line",
+      ],
+      [{ add: [{ type: "text", x: 0, y: 0, text: "x", containerId: "nope" }] }, "No element nope."],
+    ] as const) {
+      expect(planDrawingEdit(doc, edit as unknown as DrawingEdit, 0)).toEqual({
+        reason: expect.stringContaining(reason),
+      });
+    }
+  });
+});

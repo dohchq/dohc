@@ -8,6 +8,8 @@ import { createWorkspaceGraphConnections } from "./workspaces/workspaceGraphConn
 import { createWorkspaceRetrievalReader } from "./workspaces/workspaceRetrieval";
 import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
+import { drawingOperations } from "./ipc/drawingOperations";
+import { readDrawing } from "./workspaces/drawingEdit";
 import { linksOperations } from "./ipc/linksOperations";
 import { retrievalOperations } from "./ipc/retrievalOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
@@ -4519,6 +4521,22 @@ async function workspaceOutsideChanges(workspace: EngineWorkspace) {
     outsideChanges: changes.map(({ path, firstObservedAtMs }) => ({ path, firstObservedAtMs })),
   };
 }
+async function workspaceDrawing(
+  workspace: EngineWorkspace & { shareView?: unknown },
+  input: { path: string; points?: boolean },
+) {
+  if (shareViewIsPresent(workspace.shareView))
+    throw new Error("Only the original workspace reads drawings.");
+  return await readDrawing(
+    engineYDocSessionIpc,
+    { workspaceId: workspace.workspaceId, ...input },
+    async (path) => {
+      const read = await readWorkspaceText(workspace.rootPath, path);
+      if (read.truncated) throw new Error(`${path} is too large to read as a drawing.`);
+      return read.text;
+    },
+  );
+}
 const resolveEngineFiles = createEngineFileResolver(
   withEngineAdapter,
   createReceivedFileReferenceScopes<EngineWorkspace>({
@@ -8530,6 +8548,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
     outsideChanges: (workspace) => workspaceOutsideChanges(workspace),
+    drawingRead: (workspace, input) => workspaceDrawing(workspace, input),
     planUndoAgentRun: async (workspace, input) => {
       if (shareViewIsPresent(workspace.shareView))
         throw new Error("Only the original workspace can plan an agent run undo.");
@@ -8646,6 +8665,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   liveDocuments: {
     readDocument: (input) => engineYDocSessionIpc.readDocument(input),
     editDocument: (input) => engineYDocSessionIpc.editDocument(input),
+    editLiveDocument: (input, apply) => engineYDocSessionIpc.editLiveDocument(input, apply),
     openSharedDocument: (workspaceId, path) =>
       engineYDocSessionIpc.openSharedDocument(workspaceId, path),
   },
@@ -10513,6 +10533,10 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, retrievalOperations, {
     workspaceSearch: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
       workspaceRetrieval.search(operation.workspace, input),
+  });
+  registerOperations(operationBoundary, drawingOperations, {
+    drawingRead: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+      workspaceDrawing(operation.workspace, input),
   });
   registerOperations(operationBoundary, captureOperations, {
     outsideChanges: async (_input, { operation }) => {

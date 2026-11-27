@@ -282,5 +282,6 @@
   "desktop:member-app-sharing": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-connections": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:member-app-source": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:member-app-promote": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:member-app-promote": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:drawing-read": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }
