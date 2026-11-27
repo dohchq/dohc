@@ -6273,12 +6273,17 @@ function WorkspaceShell(props: {
       reportShellError("dohc could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const creatingApp = useRef(false);
   const createNewApp = useCallback(async () => {
+    if (creatingApp.current) return;
+    creatingApp.current = true;
     try {
-      const plan = planNewApp({
-        appRoot: uniqueNewPath(files, folders, "New app"),
-        folder: "missing",
+      const { path: appRoot } = await bridge().createWorkspaceFolder({
+        workspaceId,
+        relativePath: uniqueNewPath(files, folders, "New app"),
+        exclusive: true,
       });
+      const plan = planNewApp({ appRoot, folder: { entryCount: 0 } });
       if (!plan.ok) throw new Error(plan.reason);
       for (const file of plan.files) {
         await bridge().createWorkspaceFile({
@@ -6292,6 +6297,8 @@ function WorkspaceShell(props: {
       openAppTab(plan.appRoot);
     } catch (error) {
       reportShellError("dohc could not create an app.", error);
+    } finally {
+      creatingApp.current = false;
     }
   }, [files, folders, openAppTab, refreshFiles, reportShellError, workspaceId]);
   // Add an app here… opens the Explorer with its Apps section open and its

@@ -45,10 +45,12 @@ test("an empty workspace makes apps and points to agent settings", async () => {
       expect(await readFile(join(temp.rootPath, file.path), "utf8")).toBe(file.content);
     }
 
-    await page.getByTestId("explorer-apps-add").click();
+    await page.getByTestId("explorer-apps-add").dblclick();
     await expect(page.locator('[data-testid="sites-row"][data-root="New app 2"]')).toBeVisible({
       timeout: 20_000,
     });
+    await expect(page.getByTestId("sites-row")).toHaveCount(2);
+    await expect(page.getByText("dohc could not create an app.")).toHaveCount(0);
     await page.screenshot({ path: shot("apps-created") });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
