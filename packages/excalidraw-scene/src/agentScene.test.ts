@@ -49,14 +49,12 @@ describe("planDrawingEdit", () => {
       y: 50 - (label!.height as number) / 2,
     });
     expect(go).toMatchObject({
+      x: 204,
       startBinding: { elementId: "a", focus: 0, gap: 4 },
       endBinding: { elementId: "b", focus: 0, gap: 4 },
-      points: [
-        [0, 0],
-        [160, 0],
-      ],
       endArrowhead: "arrow",
     });
+    expect((go!.x as number) + (go!.points as number[][])[1]![0]!).toBe(396);
     expect(live(doc).find((element) => element.id === "go")).toMatchObject({ pointCount: 2 });
   });
 
@@ -90,15 +88,9 @@ describe("planDrawingEdit", () => {
     expect(moved.map(({ id }) => id).sort()).toEqual(["a", "go", "label"]);
     const label = foldScene(doc).elements.find((element) => element.id === "label")!;
     expect(label.x).toBe(200 - (label.width as number) / 2);
-    expect(foldScene(doc).elements.find((element) => element.id === "go")).toMatchObject({
-      x: 300,
-      y: 50,
-      width: 60,
-      points: [
-        [0, 0],
-        [60, 0],
-      ],
-    });
+    const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+    expect(go).toMatchObject({ x: 304, width: 92 });
+    expect((go.x as number) + (go.points as number[][])[1]![0]!).toBe(396);
 
     apply(doc, { delete: [{ id: "a", expectedVersion: 2 }] });
     expect(live(doc).map((element) => element.id)).toEqual(["b", "go"]);
@@ -126,6 +118,27 @@ describe("planDrawingEdit", () => {
       ["b", 500],
       ["go", 300],
     ]);
+  });
+
+  it("centers a label on an arrow that points back", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        {
+          id: "go",
+          type: "arrow",
+          x: 400,
+          y: 50,
+          points: [
+            [0, 0],
+            [-200, 0],
+          ],
+        },
+        { id: "label", type: "text", x: 0, y: 0, text: "back", containerId: "go" },
+      ],
+    });
+    const label = foldScene(doc).elements.find((element) => element.id === "label")!;
+    expect(label.x).toBe(300 - (label.width as number) / 2);
   });
 
   it("edits around a label whose shape is gone", () => {

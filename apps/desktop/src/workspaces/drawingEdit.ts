@@ -129,6 +129,8 @@ export async function readDrawing(
   } catch {
     throw new Error(`${path} is not a valid drawing file.`);
   }
+  if (text.trim() !== "" && (file as { type?: unknown } | null)?.type !== "excalidraw")
+    throw new Error(`${path} is not an Excalidraw drawing.`);
   const { elements, appState } = (file ?? {}) as { elements?: unknown; appState?: unknown };
   return {
     path,

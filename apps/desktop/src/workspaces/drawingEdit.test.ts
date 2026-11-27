@@ -180,6 +180,7 @@ describe("readDrawing", () => {
       readDocument: async ({ path }: { path: string }) => ({ path, state: null }),
     } as LiveDocumentSessions;
     const file = JSON.stringify({
+      type: "excalidraw",
       elements: [
         { id: "x", type: "rectangle", version: 4, x: 1, y: 2, width: 3, height: 4 },
         { id: "gone", type: "rectangle", isDeleted: true },
@@ -192,5 +193,9 @@ describe("readDrawing", () => {
       elements: [{ id: "x", type: "rectangle", version: 4, x: 1, y: 2, width: 3, height: 4 }],
       appState: { viewBackgroundColor: "#fff" },
     });
+    await expect(
+      readDrawing(settled, target, async () => JSON.stringify({ type: "unrelated" })),
+    ).rejects.toThrow("plan.excalidraw is not an Excalidraw drawing.");
+    expect(await readDrawing(settled, target, async () => "")).toMatchObject({ elements: [] });
   });
 });

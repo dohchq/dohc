@@ -940,6 +940,7 @@ import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 
 import {
+  prepareWorkspaceFileRead,
   readWorkspaceText,
   resolveWorkspaceDocument,
   resolveWorkspaceFile,
@@ -4530,11 +4531,10 @@ async function workspaceDrawing(
   return await readDrawing(
     engineYDocSessionIpc,
     { workspaceId: workspace.workspaceId, ...input },
-    async (path) => {
-      const read = await readWorkspaceText(workspace.rootPath, path);
-      if (read.truncated) throw new Error(`${path} is too large to read as a drawing.`);
-      return read.text;
-    },
+    async (path) =>
+      (await (await prepareWorkspaceFileRead(workspace.rootPath, path)).readAsset()).bytes.toString(
+        "utf8",
+      ),
   );
 }
 const resolveEngineFiles = createEngineFileResolver(

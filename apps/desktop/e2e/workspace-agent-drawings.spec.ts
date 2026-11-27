@@ -98,12 +98,30 @@ test("an agent creates a drawing and edits it live while the person draws", asyn
   const temp = await createTempWorkspace();
   let desktop: Desktop | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{ path: "readme.md", contents: "# Plans\n" }]);
+    const photo = {
+      dataURL: `data:image/png;base64,${"A".repeat(3_000_000)}`,
+      mimeType: "image/png",
+    };
+    await writeWorkspaceFiles(temp, [
+      { path: "readme.md", contents: "# Plans\n" },
+      {
+        path: "photo.excalidraw",
+        contents: JSON.stringify({
+          type: "excalidraw",
+          elements: [{ id: "photo", type: "image", version: 3, x: 0, y: 0, fileId: "f" }],
+          files: { f: photo },
+        }),
+      },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "readme.md");
     await waitForCliEndpoint(temp.homeDir);
+    expect(await agentCli(temp, "drawingRead", { path: "photo.excalidraw" })).toMatchObject({
+      live: false,
+      elements: [{ id: "photo", type: "image", version: 3 }],
+    });
 
     const create = {
       path,

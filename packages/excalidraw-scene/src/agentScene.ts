@@ -29,6 +29,7 @@ export const EMPTY_EXCALIDRAW_DOCUMENT = JSON.stringify(
 );
 
 const FONT_SIZE = 20;
+const GAP = 4;
 const LINE_HEIGHT = 1.25;
 const CONTAINERS = new Set(["rectangle", "ellipse", "diamond", "arrow"]);
 const LINEAR = new Set(["arrow", "line", "freedraw"]);
@@ -140,7 +141,7 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
   const deleting = new Set((edit.delete ?? []).map(({ id }) => id));
   const gone = (id: unknown) => typeof id === "string" && deleting.has(id);
   for (const id of deleting) next.set(id, { ...live(id), isDeleted: true });
-  for (const id of current.keys()) {
+  for (const id of deleting.size > 0 ? current.keys() : []) {
     const before = existing(id);
     if (!before) continue;
     const after: ElementSnapshot = { ...before };
@@ -191,10 +192,11 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
     if (text?.type !== "text" || typeof text.containerId !== "string") continue;
     const container = existing(text.containerId);
     if (!container || (!next.has(text.id) && !next.has(container.id))) continue;
+    const [cx, cy] = center(container);
     next.set(text.id, {
       ...text,
-      x: numberOr(container.x) + (numberOr(container.width) - numberOr(text.width)) / 2,
-      y: numberOr(container.y) + (numberOr(container.height) - numberOr(text.height)) / 2,
+      x: cx - numberOr(text.width) / 2,
+      y: cy - numberOr(text.height) / 2,
     });
   }
   const written = [...next.values()].map((element) => ({
@@ -333,9 +335,47 @@ function link(
       throw new DrawingEditRefusal(`Only an arrow binds its ends: ${id} is a ${input.type}.`);
     if (LINEAR.has(live(targetId).type))
       throw new DrawingEditRefusal(`${id} cannot bind to ${targetId}.`);
-    next.set(id, { ...next.get(id)!, [key]: { elementId: targetId, focus: 0, gap: 4 } });
+    next.set(id, { ...next.get(id)!, [key]: { elementId: targetId, focus: 0, gap: GAP } });
     bind(targetId, "arrow");
   }
+  if (input.type !== "arrow" || input.points || !(input.start || input.end)) return;
+  const start = input.start ? live(input.start) : undefined;
+  const end = input.end ? live(input.end) : undefined;
+  const from = start
+    ? edge(start, end ? center(end) : [input.x + (input.width ?? 160), input.y])
+    : ([input.x, input.y] as const);
+  const to = end
+    ? edge(end, from)
+    : ([from[0] + (input.width ?? 160), from[1] + (input.height ?? 0)] as const);
+  const points: [number, number][] = [
+    [0, 0],
+    [to[0] - from[0], to[1] - from[1]],
+  ];
+  next.set(id, { ...next.get(id)!, x: from[0], y: from[1], points, ...pointBox(points) });
+}
+
+function center(element: ElementSnapshot) {
+  const points = Array.isArray(element.points) ? (element.points as [number, number][]) : [];
+  const [left, top] =
+    points.length > 0
+      ? [Math.min(...points.map(([x]) => x)), Math.min(...points.map(([, y]) => y))]
+      : [0, 0];
+  return [
+    numberOr(element.x) + left + numberOr(element.width) / 2,
+    numberOr(element.y) + top + numberOr(element.height) / 2,
+  ] as const;
+}
+
+function edge(element: ElementSnapshot, toward: readonly [number, number]) {
+  const [cx, cy] = center(element);
+  const [dx, dy] = [toward[0] - cx, toward[1] - cy];
+  const reach = Math.min(
+    dx === 0 ? Infinity : (numberOr(element.width) / 2 + GAP) / Math.abs(dx),
+    dy === 0 ? Infinity : (numberOr(element.height) / 2 + GAP) / Math.abs(dy),
+  );
+  return Number.isFinite(reach)
+    ? ([cx + dx * reach, cy + dy * reach] as const)
+    : ([cx, cy] as const);
 }
 
 function textSize(text: string) {
