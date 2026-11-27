@@ -173,19 +173,21 @@ it.skipIf(engine.missing)(
       dbPath: join(await createTestScratch("dohc-live-undo-relay-"), "relay", "relay.sqlite"),
       compiledMain: compiledRelayMain,
     });
-    const daemon = await openLiveDaemonCapture({
-      workspaceId,
-      rootPath: root,
-      relay: { baseUrl: relay.baseUrl, token: `test:${workspaceId}` },
-      settleDebounceMs: 60_000,
-    });
+    let daemon: Awaited<ReturnType<typeof openLiveDaemonCapture>> | undefined;
     try {
+      daemon = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: root,
+        relay: { baseUrl: relay.baseUrl, token: `test:${workspaceId}` },
+        settleDebounceMs: 60_000,
+      });
       await daemon.relay.claim();
       const note = "# Plan\n\nPerson line\n";
       await writeAndCapture(daemon, root, "note.md", note);
       await pushUntilDrained(daemon.relay);
       await editNoteAsAgent(daemon, "note.md", "richdoc");
       await pushUntilDrained(daemon.relay);
+      expect(await readFile(join(root, "note.md"), "utf8")).toContain("Agent line");
       const db = new DatabaseSync(join(root, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
       try {
         expect(db.prepare("SELECT regime FROM ydoc_docs WHERE path='note.md'").get()).toEqual({
@@ -199,7 +201,7 @@ it.skipIf(engine.missing)(
       expect(result).toMatchObject({ failed: [], skipped: [], restored: [{ path: "note.md" }] });
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(note);
     } finally {
-      await daemon.close();
+      await Promise.allSettled([daemon?.close()]);
       await relay.stop();
     }
   },
