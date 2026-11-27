@@ -89,6 +89,11 @@ describe("DatasetCsvTransferDialog", () => {
     ["a first number column", "Cost,Where\n3,Hotel", ["", ""]],
     ["a first exponent column", "Cost,Amount\n1e3,3", ["", id(4)]],
     ["a numbered title header", "Item,Amount\n123,3", ["", id(4)]],
+    [
+      "a title header with one number",
+      "Description,Label,Amount\nYear-end,2026,3\nOpen orders,Backlog,4",
+      ["", id(3), id(4)],
+    ],
   ])("maps the Collection's first text field from %s", (_label, text, fields) => {
     setup();
     fireEvent.change(screen.getByLabelText("CSV text"), { target: { value: text } });

@@ -115,20 +115,19 @@ export function suggestCsvMapping(
   const title = fields.find((field) => !field.generated);
   if (!title || title.type !== "text" || !allowed.includes(title) || used.has(title.fieldId))
     return mapping;
-  const text = (column: number) => {
-    const cells = csv.rows.map((row) => row[column]?.trim() ?? "").filter(Boolean);
-    return (
-      mapping[column] === null &&
-      cells.length > 0 &&
-      cells.every(
-        (cell) => /\p{L}/u.test(cell) && !NUMBER.test(cell) && !/^(true|false)$/i.test(cell),
-      )
-    );
-  };
+  const cells = (column: number) =>
+    csv.rows.map((row) => row[column]?.trim() ?? "").filter(Boolean);
+  const text = (cell: string) =>
+    /\p{L}/u.test(cell) && !NUMBER.test(cell) && !/^(true|false)$/i.test(cell);
   const named = csv.headers.findIndex(
-    (header, column) => TITLE_HEADERS.has(normalHeader(header)) && text(column),
+    (header, column) =>
+      mapping[column] === null &&
+      TITLE_HEADERS.has(normalHeader(header)) &&
+      cells(column).some((cell) => !NUMBER.test(cell)),
   );
-  const column = named !== -1 ? named : text(0) ? 0 : -1;
+  const first = cells(0);
+  const column =
+    named !== -1 ? named : mapping[0] === null && first.length && first.every(text) ? 0 : -1;
   if (column !== -1) mapping[column] = title.fieldId;
   return mapping;
 }
