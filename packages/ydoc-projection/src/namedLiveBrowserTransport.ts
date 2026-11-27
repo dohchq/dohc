@@ -147,14 +147,15 @@ export function createNamedLiveBrowserTransport<
           try {
             listener(removed);
           } catch {
-            /* A view listener cannot change delivery ownership. */
+            continue;
           }
         }
       });
       return created;
     };
-    const first = createProvider();
-    let provider = first;
+    let provider = createProvider(),
+      reopened = false;
+    const id = provider.doc.guid;
     const listeners = new Set<(state: NamedLiveBrowserState) => void>();
     let override: Override | undefined,
       closed = false,
@@ -294,6 +295,7 @@ export function createNamedLiveBrowserTransport<
         return false;
       unsubscribe();
       provider = createProvider(successor);
+      reopened = true;
       unsubscribe = provider.subscribe(follow);
       replaced.close();
       void connect();
@@ -712,7 +714,7 @@ export function createNamedLiveBrowserTransport<
     }
     return {
       /** Stays the same for the session's life, while `doc` changes on a reopen. */
-      id: first.doc.guid,
+      id,
       /** Changes when the relay replaces the note's lineage and the page reopens on the new one. */
       get doc() {
         return provider.doc;
@@ -738,7 +740,7 @@ export function createNamedLiveBrowserTransport<
         return true;
       },
       seed: (bytes: Uint8Array, throughJournalCursor: number) =>
-        provider === first && first.seed(bytes, throughJournalCursor),
+        !reopened && provider.seed(bytes, throughJournalCursor),
       reconnect,
       disconnect() {
         if (closed || ["quarantined", "refused"].includes(state().status)) return;
