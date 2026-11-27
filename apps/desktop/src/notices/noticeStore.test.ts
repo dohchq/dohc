@@ -1299,7 +1299,7 @@ describe("a refusal made again under the same coordinates", () => {
             title: "A note's file was not written",
             body: "",
             target: {},
-            refusalCoordinates: [hold],
+            refusalCoordinates: [],
             pendingRefusalDismissals: [hold],
             createdAtMs: clock,
             readAtMs: null,

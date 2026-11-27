@@ -731,6 +731,8 @@ mod tests {
         let mut store = EngineStore::open(&db, 0).unwrap();
         refuse(&mut store, "ws", "object", "lineage", 0);
         let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        drop(store);
+        let mut store = EngineStore::open(&db, 1).unwrap();
         refuse_again(&mut store, 0, &shown.reason);
         dismiss_refusal_notice(
             &mut store,
@@ -740,8 +742,6 @@ mod tests {
             &NoFaults,
         )
         .unwrap();
-        drop(store);
-        let store = EngineStore::open(&db, 1).unwrap();
         assert!(list_refusal_notices(&store, "ws").unwrap().is_empty());
     }
 
