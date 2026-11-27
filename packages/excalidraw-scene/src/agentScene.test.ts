@@ -156,6 +156,65 @@ describe("planDrawingEdit", () => {
     expect([(go.x as number) + end[0]!, (go.y as number) + end[1]!]).toEqual([396, 50]);
   });
 
+  it("keeps a bound arrow's end on a rotated shape resized in place", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        {
+          id: "go",
+          type: "arrow",
+          x: 100,
+          y: 300,
+          points: [
+            [0, 0],
+            [0, -146],
+          ],
+        },
+      ],
+    });
+    const scene = foldScene(doc).elements;
+    const a = scene.find((element) => element.id === "a")!;
+    const go = scene.find((element) => element.id === "go")!;
+    insertElementRevision(doc, { ...a, version: 2, angle: Math.PI / 2 });
+    insertElementRevision(doc, {
+      ...go,
+      version: 2,
+      endBinding: { elementId: "a", focus: 0, gap: 4 },
+    });
+    apply(doc, { update: [{ id: "a", expectedVersion: 2, width: 300 }] });
+    const moved = foldScene(doc).elements.find((element) => element.id === "go")!;
+    const end = (moved.points as number[][])[1]!;
+    expect((moved.x as number) + end[0]!).toBeCloseTo(150);
+    expect((moved.y as number) + end[1]!).toBeCloseTo(204);
+  });
+
+  it("leaves a bound arrow alone when its shape is only restyled", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "b", type: "rectangle", x: 400, y: 0, width: 200, height: 100 },
+        {
+          id: "go",
+          type: "arrow",
+          x: 204,
+          y: 0.1,
+          start: "a",
+          end: "b",
+          points: [
+            [0, 0],
+            [192, 0],
+          ],
+        },
+      ],
+    });
+    const written = apply(doc, {
+      update: [{ id: "a", expectedVersion: 1, strokeColor: "#e03131" }],
+    });
+    expect(written.map(({ id }) => id)).toEqual(["a"]);
+  });
+
   it("sizes changed text with the element's own font size and line height", () => {
     const doc = new Y.Doc();
     apply(doc, { add: [{ id: "t", type: "text", x: 0, y: 0, text: "Hi" }] });

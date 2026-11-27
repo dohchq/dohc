@@ -169,12 +169,18 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
       const before = typeof target === "string" ? current.get(target) : undefined;
       const after = typeof target === "string" ? existing(target) : undefined;
       if (!before || !after) return [0, 0] as const;
-      const [bx, by] = center(before);
-      const [ax, ay] = center(after);
-      const scale = (size: "width" | "height") =>
-        (numberOr(after[size]) / 2 + GAP) / (numberOr(before[size]) / 2 + GAP);
-      const [x, y] = [numberOr(arrow.x) + px, numberOr(arrow.y) + py];
-      return [ax + (x - bx) * scale("width") - x, ay + (y - by) * scale("height") - y] as const;
+      const change = (key: "x" | "y" | "width" | "height") =>
+        numberOr(after[key]) - numberOr(before[key]);
+      const grow = (size: "width" | "height") => change(size) / (numberOr(before[size]) + 2 * GAP);
+      const [cx, cy] = center(before);
+      const [ox, oy] = [numberOr(arrow.x) + px - cx, numberOr(arrow.y) + py - cy];
+      const [cos, sin] = [Math.cos(numberOr(after.angle)), Math.sin(numberOr(after.angle))];
+      const u = (ox * cos + oy * sin) * grow("width");
+      const v = (oy * cos - ox * sin) * grow("height");
+      return [
+        change("x") + change("width") / 2 + u * cos - v * sin,
+        change("y") + change("height") / 2 + u * sin + v * cos,
+      ] as const;
     };
     const [sx, sy] = shift("startBinding", ends[0]!);
     const [ex, ey] = shift("endBinding", ends[last]!);

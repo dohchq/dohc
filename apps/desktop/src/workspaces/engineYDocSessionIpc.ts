@@ -7,6 +7,10 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
+  SECRET_READ_DENIED_REASON,
+  classifyEngineFilePathForRead,
+} from "@dohc/security-contract/engine-path-floor";
+import {
   liveDocumentKindForPath,
   type LiveDocumentKind,
 } from "@dohc/workspace-contracts/live-documents";
@@ -1257,6 +1261,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         input.kind ?? "richdoc",
       );
       authority.assertCurrent();
+      if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
+        throw new Error(SECRET_READ_DENIED_REASON);
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
       if (held) return { path, state: Y.encodeStateAsUpdate(held.session.provider.doc) };
