@@ -94,7 +94,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, posix } from "node:path";
 
 type DeclaredTool = DeclaredOperation["mcp"]["tool"];
 export const DECLARED_TOOLS = byName(
@@ -1959,13 +1959,23 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
     });
   }
 
-  if (app.entry) {
-    const entry = await safeResolve(ctx, app.entry, "read");
-    const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
+  const manifestPath = join(root.absolute, "app.publish.json");
+  const manifest =
+    !app.entry && (await lstat(manifestPath).catch(() => null))?.isFile()
+      ? await readJsonDetailed<{ entryPath?: unknown }>(manifestPath)
+      : null;
+  const entryPath =
+    app.entry ??
+    (manifest?.ok && isRecord(manifest.value) && typeof manifest.value.entryPath === "string"
+      ? posix.normalize(relativeJoin(root.normalized, manifest.value.entryPath))
+      : undefined);
+  if (entryPath) {
+    const entry = await safeResolve(ctx, entryPath, "read");
+    const exists = entry.ok && Boolean((await lstat(entry.absolute).catch(() => null))?.isFile());
     checks.push({
       name: "entry-file",
       ok: exists,
-      path: app.entry,
+      path: entryPath,
       message: exists ? "Entry file exists." : "Entry file is missing.",
     });
   } else if (!app.scripts.dev && !app.scripts.start && !app.scripts.build) {
@@ -1973,7 +1983,7 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
       name: "entry-or-script",
       ok: false,
       path: root.normalized,
-      message: "App needs an index.html entry or a package script.",
+      message: "App needs an index.html entry, an app.publish.json entryPath, or a package script.",
     });
   }
 

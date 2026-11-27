@@ -1688,7 +1688,7 @@ describe("CLI socket server", () => {
     expect(await readFile(join(cwd, "index.html"), "utf8")).toBe("subfolder file");
     expect(writeFiles.mock.calls.map(([files]) => files.map((file) => file.path))).toEqual([
       ["app/index.html"],
-      expect.arrayContaining(["app/site/index.html"]),
+      ["app/site/app.publish.json", "app/site/src/App.tsx"],
       ["app/people.sqlite"],
     ]);
     expect(
@@ -1696,19 +1696,19 @@ describe("CLI socket server", () => {
         .flatMap(([files]) => files)
         .every((file) => file.path.startsWith("app/")),
     ).toBe(true);
-    await expect(stat(join(cwd, "site/index.html"))).resolves.toBeDefined();
+    await expect(stat(join(cwd, "site/src/App.tsx"))).resolves.toBeDefined();
     await expect(stat(join(cwd, "people.sqlite"))).resolves.toBeDefined();
     writeFiles.mockResolvedValueOnce({
       ok: false,
-      written: ["app/partial/index.html"],
-      path: "app/partial/styles.css",
-      reason: "Cannot write app/partial/styles.css: disk full. Free space.",
+      written: ["app/partial/app.publish.json"],
+      path: "app/partial/src/App.tsx",
+      reason: "Cannot write app/partial/src/App.tsx: disk full. Free space.",
     });
     expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
       ok: false,
-      written: ["partial/index.html"],
-      path: "partial/styles.css",
-      reason: "Cannot write partial/styles.css: disk full. Free space.",
+      written: ["partial/app.publish.json"],
+      path: "partial/src/App.tsx",
+      reason: "Cannot write partial/src/App.tsx: disk full. Free space.",
     });
   });
 

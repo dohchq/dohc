@@ -1126,47 +1126,25 @@ describe("mcp tools operate on allowed paths", () => {
     },
   );
 
-  it("dohc_create_app scaffolds a normal website (engine-recorded)", async () => {
+  it("dohc_create_app scaffolds an app that dohc_test_app passes (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
       const result = await createApp(ctx, { appRoot: "finance/ledger", title: "Ledger" });
-      expect(result).toMatchObject({ ok: true, appRoot: "finance/ledger" });
-      if (!result.ok) return;
-      expect(result.files).toEqual(
-        expect.arrayContaining([
-          "finance/ledger/index.html",
-          "finance/ledger/styles.css",
-          "finance/ledger/script.js",
-          "finance/ledger/scripts/build-static.mjs",
-          "finance/ledger/package.json",
-          "finance/ledger/dohc.json",
-        ]),
-      );
-      const html = await readFile(join(ctx.root, "finance/ledger/index.html"), "utf8");
-      const packageJson = JSON.parse(
-        await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"),
-      );
-      const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
-      expect(html).toContain("<title>Ledger</title>");
-      expect(packageJson).toMatchObject({
-        private: true,
-        type: "module",
-        engines: {
-          node: ">=14.8.0",
-        },
-        scripts: {
-          dev: "serve . --listen 127.0.0.1:4173",
-          build: "node scripts/build-static.mjs",
-          preview: "serve dist --listen 127.0.0.1:4173",
-        },
-        devDependencies: {
-          serve: "14.2.6",
-        },
+      expect(result).toMatchObject({
+        ok: true,
+        appRoot: "finance/ledger",
+        files: ["finance/ledger/app.publish.json", "finance/ledger/src/App.tsx"],
       });
-      expect(config).toMatchObject({
-        version: 1,
-        type: "app",
-        title: "Ledger",
-        build: { output: "dist" },
+      await expect(testApp(ctx, { appRoot: "finance/ledger" })).resolves.toMatchObject({
+        ok: true,
+        app: { kind: "configured", confidence: "high" },
+        checks: expect.arrayContaining([
+          {
+            name: "entry-file",
+            ok: true,
+            path: "finance/ledger/src/App.tsx",
+            message: "Entry file exists.",
+          },
+        ]),
       });
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
@@ -1174,7 +1152,45 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("dohc_create_app rejects existing non-empty folders and can omit dohc.json", async () => {
+  it("dohc_test_app finds an app.publish.json entry beside the app folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "books/portal"), { recursive: true });
+      await writeFile(join(ctx.root, "books/portal.tsx"), "export {};");
+      await writeFile(
+        join(ctx.root, "books/portal/app.publish.json"),
+        JSON.stringify({ version: 1, entryPath: "../portal.tsx" }),
+      );
+      await expect(testApp(ctx, { appRoot: "books/portal" })).resolves.toMatchObject({
+        ok: true,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "entry-file", ok: true, path: "books/portal.tsx" }),
+        ]),
+      });
+    });
+  });
+
+  it("dohc_test_app reports a missing app.publish.json entry", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "broken"));
+      await writeFile(
+        join(ctx.root, "broken/app.publish.json"),
+        JSON.stringify({ version: 1, entryPath: "src/App.tsx" }),
+      );
+      await expect(testApp(ctx, { appRoot: "broken" })).resolves.toMatchObject({
+        ok: false,
+        checks: expect.arrayContaining([
+          {
+            name: "entry-file",
+            ok: false,
+            path: "broken/src/App.tsx",
+            message: "Entry file is missing.",
+          },
+        ]),
+      });
+    });
+  });
+
+  it("dohc_create_app rejects existing non-empty folders", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "existing"), { recursive: true });
       await writeFile(join(ctx.root, "existing/file.txt"), "no overwrite");
@@ -1184,39 +1200,19 @@ describe("mcp tools operate on allowed paths", () => {
       expect(request).not.toHaveBeenCalled();
       expect(await readdir(join(ctx.root, "existing"))).toEqual(["file.txt"]);
       expect(await readFile(join(ctx.root, "existing/file.txt"), "utf8")).toBe("no overwrite");
-
-      const result = await createApp(ctx, {
-        appRoot: "plain-site",
-        title: "Plain Site",
-        withDohcJson: false,
-      });
-      expect(result).toMatchObject({ ok: true, appRoot: "plain-site" });
-      await expect(readFile(join(ctx.root, "plain-site/dohc.json"), "utf8")).rejects.toThrow();
     });
   });
 
   it.each([undefined, "", "  ", "  Ledger  ", '<Ledger & "quoted">'])(
-    "dohc_create_app resolves and escapes title %s",
+    "dohc_create_app resolves the title %s",
     async (title) => {
       await withWorkspace(async (ctx) => {
         const result = await createApp(ctx, { appRoot: "finance/my_ledger", title });
         expect(result).toMatchObject({ ok: true });
-        const resolvedTitle = title?.trim() || "My Ledger";
-        const html = await readFile(join(ctx.root, "finance/my_ledger/index.html"), "utf8");
-        const escaped =
-          resolvedTitle === '<Ledger & "quoted">'
-            ? "&lt;Ledger &amp; &quot;quoted&quot;&gt;"
-            : resolvedTitle;
-        expect(html).toContain(`<title>${escaped}</title>`);
-        expect(html).toContain(`<h1>${escaped}</h1>`);
-        const manifest = JSON.parse(
-          await readFile(join(ctx.root, "finance/my_ledger/dohc.json"), "utf8"),
+        const app = await readFile(join(ctx.root, "finance/my_ledger/src/App.tsx"), "utf8");
+        expect(app).toContain(
+          `<PageHeader title={${JSON.stringify(title?.trim() || "My Ledger")}} />`,
         );
-        expect(manifest).toMatchObject({ type: "app", title: resolvedTitle });
-        const pkg = JSON.parse(
-          await readFile(join(ctx.root, "finance/my_ledger/package.json"), "utf8"),
-        );
-        expect(pkg.name).toBe("my_ledger");
       });
     },
   );

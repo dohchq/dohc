@@ -93,8 +93,8 @@ describe("MCP authored file writes", () => {
     const refusal = {
       ok: false,
       reason: "Disk full. Free space and retry.",
-      path: "app/script.js",
-      written: ["app/index.html", "app/styles.css"],
+      path: "app/src/App.tsx",
+      written: ["app/app.publish.json"],
     };
     const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => refusal);
     ctx.request = request;
@@ -104,7 +104,10 @@ describe("MCP authored file writes", () => {
     expect(sent?.verb).toBe("fileWrite");
     if (sent?.verb !== "fileWrite") throw new Error("Expected fileWrite");
     expect(sent.args.agent).toBe("Client");
-    expect(sent.args.files.length).toBeGreaterThan(3);
+    expect(sent.args.files.map((file) => file.path)).toEqual([
+      "app/app.publish.json",
+      "app/src/App.tsx",
+    ]);
     expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
     expect(await readdir(ctx.root)).toEqual([]);
   });

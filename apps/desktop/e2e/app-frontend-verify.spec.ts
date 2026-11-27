@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
+import { createApp, testApp } from "@dohc/mcp/tools";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import type {
   OwnerAppPublicationRequest,
@@ -482,6 +483,29 @@ createRoot(document.getElementById("root")!).render(<HostActions />);`,
     });
 
     await waitForWorkspaceFile(desktop.page, workspaceId, "apps/stalled-startup/app.js");
+
+    const agent = { root: workspace.rootPath, home: workspace.homeDir };
+    expect(
+      await createApp(agent, { appRoot: "apps/scaffold", title: "Trip Planner" }),
+    ).toMatchObject({
+      ok: true,
+    });
+    await waitForWorkspaceFile(desktop.page, workspaceId, "apps/scaffold/src/App.tsx");
+    expect(await testApp(agent, { appRoot: "apps/scaffold" })).toMatchObject({ ok: true });
+    const scaffoldVerify = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/scaffold",
+      steps: [{ kind: "waitFor", selector: "h1", textIncludes: "Trip Planner" }],
+    });
+    expect(scaffoldVerify, JSON.stringify(scaffoldVerify)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+      stage: "complete",
+      startupOk: true,
+      stepsOk: true,
+      diagnostics: [],
+    });
 
     // Verify working booking app (5 seats -> 200, then 4 seats -> 409 workshop_full)
     const bookingVerify = await publish(desktop.page, {
