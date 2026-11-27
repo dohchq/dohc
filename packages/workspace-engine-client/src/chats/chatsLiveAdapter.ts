@@ -251,6 +251,7 @@ export class ChatsLiveAdapter {
     body: string;
     needsDecision?: boolean;
     options?: string[];
+    optionDetails?: (string | null)[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<{ thread: ChatThread; message: ChatMessage }> {
     this.assertWorkspace(input.workspaceId);
@@ -276,6 +277,7 @@ export class ChatsLiveAdapter {
         body: input.body,
         ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
+        ...(input.optionDetails !== undefined ? { optionDetails: input.optionDetails } : {}),
         ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
         ...(input.automation !== undefined
           ? {
@@ -430,6 +432,7 @@ export class ChatsLiveAdapter {
     body: string;
     needsDecision?: boolean;
     options?: string[];
+    optionDetails?: (string | null)[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<ChatMessage> {
     this.assertWorkspace(input.workspaceId);
@@ -451,6 +454,7 @@ export class ChatsLiveAdapter {
         body: input.body,
         ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
+        ...(input.optionDetails !== undefined ? { optionDetails: input.optionDetails } : {}),
         ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
         ...(input.automation !== undefined
           ? {

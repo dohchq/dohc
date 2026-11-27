@@ -1001,6 +1001,8 @@ interface ChatDecisionRecord {
   atMs: number;
   // A poll's choices, in order. Absent for a bare question.
   options?: readonly string[];
+  // One explanation per choice, in the same order. Absent when the poll has none.
+  optionDetails?: readonly (string | null)[];
   // The choice the answer named, when the poll had choices.
   chosenOption?: string;
 }
@@ -1328,6 +1330,8 @@ export interface LinkedChatStore {
     needsDecision?: boolean;
     // A poll's choices. Implies needsDecision.
     options?: string[];
+    // One explanation per choice, or null for a choice without one.
+    optionDetails?: (string | null)[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;
@@ -1408,6 +1412,8 @@ export interface LinkedChatStore {
     needsDecision?: boolean;
     // A poll's choices. Implies needsDecision.
     options?: string[];
+    // One explanation per choice, or null for a choice without one.
+    optionDetails?: (string | null)[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;

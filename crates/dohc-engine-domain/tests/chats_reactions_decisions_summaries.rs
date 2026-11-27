@@ -56,6 +56,7 @@ fn start(
                 body: format!("opening {message_id}"),
                 needs_decision,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -110,6 +111,7 @@ fn send_with(
                 body: format!("message {message_id}"),
                 needs_decision,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments,
                 author_agent_id: None,
                 author_reported: None,
@@ -612,6 +614,7 @@ fn decision_open_is_atomic_with_start_and_send() {
             body: "rolled back".to_owned(),
             needs_decision: true,
             options: Vec::new(),
+            option_details: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
             author_reported: None,
@@ -660,6 +663,7 @@ fn decision_resolution_omits_a_local_only_resolver_from_relay_payload() {
                 body: "Resolved while signed out".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
@@ -937,6 +941,7 @@ fn keyed_post(key: &str, thread_id: &str, message_id: &str, at_ms: i64) -> Start
         body: format!("opening {message_id}"),
         needs_decision: true,
         options: Vec::new(),
+        option_details: Vec::new(),
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
@@ -962,6 +967,7 @@ fn keyed_reply(key: &str, message_id: &str, author: &str, at_ms: i64) -> SendMes
         body: format!("reply {message_id}"),
         needs_decision: false,
         options: Vec::new(),
+        option_details: Vec::new(),
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
@@ -1142,6 +1148,7 @@ fn a_resolve_receipt_keeps_no_poll_words_once_the_poll_is_deleted() {
         .start_channel_thread(
             &StartChannelThread {
                 options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
+                option_details: vec![Some("Bright core".to_owned()), None],
                 body: "Which?".to_owned(),
                 request_id: None,
                 ..keyed_post("unused", "thread", "opening", 20)
@@ -1168,6 +1175,18 @@ fn a_resolve_receipt_keeps_no_poll_words_once_the_poll_is_deleted() {
         .expect("resolve");
     let rows = added_rows(&before, &local_journal(&store));
     let recorded = receipt(&store, "answer-one");
+    let result_json = |store: &EngineStore| -> String {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT result_json FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = 'answer-one'",
+                    [WS],
+                    |row| row.get(0),
+                )
+            })
+            .expect("receipt result")
+    };
+    assert!(result_json(&store).contains("Bright core"));
     assert_eq!(
         recorded.as_ref().map(|receipt| receipt.3.clone()),
         Some(coordinates_of(&rows))
@@ -1177,17 +1196,9 @@ fn a_resolve_receipt_keeps_no_poll_words_once_the_poll_is_deleted() {
             dohc_engine_domain::chats::erase_deleted_message(tx, WS, "thread", "opening", 200)
         })
         .expect("delete");
-    let kept: String = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT result_json FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = 'answer-one'",
-                [WS],
-                |row| row.get(0),
-            )
-        })
-        .expect("receipt result");
+    let kept = result_json(&store);
     assert!(
-        !kept.contains("Quasar") && !kept.contains("Pulsar"),
+        !kept.contains("Quasar") && !kept.contains("Pulsar") && !kept.contains("Bright core"),
         "a deleted poll's choices stay in its receipt: {kept}"
     );
     assert_eq!(

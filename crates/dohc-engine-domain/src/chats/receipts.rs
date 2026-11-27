@@ -118,6 +118,8 @@ struct StoredDecision {
     resolved_by_message_id: Option<String>,
     at_ms: i64,
     options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    option_details: Vec<Option<String>>,
     chosen_option: Option<String>,
 }
 
@@ -261,6 +263,7 @@ pub(super) fn record_receipt(
             resolved_by_message_id: decision.resolved_by_message_id.clone(),
             at_ms: decision.at_ms,
             options: decision.options.clone(),
+            option_details: decision.option_details.clone(),
             chosen_option: decision.chosen_option.clone(),
         })),
         StageResult::Reaction(reaction) => Some(serde_json::to_string(&StoredReaction {
@@ -369,6 +372,7 @@ pub(super) fn replayed_decision(
         resolved_by_message_id: stored.resolved_by_message_id,
         at_ms: stored.at_ms,
         options: stored.options,
+        option_details: stored.option_details,
         chosen_option: stored.chosen_option,
     }))
 }

@@ -254,6 +254,7 @@ fn a_joined_group_stays_joined_on_the_owners_other_computer() {
                 body: "Yes".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 20,
                 request_id: None,

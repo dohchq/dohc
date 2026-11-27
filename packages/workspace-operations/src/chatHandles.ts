@@ -110,6 +110,7 @@ export function rawChatMessage(
       ? {
           decisionState: decision.state,
           ...(decision.options ? { options: [...decision.options] } : {}),
+          ...(decision.optionDetails ? { optionDetails: [...decision.optionDetails] } : {}),
           ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
           ...(decision.resolvedByMessageId
             ? { resolvedByMessageId: decision.resolvedByMessageId }
@@ -137,6 +138,7 @@ export function cliShowMessage(
       ? {
           decisionState: decision.state,
           ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
+          ...(decision.optionDetails ? { decisionOptionDetails: [...decision.optionDetails] } : {}),
           ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
         }
       : {}),

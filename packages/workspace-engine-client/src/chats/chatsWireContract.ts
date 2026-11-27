@@ -169,6 +169,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   body: string;
   needsDecision?: boolean;
   options?: string[];
+  optionDetails?: (string | null)[];
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
@@ -223,6 +224,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   body: string;
   needsDecision?: boolean;
   options?: string[];
+  optionDetails?: (string | null)[];
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
@@ -685,6 +687,7 @@ const ChatDecisionSchema = mutableStruct({
   resolvedByMessageId: Schema.optionalKey(Schema.String),
   atMs: AnyInt,
   options: Schema.optionalKey(Schema.Array(Schema.String)),
+  optionDetails: Schema.optionalKey(Schema.Array(Schema.NullOr(Schema.String))),
   chosenOption: Schema.optionalKey(Schema.String),
 });
 const ChatReactionAuthorSchema = mutableStruct({

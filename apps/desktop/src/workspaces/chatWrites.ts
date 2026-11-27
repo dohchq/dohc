@@ -139,6 +139,7 @@ interface ChatMessageInput {
   body: string;
   needsDecision?: boolean;
   options?: string[];
+  optionDetails?: (string | null)[];
   // What an agent reports about its work. The engine refuses one from a person.
   work?: ChatWorkReport;
   // Runs between admission and the final check, so a slow file lookup cannot
@@ -567,6 +568,7 @@ export function createChatWrites(dependencies: {
     await checkFileLinks(place, admission, [
       body,
       ...(input.options ?? []),
+      ...(input.optionDetails ?? []).filter((detail) => detail !== null),
       ...(input.title ? [input.title] : []),
     ]);
     await input.checkTargets?.();
@@ -602,6 +604,9 @@ export function createChatWrites(dependencies: {
         body,
         ...(input.needsDecision ? { needsDecision: true } : {}),
         ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
+        ...(input.optionDetails && input.optionDetails.length > 0
+          ? { optionDetails: input.optionDetails }
+          : {}),
         ...(input.work ? { work: input.work } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
       },
@@ -963,6 +968,7 @@ export function createChatWrites(dependencies: {
       body: command.body,
       needsDecision: command.needsDecision,
       options: command.options,
+      optionDetails: command.optionDetails,
       work: bound.work,
       resolveAttachments: bound.resolveAttachments ?? (async () => []),
       messageId: command.messageId,

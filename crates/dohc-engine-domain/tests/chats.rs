@@ -44,6 +44,7 @@ fn start_thread(
         body: body.to_owned(),
         needs_decision: false,
         options: Vec::new(),
+        option_details: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -92,6 +93,7 @@ fn send_msg(
         body: body.to_owned(),
         needs_decision: false,
         options: Vec::new(),
+        option_details: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -326,6 +328,7 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
         20,
     );
     question.options = vec![" 7am direct ".to_owned(), "2pm with a stop".to_owned()];
+    question.option_details = vec![Some(" Lands by noon ".to_owned()), Some("  ".to_owned())];
     chats
         .start_channel_thread(&question, &NO_FAULTS)
         .expect("poll");
@@ -336,7 +339,35 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].state, ChatDecisionState::Open);
     assert_eq!(open[0].options, vec!["7am direct", "2pm with a stop"]);
+    assert_eq!(
+        open[0].option_details,
+        vec![Some("Lands by noon".to_owned()), None]
+    );
     assert_eq!(open[0].chosen_option, None);
+
+    for (n, bad) in [
+        vec![Some("only one".to_owned())],
+        vec![Some("x".repeat(301)), None],
+        vec![Some("two\nlines".to_owned()), None],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut attempt = start_thread(
+            "chan-1",
+            &format!("bad-detail-{n}"),
+            &format!("bad-detail-msg-{n}"),
+            "?",
+            ChatActorKind::Agent,
+            21,
+        );
+        attempt.options = vec!["a".to_owned(), "b".to_owned()];
+        attempt.option_details = bad;
+        let err = chats
+            .start_channel_thread(&attempt, &NO_FAULTS)
+            .expect_err("bad explanations");
+        assert_eq!(err.code(), "invalid-poll-options");
+    }
 
     for bad in [
         vec!["a".to_owned(), "a".to_owned()],
@@ -390,6 +421,7 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
     assert_eq!(resolved.state, ChatDecisionState::Resolved);
     assert_eq!(resolved.chosen_option.as_deref(), Some("7am direct"));
     assert_eq!(resolved.options, vec!["7am direct", "2pm with a stop"]);
+    assert_eq!(resolved.option_details, open[0].option_details);
 
     let payloads: Vec<String> = store
         .read_with(|conn| {
@@ -415,6 +447,10 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
         serde_json::json!(["7am direct", "2pm with a stop"])
     );
     assert_eq!(last["chosenOption"], "7am direct");
+    assert_eq!(
+        last["optionDetails"],
+        serde_json::json!(["Lands by noon", null])
+    );
 }
 
 #[test]
@@ -1989,6 +2025,7 @@ fn a_deleted_poll_keeps_no_choices_or_answer() {
             &StartChannelThread {
                 needs_decision: true,
                 options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
+                option_details: Vec::new(),
                 ..start_thread(
                     "channel-general",
                     "t1",

@@ -225,7 +225,7 @@ describe("desktop CLI proxy", () => {
         choose: "Ship",
         attachments: ["notes/agenda.md"],
         needsDecision: true,
-        options: ["Ship", "Hold"],
+        options: [{ label: "Ship", detail: "Every check passed" }, { label: "Hold" }],
         runId: "run_1",
         body: "Shipping.",
       });
@@ -280,6 +280,7 @@ describe("desktop CLI proxy", () => {
             attachments: ["notes/agenda.md"],
             needsDecision: true,
             options: ["Ship", "Hold"],
+            optionDetails: ["Every check passed", null],
             body: "Shipping.",
           },
         ],

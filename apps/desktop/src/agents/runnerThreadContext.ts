@@ -38,7 +38,12 @@ function messageForMarkdown(
   message: ChatMessage,
   decisionByMessage: ReadonlyMap<
     string,
-    { state: "open" | "resolved"; options?: readonly string[]; chosenOption?: string }
+    {
+      state: "open" | "resolved";
+      options?: readonly string[];
+      optionDetails?: readonly (string | null)[];
+      chosenOption?: string;
+    }
   >,
 ): CliShowThreadResult["messages"][number] {
   const decision = decisionByMessage.get(message.id);
@@ -52,6 +57,7 @@ function messageForMarkdown(
     ...(decision?.options && decision.options.length > 0
       ? { decisionOptions: [...decision.options] }
       : {}),
+    ...(decision?.optionDetails ? { decisionOptionDetails: [...decision.optionDetails] } : {}),
     ...(decision?.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
     attachments: message.attachments.map((attachment) => ({
       ...(attachment.objectId ? { objectId: attachment.objectId } : {}),

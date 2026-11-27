@@ -1234,7 +1234,17 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     body: z.string().min(1),
     attachments: z.array(z.string().min(1).max(4096)).max(32).optional(),
     needsDecision: z.boolean().optional(),
-    options: z.array(z.string().min(1).max(200)).max(12).optional(),
+    options: z
+      .array(
+        z.union([
+          z.string().min(1).max(200),
+          z
+            .object({ label: z.string().min(1).max(200), detail: z.string().max(300).optional() })
+            .strict(),
+        ]),
+      )
+      .max(12)
+      .optional(),
     runId: z.string().min(1).max(200).optional(),
     model: reportedAgentPartSchema.optional(),
     work: chatWorkReportSchema.optional(),
@@ -1244,7 +1254,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll: give each choice as a short label, or as `{ label, detail }` with a one-line explanation shown under the label, and keep the choices out of `body` so people read them once; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
         group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),

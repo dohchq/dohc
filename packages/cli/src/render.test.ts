@@ -323,6 +323,7 @@ describe("markdown renderers", () => {
               attachments: [],
               decisionState: "resolved",
               decisionOptions: ["Train", "Bus"],
+              decisionOptionDetails: ["Arrives by noon", null],
               decisionChosenOption: "Train",
             },
             post: {
@@ -364,7 +365,7 @@ describe("markdown renderers", () => {
         "",
         "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · needs-decision(resolved) · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
         "Plan the trip",
-        "- [x] Train",
+        "- [x] Train — Arrives by noon",
         "- [ ] Bus",
         "> **Scout** · 1970-01-01T00:00:03.000Z · msg_3: Booked the train.",
         "",

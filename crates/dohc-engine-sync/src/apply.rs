@@ -19,10 +19,11 @@ use dohc_engine_domain::{
     ChatActorKind, ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError,
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
     ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution, attachment_id_for,
-    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
-    is_reaction_emoji_verbatim, merge_account_thread_read, normalize_agent_owner_name,
-    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
-    normalize_display_name, normalize_feed_identity, normalize_poll_options,
+    channel_slug_for_name, encode_poll_option_details, encode_poll_options,
+    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    merge_account_thread_read, normalize_agent_owner_name, normalize_author_user_id,
+    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_option_details, normalize_poll_options,
     normalize_reaction_agent_id, normalize_reaction_author_id, normalize_replicated_chat_id,
     parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
     resolve_follow_target, resolve_thread_message, resolve_thread_read_coordinate,
@@ -934,6 +935,8 @@ struct DecisionSet {
     resolved_by_message_id: Option<String>,
     #[serde(default)]
     options: Option<Vec<String>>,
+    #[serde(default)]
+    option_details: Option<Vec<Option<String>>>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     chosen_option: Option<String>,
 }
@@ -2217,6 +2220,9 @@ fn apply_decision(
     }
     let options = normalize_poll_options(p.options.as_deref().unwrap_or(&[]))
         .map_err(|error| map_chat_rule(error, "chat decision options are invalid"))?;
+    let option_details =
+        normalize_poll_option_details(&options, p.option_details.as_deref().unwrap_or(&[]))
+            .map_err(|error| map_chat_rule(error, "chat decision options are invalid"))?;
     let chosen_option = match p.chosen_option.as_deref() {
         None => {
             // A resolved poll names its answer; a bare question has none.
@@ -2254,6 +2260,7 @@ fn apply_decision(
         return Ok(());
     }
     let options_json = encode_poll_options(&options);
+    let option_details_json = encode_poll_option_details(&option_details);
     let prior_thread_id = tx
         .query_row(
             "SELECT thread_id FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
@@ -2265,18 +2272,35 @@ fn apply_decision(
     let updated = tx.execute(
         "INSERT INTO chat_decisions \
          (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq, \
-          options_json, chosen_option) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+          options_json, chosen_option, option_details_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(workspace_id, message_id) DO UPDATE SET \
            thread_id=excluded.thread_id, state=excluded.state, resolved_by_message_id=excluded.resolved_by_message_id, \
            at_ms=excluded.at_ms, origin_id=excluded.origin_id, origin_seq=excluded.origin_seq, \
-           options_json=excluded.options_json, chosen_option=excluded.chosen_option \
+           options_json=excluded.options_json, chosen_option=excluded.chosen_option, \
+           option_details_json=CASE WHEN excluded.options_json IS options_json \
+             THEN COALESCE(excluded.option_details_json, option_details_json) \
+             ELSE excluded.option_details_json END \
          WHERE (excluded.at_ms, excluded.state='resolved', excluded.origin_id, excluded.origin_seq) > \
                (at_ms, state='resolved', origin_id, origin_seq)",
-        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq, options_json, chosen_option],
+        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq, options_json, chosen_option, option_details_json],
     )
     .map_err(SyncError::persist)?;
-    if updated > 0 {
+    // Explanations belong to the choices they were written for. A snapshot
+    // without them, such as an answer from a build that predates them, keeps
+    // them (above), and an older snapshot that carries them still fills them.
+    let filled = match option_details_json {
+        Some(details) => tx
+            .execute(
+                "UPDATE chat_decisions SET option_details_json=?3 \
+                 WHERE workspace_id=?1 AND message_id=?2 \
+                   AND option_details_json IS NULL AND options_json IS ?4",
+                params![op.workspace_id, p.message_id, details, options_json],
+            )
+            .map_err(SyncError::persist)?,
+        None => 0,
+    };
+    if updated > 0 || filled > 0 {
         if let Some(prior_thread_id) = prior_thread_id
             && prior_thread_id != p.thread_id
         {

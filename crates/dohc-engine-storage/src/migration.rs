@@ -3838,6 +3838,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("kept_format_two_replay.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 116,
+        id: "v2-chat-decision-option-details",
+        sql: "ALTER TABLE chat_decisions ADD COLUMN option_details_json TEXT;",
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -6102,6 +6108,10 @@ mod tests {
             (
                 "v2-kept-format-two-replay",
                 "68d67c24f40109fafd44d0a8f3f9277689fdc3f14c79013e9971b1c70bbbe587",
+            ),
+            (
+                "v2-chat-decision-option-details",
+                "83d9d17f420873b036745a85a60ca72ee95418eeb897998621da278e0f80cfbc",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

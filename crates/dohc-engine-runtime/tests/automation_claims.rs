@@ -1650,6 +1650,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 body: "/task Now".to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
+                option_details: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
                 author_agent_id: None,
