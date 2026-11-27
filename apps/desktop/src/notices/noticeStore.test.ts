@@ -1111,6 +1111,56 @@ it("does not let a dismissed absent-head hold hide a later head for the same not
   expect(dismissRefusal).toHaveBeenCalledOnce();
 });
 
+it("keeps a dismissed refusal hidden across restart, and shows a later refusal of the same change for another reason", async () => {
+  const coordinate = { originId: "peer", originSeq: 4 };
+  let reason = "ydoc-note-uses-a-newer-body-format";
+  const refusalNotices = async () => [
+    {
+      workspaceId: WORKSPACE,
+      notices: [
+        {
+          noticeId: "sync-refusal-note",
+          originId: "peer",
+          originSeq: 4,
+          refusalCoordinates: [coordinate],
+          reason,
+          document: {
+            versionId: "main",
+            path: "plan.md",
+            objectId: "note",
+            lineageClaimId: "lineage",
+            conflictId: null,
+          },
+        },
+      ],
+    },
+  ];
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [shown] = (await first.store.list()).notices;
+  expect(shown!.title).toBe("A note needs a newer version of dohc");
+  await first.store.mark([shown!], "dismissed", null);
+  const restarted = await computer(null, {
+    directory: first.directory,
+    refusalNotices,
+    dismissRefusal,
+  });
+  expect((await restarted.store.list()).notices).toEqual([]);
+  expect(dismissRefusal).toHaveBeenLastCalledWith(WORKSPACE, "sync-refusal-note", [coordinate]);
+  const sent = dismissRefusal.mock.calls.length;
+  reason = "ydoc-kept-base-cannot-settle";
+  expect((await restarted.store.list()).notices).toEqual([
+    expect.objectContaining({
+      noticeId: "sync-refusal-note",
+      title: "A change needs your review",
+      readAtMs: null,
+      refusalCoordinates: [coordinate],
+      detail: expect.stringContaining(reason),
+    }),
+  ]);
+  expect(dismissRefusal).toHaveBeenCalledTimes(sent);
+});
+
 it("rejects a refusal dismissal without shown coordinates", async () => {
   const dismissRefusal = vi.fn(async () => {});
   const first = await computer(null, {
