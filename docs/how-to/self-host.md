@@ -28,12 +28,25 @@ To turn it on, follow [Publish apps](#publish-apps).
 
 ## Prepare the host
 
-Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
+Install Git, Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
 Have an SMTP service ready for verification and password reset emails.
 The server emails share invitations through it too.
 The SMTP service must support TLS.
 
-## Build the deployment bundle
+## Get the Compose files and image
+
+On a `linux/amd64` host, clone the repository for the Compose files and setup scripts, then pull the prebuilt image:
+
+```sh
+git clone --depth 1 https://github.com/dohchq/dohc.git
+cd dohc
+docker pull ghcr.io/dohchq/dohc-self-host:latest
+```
+
+To pin a specific commit instead of `latest`, use `ghcr.io/dohchq/dohc-self-host:COMMIT_SHA` or a digest from the [dohc-self-host package](https://github.com/orgs/dohchq/packages/container/package/dohc-self-host).
+For other architectures such as `linux/arm64`, or to build locally without pulling from GitHub Container Registry, [build the deployment bundle](#build-the-deployment-bundle) instead.
+
+### Build the deployment bundle
 
 The build machine needs Git and at least 40 GB of free disk space.
 Clone dohc and select the release you intend to deploy.
@@ -64,14 +77,16 @@ Keep the bundle's configuration and persistent volumes when you update dohc.
 For public access, run this command with your domain:
 
 ```sh
-node tools/self-host/bootstrap.mjs init --origin https://dohc.your-domain.com --name "My dohc server" --image dohc-self-host:VERSION
+node tools/self-host/bootstrap.mjs init --origin https://dohc.your-domain.com --name "My dohc server" --image ghcr.io/dohchq/dohc-self-host:latest
 ```
 
 For private access, use your server's Tailscale HTTPS hostname:
 
 ```sh
-node tools/self-host/bootstrap.mjs init --origin https://your-server.your-tailnet.ts.net --mode private --name "My dohc server" --image dohc-self-host:VERSION
+node tools/self-host/bootstrap.mjs init --origin https://your-server.your-tailnet.ts.net --mode private --name "My dohc server" --image ghcr.io/dohchq/dohc-self-host:latest
 ```
+
+If you built the image from source or pinned a specific tag, pass that image name instead.
 
 The command creates `.env.self-host` and generates the deployment secrets.
 It refuses to replace an existing configuration.
@@ -702,14 +717,17 @@ node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-
 Both recovery commands leave a stopped deployment stopped.
 If the deployment is running, each of them stops it and starts it again, so the server goes away three times instead of once.
 
-Replace the shipped Compose files, scripts, and documentation with the new release bundle.
+Update the Compose files and scripts (`git pull` in a repository checkout, or copy the new release bundle).
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
 Do not rerun `init`.
-Load the new release image, then select it:
+Pull or load the new image, then select it:
 
 ```sh
-node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
+docker pull ghcr.io/dohchq/dohc-self-host:latest
+node tools/self-host/bootstrap.mjs upgrade --image ghcr.io/dohchq/dohc-self-host:latest
 ```
+
+If you built the image from source or pinned a specific tag, pass that image name instead.
 
 The upgrade starts the deployment and checks readiness.
 It preserves volumes and secrets and saves the previous configuration privately.
