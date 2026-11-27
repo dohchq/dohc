@@ -1200,7 +1200,19 @@ fn convert_all(
     budget: usize,
     live: &dyn LeaseProbe,
 ) -> FormatTwoPass {
-    on(|| convert_notes_to_format_two(store, "ws", after, budget, live, &NoFaults, 21).unwrap())
+    on(|| {
+        convert_notes_to_format_two(
+            store,
+            "ws",
+            after,
+            budget,
+            live,
+            &|_, _| None,
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    })
 }
 
 fn changes(store: &EngineStore) -> i64 {
@@ -1226,7 +1238,16 @@ fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
         })
         .collect();
     let off = reading_body_sequence_here(|| {
-        convert_notes_to_format_two(&mut store, "ws", None, 2, &NoLiveLeases, &NoFaults, 21)
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            2,
+            &NoLiveLeases,
+            &|_, _| None,
+            &NoFaults,
+            21,
+        )
     })
     .unwrap();
     assert!(off.off);
@@ -1331,21 +1352,21 @@ fn the_pass_names_a_note_too_large_for_format_two_and_leaves_it() {
     assert!(carriers(&store).is_empty());
 }
 
-#[test]
-fn a_local_only_workspace_drops_its_format_one_cache_offline() {
-    let (_scratch, _path, mut store) = open_store();
-    let key = seed_note(&mut store, NOTE, "moment-local", None);
+fn local_note(store: &mut EngineStore, text: &str, seed_source: Option<&str>) -> DocKey {
+    let key = seed_note(store, text, "moment-local", None);
     dohc_engine_collab::record_local_update(
-        &mut store,
+        store,
         &mut WriterDocCache::new(),
         &key,
-        &base_of(&[NOTE]),
+        &base_of(&[text]),
         LocalAppend {
             marker: Some(dohc_engine_collab::MarkerCreation {
                 path: Some("doc.md"),
                 content_kind: ContentKind::Richdoc,
                 regime: dohc_engine_collab::Regime::LocalOnly,
             }),
+            is_seed: seed_source.is_some(),
+            seed_source_sha256: seed_source,
             ..Default::default()
         },
         &NoFaults,
@@ -1353,15 +1374,24 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
         |_, _, _| Ok(()),
     )
     .unwrap();
-    let projected = on(|| {
-        dohc_engine_collab::load_persisted(&store, &key)
+    key
+}
+
+fn projected(store: &EngineStore, key: &DocKey) -> String {
+    on(|| {
+        dohc_engine_collab::load_persisted(store, key)
             .unwrap()
             .unwrap()
             .doc
             .project(ContentKind::Richdoc)
             .unwrap()
             .content
-    });
+    })
+}
+
+fn settled_local_note(store: &mut EngineStore, text: &str) -> DocKey {
+    let key = local_note(store, text, None);
+    let projected = projected(store, &key);
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1372,14 +1402,25 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
+    key
+}
+
+fn head(store: &EngineStore, key: &DocKey) -> (i64, i64) {
+    let marker = dohc_engine_collab::read_marker(store, key)
+        .unwrap()
+        .unwrap();
+    (marker.head_update_seq, marker.head_snapshot_seq)
+}
+
+#[test]
+fn a_local_only_workspace_drops_its_format_one_cache_offline() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
     assert_eq!(note(&store, &key), (1, NOTE.to_owned()));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!(pass.skipped, Vec::new());
     assert_eq!(pass.converted, 1);
-    let marker = dohc_engine_collab::read_marker(&store, &key)
-        .unwrap()
-        .unwrap();
-    assert_eq!((marker.head_update_seq, marker.head_snapshot_seq), (0, 0));
+    assert_eq!(head(&store, &key), (0, 0));
     assert_eq!(text(&mut store), NOTE);
     assert!(carriers(&store).is_empty());
     let journaled: i64 = store
@@ -1392,4 +1433,111 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
     let again = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!((again.converted, again.unchanged), (0, 1));
     assert_eq!(changes(&store), before);
+}
+
+#[test]
+fn a_local_only_note_format_two_cannot_hold_keeps_its_cache() {
+    let linked = "Run [`npm install`](https://example.com) first\n";
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, linked);
+    let before = (head(&store, &key), changes(&store));
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
+    assert_eq!(pass.converted, 0);
+    assert_eq!((head(&store, &key), changes(&store)), before);
+    assert_eq!(note(&store, &key), (1, linked.to_owned()));
+}
+
+#[test]
+fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
+    let (_scratch, _path, mut store) = open_store();
+    let source = hex_sha256(NOTE.as_bytes());
+    let key = local_note(&mut store, NOTE, Some(&source));
+    let unproven = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(
+        unproven.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "ydoc-unsettled")]
+    );
+    assert_eq!(head(&store, &key), (1, 0));
+    let projection = hex_sha256(projected(&store, &key).as_bytes());
+    let file_proof = |_: &EngineStore, proven: &DocKey| {
+        (proven.object_id == "object-a").then(|| dohc_engine_collab::CloseProjection {
+            sha256: projection.clone(),
+            materialized_seed_source_sha256: Some(source.clone()),
+        })
+    };
+    let proven = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &file_proof,
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    });
+    assert_eq!((proven.converted, proven.skipped), (1, Vec::new()));
+    assert_eq!(head(&store, &key), (0, 0));
+    assert_eq!(text(&mut store), NOTE);
+}
+
+#[test]
+fn a_damaged_note_is_reported_and_the_pass_goes_on() {
+    let (_scratch, _path, mut store) = open_store();
+    let keys: Vec<DocKey> = (1..=3)
+        .map(|n| {
+            let text = format!("Note {n}.\n");
+            let (object, path) = (format!("note-{n}"), format!("note-{n}.md"));
+            seed_at(
+                &mut store,
+                (&object, &path),
+                &text,
+                &format!("moment-{n}"),
+                Some(&base_of(&[&text])),
+            )
+        })
+        .collect();
+    store
+        .write_with(&NoFaults, |tx| {
+            let blob: String = tx
+                .query_row(
+                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='note-2' \
+                     UNION ALL SELECT update_blob_sha256 FROM ydoc_updates \
+                     WHERE object_id='note-2' LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::persist)?;
+            let mut bytes: Vec<u8> = tx
+                .query_row(
+                    "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                    [&blob],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::persist)?;
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?2 WHERE sha256=?1",
+                params![blob, bytes],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(pass.converted, 2);
+    assert_eq!(
+        pass.failed
+            .iter()
+            .map(|(key, path, _)| (key, path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(&keys[1], "note-2.md")]
+    );
+    assert_eq!(note(&store, &keys[0]).0, 2);
+    assert_eq!(note(&store, &keys[2]).0, 2);
+    assert_eq!(pass.resume_after, None);
 }
