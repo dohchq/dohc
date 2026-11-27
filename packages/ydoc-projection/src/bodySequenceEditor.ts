@@ -69,8 +69,8 @@ export type BodySequenceOptions = {
   edit?: (change: () => void) => boolean;
   /**
    * Told why, each time a dispatch that changed the editor's document was not written. The editor
-   * shows the note again first, and unless the note was overtaken, with the selection as it was
-   * before the dispatch.
+   * shows the note again first, and unless the note was overtaken or part of the dispatch was
+   * written, with the selection as it was before the dispatch.
    */
   unwritten?: (why: BodySequenceUnwritten) => void;
   /**
@@ -84,7 +84,9 @@ export type BodySequenceOptions = {
 /**
  * Why a dispatch was not written.
  *
- * - `unwritable`: the adapter cannot write it, and nothing was written.
+ * - `unwritable`: the adapter cannot write it. Nothing was written, unless the note refused part
+ *   of a dispatch whose trial passed: what was written up to there stays, in the one Yjs
+ *   transaction the whole dispatch would have been, and the editor shows the note as it now reads.
  * - `guarded`: the host's `edit` guard did not run the change, and nothing was written.
  * - `guardedAfterBoundary`: the guard ran the change that gives a line its boundary and then did
  *   not run the dispatch. The boundary stays, as every boundary that was sent does, and the note
@@ -561,13 +563,14 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           const recorded = pending.some(
             (transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false,
           );
+          let whole = true;
           const wrote = change(recorded, () => {
-            for (const transaction of how.transactions)
-              if (!writeTransaction(target, transaction)) break;
+            whole = how.transactions.every((transaction) => writeTransaction(target, transaction));
             writing = false;
           });
           const guarded = lines.length > 0 ? "guardedAfterBoundary" : "guarded";
           if (!wrote) why = ran ? "overtaken" : guarded;
+          else if (!whole) why = "unwritable";
         } finally {
           writing = false;
           show(undefined, why && why !== "overtaken" ? selections.get(pending[0]!) : undefined);
