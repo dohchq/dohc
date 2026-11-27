@@ -633,6 +633,60 @@ describe("named browser transport", () => {
     expect(getDohcYDocBodyFragment(f.value.doc).toString()).not.toContain("RESTORED");
     expect(peer.submissions()).toHaveLength(0);
   });
+  it("reopens on a fresh document when the relay replaces the note's lineage, and the next edit lands there", async () => {
+    const f = await live();
+    edit(f.value, " saved");
+    f.peer.ack(await f.peer.submitted());
+    await waitState(f.value, (state) => state.pendingUpdates === 0);
+    const replaced = f.value.doc,
+      successor = document("base saved"),
+      next = { ...binding, lineageClaimId: "successor" };
+    f.socket.close();
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value, 2);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    const replacing = peer.initial(successor, next);
+    const reopened = await f.socketAt(2),
+      fresh = host(reopened, f.value, 2);
+    reopened.open();
+    await fresh.greet();
+    await fresh.initial(successor, next);
+    await replacing;
+    expect(f.value.state()).toMatchObject({ status: "live", binding: next, pendingUpdates: 0 });
+    expect(f.value.doc).not.toBe(replaced);
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toBe(
+      getDohcYDocBodyFragment(successor).toString(),
+    );
+    expect(edit(f.value, " more")).toBe(true);
+    Y.applyUpdate(successor, (await fresh.submitted()).bytes);
+    expect(getDohcYDocBodyFragment(successor).toString()).toContain("base saved more");
+    expect(peer.submissions()).toHaveLength(0);
+  });
+  it("keeps typing the relay never confirmed for review when the note's lineage is replaced", async () => {
+    const f = await live();
+    edit(f.value, " unconfirmed");
+    await f.peer.submitted();
+    f.socket.close();
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value, 2);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    await peer.initial(document("base"), { ...binding, lineageClaimId: "successor" });
+    expect(f.value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "lineage-replaced",
+      pendingUpdates: 1,
+    });
+    expect(draftNeedsReview(f.value.state())).toBe(true);
+    expect(f.value.unsentText()).toMatchObject({ text: " unconfirmed" });
+    expect(peer.submissions()).toHaveLength(0);
+    expect(f.sockets).toHaveLength(2);
+  });
   it("cancels a connecting socket without accepting a late open", async () => {
     const f = fixture(),
       connecting = f.value.reconnect(),

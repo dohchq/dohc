@@ -10,8 +10,10 @@ import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import { isNamedLiveStopped, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveProvider,
+  LINEAGE_REPLACED,
   type NamedLiveProviderState,
 } from "@dohc/ydoc-projection/named-live-provider";
+import type { RemovedText } from "@dohc/ydoc-projection/removed-text";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
@@ -130,11 +132,19 @@ export function createNamedLiveBrowserTransport<
     const target = { ...selection };
     for (const value of Object.values(target)) parseLiveUpdateIdentifier(value);
     const recordingContext = options.recordingContext;
-    const provider = createNamedLiveProvider(
-      limits.provider,
-      target,
-      recordingContext ? () => recordingContext(target) : undefined,
-    );
+    const removedListeners = new Set<(removed: RemovedText) => void>();
+    const createProvider = () => {
+      const created = createNamedLiveProvider(
+        limits.provider,
+        target,
+        recordingContext ? () => recordingContext(target) : undefined,
+      );
+      created.onRemovedText((removed) => {
+        for (const listener of removedListeners) listener(removed);
+      });
+      return created;
+    };
+    let provider = createProvider();
     const listeners = new Set<(state: NamedLiveBrowserState) => void>();
     let override: Override | undefined,
       closed = false,
@@ -259,7 +269,25 @@ export function createNamedLiveBrowserTransport<
       notify();
       scheduleReconnect();
     }
-    const unsubscribe = provider.subscribe((value) => {
+    const reopenOnLineage = (value: NamedLiveProviderState) => {
+      const replaced = provider;
+      if (
+        closed ||
+        value.status !== "quarantined" ||
+        value.reason !== LINEAGE_REPLACED ||
+        value.pendingUpdates > 0 ||
+        replaced.unsentText() !== null
+      )
+        return false;
+      unsubscribe();
+      provider = createProvider();
+      unsubscribe = provider.subscribe(follow);
+      replaced.close();
+      void connect();
+      return true;
+    };
+    const follow = (value: NamedLiveProviderState) => {
+      if (reopenOnLineage(value)) return;
       if (value.status === "live") {
         everLive = true;
         typingStopped = false;
@@ -271,7 +299,8 @@ export function createNamedLiveBrowserTransport<
       wasLive = value.status === "live";
       notify();
       scheduleReconnect();
-    });
+    };
+    let unsubscribe = provider.subscribe(follow);
     async function json(held: Attempt, path: string, body?: unknown): Promise<unknown> {
       const signal = held.controller.signal;
       let response: Response | undefined;
@@ -669,7 +698,10 @@ export function createNamedLiveBrowserTransport<
       }
     }
     return {
-      doc: provider.doc,
+      /** Changes when the relay replaces the note's lineage and the page reopens on the new one. */
+      get doc() {
+        return provider.doc;
+      },
       state,
       subscribe(listener: (value: NamedLiveBrowserState) => void) {
         listeners.add(listener);
@@ -677,15 +709,21 @@ export function createNamedLiveBrowserTransport<
           listeners.delete(listener);
         };
       },
-      onRemovedText: provider.onRemovedText,
-      unsentText: provider.unsentText,
+      onRemovedText(listener: (removed: RemovedText) => void) {
+        removedListeners.add(listener);
+        return () => {
+          removedListeners.delete(listener);
+        };
+      },
+      unsentText: () => provider.unsentText(),
       /** Editors must use this guard before their synchronous Yjs transaction. */
       edit(change: () => void): boolean {
         if (closed || !namedLiveEditable(state())) return false;
         provider.doc.transact(change);
         return true;
       },
-      seed: provider.seed,
+      seed: (bytes: Uint8Array, throughJournalCursor: number) =>
+        provider.seed(bytes, throughJournalCursor),
       reconnect,
       disconnect() {
         if (closed || ["quarantined", "refused"].includes(state().status)) return;

@@ -97,6 +97,8 @@ async function digest(bytes: Uint8Array): Promise<string> {
 function sameBinding(left: LiveObjectBinding, right: LiveObjectBinding): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
+/** The provider stopped because the relay replaced the note's lineage. Only a new provider can open the new one. */
+export const LINEAGE_REPLACED = "lineage-replaced";
 const REMOTE = Symbol("named-live-remote");
 
 /**
@@ -458,7 +460,16 @@ export function createNamedLiveProvider(
                     sync.binding.objectId !== expected.objectId)) ||
                 (binding && !sameBinding(binding, sync.binding))
               ) {
-                quarantine("binding-changed");
+                quarantine(
+                  binding &&
+                    binding.lineageClaimId !== sync.binding.lineageClaimId &&
+                    sameBinding(
+                      { ...binding, lineageClaimId: sync.binding.lineageClaimId },
+                      sync.binding,
+                    )
+                    ? LINEAGE_REPLACED
+                    : "binding-changed",
+                );
                 return;
               }
               if (begin.appliedThroughJournalCursor < highestObservedCursor) {

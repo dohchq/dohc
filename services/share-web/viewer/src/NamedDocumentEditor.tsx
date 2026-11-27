@@ -152,16 +152,17 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
 /** The page's unsaved words, read again as the note or the session changes. */
 function useUnsentText(session: NamedDocumentSession) {
   const [unsent, setUnsent] = useState(() => session.unsentText());
+  const doc = session.doc;
   useEffect(() => {
     const read = () => setUnsent(session.unsentText());
     read();
-    session.doc.on("update", read);
+    doc.on("update", read);
     const unsubscribe = session.subscribe(read);
     return () => {
-      session.doc.off("update", read);
+      doc.off("update", read);
       unsubscribe();
     };
-  }, [session]);
+  }, [session, doc]);
   return unsent;
 }
 
@@ -270,10 +271,10 @@ export function NamedDocumentEditor({
     [unwritten, setUnwritten] = useState<BodySequenceUnwritten | null>(null),
     [toolbar, setToolbar] = useState<LiveEditorToolbarState | null>(null);
   resolveImageRef.current = resolveImage;
-  const frontmatter = useFrontmatterAsWritten(session.doc);
+  const doc = session.doc;
+  const frontmatter = useFrontmatterAsWritten(doc);
   useEffect(() => {
-    const read = () =>
-      setFormat(session.state().holds ? (readsBodySequence(session.doc) ? 2 : 1) : null);
+    const read = () => setFormat(session.state().holds ? (readsBodySequence(doc) ? 2 : 1) : null);
     const receive = (value: NamedLiveBrowserState) => {
       setState(value);
       read();
@@ -282,17 +283,17 @@ export function NamedDocumentEditor({
     };
     receive(session.state());
     const unsubscribe = session.subscribe(receive);
-    session.doc.on("update", read);
+    doc.on("update", read);
     return () => {
-      session.doc.off("update", read);
+      doc.off("update", read);
       unsubscribe();
     };
-  }, [session, onState]);
+  }, [session, doc, onState]);
   useEffect(() => {
     if (!element.current || format === null) return;
     autoFocusedRef.current = false;
     const editor = mountLiveBodyEditor(element.current, {
-      doc: session.doc,
+      doc,
       label: "Shared file editor",
       canEdit: () => namedLiveEditable(session.state()),
       edit: session.edit,
@@ -307,7 +308,7 @@ export function NamedDocumentEditor({
       editor.destroy();
       setUnwritten(null);
     };
-  }, [session, format]);
+  }, [session, doc, format]);
   const editable = namedLiveEditable(state);
   useEffect(() => {
     if (!link || !editable || bodyHidden || autoFocusedRef.current || !editorRef.current) return;
