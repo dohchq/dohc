@@ -94,7 +94,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, posix } from "node:path";
 
 type DeclaredTool = DeclaredOperation["mcp"]["tool"];
 export const DECLARED_TOOLS = byName(
@@ -1959,17 +1959,19 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
     });
   }
 
-  const manifest = app.entry
-    ? null
-    : await readJsonDetailed<{ entryPath?: unknown }>(join(root.absolute, "app.publish.json"));
+  const manifestPath = join(root.absolute, "app.publish.json");
+  const manifest =
+    !app.entry && (await lstat(manifestPath).catch(() => null))?.isFile()
+      ? await readJsonDetailed<{ entryPath?: unknown }>(manifestPath)
+      : null;
   const entryPath =
     app.entry ??
     (manifest?.ok && isRecord(manifest.value) && typeof manifest.value.entryPath === "string"
-      ? relativeJoin(root.normalized, manifest.value.entryPath)
+      ? posix.normalize(relativeJoin(root.normalized, manifest.value.entryPath))
       : undefined);
   if (entryPath) {
     const entry = await safeResolve(ctx, entryPath, "read");
-    const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
+    const exists = entry.ok && Boolean((await lstat(entry.absolute).catch(() => null))?.isFile());
     checks.push({
       name: "entry-file",
       ok: exists,

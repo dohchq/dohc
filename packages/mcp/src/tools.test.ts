@@ -1152,6 +1152,23 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("dohc_test_app finds an app.publish.json entry beside the app folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "books/portal"), { recursive: true });
+      await writeFile(join(ctx.root, "books/portal.tsx"), "export {};");
+      await writeFile(
+        join(ctx.root, "books/portal/app.publish.json"),
+        JSON.stringify({ version: 1, entryPath: "../portal.tsx" }),
+      );
+      await expect(testApp(ctx, { appRoot: "books/portal" })).resolves.toMatchObject({
+        ok: true,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "entry-file", ok: true, path: "books/portal.tsx" }),
+        ]),
+      });
+    });
+  });
+
   it("dohc_test_app reports a missing app.publish.json entry", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "broken"));
