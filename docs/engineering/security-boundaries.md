@@ -746,7 +746,7 @@ and turn each delivery into a quarantined Markdown record inside a private Colle
   on matching SHA-256 body hash, `409` on mismatch). Every answer from the ingress handler
   sends `Access-Control-Allow-Origin: *`, so a form's script on another website can read whether
   its delivery was accepted. A script that knows the address can read what any HTTP client
-  already gets: the status, which tells an unknown token from a paused host or a full queue,
+  already gets: the status, which tells an unknown token from an unavailable automation host or a full queue,
   the error text, and the delivery ID. Ingress reads no cookies or credentials. Answers the relay makes
   outside that handler, such as `503` while relay storage is unavailable, carry no CORS
   header, and the browser reports a network failure. There is no `OPTIONS` handler, so only
