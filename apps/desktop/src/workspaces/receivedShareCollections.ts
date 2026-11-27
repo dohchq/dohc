@@ -115,7 +115,10 @@ export function standaloneShareCollectionSource(
     workspaceId: workspace.workspaceId,
   });
   const grant = recordedShareSelector(target?.grantedSelector);
-  return target && !target.ended && grant && !grant.wholeWorkspace
+  const removed = workspace.confirmedRemovedShares?.some(
+    (removal) => removal.shareId === target?.shareId,
+  );
+  return target && !target.ended && !removed && grant && !grant.wholeWorkspace
     ? receivedSource(workspace, shareEngine)
     : null;
 }

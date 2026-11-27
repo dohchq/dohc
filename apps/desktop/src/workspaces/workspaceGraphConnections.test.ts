@@ -417,6 +417,13 @@ it("drops what a narrowed, ended, or unreadable grant no longer covers on the ne
   expect(after.records).toEqual([]);
   const ended = { ...entry, ...received(grant(["Tasks", "People"]), { ended: true }) };
   expect(await reader.connections(ended)).toEqual(SHARE_OMITTED_CONNECTIONS);
+  const removal = (shareId: string) => ({
+    ...entry,
+    ...received(grant(["Tasks", "People"])),
+    confirmedRemovedShares: [{ shareId, removedAtMs: 1 }],
+  });
+  expect(await reader.connections(removal("s"))).toEqual(SHARE_OMITTED_CONNECTIONS);
+  expect((await reader.connections(removal("other"))).nodes).toHaveLength(2);
   expect(await reader.connections({ ...entry, ...received(grant([])) })).toEqual(
     SHARE_OMITTED_CONNECTIONS,
   );
