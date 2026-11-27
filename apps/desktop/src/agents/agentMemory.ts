@@ -10,6 +10,7 @@ const Memory = z.object({
   memoryId: z.string(),
   sessionId: z.uuid(),
   given: z.array(z.string()),
+  busy: z.string().optional(),
 });
 type Memory = z.infer<typeof Memory>;
 
@@ -30,6 +31,8 @@ export interface AgentMemory {
     memoryId: string;
     triggerMessageId: string;
   }): Promise<MemoryTurn | null>;
+  /** The session's run ended. A session still busy from an earlier dohc starts over, as its runner can outlive dohc. */
+  finish(workspaceId: string, agentId: string, sessionId: string): Promise<void>;
   /** Drops the session, so the next run starts a new one. */
   forget(workspaceId: string, agentId: string, sessionId: string): Promise<void>;
 }
@@ -41,6 +44,7 @@ export function createAgentMemory(
   path: () => string,
   fileOperations?: DurableFileOperations,
 ): AgentMemory {
+  const instance = randomUUID();
   let loaded: Promise<Memory[]> | null = null;
   let writes: Promise<unknown> = Promise.resolve();
   const change = <Result>(update: (memories: Memory[]) => [Memory[] | null, Result]) => {
@@ -50,12 +54,7 @@ export function createAgentMemory(
       if (changed === null) return result;
       const destination = path();
       await mkdir(dirname(destination), { recursive: true });
-      try {
-        await atomicWriteFile(destination, JSON.stringify(changed), fileOperations);
-      } catch (error) {
-        loaded = null;
-        throw error;
-      }
+      await atomicWriteFile(destination, JSON.stringify(changed), fileOperations);
       memories.splice(0, memories.length, ...changed);
       return result;
     });
@@ -66,6 +65,24 @@ export function createAgentMemory(
   };
   const others = (memories: Memory[], workspaceId: string, agentId: string) =>
     memories.filter((each) => each.workspaceId !== workspaceId || each.agentId !== agentId);
+  const withSession = (
+    workspaceId: string,
+    agentId: string,
+    sessionId: string,
+    replace: (memory: Memory) => Memory[],
+  ) =>
+    change((memories) => {
+      const found = memories.find(
+        (each) =>
+          each.workspaceId === workspaceId &&
+          each.agentId === agentId &&
+          each.sessionId === sessionId,
+      );
+      return [
+        found ? [...others(memories, workspaceId, agentId), ...replace(found)] : null,
+        undefined,
+      ];
+    });
   return {
     take: ({ workspaceId, agentId, memoryId, triggerMessageId }) =>
       change((memories) => {
@@ -76,34 +93,24 @@ export function createAgentMemory(
             each.memoryId === memoryId,
         );
         if (found?.given.includes(triggerMessageId)) return [null, null];
-        const memory = found ?? {
-          workspaceId,
-          agentId,
-          memoryId,
-          sessionId: randomUUID(),
-          given: [],
-        };
+        const memory =
+          found && (found.busy === undefined || found.busy === instance)
+            ? found
+            : { workspaceId, agentId, memoryId, sessionId: randomUUID(), given: [] };
         const next = {
           ...memory,
           given: [...memory.given, triggerMessageId].slice(-GIVEN_LIMIT),
+          busy: instance,
         };
         return [
           [...others(memories, workspaceId, agentId), next].slice(-MEMORIES_LIMIT),
           { sessionId: memory.sessionId, resume: memory.given.length > 0 },
         ];
       }),
+    finish: (workspaceId, agentId, sessionId) =>
+      withSession(workspaceId, agentId, sessionId, ({ busy: _ended, ...memory }) => [memory]),
     forget: (workspaceId, agentId, sessionId) =>
-      change((memories) => [
-        memories.some(
-          (each) =>
-            each.workspaceId === workspaceId &&
-            each.agentId === agentId &&
-            each.sessionId === sessionId,
-        )
-          ? others(memories, workspaceId, agentId)
-          : null,
-        undefined,
-      ]),
+      withSession(workspaceId, agentId, sessionId, () => []),
   };
 }
 

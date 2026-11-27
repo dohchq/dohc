@@ -1386,6 +1386,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
+      if (memory)
+        child.onExit(() => {
+          options.agentMemory
+            ?.finish(workspace.workspaceId, agent.id, memory.sessionId)
+            .catch(reportError);
+        });
       child.onExit((code, signal) => {
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, code, signal)) {

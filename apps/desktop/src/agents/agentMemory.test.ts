@@ -14,8 +14,10 @@ const turn = (triggerMessageId: string, memoryId = "memory-1", workspaceId = "tr
 describe("agent memory", () => {
   it("gives each message to a session once, even after dohc restarts", async () => {
     const path = join(await createTestScratch("dohc-agent-memory-"), "agent-memory.json");
-    const first = await createAgentMemory(() => path).take(turn("message-1"));
+    const before = createAgentMemory(() => path);
+    const first = await before.take(turn("message-1"));
     expect(first).toEqual({ sessionId: expect.any(String), resume: false });
+    await before.finish("trip", "default", first!.sessionId);
 
     const restarted = createAgentMemory(() => path);
     await expect(restarted.take(turn("message-1"))).resolves.toBeNull();
@@ -25,6 +27,19 @@ describe("agent memory", () => {
     });
     const other = await restarted.take(turn("message-1", "memory-1", "fundraiser"));
     expect(other?.sessionId).not.toBe(first!.sessionId);
+  });
+
+  it("starts over when an earlier dohc's run may still hold the session", async () => {
+    const path = join(await createTestScratch("dohc-agent-memory-"), "agent-memory.json");
+    const before = createAgentMemory(() => path);
+    const first = await before.take(turn("message-1"));
+    await expect(before.take(turn("message-2"))).resolves.toEqual({
+      sessionId: first!.sessionId,
+      resume: true,
+    });
+    const restarted = await createAgentMemory(() => path).take(turn("message-3"));
+    expect(restarted).toEqual({ sessionId: expect.any(String), resume: false });
+    expect(restarted!.sessionId).not.toBe(first!.sessionId);
   });
 
   it("starts a new session for a new memory id or a forgotten session", async () => {
