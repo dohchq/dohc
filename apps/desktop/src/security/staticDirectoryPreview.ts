@@ -67,6 +67,12 @@ export function assertContainedFilePath(path: string, label: string): void {
   }
 }
 
+const SERVED_HEADERS = {
+  "cache-control": "no-store",
+  "content-security-policy": "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'",
+  "x-content-type-options": "nosniff",
+};
+
 function mimeType(pathname: string): string {
   return MIME_TYPES[extname(pathname).toLowerCase()] ?? "application/octet-stream";
 }
@@ -163,11 +169,7 @@ export async function startStaticDirectoryPreview(
           return;
         }
         const body = await options.fileSource.read(relativePath);
-        response.writeHead(200, {
-          "cache-control": "no-store",
-          "content-type": mimeType(relativePath),
-          "x-content-type-options": "nosniff",
-        });
+        response.writeHead(200, { ...SERVED_HEADERS, "content-type": mimeType(relativePath) });
         response.end(body);
         return;
       }
@@ -238,11 +240,7 @@ export async function startStaticDirectoryPreview(
           return;
         }
         const body = await handle.readFile();
-        response.writeHead(200, {
-          "cache-control": "no-store",
-          "content-type": mimeType(realTarget),
-          "x-content-type-options": "nosniff",
-        });
+        response.writeHead(200, { ...SERVED_HEADERS, "content-type": mimeType(realTarget) });
         response.end(body);
       } finally {
         await handle.close();

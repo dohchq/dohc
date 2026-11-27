@@ -106,7 +106,7 @@ import {
   createDesktopWorkspaceCallbacks,
   type DesktopWorkspaceCallbacksDependencies,
 } from "./workspaces/desktopWorkspaceCallbacks";
-import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
+import { createWorkspaceFileProtocol } from "./security/workspaceFileProtocol";
 import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetResponse";
 import {
   CollectionMoveUnfinishedError,
@@ -1259,9 +1259,8 @@ registerShareHandoffProtocol(app, process);
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
-// Registered privileged so the renderer can fetch() text and use it as
-// <img>/<audio> src, without piping large binaries through IPC as base64.
-// Must be declared before app `ready`.
+// Used as <img>/<audio> src so large binaries skip IPC. Must be declared
+// before app `ready`.
 const DOHC_FILE_SCHEME = "dohc-file";
 const { workerDatabaseReader, editWorkspaceDatabaseInWorker } =
   createWorkspaceDatabaseAccess(workspaceDatabaseWorker);
@@ -9889,12 +9888,15 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         registerIpcHandlers();
         // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
         // Registered before the window so the first load can already fetch.
-        protocol.handle(
-          DOHC_FILE_SCHEME,
-          createWorkspaceFileProtocolHandler({
-            findWorkspace,
-            readOwnedWorkspaceAsset,
-          }),
+        const workspaceFiles = createWorkspaceFileProtocol({
+          findWorkspace,
+          readOwnedWorkspaceAsset,
+          isTrustedFrame,
+        });
+        protocol.handle(DOHC_FILE_SCHEME, workspaceFiles.handle);
+        session.defaultSession.webRequest.onBeforeSendHeaders(
+          { urls: [`${DOHC_FILE_SCHEME}://*/*`] },
+          workspaceFiles.admit,
         );
       },
       markFirstWindow: () => {

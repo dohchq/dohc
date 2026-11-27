@@ -32,6 +32,8 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+const PREVIEW_POLICY = "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'";
+
 describe("startStaticDirectoryPreview", () => {
   it("serves an arbitrary contained panel directory with the static safeguards", async () => {
     const appRoot = join(root, "app");
@@ -48,6 +50,7 @@ describe("startStaticDirectoryPreview", () => {
     try {
       const response = await fetch(preview.url);
       expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("content-security-policy")).toBe(PREVIEW_POLICY);
       await expect(response.text()).resolves.toContain("App panel");
       await expect(
         fetch(new URL("/.dohc/secret.txt", preview.url)).then((result) => result.status),
@@ -93,9 +96,9 @@ describe("startStaticDirectoryPreview", () => {
         ).resolves.toBe(403);
       }
       expect(read).not.toHaveBeenCalled();
-      await expect(fetch(preview.url).then((response) => response.text())).resolves.toBe(
-        "owner index",
-      );
+      const response = await fetch(preview.url);
+      expect(response.headers.get("content-security-policy")).toBe(PREVIEW_POLICY);
+      await expect(response.text()).resolves.toBe("owner index");
       await expect(
         fetch(new URL("/recipient-only.js", preview.url)).then((response) => response.status),
       ).resolves.toBe(404);
