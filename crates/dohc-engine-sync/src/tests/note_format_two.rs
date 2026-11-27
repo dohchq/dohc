@@ -838,6 +838,50 @@ fn a_successor_edit_from_a_third_origin_waits_for_a_retained_conversion() {
 }
 
 #[test]
+fn a_successor_edit_to_an_open_note_waits_for_the_conversion_and_lands_on_close() {
+    let base = base_of(&[NOTE]);
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base);
+    let (_scratch, _path, mut peer) = open_store();
+    seed_identity(&mut peer);
+    let key = seed_note(&mut peer, NOTE, "moment-current", Some(&base));
+    hand_over(&owner_store, &mut peer, &carrier);
+    let third_edit = successor_edit(&owner_store, &carrier, "A third edit.\n");
+    let mut third = successor_update(&peer, 0, &carrier, &third_edit);
+    third.origin_id = "third".to_owned();
+    third.recorded_at_ms = 3_000;
+    let client = relay(vec![conversion_op(0, &carrier), third]);
+    let held = pull(&client, &mut peer, &OpenNote("object-a"));
+    assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
+    let closed = pull(&client, &mut peer, &NoLiveLeases);
+    assert!(
+        matches!(closed, SyncPassOutcome::Complete { .. }),
+        "{closed:?}"
+    );
+    assert_eq!(claim(&peer, &key), Some(successor_claim(&carrier)));
+    assert_eq!(note(&peer, &key), (2, "A third edit.\n".to_owned()));
+    assert_eq!(text(&mut peer), "A third edit.\n");
+    assert_eq!(open_reviews(&peer), 0);
+}
+
+#[test]
+fn a_successor_edit_to_an_open_note_with_no_ydoc_waits_for_a_retained_base() {
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
+    retain(&mut peer, &predecessor_base(&carrier));
+    let third_edit = successor_edit(&owner_store, &carrier, "A third edit.\n");
+    let mut third = successor_update(&peer, 0, &carrier, &third_edit);
+    third.origin_id = "third".to_owned();
+    third.recorded_at_ms = 3_000;
+    let client = relay(vec![conversion_op(0, &carrier), third]);
+    let held = pull(&client, &mut peer, &OpenNote("object-a"));
+    assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
+    assert_eq!(retained(&peer, "third"), 1);
+    assert_eq!(claim(&peer, &key), None);
+    pull(&client, &mut peer, &NoLiveLeases);
+    assert_eq!(note(&peer, &key), (2, "A third edit.\n".to_owned()));
+}
+
+#[test]
 fn a_conversion_does_not_wait_for_a_base_another_note_holds_the_path_of() {
     let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
     let (_scratch, _path, mut peer) = open_store();
