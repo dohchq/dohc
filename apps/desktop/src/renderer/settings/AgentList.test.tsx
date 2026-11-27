@@ -397,6 +397,36 @@ it("keeps a tool's profile when its command is saved as shown, and adds your own
   });
 });
 
+it("asks before letting a Claude Code agent run any command, and turns it off at once", async () => {
+  const ada = testAgent({
+    name: "Ada",
+    launch: { tool: "claude", executable: "C:\\Tools\\claude.exe" },
+  });
+  const { onSave, rerender } = renderList({
+    settings: { ...SETTINGS, agents: { ada, codex: SETTINGS.agents.codex! } },
+  });
+  const commands = () => page().getByRole("switch", { name: "Let Ada run any command" });
+  await openAgent("Ada");
+  expect(commands().getAttribute("aria-checked")).toBe("false");
+  await userEvent.click(commands());
+  await userEvent.click(within(screen.getByTestId("allow-shell-dialog")).getByText("Cancel"));
+  expect(onSave).not.toHaveBeenCalled();
+  await userEvent.click(commands());
+  await userEvent.click(screen.getByTestId("allow-shell-confirm"));
+  expect(onSave.mock.calls.at(-1)![0].agents.ada).toEqual({ ...ada, allowShell: true });
+  rerender({
+    settings: {
+      ...SETTINGS,
+      agents: { ada: { ...ada, allowShell: true }, codex: SETTINGS.agents.codex! },
+    },
+  });
+  await userEvent.click(commands());
+  expect(screen.queryByTestId("allow-shell-dialog")).toBeNull();
+  expect(onSave.mock.calls.at(-1)![0].agents.ada).toEqual(ada);
+  await openAgent("Codex");
+  expect(page().queryByRole("switch", { name: "Let Codex run any command" })).toBeNull();
+});
+
 it("doesn't check an agent added in one workspace after the panel moves to another", async () => {
   const saving = deferred<DesktopUserSettingsResult | null>();
   const { onSave, rerender } = renderList();

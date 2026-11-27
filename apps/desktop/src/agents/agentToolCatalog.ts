@@ -143,7 +143,7 @@ export const AGENT_TOOLS = [
     command: "claude",
     authArgs: ["auth", "status"],
     permissions:
-      "Edits workspace files and uses dohc's tools without asking. Other actions use your Claude permissions; approval requests are denied.",
+      "Edits workspace files and uses dohc's tools without asking. Commands follow the Commands setting. Other actions use your Claude permissions; approval requests are denied.",
   },
   {
     id: "codex",
@@ -177,10 +177,12 @@ export const AGENT_TOOLS = [
 // the run's dohc server; a read-only Codex run gets that from codexRunConfig,
 // and loads none of the person's saved command rules. `codex mcp list`
 // takes no --ignore-rules, so it stays out of runArguments.
+// On Windows, Claude Code runs commands through a separate PowerShell tool.
 export function agentProfileArguments(
   profile: AgentLaunchProfile,
   runArguments: readonly string[] = [],
   readOnly = false,
+  shell = false,
 ): string[] {
   const own = readOnly ? [] : (profile.arguments ?? []);
   // If the person's last flag needs a value, it takes the next argument. That
@@ -209,6 +211,7 @@ export function agentProfileArguments(
         "--allowedTools",
         "Edit(/**)",
         "mcp__dohc",
+        ...(shell ? ["Bash", "PowerShell"] : []),
         "--disallowedTools",
         "Edit(/.dohc/**)",
         "Edit(/.codex/**)",

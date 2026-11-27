@@ -127,6 +127,7 @@ export const AgentSettings = z
     // The workspaces whose messages dohc forwards to the thread.
     workspaces: z.array(SettingsWorkspaceId).max(MAX_AGENT_WORKSPACES).optional(),
     changesFiles: z.boolean().default(true),
+    allowShell: z.boolean().optional(),
     // Pause and Resume. dohc starts, and forwards to, only an enabled agent.
     enabled: z.boolean(),
     timeoutMinutes: z.number().int().min(1).max(1440).default(30),
@@ -434,6 +435,7 @@ export function agentProblem(id: string, entry: unknown): string {
       return `\`hue\` must be one of: ${AGENT_HUES.join(", ")}.`;
     case "enabled":
     case "changesFiles":
+    case "allowShell":
       // The one rule across keys: an agent dohc cannot start stays off.
       return issue.code === "custom" ? issue.message : `\`${key}\` must be true or false.`;
     case "timeoutMinutes":

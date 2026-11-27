@@ -101,6 +101,22 @@ describe("agent launch profiles", () => {
     ]);
     expect(launchCommand(profile)).toBe("/usr/local/bin/claude");
   });
+  it("adds command tools only to a Claude Code run that may write and has them allowed", () => {
+    const claude = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
+    expect(agentProfileArguments(claude, [], false, true).slice(6, 12)).toEqual([
+      "--allowedTools",
+      "Edit(/**)",
+      "mcp__dohc",
+      "Bash",
+      "PowerShell",
+      "--disallowedTools",
+    ]);
+    expect(agentProfileArguments(claude, [], true, true)).toEqual(
+      agentProfileArguments(claude, [], true),
+    );
+    const codex = { tool: "codex", executable: "/usr/local/bin/codex" } as const;
+    expect(agentProfileArguments(codex, [], false, true)).toEqual(agentProfileArguments(codex));
+  });
   it("puts the person's own flags once, after the subcommand and before dohc's", () => {
     const run = ["--config", "mcp_servers.dohc.required=true"];
     expect(

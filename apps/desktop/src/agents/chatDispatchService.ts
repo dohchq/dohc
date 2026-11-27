@@ -456,7 +456,7 @@ function buildRunnerPrompt(
       : "";
   const report =
     form === "mcp"
-      ? "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
+      ? "When you finish, say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Answer a quick question in a few sentences. For building or debugging work, also say what works now and what is left, in short lines or a list. Leave out tool logs. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
       : "Report outcomes, not tool logs. ";
   const links =
     form === "mcp" && dohcTools === "all"
@@ -1292,6 +1292,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         command: launchCommand(agent.launch),
         profile,
         dohcTools,
+        shell: agent.allowShell === true,
         prompt: buildRunnerPrompt(
           markdown,
           claim.run.threadId,

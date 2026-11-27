@@ -28,6 +28,7 @@ import type { Agent } from "../settings/userSettings";
 type RunnerSettings = {
   command: string;
   profile?: AgentLaunchProfile;
+  allowShell?: boolean;
   enabled: boolean;
   timeoutMinutes: number;
 };
@@ -583,6 +584,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
           name: options.agentName ?? "Nova",
           enabled: runner.enabled,
           timeoutMinutes: runner.timeoutMinutes,
+          ...(runner.allowShell ? { allowShell: true } : {}),
         }),
         launch: runner.profile ?? launchFromCommand(runner.command) ?? undefined,
       },
@@ -1030,6 +1032,64 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain(
       "**Stamp the finish date** · automation ·",
     );
+  });
+
+  it("lets commands into a person's run when allowed, never into an automation's run or a test", async () => {
+    const fixture = await createFixture({
+      runner: {
+        command: "",
+        profile: { tool: "claude", executable: resolve("test-claude.exe") },
+        allowShell: true,
+      },
+    });
+    const asked = await createAgentThread(fixture, {
+      body: "Build the packing app.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    expect(fixture.spawnCalls[0]!.args).toEqual(
+      expect.arrayContaining(["Edit(/**)", "mcp__dohc", "Bash", "PowerShell"]),
+    );
+    await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+
+    const channel = await fixture.chat.ensureAgentChannel({
+      workspaceId: WORKSPACE_ID,
+      agentId: "default",
+      name: "Nova",
+    });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Answer the Group" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+      body: "Run the cleanup script.",
+    });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: wake.message.id,
+      threadId: wake.thread.id,
+      agentId: "default",
+    });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+    const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    await linkAgentReply(fixture, wake.thread.id, wokenRun.run.runId);
+    fixture.spawnCalls[1]!.process.emitExit(0);
+    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+
+    void fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(3));
+    for (const call of fixture.spawnCalls.slice(1)) {
+      expect(call.args).not.toContain("Bash");
+      expect(call.args).not.toContain("PowerShell");
+      expect(call.args.slice(-3)).toEqual(["Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
+    }
   });
 
   it("doesn't let an automation start an agent that runs the person's own command", async () => {
@@ -2323,7 +2383,7 @@ describe("chatDispatchService", () => {
   const APPROVALS =
     "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
   const REPORT =
-    "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
+    "When you finish, say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Answer a quick question in a few sentences. For building or debugging work, also say what works now and what is left, in short lines or a list. Leave out tool logs. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
 
   it.each(["claude", "codex"] as const)(
     "gives a %s run an automation started only the reply tool, and no tool that writes",

@@ -380,9 +380,25 @@ function replyThroughMcp(args, body) {
     launch.readOnly === replyOnly &&
     names.includes("dohc_reply_to_chat") &&
     replyOnly === (names.length === 1);
-  callMcpTools(launch, offersRunTools, [
-    { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } },
-  ]);
+  const makesApp = !launch.readOnly && prompt.includes("Make the hello app");
+  callMcpTools(
+    launch,
+    (names) => offersRunTools(names) && (!makesApp || names.includes("dohc_write_file")),
+    [
+      ...(makesApp
+        ? [
+            {
+              name: "dohc_write_file",
+              arguments: {
+                path: "apps/hello/src/App.tsx",
+                content: "export default function App() {\n  return <h1>Hello</h1>;\n}\n",
+              },
+            },
+          ]
+        : []),
+      { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } },
+    ],
+  );
 }
 
 if (profileTool) {
