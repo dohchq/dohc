@@ -1621,6 +1621,7 @@ define_server_error_codes! {
     "member_exists" => |_| RelayError::Conflict,
     "member_removed" => |_| RelayError::Conflict,
     "members_forbidden" => |_| RelayError::Forbidden,
+    "dataset_kept_by_owner" => |_| RelayError::HttpStatus(404),
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
     "not_found" => unavailable,
     "notice_list_full" => |_| RelayError::Conflict,

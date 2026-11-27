@@ -2126,6 +2126,43 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
   expect(activate).toHaveBeenCalledOnce();
 });
 
+it("refuses an Admin's field change while the joined copy holds rule edits that aren't approved", async () => {
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const writeSharedSources = vi.fn(async () => {
+    throw new Error("rule files sent");
+  });
+  const data = { approvedArtifacts: async () => f.host.approvedArtifacts() };
+  const named = { governance: () => ({ workspaceId: "owner-workspace", data }) };
+  const f = fixture(
+    undefined,
+    named as unknown as NamedDatasetData,
+    undefined,
+    localHost,
+    undefined,
+    { writeSharedSources },
+  );
+  f.workspace.shareView = { shareId: "s" };
+  f.sources.set("data/schema.sql", "SCHEMA\nCREATE TABLE drafts(id TEXT);");
+  f.sources.set("data/operations.js", "﻿OPERATIONS");
+  const change = {
+    action: "prepareSchemaChange",
+    workspaceId: "workspace",
+    datasetPath: "data/dataset.json",
+    revision: 1,
+    revisionSha256: f.revision.revisionSha256,
+    change: { kind: "renameCollection", name: "Guests" },
+  };
+  await expect(f.handler("window", change)).rejects.toThrow(
+    "This Collection's rule files have edits that aren't approved yet.",
+  );
+  expect(writeSharedSources).not.toHaveBeenCalled();
+  f.sources.set("data/schema.sql", "SCHEMA");
+  await expect(f.handler("window", change)).rejects.toThrow("rule files sent");
+  expect(writeSharedSources).toHaveBeenCalledOnce();
+});
+
 it("computes generatedSources on historyRevision from both schemaSql and operationSource", async () => {
   const f = fixture();
   const definition = f.revision.definition;

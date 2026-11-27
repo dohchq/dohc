@@ -187,7 +187,7 @@ export interface DatasetAuthority {
   };
   /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
   defaultOperationIds?: readonly string[];
-  /** A workspace Admin, checked by the host on this request: they discover every Collection and run each read-only operation, Owner-only ones included. Writes still need a grant or default. */
+  /** A workspace Admin, checked by the host on this request: they discover every Collection and run each read-only operation, Owner-only ones included, except bulk ones. Writes still need a grant or default. */
   adminReads?: boolean;
   /**
    * The chain depth an automation caller's writes declare, one more than the
@@ -858,7 +858,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         operations = approved.definition.operations.flatMap(
           (operation) =>
             held.find((value) => value.operationId === operation.operationId) ??
-            (operation.readOnly ? [operation] : []),
+            (operation.readOnly && operation.profile !== "bulk" ? [operation] : []),
         );
       }
       token = row ? String(row.token) : "";

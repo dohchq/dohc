@@ -810,24 +810,57 @@ export function createDatasetHandler<
               })),
             }),
           });
-          const descriptorAt = async (path: string) => {
-            const [file] = await withSourceAdapter(async (adapter) =>
+          const textsAt = async (paths: string[]) => {
+            const files = await withSourceAdapter(async (adapter) =>
               adapter.hydrateCapturedSources(
                 await adapter.captureSourceMetadata({
                   workspaceId: input.workspaceId,
                   versionId: "main",
-                  paths: [path],
-                  bounds: { maxInputFiles: 1, maxInputBytes: 256 * 1024 },
+                  paths,
+                  bounds: {
+                    maxInputFiles: paths.length,
+                    maxInputBytes: paths.length * 256 * 1024,
+                  },
                   signal: operation.signal,
                 }),
                 operation.signal,
               ),
             );
             current();
-            if (!file) throw new Error(`Collection source unavailable: ${path}.`);
-            return parseDatasetDefinition(JSON.parse(new TextDecoder().decode(file.bytes)), {
+            return paths.map((path) => {
+              const file = files.find((value) => value.path === path);
+              if (!file) throw new Error(`Collection source unavailable: ${path}.`);
+              return new TextDecoder().decode(file.bytes);
+            });
+          };
+          const descriptorAt = async (path: string) =>
+            parseDatasetDefinition(JSON.parse((await textsAt([path]))[0]!), {
               descriptorPath: path,
             });
+          const approvedDescriptorAt = async (
+            descriptorPath: string,
+            approved: { revision: DatasetRevision; schemaSql: string; operationSource: string },
+          ) => {
+            const pinned = await descriptorAt(descriptorPath);
+            const [schemaSql, operationSource] = await textsAt([
+              pinned.schemaPath,
+              pinned.operationsPath,
+            ]);
+            const digest = (definition: DatasetDefinition, schema: string, operations: string) =>
+              describeDatasetRevision({
+                definition,
+                revision: 1,
+                schemaSql: schema.replace(/^﻿/, ""),
+                operationSource: operations.replace(/^﻿/, ""),
+              }).revisionSha256;
+            if (
+              digest(pinned, schemaSql!, operationSource!) !==
+              digest(approved.revision.definition, approved.schemaSql, approved.operationSource)
+            )
+              throw new Error(
+                "This Collection's rule files have edits that aren't approved yet. Review or undo them, then change fields.",
+              );
+            return pinned;
           };
           const credentialGeneration = dependencies.currentCredentialGeneration?.();
           const migrationAuthority = {
@@ -1397,7 +1430,11 @@ export function createDatasetHandler<
                   });
             const generated =
               shared && "datasetPath" in request
-                ? inPlace(changed, request.datasetPath, await descriptorAt(request.datasetPath))
+                ? inPlace(
+                    changed,
+                    request.datasetPath,
+                    await approvedDescriptorAt(request.datasetPath, approved),
+                  )
                 : changed;
             const expected = describeDatasetRevision({
               definition: generated.definition,

@@ -1627,7 +1627,7 @@ it("tells someone who isn't an Admin that the server refused their rules request
   expect(await approval(id(40))).toBe("members_forbidden");
 });
 
-it("lets an Admin read back a Collection whose reads their change left Owner-only, find one with only writes, and still never write", async () => {
+it("lets an Admin read back a Collection whose reads their change left Owner-only, find one with only writes and bulk reads, and still never write", async () => {
   const f = await adminRulesFixture(false);
   f.admin();
   const revision = describeDatasetRevision({
@@ -1669,7 +1669,11 @@ it("lets an Admin read back a Collection whose reads their change left Owner-onl
       datasetId: id(41),
       schemaPath: "signups/schema.sql",
       operationsPath: "signups/operations.js",
-      operations: definition.operations.filter((operation) => !operation.readOnly),
+      operations: definition.operations.map((operation) =>
+        operation.readOnly
+          ? { ...operation, access: "owner" as const, profile: "bulk" as const }
+          : operation,
+      ),
     },
     revision: 1,
     schemaSql,
