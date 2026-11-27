@@ -35,7 +35,15 @@ import {
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
 } from "./bodySequenceStore.js";
-import { giveBoundaries, howToWrite, keepsPairs, writeTransaction } from "./bodySequenceWriting.js";
+import { BODY_SEQUENCE_CHANGE_MAX_VALUES, bodySequenceChangeLimit } from "./bodySequenceIntake.js";
+import {
+  giveBoundaries,
+  howToWrite,
+  keepsPairs,
+  sizeLimitPast,
+  writeTransaction,
+} from "./bodySequenceWriting.js";
+import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
 
 export type BodySequenceOptions = {
   /** The note's `sequence`, declared before any update was applied to its document. */
@@ -70,7 +78,8 @@ export type BodySequenceOptions = {
   /**
    * Told why, each time a dispatch that changed the editor's document was not written. The editor
    * shows the note again first, and unless the note was overtaken or part of the dispatch was
-   * written, with the selection as it was before the dispatch.
+   * written, with the selection as it was before the dispatch. Told `unwritable` too for an undo
+   * or redo it refuses.
    */
   unwritten?: (why: BodySequenceUnwritten) => void;
   /**
@@ -151,7 +160,12 @@ export function createBodySequenceHistory(
   return history;
 }
 
-type Bound = { sequence: Y.Text; history: Y.UndoManager; reader: BodyReader };
+type Bound = {
+  sequence: Y.Text;
+  history: Y.UndoManager;
+  reader: BodyReader;
+  unwritten?: (why: BodySequenceUnwritten) => void;
+};
 
 function boundOf(state: EditorState): Bound | null {
   const read = bodySequenceKey.get(state)?.spec.bound as (() => Bound | null) | undefined;
@@ -162,6 +176,110 @@ function isBusy(doc: Y.Doc): boolean {
   return doc._transaction !== null || doc._transactionCleanups.length > 0;
 }
 
+type Step = Y.UndoManager["undoStack"][number];
+
+const ITEM_BYTES = 64;
+
+type Visit = (item: Y.Item, from: number, to: number) => void;
+
+function eachItem(doc: Y.Doc, items: Step["insertions"], visit: Visit): void {
+  for (const [client, ranges] of items.clients) {
+    const structs = doc.store.clients.get(client) ?? [];
+    const known = Y.getState(doc.store, client);
+    for (const { clock, len } of ranges) {
+      if (clock >= known) continue;
+      for (let at = Y.findIndexSS(structs, clock); at < structs.length; at++) {
+        const struct = structs[at]!;
+        const { clock: first } = struct.id;
+        if (first >= clock + len) break;
+        const to = Math.min(first + struct.length, clock + len);
+        if (struct instanceof Y.Item) visit(struct, Math.max(first, clock), to);
+      }
+    }
+  }
+}
+
+function holdsOutside(items: Step["insertions"], client: number, from: number, to: number) {
+  let inside = 0;
+  for (const { clock, len } of items.clients.get(client) ?? [])
+    inside += Math.max(0, Math.min(to, clock + len) - Math.max(from, clock));
+  return inside < to - from;
+}
+
+const measured = (_key: string, value: unknown) =>
+  typeof value === "bigint" ? String(value) : value;
+
+function contentBytes({ content, parentSub }: Y.Item): number {
+  const value =
+    content instanceof Y.ContentString
+      ? content.str
+      : JSON.stringify(
+          content instanceof Y.ContentFormat ? [content.key, content.value] : content.getContent(),
+          measured,
+        );
+  return ITEM_BYTES + 3 * (value.length + (parentSub?.length ?? 0));
+}
+
+function isSmall({ sequence, history }: Bound, doc: Y.Doc, steps: readonly Step[]): boolean {
+  let bytes = 0;
+  for (let at = steps.length - 1; at >= 0; at--) {
+    const { insertions, deletions } = steps[at]!;
+    let changes = false;
+    eachItem(doc, insertions, (item) => {
+      bytes += ITEM_BYTES;
+      const inScope = history.scope.some(
+        (type) => type instanceof Y.AbstractType && Y.isParentOf(type, item),
+      );
+      changes ||= !item.deleted && item.redone === null && inScope && history.deleteFilter(item);
+    });
+    eachItem(doc, deletions, (item, from, to) => {
+      bytes += contentBytes(item);
+      changes ||=
+        item.deleted &&
+        item.redone === null &&
+        item.parent === sequence &&
+        holdsOutside(insertions, item.id.client, from, to);
+    });
+    if (bytes > BODY_SEQUENCE_CHANGE_MAX_VALUES) return false;
+    if (changes) return true;
+  }
+  return true;
+}
+
+function copyWithItsRedos(doc: Y.Doc): Y.Doc {
+  const copy = new Y.Doc({ gc: false });
+  Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+  copy.clientID = doc.clientID;
+  copy.transact((transaction) => {
+    for (const [client, structs] of doc.store.clients)
+      for (const struct of structs) {
+        if (!(struct instanceof Y.Item) || struct.redone === null) continue;
+        const { clock } = struct.id;
+        Y.getItemCleanEnd(transaction, copy.store, Y.createID(client, clock + struct.length - 1));
+        Y.getItemCleanStart(transaction, struct.id).redone = struct.redone;
+      }
+  });
+  return copy;
+}
+
+function passesTheRoom(bound: Bound, doc: Y.Doc, step: "undo" | "redo"): boolean {
+  const { history } = bound;
+  if (isSmall(bound, doc, step === "undo" ? history.undoStack : history.redoStack)) return true;
+  const copy = copyWithItsRedos(doc);
+  const trial = createBodySequenceHistory(copy);
+  trial.undoStack = [...history.undoStack];
+  trial.redoStack = [...history.redoStack];
+  const changes: Uint8Array[] = [];
+  copy.on("update", (change: Uint8Array) => changes.push(change));
+  trial[step]();
+  copy.destroy();
+  return changes.every(
+    (change) =>
+      bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) === undefined &&
+      sizeLimitPast(change) === undefined,
+  );
+}
+
 function stepOfHistory(step: "undo" | "redo"): Command {
   return (state, dispatch) => {
     const bound = boundOf(state);
@@ -169,7 +287,9 @@ function stepOfHistory(step: "undo" | "redo"): Command {
     if (!bound || !doc || isBusy(doc)) return false;
     const steps = step === "undo" ? bound.history.undoStack : bound.history.redoStack;
     if (steps.length === 0) return false;
-    if (dispatch) bound.history[step]();
+    if (!dispatch) return true;
+    if (passesTheRoom(bound, doc, step)) bound.history[step]();
+    else bound.unwritten?.("unwritable");
     return true;
   };
 }
@@ -178,7 +298,9 @@ function stepOfHistory(step: "undo" | "redo"): Command {
  * Undoes this person's last change. The change comes back from the sequence as its own
  * transaction, so a host whose commands carry a transaction must not dispatch that one too. Like
  * an edit, it is refused while a Yjs transaction is open on the note's document or Yjs has not
- * told of every finished one: Yjs would lose the redo.
+ * told of every finished one: Yjs would lose the redo. It is tried on a copy of the note first, and
+ * refused whole, with `unwritten` told `unwritable`, when the change it would send is past one of
+ * the room's limits on one change.
  */
 export const undoBodySequence: Command = stepOfHistory("undo");
 
@@ -419,7 +541,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       if (!history.scope.includes(sequence)) throw new Error("The history must be of this note.");
       const releaseFormatting = keepBodySequenceFormatting(sequence);
       const reader = createBodyReader(view.state.schema, sequence, containers);
-      const here: Bound = { sequence, reader, history };
+      const here: Bound = { sequence, reader, history, unwritten: options.unwritten };
       bound = here;
       const unread: Y.Transaction[] = [];
       let shown: ProseMirrorNode | null = null;
