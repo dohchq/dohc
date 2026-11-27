@@ -1094,8 +1094,7 @@ export function HistoryRow(props: {
 }
 
 // One author's run of edits to one file: its newest edit, with the count that
-// lists the earlier ones and Undo run under it. An agent run of one change
-// is a run too, so Undo run is where every agent run keeps it.
+// lists the earlier ones under it.
 function RunRow(props: {
   group: EngineHistoryGroup;
   more: boolean;
