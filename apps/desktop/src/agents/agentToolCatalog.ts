@@ -143,7 +143,7 @@ export const AGENT_TOOLS = [
     command: "claude",
     authArgs: ["auth", "status"],
     permissions:
-      "Edits workspace files and uses dohc's tools without asking. Other actions use your Claude permissions; approval requests are denied.",
+      "Edits workspace files and uses dohc's tools without asking. Commands follow the Commands setting. Other actions use your Claude permissions; approval requests are denied.",
   },
   {
     id: "codex",
