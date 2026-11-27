@@ -123,7 +123,7 @@ Returns `{ path, live, elements: { id, type, version, x, y, width, height, angle
 
 ### `dohc_create_drawing`
 
-Create a new .excalidraw drawing, optionally with elements, without replacing an existing file. History records it as yours. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow or line takes start and end element ids to bind its ends. The answer lists each element's id and version. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
+Create a new .excalidraw drawing, optionally with elements, without replacing an existing file. History records it as yours. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. The answer lists each element's id and version. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -135,7 +135,7 @@ Returns `{ ok: true, path, elements: { id, version }[], warning? } | { ok: false
 
 ### `dohc_edit_drawing`
 
-Change an .excalidraw drawing: add elements, update fields of existing ones, or delete them. An open canvas shows the change at once and keeps what the person draws meanwhile. update and delete need each element's id and the version from dohc_read_drawing as expectedVersion; the whole edit is refused if someone changed one of those elements since, so read again and retry. Deleting a shape deletes its text too. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow or line takes start and end element ids to bind its ends. Send requestId to retry safely: the same id answers again without applying twice. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
+Change an .excalidraw drawing: add elements, update fields of existing ones, or delete them. An open canvas shows the change at once and keeps what the person draws meanwhile. update and delete need each element's id and the version from dohc_read_drawing as expectedVersion; the whole edit is refused if someone changed one of those elements since, so read again and retry. Deleting a shape deletes its text too. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Send requestId to retry safely: the same id answers again without applying twice. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1227,7 +1227,7 @@ dohc drawing create <path> [elements-json] [options]
 
 Create a drawing, optionally with elements.
 
-Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow or line takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
+Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
 
 - `--request-id <id>`: Create it at most once for this id.
 
@@ -1241,7 +1241,7 @@ dohc drawing edit <path> <edit-json> [options]
 
 Add, change, or delete a drawing's elements.
 
-edit-json is { add, update, delete }. update and delete name each element's id and the expectedVersion drawing read gave; dohc refuses the whole edit when someone changed that element since. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow or line takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
+edit-json is { add, update, delete }. update and delete name each element's id and the expectedVersion drawing read gave; dohc refuses the whole edit when someone changed that element since. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
 
 - `--request-id <id>`: Apply it at most once for this id.
 

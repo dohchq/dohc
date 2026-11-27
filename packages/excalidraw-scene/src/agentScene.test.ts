@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { DrawingEdit } from "@dohc/workspace-contracts/drawing";
 import { planDrawingEdit, summarizeDrawing } from "./agentScene";
-import { foldScene } from "./index";
+import { foldScene, insertElementRevision } from "./index";
 
 function apply(doc: Y.Doc, edit: DrawingEdit) {
   const plan = planDrawingEdit(doc, edit, 1_700_000_000_000);
@@ -103,6 +103,47 @@ describe("planDrawingEdit", () => {
     apply(doc, { delete: [{ id: "a", expectedVersion: 2 }] });
     expect(live(doc).map((element) => element.id)).toEqual(["b", "go"]);
     expect(live(doc).find((element) => element.id === "go")).not.toHaveProperty("startBinding");
+  });
+
+  it("moves an arrow the edit names only by its own update", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "b", type: "rectangle", x: 400, y: 0, width: 200, height: 100 },
+        { id: "go", type: "arrow", x: 200, y: 50, start: "a", end: "b" },
+      ],
+    });
+    apply(doc, {
+      update: [
+        { id: "a", expectedVersion: 1, x: 100 },
+        { id: "b", expectedVersion: 1, x: 500 },
+        { id: "go", expectedVersion: 1, x: 300 },
+      ],
+    });
+    expect(live(doc).map(({ id, x }) => [id, x])).toEqual([
+      ["a", 100],
+      ["b", 500],
+      ["go", 300],
+    ]);
+  });
+
+  it("edits around a label whose shape is gone", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0 },
+        { id: "label", type: "text", x: 0, y: 0, text: "Hi", containerId: "a" },
+        { id: "b", type: "rectangle", x: 300, y: 0 },
+      ],
+    });
+    const orphan = foldScene(doc).elements.find((element) => element.id === "a")!;
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(doc));
+    insertElementRevision(remote, { ...orphan, version: 2, isDeleted: true });
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(remote));
+    apply(doc, { update: [{ id: "b", expectedVersion: 1, x: 600 }] });
+    expect(live(doc).find((element) => element.id === "b")).toMatchObject({ x: 600 });
   });
 
   it("converges with a concurrent canvas edit to another element", () => {

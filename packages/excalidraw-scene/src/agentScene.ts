@@ -153,9 +153,10 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
       after.boundElements = after.boundElements.filter((bound) => !gone((bound as JsonObject).id));
     if (stableJson(after) !== stableJson(before)) next.set(id, after);
   }
+  const updating = new Set((edit.update ?? []).map(({ id }) => id));
   for (const id of current.keys()) {
     const arrow = existing(id);
-    if (arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
+    if (updating.has(id) || arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
     const shift = (key: "startBinding" | "endBinding") => {
       const target = (arrow[key] as JsonObject | null | undefined)?.elementId;
       const before = typeof target === "string" ? current.get(target) : undefined;
@@ -188,8 +189,8 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
   for (const id of new Set([...current.keys(), ...next.keys()])) {
     const text = existing(id);
     if (text?.type !== "text" || typeof text.containerId !== "string") continue;
-    const container = live(text.containerId);
-    if (!next.has(text.id) && !next.has(container.id)) continue;
+    const container = existing(text.containerId);
+    if (!container || (!next.has(text.id) && !next.has(container.id))) continue;
     next.set(text.id, {
       ...text,
       x: numberOr(container.x) + (numberOr(container.width) - numberOr(text.width)) / 2,

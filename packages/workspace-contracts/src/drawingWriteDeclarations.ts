@@ -11,7 +11,7 @@ const NO_IPC = { none: "The canvas edits drawings through its own live session."
 const UNDO =
   "Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.";
 const ELEMENT_NOTE =
-  "Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow or line takes start and end element ids to bind its ends.";
+  "Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends.";
 const REASON =
   "Only the original workspace edits drawings: shared views never open them live. Shared profiles omit it; the socket refuses received shares and read-only workspaces, and the handler resolves the path again.";
 
