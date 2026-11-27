@@ -1632,16 +1632,16 @@ function registerValidatedBaseline(
   });
 }
 
-const lineageEndings = (oneObject: boolean) => {
+const lineageEndings = (oneObject: boolean, forRead = false) => {
   const object = oneObject ? " AND object_id=?" : "";
   return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
     UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${object}
     UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${object}
-    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND state<>'starting'`;
+    UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND ${forRead ? "(state<>'off' OR host_drained_at_ms IS NULL)" : "state<>'starting'"}`;
 };
 
 export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
-export type RelayLiveNote = { objectId: string; path: string | null; kinds: RelayLiveNoteKind[] };
+export type RelayLiveNote = { objectId: string; kinds: RelayLiveNoteKind[] };
 
 export function relayLiveNotes(
   storage: StorageContext,
@@ -1650,13 +1650,10 @@ export function relayLiveNotes(
 ): RelayLiveNote[] {
   const rows = storage.readTx(() =>
     storage.db
-      .prepare(`SELECT DISTINCT e.object_id,e.kind,(SELECT d.current_path FROM sync_relay_live_documents d
-          WHERE d.workspace_id=? AND d.main_version_id='main' AND d.object_id=e.object_id
-          ORDER BY d.lineage_state='current' DESC,d.registered_at_ms DESC LIMIT 1) AS path
-        FROM (${lineageEndings(false)} UNION ALL SELECT 'session',value FROM json_each(?)) e
+      .prepare(`SELECT DISTINCT e.object_id,e.kind
+        FROM (${lineageEndings(false, true)} UNION ALL SELECT 'session',value FROM json_each(?)) e
         ORDER BY e.object_id,e.kind`)
       .all(
-        workspaceId,
         workspaceId,
         "main",
         workspaceId,
@@ -1670,11 +1667,7 @@ export function relayLiveNotes(
   const notes = new Map<string, RelayLiveNote>();
   for (const row of rows) {
     const objectId = String(row.object_id);
-    const note = notes.get(objectId) ?? {
-      objectId,
-      path: row.path === null ? null : String(row.path),
-      kinds: [],
-    };
+    const note = notes.get(objectId) ?? { objectId, kinds: [] };
     note.kinds.push(row.kind as RelayLiveNoteKind);
     notes.set(objectId, note);
   }

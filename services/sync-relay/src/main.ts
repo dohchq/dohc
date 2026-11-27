@@ -763,14 +763,12 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let liveRooms: LiveRooms | undefined;
-let liveMembership: ReturnType<typeof createLiveMembershipRegistry> | undefined;
 let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ...(analytics ? { onWorkspaceCreated: () => analytics.track("sync_workspace_activated") } : {}),
   liveRooms: () => liveRooms,
-  liveSessions: (workspaceId) => liveMembership?.liveObjects(workspaceId) ?? new Set(),
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
@@ -1459,7 +1457,6 @@ if (namedLiveConfig) {
     },
     storage.readLiveAuthority.bind(storage),
   );
-  liveMembership = membership;
   const bounds = namedLiveConfig.host;
   const everyRoom = createLiveRooms({
     storage,
