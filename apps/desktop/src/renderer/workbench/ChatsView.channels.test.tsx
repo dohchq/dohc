@@ -11,6 +11,7 @@ import {
   thread,
   shareListing,
   emitCloudSessionChanged,
+  emitWorkspaceActivity,
   renderView,
   navigatorView,
 } from "./ChatsView.testHarness";
@@ -884,6 +885,124 @@ describe("ChatsView Group access marks", () => {
           ?.getAttribute("data-level"),
       ).toBe("none"),
     );
+  });
+
+  it("opens Group settings from a Group's menu, and saves while the owner is alone", async () => {
+    const user = userEvent.setup();
+    const onShowFolder = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        ...groups,
+        channel({ id: "channel-team", name: "Team", wireId: "wire-team", folderPath: "Team" }),
+      ],
+      fileThreads: [],
+    });
+    bridgeMock.workspaceMembers.mockImplementation(async (input: { request: { action: string } }) =>
+      input.request.action === "group"
+        ? { status: "ready" }
+        : {
+            status: "ready",
+            view: {
+              memberLevel: "comment",
+              people: [{ role: "owner", state: "active" }],
+              groupRules: [],
+              inviteLink: null,
+            },
+          },
+    );
+    renderView(vi.fn(), vi.fn(), { onShowFolder });
+    const row = (name: string) =>
+      screen.getAllByTestId("chats-channel").find((entry) => entry.textContent === name)!;
+    await screen.findAllByTestId("chats-channel");
+    fireEvent.contextMenu(row("Team"), { clientX: 40, clientY: 60 });
+    await user.click(await screen.findByTestId("chat-row-menu-show-folder"));
+    expect(onShowFolder).toHaveBeenCalledExactlyOnceWith("Team");
+    fireEvent.contextMenu(row("Open"), { clientX: 40, clientY: 60 });
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
+    await user.click(screen.getByTestId("chat-row-menu-group-settings"));
+    const dialog = await screen.findByTestId("chats-group-settings-dialog");
+    expect(dialog.textContent).toContain("Open");
+    expect(dialog.textContent).toContain("Only you are in this workspace.");
+    await user.click(await screen.findByRole("radio", { name: "View only" }));
+    await user.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() =>
+      expect(bridgeMock.workspaceMembers).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        request: { action: "group", group: "wire-open", level: "view" },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("chats-group-settings-dialog")).toBeNull());
+  });
+
+  it("offers Show folder on a new Group only once the share lookup says it's this computer's", async () => {
+    const team = channel({
+      id: "channel-team",
+      name: "Team",
+      wireId: "wire-team",
+      folderPath: "Team",
+    });
+    let withTeam = false;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({ channels: withTeam ? [channel(), team] : [channel()], fileThreads: [] }),
+    );
+    renderView(vi.fn(), vi.fn(), { onShowFolder: vi.fn() });
+    await screen.findByTestId("chats-channel");
+
+    const joinedRead = deferred<{ joined: unknown[] }>();
+    bridgeMock.listJoinedSharedChannels.mockReturnValue(joinedRead.promise);
+    withTeam = true;
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
+    const openTeamMenu = async () => {
+      const row = screen
+        .getAllByTestId("chats-channel")
+        .find((entry) => entry.textContent?.startsWith("Team"))!;
+      fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+      await screen.findByTestId("chat-row-menu-archive");
+    };
+    await openTeamMenu();
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("chat-row-menu-archive")).toBeNull());
+
+    await act(async () => {
+      joinedRead.resolve({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    await screen.findByTestId("chats-channel-shared");
+    await openTeamMenu();
+    expect(screen.queryByTestId("chat-row-menu-show-folder")).toBeNull();
+  });
+
+  it("offers only Close in Group settings when the workspace never synced", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'desktop:workspace-members': Error [workspace-not-synced]: Sync this workspace before sharing.",
+      ),
+    );
+    renderView(vi.fn(), vi.fn());
+    const row = (await screen.findAllByTestId("chats-channel")).find(
+      (entry) => entry.textContent === "Open",
+    )!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+    await user.click(await screen.findByTestId("chat-row-menu-group-settings"));
+    const dialog = await screen.findByTestId("chats-group-settings-dialog");
+    await waitFor(() => expect(dialog.textContent).toContain("Only you are in this workspace."));
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.queryByTestId("chats-group-settings-save")).toBeNull();
+    expect(dialog.textContent).not.toContain("Try again");
   });
 
   // The page tells the shell, and the shell tells the navigator.

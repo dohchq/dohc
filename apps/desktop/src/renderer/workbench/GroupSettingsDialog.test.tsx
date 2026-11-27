@@ -29,7 +29,7 @@ function open(
 
 describe("GroupSettingsDialog", () => {
   it("shows Default for a Group with no rule, and saves the level picked", async () => {
-    const { save, onClose } = open({ level: null, memberLevel: "comment" });
+    const { save, onClose } = open({ level: null, memberLevel: "comment", alone: false });
     await waitFor(() => expect(checked("Default")).toBe(true));
     expect(checked("Can post")).toBe(false);
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
@@ -46,7 +46,7 @@ describe("GroupSettingsDialog", () => {
   });
 
   it("keeps following the member level when a Group with no rule comes back to Default", async () => {
-    const { save, onClose } = open({ level: null, memberLevel: "view" });
+    const { save, onClose } = open({ level: null, memberLevel: "view", alone: false });
     await waitFor(() => expect(checked("Default")).toBe(true));
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
       "Follows the member level, View, so members can read only.",
@@ -60,7 +60,7 @@ describe("GroupSettingsDialog", () => {
 
   // Can post is a rule of the Group's own, even where the member level would also post.
   it("sets Can post as the Group's own rule, apart from Default", async () => {
-    const { save } = open({ level: null, memberLevel: "comment" });
+    const { save } = open({ level: null, memberLevel: "comment", alone: false });
     await waitFor(() => expect(checked("Default")).toBe(true));
     fireEvent.click(radio("Can post"));
     expect(checked("Default")).toBe(false);
@@ -70,7 +70,7 @@ describe("GroupSettingsDialog", () => {
   });
 
   it("keeps a saved rule that matches the member level until Default", async () => {
-    const { save } = open({ level: "comment", memberLevel: "comment" });
+    const { save } = open({ level: "comment", memberLevel: "comment", alone: false });
     await waitFor(() => expect(checked("Can post")).toBe(true));
     expect(checked("Default")).toBe(false);
     expect(screen.queryByTestId("chats-group-access-follows")).toBeNull();
@@ -81,7 +81,7 @@ describe("GroupSettingsDialog", () => {
   });
 
   it("warns before hiding the Group, and clears a rule to follow the member level", async () => {
-    const { save } = open({ level: "view", memberLevel: "comment" });
+    const { save } = open({ level: "view", memberLevel: "comment", alone: false });
     await waitFor(() => expect(checked("View only")).toBe(true));
     fireEvent.click(radio("No access"));
     expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
@@ -94,8 +94,8 @@ describe("GroupSettingsDialog", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(null));
   });
 
-  it("offers only Close while no one else is in the workspace", async () => {
-    const { save, onClose } = open("no-members");
+  it("offers only Close when there are no rules to read", async () => {
+    const { save, onClose } = open("no-rules");
     expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
       "Only you are in this workspace.",
     );
@@ -106,11 +106,23 @@ describe("GroupSettingsDialog", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it("lets the owner choose access while no one else is in the workspace", async () => {
+    const { save, onClose } = open({ level: null, memberLevel: "comment", alone: true });
+    expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
+      "Only you are in this workspace.",
+    );
+    await waitFor(() => expect(checked("Default")).toBe(true));
+    fireEvent.click(radio("View only"));
+    fireEvent.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("view"));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("keeps Save off while access loads, and offers Try again when the read fails", async () => {
     let fail = true;
     const load = vi.fn(async (): Promise<GroupAccess> => {
       if (fail) throw new Error("offline");
-      return { level: "none", memberLevel: "view" };
+      return { level: "none", memberLevel: "view", alone: false };
     });
     open(load);
     expect((screen.getByTestId("chats-group-settings-save") as HTMLButtonElement).disabled).toBe(
@@ -129,7 +141,7 @@ describe("GroupSettingsDialog", () => {
 
   it("keeps the dialog open with the error in place when the save fails", async () => {
     const save = vi.fn(async () => "dohc could not change this Group's access.");
-    const { onClose } = open({ level: null, memberLevel: "comment" }, save);
+    const { onClose } = open({ level: null, memberLevel: "comment", alone: false }, save);
     await waitFor(() => expect(checked("Default")).toBe(true));
     fireEvent.click(radio("No access"));
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
@@ -142,7 +154,7 @@ describe("GroupSettingsDialog", () => {
 
   it("says members keep their access to a hidden Group's folder, and closes to show it", async () => {
     const onOpenFolder = vi.fn();
-    const { onClose } = open({ level: null, memberLevel: "comment" }, undefined, {
+    const { onClose } = open({ level: null, memberLevel: "comment", alone: false }, undefined, {
       folderPath: "Team/Plans",
       onOpenFolder,
     });
@@ -163,13 +175,13 @@ describe("groupAccessFrom", () => {
   const rules = [{ channelWireId: "g1", level: "none" as const }];
 
   // The relay answers the owner an empty rule list before anyone is invited.
-  it("says only you are here until someone else is in the workspace or can join it", () => {
+  it("offers access before anyone else is in the workspace, and says so", () => {
     expect(
       groupAccessFrom(
         { memberLevel: "comment", people: [owner], groupRules: [], inviteLink: null },
         "g1",
       ),
-    ).toBe("no-members");
+    ).toEqual({ level: null, memberLevel: "comment", alone: true });
     expect(
       groupAccessFrom(
         {
@@ -180,7 +192,16 @@ describe("groupAccessFrom", () => {
         },
         "g2",
       ),
-    ).toBe("no-members");
+    ).toEqual({ level: null, memberLevel: "comment", alone: true });
+  });
+
+  it("has nothing to offer without the rules", () => {
+    expect(
+      groupAccessFrom(
+        { memberLevel: "comment", people: [owner], groupRules: null, inviteLink: null },
+        "g1",
+      ),
+    ).toBe("no-rules");
   });
 
   it("reads the Group's rule once someone else is invited", () => {
@@ -189,10 +210,12 @@ describe("groupAccessFrom", () => {
     expect(groupAccessFrom({ ...list, memberLevel: "comment" }, "g1")).toEqual({
       level: "none",
       memberLevel: "comment",
+      alone: false,
     });
     expect(groupAccessFrom({ ...list, memberLevel: "view" }, "g2")).toEqual({
       level: null,
       memberLevel: "view",
+      alone: false,
     });
   });
 
@@ -203,7 +226,7 @@ describe("groupAccessFrom", () => {
         { memberLevel: "comment", people: [owner], groupRules: [], inviteLink: { enabled: true } },
         "g1",
       ),
-    ).toEqual({ level: null, memberLevel: "comment" });
+    ).toEqual({ level: null, memberLevel: "comment", alone: false });
   });
 
   // A rule still applies to the next person who joins, so it stays visible and changeable.
@@ -218,6 +241,6 @@ describe("groupAccessFrom", () => {
         },
         "g1",
       ),
-    ).toEqual({ level: "none", memberLevel: "comment" });
+    ).toEqual({ level: "none", memberLevel: "comment", alone: true });
   });
 });

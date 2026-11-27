@@ -3,6 +3,7 @@ import {
   ArchiveRestore,
   Ban,
   CheckCheck,
+  FolderOpen,
   LogOut,
   Power,
   Settings,
@@ -15,7 +16,15 @@ import { MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 // lists only what that row can do now: a row with nothing unread has no
 // Mark as read, and a group shared with you cannot add people.
 export type ChatRowMenuTarget =
-  | { kind: "group"; unread: boolean; archived: boolean; canAddPeople: boolean; canLeave: boolean }
+  | {
+      kind: "group";
+      unread: boolean;
+      archived: boolean;
+      canAddPeople: boolean;
+      canLeave: boolean;
+      hasSettings: boolean;
+      hasFolder: boolean;
+    }
   // A direct conversation. Block names the one other person; a group has none.
   | { kind: "person"; unread: boolean; block: { name: string; blocked: boolean } | null }
   | {
@@ -35,6 +44,8 @@ export type ChatRowMenuActions = {
   setArchived: (archived: boolean) => void;
   addPeople: () => void;
   leave: () => void;
+  openGroupSettings: () => void;
+  showFolder?: () => void;
   openAgentSettings?: () => void;
   setAgentEnabled: (enabled: boolean) => void;
   removeAgent: () => void;
@@ -109,6 +120,24 @@ export function chatRowMenuItems(
         icon: <UserPlus size={ICON} aria-hidden />,
         onSelect: actions.addPeople,
         testId: "chat-row-menu-add-people",
+      });
+    }
+    if (target.hasSettings) {
+      top.push({
+        id: "group-settings",
+        label: "Group settings…",
+        icon: <Settings size={ICON} aria-hidden />,
+        onSelect: actions.openGroupSettings,
+        testId: "chat-row-menu-group-settings",
+      });
+    }
+    if (target.hasFolder && actions.showFolder) {
+      top.push({
+        id: "show-folder",
+        label: "Show folder",
+        icon: <FolderOpen size={ICON} aria-hidden />,
+        onSelect: actions.showFolder,
+        testId: "chat-row-menu-show-folder",
       });
     }
     bottom.push(archive);

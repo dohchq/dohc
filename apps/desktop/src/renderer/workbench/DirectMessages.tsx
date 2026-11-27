@@ -253,6 +253,7 @@ export function DirectPeopleSection(
               setArchived: () => undefined,
               addPeople: () => undefined,
               leave: () => undefined,
+              openGroupSettings: () => undefined,
               setAgentEnabled: () => undefined,
               removeAgent: () => undefined,
               hideChat: () => undefined,

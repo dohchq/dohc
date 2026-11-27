@@ -29,7 +29,7 @@ describe("ChatsView archive and row menus", () => {
     renderView(vi.fn(), vi.fn(), { userSettings: DEFAULT_USER_SETTINGS, onNotice });
 
     fireEvent.contextMenu(await screen.findByTestId("chats-channel"), { clientX: 40, clientY: 60 });
-    expect(menuLabels()).toEqual(["Add people…", "Archive"]);
+    expect(menuLabels()).toEqual(["Add people…", "Group settings…", "Archive"]);
     await user.click(screen.getByTestId("chat-row-menu-archive"));
 
     expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({
@@ -78,7 +78,7 @@ describe("ChatsView archive and row menus", () => {
     expect(within(trip).getByTestId("chats-channel-unread").textContent).toBe("2");
 
     fireEvent.contextMenu(trip, { clientX: 40, clientY: 200 });
-    expect(menuLabels()).toEqual(["Mark as read", "Add people…", "Unarchive"]);
+    expect(menuLabels()).toEqual(["Mark as read", "Add people…", "Group settings…", "Unarchive"]);
     fireEvent.keyDown(screen.getByTestId("chat-row-menu-unarchive"), { key: "Escape" });
 
     await user.click(trip);
