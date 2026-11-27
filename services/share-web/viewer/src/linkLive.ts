@@ -110,6 +110,7 @@ export async function openLinkDocument(discriminator: string, path: string, sign
   const transport = createNamedLiveBrowserTransport<{ objectId: string }>({
     publicOrigin: location.origin,
     limits,
+    reopenOnLineage: true,
     recordingContext() {
       if (!publicPrincipalId) throw Error("Link identity is unavailable");
       return { kind: "link", publicPrincipalId };

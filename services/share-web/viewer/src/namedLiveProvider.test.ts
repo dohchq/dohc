@@ -1015,6 +1015,7 @@ describe("named live browser provider", () => {
         status: "quarantined",
         reason: field === "lineageClaimId" ? "lineage-replaced" : "binding-changed",
       });
+      expect(value.replacement()).toEqual(field === "lineageClaimId" ? selected : null);
       expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(old);
     },
   );

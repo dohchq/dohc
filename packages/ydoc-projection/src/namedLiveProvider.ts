@@ -112,8 +112,10 @@ export function createNamedLiveProvider(
   expectedDocument?: Pick<LiveObjectBinding, "objectId"> &
     Partial<Pick<LiveObjectBinding, "workspaceId">>,
   recordingContext?: LiveAuthorContext | (() => LiveAuthorContext),
+  initialBinding?: LiveObjectBinding,
 ) {
   const expected = expectedDocument && { ...expectedDocument };
+  const initial = initialBinding && parseLiveObjectBinding(initialBinding);
   const limits: NamedLiveProviderLimits = {
     frames: { ...input.frames, receive: { ...input.frames.receive } },
     maxPendingUpdateBytes: input.maxPendingUpdateBytes,
@@ -158,6 +160,7 @@ export function createNamedLiveProvider(
   let status: NamedLiveProviderState["status"] = "disconnected",
     reason: string | null = null;
   let binding: LiveObjectBinding | null = null,
+    replacement: LiveObjectBinding | null = null,
     hostEpoch: number | null = null;
   let pendingBytes = 0,
     incomingBytes = 0,
@@ -452,24 +455,26 @@ export function createNamedLiveProvider(
             }
             if (begin.purpose === "initial-sync") {
               const sync = decodeLiveFrameSync(content, limits.frames.receive);
+              const known = binding ?? initial;
               if (
                 sync.binding.mainVersionId !== "main" ||
                 (expected &&
                   ((expected.workspaceId !== undefined &&
                     sync.binding.workspaceId !== expected.workspaceId) ||
                     sync.binding.objectId !== expected.objectId)) ||
-                (binding && !sameBinding(binding, sync.binding))
+                (known && !sameBinding(known, sync.binding))
               ) {
-                quarantine(
-                  binding &&
-                    binding.lineageClaimId !== sync.binding.lineageClaimId &&
-                    sameBinding(
-                      { ...binding, lineageClaimId: sync.binding.lineageClaimId },
-                      sync.binding,
-                    )
-                    ? LINEAGE_REPLACED
-                    : "binding-changed",
-                );
+                if (
+                  known &&
+                  known.lineageClaimId !== sync.binding.lineageClaimId &&
+                  sameBinding(
+                    { ...known, lineageClaimId: sync.binding.lineageClaimId },
+                    sync.binding,
+                  )
+                ) {
+                  replacement = parseLiveObjectBinding(sync.binding);
+                  quarantine(LINEAGE_REPLACED);
+                } else quarantine("binding-changed");
                 return;
               }
               if (begin.appliedThroughJournalCursor < highestObservedCursor) {
@@ -665,6 +670,9 @@ export function createNamedLiveProvider(
       notify();
       return true;
     },
+    /** The binding that replaced this provider's lineage; null unless it stopped with `lineage-replaced`. */
+    replacement: () =>
+      replacement && { ...replacement, selectorPaths: [...replacement.selectorPaths] },
     /** What this page's unsaved changes typed that the note still shows; null with none. */
     unsentText(): UnsentText | null {
       const unsent = [...pending.map(({ bytes }) => bytes), ...refused];

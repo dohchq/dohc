@@ -85,6 +85,8 @@ interface Options<Selection extends LiveSelection> {
   limits: NamedLiveBrowserLimits;
   fetch?: typeof fetch;
   openSocket?: (url: string, protocols: string[]) => BrowserSocket;
+  /** Reopen on a fresh document when the relay replaces the note's lineage. The caller must follow `doc`. */
+  reopenOnLineage?: boolean;
 }
 type Provider = ReturnType<typeof createNamedLiveProvider>;
 type Route = ReturnType<Provider["connect"]>;
@@ -133,18 +135,26 @@ export function createNamedLiveBrowserTransport<
     for (const value of Object.values(target)) parseLiveUpdateIdentifier(value);
     const recordingContext = options.recordingContext;
     const removedListeners = new Set<(removed: RemovedText) => void>();
-    const createProvider = () => {
+    const createProvider = (initial?: Parameters<typeof createNamedLiveProvider>[3]) => {
       const created = createNamedLiveProvider(
         limits.provider,
         target,
         recordingContext ? () => recordingContext(target) : undefined,
+        initial,
       );
       created.onRemovedText((removed) => {
-        for (const listener of removedListeners) listener(removed);
+        for (const listener of removedListeners) {
+          try {
+            listener(removed);
+          } catch {
+            /* A view listener cannot change delivery ownership. */
+          }
+        }
       });
       return created;
     };
-    let provider = createProvider();
+    const first = createProvider();
+    let provider = first;
     const listeners = new Set<(state: NamedLiveBrowserState) => void>();
     let override: Override | undefined,
       closed = false,
@@ -271,7 +281,10 @@ export function createNamedLiveBrowserTransport<
     }
     const reopenOnLineage = (value: NamedLiveProviderState) => {
       const replaced = provider;
+      const successor = replaced.replacement();
       if (
+        !options.reopenOnLineage ||
+        !successor ||
         closed ||
         value.status !== "quarantined" ||
         value.reason !== LINEAGE_REPLACED ||
@@ -280,7 +293,7 @@ export function createNamedLiveBrowserTransport<
       )
         return false;
       unsubscribe();
-      provider = createProvider();
+      provider = createProvider(successor);
       unsubscribe = provider.subscribe(follow);
       replaced.close();
       void connect();
@@ -698,6 +711,8 @@ export function createNamedLiveBrowserTransport<
       }
     }
     return {
+      /** Stays the same for the session's life, while `doc` changes on a reopen. */
+      id: first.doc.guid,
       /** Changes when the relay replaces the note's lineage and the page reopens on the new one. */
       get doc() {
         return provider.doc;
@@ -723,7 +738,7 @@ export function createNamedLiveBrowserTransport<
         return true;
       },
       seed: (bytes: Uint8Array, throughJournalCursor: number) =>
-        provider.seed(bytes, throughJournalCursor),
+        provider === first && first.seed(bytes, throughJournalCursor),
       reconnect,
       disconnect() {
         if (closed || ["quarantined", "refused"].includes(state().status)) return;
@@ -741,6 +756,7 @@ export function createNamedLiveBrowserTransport<
         unsubscribe();
         notify();
         listeners.clear();
+        removedListeners.clear();
       },
     };
   }

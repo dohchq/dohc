@@ -7,8 +7,8 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
-import type { RemovedText } from "@dohc/ydoc-projection/removed-text";
-import { NamedDocumentEditor } from "./NamedDocumentEditor";
+import type { RemovedText, UnsentText } from "@dohc/ydoc-projection/removed-text";
+import { DraftReview, NamedDocumentEditor } from "./NamedDocumentEditor";
 
 let container: HTMLDivElement, root: Root;
 function session(
@@ -33,7 +33,8 @@ function session(
   };
   const removed = new Set<(removed: RemovedText) => void>();
   const listeners = new Set<(state: NamedLiveBrowserState) => void>();
-  return {
+  const value = {
+    id: doc.guid,
     doc,
     state: () => state,
     subscribe(listener: (state: NamedLiveBrowserState) => void) {
@@ -48,19 +49,21 @@ function session(
       removed.add(listener);
       return () => void removed.delete(listener);
     },
-    unsentText: () => null,
+    unsent: null as UnsentText | null,
+    unsentText: (): UnsentText | null => value.unsent,
     remove(text: string) {
-      for (const listener of removed) listener({ text, clients: new Set([doc.clientID]) });
+      for (const listener of removed) listener({ text, clients: new Set([value.doc.clientID]) });
     },
     close: vi.fn(),
     reconnect: vi.fn(async () => {}),
     disconnect: vi.fn(),
     seed: vi.fn(() => false),
     edit: (change: () => void): boolean => {
-      doc.transact(change);
+      value.doc.transact(change);
       return true;
     },
   };
+  return value;
 }
 function properties(): string | null {
   return container.querySelector('section[aria-label="Properties"] pre')?.textContent ?? null;
@@ -403,8 +406,40 @@ it("edits a note in format 2 from the toolbar", async () => {
   expect(unwrittenNotice()).toBeNull();
 });
 
+it("reads unsent text from the document the session reopened on", async () => {
+  const live = session("Old text", {}, { bodySequence: true });
+  const review = () => root.render(<DraftReview session={live} className="draft-recovery" />);
+  await act(async () => review());
+  const successor = markdownToYDoc("New text", { bodySequence: true });
+  live.doc = successor;
+  await act(async () => review());
+  expect(container.textContent).toContain("Nothing you typed is waiting to be saved.");
+  live.unsent = { text: " typed", deletes: false };
+  await act(async () => successor.getMap("meta").set("touched", true));
+  expect(container.querySelector("blockquote")?.textContent).toBe(" typed");
+});
+
+function quote() {
+  container
+    .querySelector<HTMLButtonElement>('[role="toolbar"] button[aria-label="Quote"]')!
+    .click();
+}
+
+it("takes no edit from an editor still on the document the session left", async () => {
+  const live = session("Old text", {}, { bodySequence: true });
+  const replaced = live.doc,
+    successor = markdownToYDoc("New text", { bodySequence: true });
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  live.doc = successor;
+  await act(async () => quote());
+  expect(yDocToMarkdown(replaced)).not.toContain(">");
+  expect(yDocToMarkdown(successor)).not.toContain(">");
+});
+
 it("mounts the editor again on the note's new lineage, in format 2", async () => {
-  const live = session("Old text");
+  const live = session("Old text", {}, { bodySequence: true });
   await act(async () =>
     root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
   );
@@ -413,11 +448,7 @@ it("mounts the editor again on the note's new lineage, in format 2", async () =>
   live.doc = successor;
   await act(async () => live.report({ status: "live" }));
   expect(textbox()?.textContent).toBe("New text");
-  await act(async () =>
-    container
-      .querySelector<HTMLButtonElement>('[role="toolbar"] button[aria-label="Quote"]')!
-      .click(),
-  );
+  await act(async () => quote());
   expect(yDocToMarkdown(successor)).toContain("> New text");
 });
 

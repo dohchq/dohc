@@ -149,7 +149,6 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   );
 }
 
-/** An editor's calls into a session, which take no edit once the session reopens on another document. */
 export function editingOf(session: NamedDocumentSession, doc: NamedDocumentSession["doc"]) {
   return {
     canEdit: () => session.doc === doc && namedLiveEditable(session.state()),
