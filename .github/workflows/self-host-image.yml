@@ -70,13 +70,16 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
+          LATEST_IMAGE: ghcr.io/dohchq/dohc-self-host:latest
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           docker push "$IMAGE"
+          docker tag "$IMAGE" "$LATEST_IMAGE"
+          docker push "$LATEST_IMAGE"
           ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
           jq --arg image "$ref" '.image = $image' "$RUNNER_TEMP/bundle/release.json" > "$RUNNER_TEMP/release.json"
           mv "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/bundle/release.json"
-          echo "Published \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published `%s` and `%s`\n' "$ref" "$LATEST_IMAGE" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: self-host-bundle-${{ github.sha }}
