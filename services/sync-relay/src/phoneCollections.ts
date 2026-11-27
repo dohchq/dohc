@@ -7,6 +7,7 @@ import {
   isDatasetWorkerFailure,
 } from "@dohc/app-backend-runtime/supervisor";
 import {
+  APP_BACKEND_INPUT_BYTES,
   AppBackendLimitError,
   parseAppBackendJson,
   type AppBackendJson,
@@ -33,8 +34,10 @@ import type { StorageContext } from "./storage/context";
 
 export const PHONE_COLLECTION_PAGE = 50;
 const RELATION_LABEL_LIMIT = 100;
+const RELATION_LABEL_PAGES = 5;
 const RELATION_LABEL_MAX = 500;
-const RELATION_KEY_FALLBACK_MAX = 25;
+const RELATION_KEY_FALLBACK_MAX = 100;
+const RELATION_KEY_BATCH = 8;
 
 const OPERATIONS = new Set([
   "collections",
@@ -161,7 +164,7 @@ function cursor(value: unknown): { id: string | number; value: AppBackendJson } 
   )
     throw badRequest("Invalid Collection cursor.");
   try {
-    return { id: key, value: parseAppBackendJson(sorted, 4096) };
+    return { id: key, value: parseAppBackendJson(sorted, APP_BACKEND_INPUT_BYTES) };
   } catch {
     throw badRequest("Invalid Collection cursor.");
   }
@@ -223,8 +226,17 @@ export function createPhoneCollections(options: {
     workspaceId: string,
     source: DatasetDescription,
     relation: DescribedRelation,
+    cache?: Map<string, RelationTarget | null>,
   ): RelationTarget | null {
-    if (!visible(workspaceId, relation.datasetId)) return null;
+    const cacheKey = cache
+      ? `${relation.datasetId}\0${relation.tableId}\0${relation.fieldId}`
+      : null;
+    if (cache && cacheKey && cache.has(cacheKey)) return cache.get(cacheKey)!;
+    const remember = (value: RelationTarget | null) => {
+      if (cache && cacheKey) cache.set(cacheKey, value);
+      return value;
+    };
+    if (!visible(workspaceId, relation.datasetId)) return remember(null);
     let target: DatasetDescription;
     if (relation.datasetId === source.datasetId) target = source;
     else {
@@ -236,7 +248,7 @@ export function createPhoneCollections(options: {
           (error instanceof DatasetHostError &&
             (error.code === "not_authorized" || error.code === "conflict"))
         )
-          return null;
+          return remember(null);
         throw error;
       }
     }
@@ -249,7 +261,7 @@ export function createPhoneCollections(options: {
         op.fieldIds.includes(relation.fieldId),
     );
     const keyField = table?.fields.find((f) => f.fieldId === relation.fieldId);
-    if (!table || !read || !keyField || keyField.type === "button") return null;
+    if (!table || !read || !keyField || keyField.type === "button") return remember(null);
     const textFields = table.fields.filter(
       (f) =>
         f.type === "text" &&
@@ -258,14 +270,14 @@ export function createPhoneCollections(options: {
         read.fieldIds.includes(f.fieldId),
     );
     const label = textFields.find((f) => f.fieldId !== table.primaryKeyFieldId) ?? textFields[0];
-    return {
+    return remember({
       datasetId: target.datasetId,
       revision: target.revision,
       revisionSha256: target.revisionSha256,
       fieldId: relation.fieldId,
       readOperationId: read.operationId,
       labelFieldId: label?.fieldId ?? null,
-    };
+    });
   }
   const canInput = (
     host: NonNullable<typeof options.host>,
@@ -273,13 +285,14 @@ export function createPhoneCollections(options: {
     workspaceId: string,
     description: DatasetDescription,
     field: DescribedField,
+    cache?: Map<string, RelationTarget | null>,
   ) =>
     field.type !== "button" &&
     !field.generated &&
     (EDITABLE.has(field.type) ||
       (field.type === "relation" &&
         field.relation !== undefined &&
-        relationTarget(host, auth, workspaceId, description, field.relation) !== null));
+        relationTarget(host, auth, workspaceId, description, field.relation, cache) !== null));
   const editOperation = (
     host: NonNullable<typeof options.host>,
     auth: AppBackendAuth,
@@ -287,8 +300,9 @@ export function createPhoneCollections(options: {
     description: DatasetDescription,
     tableId: string,
     field: DescribedField,
+    cache?: Map<string, RelationTarget | null>,
   ) =>
-    canInput(host, auth, workspaceId, description, field) &&
+    canInput(host, auth, workspaceId, description, field, cache) &&
     readOperation(description, tableId)?.fieldIds.includes(field.fieldId)
       ? description.operations.find(
           (operation) =>
@@ -315,6 +329,7 @@ export function createPhoneCollections(options: {
     workspaceId: string,
     description: DatasetDescription,
     tableId: string,
+    cache?: Map<string, RelationTarget | null>,
   ) {
     const create = writeOperation(description, tableId, "create");
     const table = description.tables.find((table) => table.tableId === tableId);
@@ -333,7 +348,7 @@ export function createPhoneCollections(options: {
     for (const field of table.fields) {
       if (!create.fieldIds.includes(field.fieldId) || field.type === "button" || field.generated)
         continue;
-      if (!canInput(host, auth, workspaceId, description, field)) {
+      if (!canInput(host, auth, workspaceId, description, field, cache)) {
         const init = initialValue(field);
         if (
           field.required &&
@@ -416,6 +431,7 @@ export function createPhoneCollections(options: {
     if (operation === "collection") {
       const datasetId = id(args(input.args, ["datasetId"]).datasetId);
       const description = describe(host, auth, workspaceId, datasetId);
+      const targetCache = new Map<string, RelationTarget | null>();
       return {
         datasetId,
         name: description.name,
@@ -434,9 +450,17 @@ export function createPhoneCollections(options: {
               return [];
             const target =
               field.type === "relation" && field.relation
-                ? relationTarget(host, auth, workspaceId, description, field.relation)
+                ? relationTarget(host, auth, workspaceId, description, field.relation, targetCache)
                 : null;
-            const edit = editOperation(host, auth, workspaceId, description, table.tableId, field);
+            const edit = editOperation(
+              host,
+              auth,
+              workspaceId,
+              description,
+              table.tableId,
+              field,
+              targetCache,
+            );
             return [
               {
                 fieldId: field.fieldId,
@@ -449,7 +473,14 @@ export function createPhoneCollections(options: {
               },
             ];
           });
-          const creation = createSpec(host, auth, workspaceId, description, table.tableId);
+          const creation = createSpec(
+            host,
+            auth,
+            workspaceId,
+            description,
+            table.tableId,
+            targetCache,
+          );
           return {
             tableId: table.tableId,
             name: table.name,
@@ -906,13 +937,13 @@ export function createPhoneCollections(options: {
       const labels: Record<string, string> = {};
       const collect = (raw: AppBackendJson) => {
         if (!raw || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.rows))
-          return false;
+          return null;
         for (const row of raw.rows) {
           const opt = relationOption(row, target.fieldId, target.labelFieldId);
           if (opt && group.wanted.has(JSON.stringify(opt.value)))
             labels[JSON.stringify(opt.value)] = opt.label;
         }
-        return raw.nextCursor !== null;
+        return raw.nextCursor ?? null;
       };
       const tryTarget = async (opInput: AppBackendJson) => {
         try {
@@ -930,19 +961,49 @@ export function createPhoneCollections(options: {
           throw error;
         }
       };
-      let first = await tryTarget({ limit: RELATION_LABEL_LIMIT });
-      if (!first.ok && first.code === "invalid_input")
-        first = await tryTarget({ limit: PHONE_COLLECTION_PAGE });
-      if (first.ok && collect(first.result)) {
-        let count = 0;
-        for (const [encoded, item] of group.wanted) {
-          if (Object.hasOwn(labels, encoded) || count++ >= RELATION_KEY_FALLBACK_MAX) continue;
-          const single = await tryTarget({
-            limit: 1,
-            filters: [{ fieldId: target.fieldId, value: item }],
-          });
-          if (!single.ok) break;
-          collect(single.result);
+      let pageLimit = RELATION_LABEL_LIMIT;
+      let first = await tryTarget({ limit: pageLimit });
+      if (!first.ok && first.code === "invalid_input") {
+        pageLimit = PHONE_COLLECTION_PAGE;
+        first = await tryTarget({ limit: pageLimit });
+      }
+      let nextCursor = first.ok ? collect(first.result) : null;
+      const seenCursors = new Set<string>();
+      for (
+        let p = 1;
+        p < RELATION_LABEL_PAGES &&
+        nextCursor !== null &&
+        Object.keys(labels).length < group.wanted.size;
+        p++
+      ) {
+        const ck = JSON.stringify(nextCursor);
+        if (seenCursors.has(ck)) break;
+        seenCursors.add(ck);
+        const more = await tryTarget({ limit: pageLimit, after: nextCursor });
+        if (!more.ok) {
+          nextCursor = null;
+          break;
+        }
+        nextCursor = collect(more.result);
+      }
+      if (nextCursor !== null && Object.keys(labels).length < group.wanted.size) {
+        const missing = [...group.wanted.entries()]
+          .filter(([encoded]) => !Object.hasOwn(labels, encoded))
+          .slice(0, RELATION_KEY_FALLBACK_MAX);
+        for (let i = 0; i < missing.length; i += RELATION_KEY_BATCH) {
+          const batch = await Promise.all(
+            missing
+              .slice(i, i + RELATION_KEY_BATCH)
+              .map(([, item]) =>
+                tryTarget({ limit: 1, filters: [{ fieldId: target.fieldId, value: item }] }),
+              ),
+          );
+          let failed = false;
+          for (const single of batch) {
+            if (single.ok) collect(single.result);
+            else failed = true;
+          }
+          if (failed) break;
         }
       }
       if (Object.keys(labels).length > 0)

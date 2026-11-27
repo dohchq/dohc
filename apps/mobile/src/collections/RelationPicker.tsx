@@ -4,7 +4,7 @@ import { Check, Search, X } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { ProblemLine } from "../account/ProblemLine";
-import { requestGenerations, shownProblem } from "../server/client";
+import { shownProblem } from "../server/client";
 import type {
   RecordCursor,
   RecordId,
@@ -41,7 +41,6 @@ export function RelationPicker(props: RelationPickerProps) {
   const [problem, setProblem] = useState<ReadProblem | null>(null);
   const [searchUnsupported, setSearchUnsupported] = useState(false);
   const [limitError, setLimitError] = useState<string | null>(null);
-  const gens = useRef(requestGenerations());
   const abortRef = useRef<AbortController | null>(null);
   const known = useRef<Record<string, string>>({ ...labels });
   useEffect(() => {
@@ -53,12 +52,11 @@ export function RelationPicker(props: RelationPickerProps) {
       abortRef.current?.abort();
       const abort = new AbortController();
       abortRef.current = abort;
-      const req = gens.current.next();
       setReading(after ? "more" : "first");
       setProblem(null);
       try {
         const page = await load(term, after, abort.signal);
-        if (!gens.current.isLatest(req) || abort.signal.aborted) return;
+        if (abortRef.current !== abort || abort.signal.aborted) return;
         for (const opt of page.options) known.current[JSON.stringify(opt.value)] = opt.label;
         setOptions((cur) => {
           if (!after) return page.options;
@@ -70,7 +68,7 @@ export function RelationPicker(props: RelationPickerProps) {
         setReading(null);
       } catch (error) {
         const cause = shownProblem(error);
-        if (!gens.current.isLatest(req) || abort.signal.aborted || cause === null) return;
+        if (abortRef.current !== abort || abort.signal.aborted || cause === null) return;
         setProblem(cause);
         setReading(null);
       }

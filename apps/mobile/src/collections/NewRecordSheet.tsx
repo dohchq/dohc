@@ -28,9 +28,21 @@ import { FieldInput } from "./FieldInput";
 import { RelationPicker } from "./RelationPicker";
 import type { ChangeLineProps } from "./CollectionScreens";
 
-const initialDrafts = (fields: readonly CreateCollectionField[]): Record<string, Draft> =>
+const initialDrafts = (
+  fields: readonly CreateCollectionField[],
+  submitted?: Readonly<Record<string, RecordValue>>,
+): Record<string, Draft> =>
   Object.fromEntries(
-    fields.map((field) => [field.fieldId, draftOf(field, field.default, { emptyDate: true })]),
+    fields.map((field) => [
+      field.fieldId,
+      draftOf(
+        field,
+        submitted && Object.hasOwn(submitted, field.fieldId)
+          ? submitted[field.fieldId]
+          : field.default,
+        { emptyDate: true },
+      ),
+    ]),
   );
 
 export function NewRecordSheet(props: {
@@ -46,25 +58,26 @@ export function NewRecordSheet(props: {
   const { open, table, collections, action, actionKey, onClose, onCreated } = props;
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const saving = action?.state.kind === "saving";
+  const failed = action?.state.kind === "failed";
+  const locked = saving || failed;
+  const pendingValues = locked && action?.kind === "create" ? action.request.values : undefined;
   const [drafts, setDrafts] = useState<Record<string, Draft>>(() =>
-    initialDrafts(table.createFields),
+    initialDrafts(table.createFields, pendingValues),
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [labels, setLabels] = useState<Record<string, Record<string, string>>>({});
   const [pickingId, setPickingId] = useState<string | null>(null);
   useEffect(() => {
     if (!open) return;
-    setDrafts(initialDrafts(table.createFields));
+    setDrafts(initialDrafts(table.createFields, pendingValues));
     setErrors({});
-    setLabels({});
+    if (!pendingValues) setLabels({});
     setPickingId(null);
   }, [open, table.tableId]);
 
-  const saving = action?.state.kind === "saving";
-  const failed = action?.state.kind === "failed";
-  const picking = pickingId
-    ? (table.createFields.find((f) => f.fieldId === pickingId) ?? null)
-    : null;
+  const picking =
+    !locked && pickingId ? (table.createFields.find((f) => f.fieldId === pickingId) ?? null) : null;
   const close = () => {
     if (saving) return;
     if (picking) setPickingId(null);
@@ -115,145 +128,154 @@ export function NewRecordSheet(props: {
       presentationStyle="pageSheet"
       onRequestClose={close}
     >
-      <View
-        style={[
-          styles.sheet,
-          {
-            backgroundColor: theme.bg,
-            paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
-            paddingBottom: insets.bottom,
-          },
-        ]}
-      >
-        <View style={[styles.header, { borderColor: theme.line }]}>
-          {picking ? (
-            <>
-              <View style={styles.side} />
-              <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
-                {picking.name}
-              </Text>
-              <Pressable
-                onPress={() => setPickingId(null)}
-                android_ripple={ripple(theme, true)}
-                style={[styles.btn, styles.side, styles.right]}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.btnText, styles.strong, { color: theme.ink }]}>
-                  {collectionWords.done}
+      {open ? (
+        <View
+          style={[
+            styles.sheet,
+            {
+              backgroundColor: theme.bg,
+              paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
+              paddingBottom: insets.bottom,
+            },
+          ]}
+        >
+          <View style={[styles.header, { borderColor: theme.line }]}>
+            {picking ? (
+              <>
+                <View style={styles.side} />
+                <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
+                  {picking.name}
                 </Text>
-              </Pressable>
-            </>
-          ) : (
-            <>
-              <Pressable
-                onPress={close}
-                disabled={saving}
-                android_ripple={ripple(theme, true)}
-                style={[styles.btn, styles.side]}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.btnText, { color: saving ? theme.subtle : theme.ink }]}>
-                  {confirmWords.cancel}
-                </Text>
-              </Pressable>
-              <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
-                {collectionWords.newRecord}
-              </Text>
-              {saving ? (
-                <View style={[styles.btn, styles.side, styles.right]}>
-                  <ActivityIndicator accessibilityLabel={collectionWords.saving} />
-                </View>
-              ) : (
                 <Pressable
-                  onPress={() => void submit()}
-                  disabled={failed}
+                  onPress={() => setPickingId(null)}
                   android_ripple={ripple(theme, true)}
                   style={[styles.btn, styles.side, styles.right]}
                   accessibilityRole="button"
                 >
-                  <Text
-                    style={[
-                      styles.btnText,
-                      styles.strong,
-                      { color: failed ? theme.subtle : theme.ink },
-                    ]}
-                  >
-                    {collectionWords.create}
+                  <Text style={[styles.btnText, styles.strong, { color: theme.ink }]}>
+                    {collectionWords.done}
                   </Text>
                 </Pressable>
-              )}
-            </>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  onPress={close}
+                  disabled={saving}
+                  android_ripple={ripple(theme, true)}
+                  style={[styles.btn, styles.side]}
+                  accessibilityRole="button"
+                >
+                  <Text style={[styles.btnText, { color: saving ? theme.subtle : theme.ink }]}>
+                    {confirmWords.cancel}
+                  </Text>
+                </Pressable>
+                <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
+                  {collectionWords.newRecord}
+                </Text>
+                {saving ? (
+                  <View style={[styles.btn, styles.side, styles.right]}>
+                    <ActivityIndicator accessibilityLabel={collectionWords.saving} />
+                  </View>
+                ) : (
+                  <Pressable
+                    onPress={() => void submit()}
+                    disabled={failed}
+                    android_ripple={ripple(theme, true)}
+                    style={[styles.btn, styles.side, styles.right]}
+                    accessibilityRole="button"
+                  >
+                    <Text
+                      style={[
+                        styles.btnText,
+                        styles.strong,
+                        { color: failed ? theme.subtle : theme.ink },
+                      ]}
+                    >
+                      {collectionWords.create}
+                    </Text>
+                  </Pressable>
+                )}
+              </>
+            )}
+          </View>
+          {picking ? (
+            <RelationPicker
+              name={picking.name}
+              many={picking.relation?.many === true}
+              selected={
+                Array.isArray(drafts[picking.fieldId])
+                  ? (drafts[picking.fieldId] as readonly RecordId[])
+                  : []
+              }
+              labels={labels[picking.fieldId] ?? {}}
+              load={loadRelations}
+              onChange={(next, nextLabels) => {
+                setField(picking.fieldId, next);
+                setLabels((cur) => ({ ...cur, [picking.fieldId]: { ...nextLabels } }));
+              }}
+            />
+          ) : (
+            <ScrollView
+              contentContainerStyle={styles.form}
+              keyboardShouldPersistTaps="handled"
+              automaticallyAdjustKeyboardInsets
+            >
+              {action
+                ? props.renderAction({
+                    onRetry: () =>
+                      void collections.retryAction(actionKey).then((opened) => {
+                        if (!collections.actions().has(actionKey)) {
+                          onClose();
+                          onCreated(opened);
+                        }
+                      }),
+                    onReload: () => {
+                      collections.discardAction(actionKey);
+                      void collections.reload();
+                    },
+                    onDiscard: () => collections.discardAction(actionKey),
+                  })
+                : null}
+              {table.createFields.map((field) => (
+                <View key={field.fieldId} style={styles.field}>
+                  {field.type === "checkbox" ? null : (
+                    <Text
+                      style={[styles.label, { color: theme.muted }]}
+                      accessibilityLabel={
+                        field.required ? `${field.name}, ${collectionWords.required}` : field.name
+                      }
+                    >
+                      {field.name}
+                      {field.required ? " *" : ""}
+                    </Text>
+                  )}
+                  <FieldInput
+                    field={field}
+                    draft={
+                      drafts[field.fieldId] ?? draftOf(field, field.default, { emptyDate: true })
+                    }
+                    onChange={(next) => setField(field.fieldId, next)}
+                    disabled={locked}
+                    error={errors[field.fieldId] ?? null}
+                    onClearDate={
+                      field.type === "date" && !field.required
+                        ? () => setField(field.fieldId, "")
+                        : null
+                    }
+                    relationLabels={labels[field.fieldId]}
+                    onPickRelation={
+                      field.type === "relation" && !locked
+                        ? () => setPickingId(field.fieldId)
+                        : undefined
+                    }
+                  />
+                </View>
+              ))}
+            </ScrollView>
           )}
         </View>
-        {picking ? (
-          <RelationPicker
-            name={picking.name}
-            many={picking.relation?.many === true}
-            selected={
-              Array.isArray(drafts[picking.fieldId])
-                ? (drafts[picking.fieldId] as readonly RecordId[])
-                : []
-            }
-            labels={labels[picking.fieldId] ?? {}}
-            load={loadRelations}
-            onChange={(next, nextLabels) => {
-              setField(picking.fieldId, next);
-              setLabels((cur) => ({ ...cur, [picking.fieldId]: { ...nextLabels } }));
-            }}
-          />
-        ) : (
-          <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
-            {action
-              ? props.renderAction({
-                  onRetry: () =>
-                    void collections.retryAction(actionKey).then((opened) => {
-                      if (!collections.actions().has(actionKey)) {
-                        onClose();
-                        onCreated(opened);
-                      }
-                    }),
-                  onReload: () => {
-                    collections.discardAction(actionKey);
-                    void collections.reload();
-                  },
-                  onDiscard: () => collections.discardAction(actionKey),
-                })
-              : null}
-            {table.createFields.map((field) => (
-              <View key={field.fieldId} style={styles.field}>
-                {field.type === "checkbox" ? null : (
-                  <Text
-                    style={[styles.label, { color: theme.muted }]}
-                    accessibilityLabel={
-                      field.required ? `${field.name}, ${collectionWords.required}` : field.name
-                    }
-                  >
-                    {field.name}
-                    {field.required ? " *" : ""}
-                  </Text>
-                )}
-                <FieldInput
-                  field={field}
-                  draft={
-                    drafts[field.fieldId] ?? draftOf(field, field.default, { emptyDate: true })
-                  }
-                  onChange={(next) => setField(field.fieldId, next)}
-                  error={errors[field.fieldId] ?? null}
-                  onClearDate={
-                    field.type === "date" && !field.required
-                      ? () => setField(field.fieldId, "")
-                      : null
-                  }
-                  relationLabels={labels[field.fieldId]}
-                  onPickRelation={
-                    field.type === "relation" ? () => setPickingId(field.fieldId) : undefined
-                  }
-                />
-              </View>
-            ))}
-          </ScrollView>
-        )}
-      </View>
+      ) : null}
     </Modal>
   );
 }

@@ -1,10 +1,11 @@
 import { collectionWords } from "@dohc/interface-words/collections";
-import type {
-  CollectionField,
-  CreateCollectionField,
-  RecordId,
-  RecordValue,
-  RelationLabels,
+import {
+  isRelationKey,
+  type CollectionField,
+  type CreateCollectionField,
+  type RecordId,
+  type RecordValue,
+  type RelationLabels,
 } from "../server/phoneCollections";
 
 // How the phone shows a record's values, read-only and plain, by field type.
@@ -44,10 +45,6 @@ function date(value: string): string {
         minute: "2-digit",
       });
 }
-
-const isRelationKey = (value: unknown): value is RecordId =>
-  (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
-  (typeof value === "number" && Number.isFinite(value));
 
 /** One field's value. `files` names attached files by ID; `relationLabels` maps JSON-encoded keys to labels. */
 export function shownValue(

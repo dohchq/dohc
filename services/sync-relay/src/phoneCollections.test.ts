@@ -2357,3 +2357,202 @@ CREATE TABLE entries(id TEXT PRIMARY KEY NOT NULL,cat_code REAL REFERENCES categ
     values: { [ENT_CAT]: 1.5 },
   });
 });
+
+it("resolves more than 25 relation links beyond row 100 and paginates cursors on long sorted text", async () => {
+  const DS = id(800),
+    TAGS = id(801),
+    TAG_ID = id(802),
+    TAG_LABEL = id(803),
+    ITEMS = id(804),
+    ITEM_ID = id(805),
+    ITEM_TITLE = id(806),
+    ITEM_TAGS = id(807),
+    TAG_READ = id(810),
+    TAG_CREATE = id(811),
+    ITEM_READ = id(812),
+    ITEM_CREATE = id(813);
+  const def: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: DS,
+    name: "Big",
+    schemaPath: "big/schema.sql",
+    operationsPath: "big/operations.js",
+    tables: [
+      {
+        tableId: TAGS,
+        name: "Tags",
+        sqlName: "tags",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: TAG_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: TAG_LABEL,
+            name: "Label",
+            sqlColumn: "label",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: ITEMS,
+        name: "Items",
+        sqlName: "items",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ITEM_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ITEM_TITLE,
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: ITEM_TAGS,
+            name: "Tags",
+            sqlColumn: "tag_ids",
+            type: "relation",
+            required: false,
+            unique: false,
+            relation: { datasetId: DS, tableId: TAGS, fieldId: TAG_ID, many: true },
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: TAG_READ,
+        name: "readTags",
+        label: "Read",
+        tableId: TAGS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: TAG_CREATE,
+        name: "createTag",
+        label: "Create",
+        tableId: TAGS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [TAG_ID, TAG_LABEL],
+      },
+      {
+        operationId: ITEM_READ,
+        name: "readItems",
+        label: "Read",
+        tableId: ITEMS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ITEM_ID, ITEM_TITLE, ITEM_TAGS],
+      },
+      {
+        operationId: ITEM_CREATE,
+        name: "createItem",
+        label: "Create",
+        tableId: ITEMS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ITEM_ID, ITEM_TITLE, ITEM_TAGS],
+      },
+    ],
+  };
+  const sql = `CREATE TABLE tags(id TEXT PRIMARY KEY NOT NULL,label TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,tag_ids TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const src = generateDatasetOperations(def);
+  const rev = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: sql,
+    operationSource: src,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: rev,
+    schemaSql: sql,
+    operationSource: src,
+    capacityBytes: 4 * 1024 * 1024,
+  });
+  pushFile(f.storage, "big-dataset", null, {
+    path: "big/dataset.json",
+    text: JSON.stringify({ datasetId: DS }),
+  });
+  for (let i = 0; i < 126; i++) {
+    const tid = `t-${String(i).padStart(3, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: TAG_CREATE,
+      input: { values: { [TAG_ID]: tid, [TAG_LABEL]: `Tag ${i}` } },
+      idempotencyKey: `bt-${i}`,
+    });
+  }
+  const lateTags = Array.from({ length: 26 }, (_, i) => `t-${String(100 + i).padStart(3, "0")}`);
+  const longText = "A".repeat(4096);
+  for (let i = 0; i < PHONE_COLLECTION_PAGE + 1; i++) {
+    const iid = `i-${String(i).padStart(2, "0")}`;
+    await f.host.invoke(owner, {
+      workspaceId: "w",
+      datasetId: DS,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      operationId: ITEM_CREATE,
+      input: {
+        values: {
+          [ITEM_ID]: iid,
+          [ITEM_TITLE]: `${longText}-${String(i).padStart(2, "0")}`,
+          [ITEM_TAGS]: i === 0 ? lateTags : [],
+        },
+      },
+      idempotencyKey: `bi-${i}`,
+    });
+  }
+  const page1 = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    sort: { fieldId: ITEM_TITLE, direction: "asc" },
+  });
+  expect(page1.status).toBe(200);
+  const res1 = page1.body.result as {
+    nextCursor: unknown;
+    relations: Record<string, Record<string, string>>;
+  };
+  expect(Object.keys(res1.relations[ITEM_TAGS] ?? {})).toHaveLength(26);
+  expect(res1.relations[ITEM_TAGS]?.['"t-125"']).toBe("Tag 125");
+  expect(res1.nextCursor).not.toBeNull();
+  const page2 = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ITEMS,
+    sort: { fieldId: ITEM_TITLE, direction: "asc" },
+    after: res1.nextCursor,
+  });
+  expect(page2.status).toBe(200);
+  expect((page2.body.result as { rows: Array<{ id: string }> }).rows.map((r) => r.id)).toEqual([
+    `i-${PHONE_COLLECTION_PAGE}`,
+  ]);
+});

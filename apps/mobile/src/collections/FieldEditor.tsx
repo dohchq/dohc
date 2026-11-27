@@ -103,13 +103,6 @@ function Editor(props: {
     <Stack.Screen
       options={{
         title: field.name,
-        ...(kind === "relation"
-          ? {
-              headerTransparent: false,
-              headerStyle: { backgroundColor: theme.bg },
-              headerShadowVisible: false,
-            }
-          : {}),
         headerLeft: () => (
           <HeaderButton label={confirmWords.cancel} onPress={() => router.back()} />
         ),

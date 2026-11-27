@@ -26,13 +26,14 @@ export interface FieldInputProps {
   readonly onClearDate?: (() => void) | null;
   readonly inlineDate?: boolean;
   readonly autoFocus?: boolean;
+  readonly disabled?: boolean;
   readonly error?: string | null;
   readonly relationLabels?: Readonly<Record<string, string>>;
   readonly onPickRelation?: () => void;
 }
 
 export function FieldInput(props: FieldInputProps) {
-  const { field, draft, onChange, error } = props;
+  const { field, draft, onChange, error, disabled = false } = props;
   const theme = useTheme();
   let control;
   if (field.type === "checkbox")
@@ -42,6 +43,7 @@ export function FieldInput(props: FieldInputProps) {
         <Switch
           value={draft === true}
           onValueChange={onChange}
+          disabled={disabled}
           accessibilityLabel={field.name}
           trackColor={{ true: theme.accent }}
         />
@@ -53,8 +55,9 @@ export function FieldInput(props: FieldInputProps) {
         name={field.name}
         day={typeof draft === "string" ? draft : ""}
         inline={props.inlineDate === true}
+        disabled={disabled}
         onPick={onChange}
-        onClear={props.onClearDate ?? null}
+        onClear={disabled ? null : (props.onClearDate ?? null)}
       />
     );
   else if (field.type === "select" || field.type === "multi-select") {
@@ -65,6 +68,7 @@ export function FieldInput(props: FieldInputProps) {
       return (
         <Pressable
           key={option}
+          disabled={disabled}
           onPress={() => {
             void Haptics.selectionAsync();
             onChange(
@@ -78,9 +82,9 @@ export function FieldInput(props: FieldInputProps) {
             pressed && { backgroundColor: theme.panel2 },
           ]}
           accessibilityRole={many ? "checkbox" : "radio"}
-          accessibilityState={many ? { checked: on } : { selected: on }}
+          accessibilityState={many ? { checked: on, disabled } : { selected: on, disabled }}
         >
-          <Text style={[styles.text, { color: theme.ink }]}>{option}</Text>
+          <Text style={[styles.text, { color: disabled ? theme.muted : theme.ink }]}>{option}</Text>
           {on ? <Check size={20} color={theme.accent} strokeWidth={2} /> : null}
         </Pressable>
       );
@@ -96,7 +100,7 @@ export function FieldInput(props: FieldInputProps) {
     control = (
       <Pressable
         onPress={props.onPickRelation}
-        disabled={!props.onPickRelation}
+        disabled={disabled || !props.onPickRelation}
         android_ripple={ripple(theme)}
         style={({ pressed }) => [
           styles.row,
@@ -104,10 +108,11 @@ export function FieldInput(props: FieldInputProps) {
           pressed && { backgroundColor: theme.panel2 },
         ]}
         accessibilityRole="button"
+        accessibilityState={{ disabled: disabled || !props.onPickRelation }}
         accessibilityLabel={`${field.name}, ${summary || placeholder}`}
       >
         <Text
-          style={[styles.text, { color: summary ? theme.ink : theme.subtle }]}
+          style={[styles.text, { color: summary && !disabled ? theme.ink : theme.subtle }]}
           numberOfLines={2}
         >
           {summary || placeholder}
@@ -120,6 +125,7 @@ export function FieldInput(props: FieldInputProps) {
       <TextInput
         value={typeof draft === "string" ? draft : ""}
         onChangeText={onChange}
+        editable={!disabled}
         autoFocus={props.autoFocus}
         multiline={field.type === "text"}
         keyboardType={
@@ -137,7 +143,10 @@ export function FieldInput(props: FieldInputProps) {
         style={[
           styles.input,
           field.type === "text" && styles.multiline,
-          { color: theme.ink, borderColor: error ? theme.danger : theme.line },
+          {
+            color: disabled ? theme.muted : theme.ink,
+            borderColor: error ? theme.danger : theme.line,
+          },
         ]}
       />
     );
@@ -157,6 +166,7 @@ function DateInput(props: {
   name: string;
   day: string;
   inline: boolean;
+  disabled: boolean;
   onPick(day: string): void;
   onClear: (() => void) | null;
 }) {
@@ -171,9 +181,11 @@ function DateInput(props: {
   const formatted = props.day
     ? rowText(shownValue({ type: "date" }, props.day, {}), props.name)
     : null;
+  const showInline =
+    Platform.OS === "ios" && !props.disabled && (props.inline || (expanded && Boolean(props.day)));
   return (
     <>
-      {Platform.OS === "ios" && expanded ? (
+      {showInline ? (
         <DateTimePicker
           value={value}
           mode="date"
@@ -184,19 +196,26 @@ function DateInput(props: {
         />
       ) : (
         <Pressable
+          disabled={props.disabled}
           onPress={() => {
             if (Platform.OS === "android") openDialog();
             else {
-              if (!expanded && !props.day) props.onPick(dayOf(new Date()));
-              setExpanded((open) => !open);
+              if (!props.day) props.onPick(dayOf(new Date()));
+              setExpanded(true);
             }
           }}
           android_ripple={ripple(theme)}
           style={[styles.row, { borderColor: theme.line }]}
           accessibilityRole="button"
+          accessibilityState={{ disabled: props.disabled }}
           accessibilityLabel={props.name}
         >
-          <Text style={[styles.text, { color: formatted ? theme.ink : theme.subtle }]}>
+          <Text
+            style={[
+              styles.text,
+              { color: formatted && !props.disabled ? theme.ink : theme.subtle },
+            ]}
+          >
             {formatted ?? collectionWords.chooseDate}
           </Text>
         </Pressable>

@@ -189,14 +189,13 @@ function Records({
   };
   const showSort = sortable.length > 0 && !view?.refused;
   const showCreate = phoneWrites && table?.canCreate;
+  const sheetOpen =
+    creating && Boolean(showCreate && table && newKey && table.createFields.length > 0);
 
   const title = (
     <Stack.Screen
       options={{
         title: description?.name ?? "",
-        headerTransparent: false,
-        headerStyle: { backgroundColor: theme.bg },
-        headerShadowVisible: false,
         headerRight:
           showSort || showCreate
             ? () => (
@@ -221,7 +220,7 @@ function Records({
                       />
                     </Pressable>
                   ) : null}
-                  {!showCreate ? null : adding?.state.kind === "saving" && !creating ? (
+                  {!showCreate ? null : adding?.state.kind === "saving" && !sheetOpen ? (
                     <View style={styles.headerButton}>
                       <ActivityIndicator accessibilityLabel={collectionWords.saving} />
                     </View>
@@ -344,7 +343,7 @@ function Records({
           />
         </View>
       ) : null}
-      {newKey && adding && !creating ? (
+      {newKey && adding && !sheetOpen ? (
         <View style={styles.problem}>
           <ChangeLine
             state={adding.state}
@@ -403,7 +402,7 @@ function Records({
       />
       {showCreate && table && newKey && table.createFields.length > 0 ? (
         <NewRecordSheet
-          open={creating}
+          open={sheetOpen}
           table={table}
           collections={collections}
           action={adding}
