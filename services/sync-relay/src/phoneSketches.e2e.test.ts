@@ -388,14 +388,13 @@ it.skipIf(engine.missing)(
       objectId,
       requestId: "req-save-1",
       elements: [box],
-      appState: { viewBackgroundColor: "#f5f0e6" },
     });
     expect(saved).toMatchObject({
       ok: true,
       path: "Trip Map.excalidraw",
       objectId,
       lostElementIds: [],
-      appState: { viewBackgroundColor: "#f5f0e6" },
+      appState: { gridSize: null, viewBackgroundColor: "#ffffff" },
       missingAssets: 0,
     });
     expect(saved.elements).toEqual([box]);
@@ -407,7 +406,6 @@ it.skipIf(engine.missing)(
         objectId,
         requestId: "req-save-1",
         elements: [box],
-        appState: { viewBackgroundColor: "#f5f0e6" },
       }),
     ).toEqual(saved);
 
@@ -426,7 +424,7 @@ it.skipIf(engine.missing)(
       expect(provider.lineage).toBe("existing");
       const scene = foldScene(provider.doc);
       expect(scene.elements).toEqual([box]);
-      expect(scene.appState).toEqual({ gridSize: null, viewBackgroundColor: "#f5f0e6" });
+      expect(scene.appState).toEqual({ gridSize: null, viewBackgroundColor: "#ffffff" });
     } finally {
       await provider.evict().catch(() => undefined);
     }
@@ -646,8 +644,20 @@ it.skipIf(engine.missing)(
     expect(saved).toMatchObject({
       ok: true,
       lostElementIds: ["el-shared"],
+      lostVersions: { "el-shared": 4 },
     });
     expect(saved.elements).toEqual([desktopWinner]);
+
+    // Re-saving the kept draft bumped above the winning version with a fresh requestId wins cleanly.
+    const phoneRetry = rect("el-shared", 5, 777, { x: 99 });
+    const retried = await op("saveSketch", {
+      path: "Race.excalidraw",
+      objectId,
+      requestId: "req-race-win",
+      elements: [phoneRetry],
+    });
+    expect(retried).toMatchObject({ ok: true, lostElementIds: [] });
+    expect(retried.elements).toEqual([phoneRetry]);
   },
   120_000,
 );
@@ -665,24 +675,25 @@ it.skipIf(engine.missing)(
       status: "saved",
       scale: [1, 1],
     };
+    const originalText = JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      elements: [shape, imgEl],
+      appState: { gridModeEnabled: true },
+      files: {
+        [fileId]: {
+          id: fileId,
+          mimeType: "image/png",
+          dataURL: PNG_DATA_URL,
+          created: 1_700_000_000_000,
+        },
+      },
+    });
     const written = await owner.files.writeTextFile({
       workspaceId: WORKSPACE,
       versionId: owner.versionId,
       path: "NeverOpened.excalidraw",
-      text: JSON.stringify({
-        type: "excalidraw",
-        version: 2,
-        elements: [shape, imgEl],
-        appState: { gridModeEnabled: true },
-        files: {
-          [fileId]: {
-            id: fileId,
-            mimeType: "image/png",
-            dataURL: PNG_DATA_URL,
-            created: 1_700_000_000_000,
-          },
-        },
-      }),
+      text: originalText,
       publish: true,
       createOnly: true,
       metadata: { origin: "api", summary: "Seed never-opened sketch" },
@@ -712,6 +723,31 @@ it.skipIf(engine.missing)(
       "raw-img-el",
     ]);
     expect(logCount(), "reading a never-opened sketch must not publish anything").toBe(beforeRead);
+
+    // A refused first save must not rewrite or seed the original never-opened sketch.
+    const refusedFirstSave = await call("saveSketch", {
+      path: "NeverOpened.excalidraw",
+      objectId,
+      requestId: "req-never-opened-bad-img",
+      elements: [
+        {
+          ...rect("img-forbidden", 1, 20),
+          type: "image",
+          fileId: "forbidden-new-img",
+          status: "saved",
+          scale: [1, 1],
+        },
+      ],
+    });
+    expect(refusedFirstSave.status).toBe(400);
+    expect(logCount(), "refused first save must not publish anything").toBe(beforeRead);
+    await owner.sync();
+    const untouched = await owner.files.readTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "NeverOpened.excalidraw",
+    });
+    expect(untouched?.text).toBe(originalText);
 
     // Saving seeds the absent lineage, preserves the embedded image asset, and syncs back to desktop.
     const added = rect("phone-added", 1, 33, { index: "a2" });

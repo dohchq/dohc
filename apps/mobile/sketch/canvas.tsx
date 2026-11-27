@@ -1,10 +1,8 @@
 import {
   EXCALIDRAW_EXPORTABLE_APP_STATE,
   revisionKey,
-  stableJson,
   type ElementSnapshot,
   type JsonObject,
-  type JsonValue,
 } from "@dohc/excalidraw-scene";
 import { CaptureUpdateAction, Excalidraw, MainMenu, restore } from "@excalidraw/excalidraw";
 import { useEffect, useRef, useState } from "react";
@@ -21,6 +19,7 @@ interface SketchPayload {
   files: Record<string, BinaryFileData>;
   readOnly: boolean;
   theme: "light" | "dark";
+  preserved?: ElementSnapshot[];
 }
 
 interface SketchHostWindow extends Window {
@@ -35,40 +34,28 @@ const host = window as SketchHostWindow;
 const post = (kind: string, payload: Record<string, unknown> = {}) =>
   host.ReactNativeWebView?.postMessage?.(JSON.stringify({ kind, ...payload }));
 
-function snapshot(elements: readonly ElementSnapshot[], appState: Record<string, unknown>) {
-  const el = new Map<string, string>();
+function snapshot(elements: readonly ElementSnapshot[]) {
+  const base = new Map<string, string>();
   for (const e of elements) {
-    if (!e.isDeleted) el.set(e.id, revisionKey(e.id, e.version, e.versionNonce));
+    if (!e.isDeleted) base.set(e.id, revisionKey(e.id, e.version, e.versionNonce));
   }
-  const state = new Map<string, string>();
-  for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
-    if (appState[key] !== undefined) state.set(key, stableJson(appState[key]));
-  }
-  return { elements: el, appState: state };
+  return base;
 }
 
-function collectDelta(
-  elements: readonly ElementSnapshot[],
-  appState: Record<string, unknown>,
-  base: { elements: ReadonlyMap<string, string>; appState: ReadonlyMap<string, string> },
-) {
-  const changedElements: ElementSnapshot[] = [];
+function isChangedElement(e: ElementSnapshot, base: ReadonlyMap<string, string>) {
+  if (e.type === "text" && e.isDeleted !== true && (typeof e.text !== "string" || !e.text))
+    return false;
+  const prev = base.get(e.id);
+  if (prev === undefined && e.isDeleted) return false;
+  return prev !== revisionKey(e.id, e.version, e.versionNonce);
+}
+
+function collectDelta(elements: readonly ElementSnapshot[], base: ReadonlyMap<string, string>) {
+  const changed: ElementSnapshot[] = [];
   for (const e of elements) {
-    if (e.type === "text" && e.isDeleted !== true && (typeof e.text !== "string" || !e.text))
-      continue;
-    const prev = base.elements.get(e.id);
-    if (prev === undefined && e.isDeleted) continue;
-    if (prev !== revisionKey(e.id, e.version, e.versionNonce)) {
-      changedElements.push(JSON.parse(JSON.stringify(e)) as ElementSnapshot);
-    }
+    if (isChangedElement(e, base)) changed.push(JSON.parse(JSON.stringify(e)) as ElementSnapshot);
   }
-  const changedAppState: Record<string, JsonValue> = {};
-  for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
-    if (appState[key] === undefined) continue;
-    const normalized = JSON.parse(JSON.stringify(appState[key])) as JsonValue;
-    if (base.appState.get(key) !== stableJson(normalized)) changedAppState[key] = normalized;
-  }
-  return { elements: changedElements, appState: changedAppState };
+  return changed;
 }
 
 function restoreScene(payload: SketchPayload) {
@@ -89,6 +76,22 @@ function restoreScene(payload: SketchPayload) {
   };
 }
 
+function mergePreserved(
+  remote: readonly ElementSnapshot[],
+  preserved: readonly ElementSnapshot[] | undefined,
+) {
+  if (!preserved || preserved.length === 0) return remote;
+  const byId = new Map(preserved.map((e) => [e.id, e]));
+  const merged = remote.map((e) => {
+    const kept = byId.get(e.id);
+    if (!kept) return e;
+    byId.delete(e.id);
+    return kept;
+  });
+  for (const kept of byId.values()) merged.push(kept);
+  return merged;
+}
+
 function SketchCanvas() {
   const [loaded, setLoaded] = useState<{
     mount: number;
@@ -97,7 +100,7 @@ function SketchCanvas() {
   } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  const baseRef = useRef(snapshot([], {}));
+  const baseRef = useRef<Map<string, string>>(new Map());
   const dirtyRef = useRef(false);
   const paintedMountRef = useRef(0);
   const readOnlyRef = useRef(true);
@@ -116,7 +119,7 @@ function SketchCanvas() {
   useEffect(() => {
     host.__dohcSketchLoad = (next) => {
       const scene = restoreScene(next);
-      baseRef.current = snapshot(scene.elements, scene.appState);
+      baseRef.current = snapshot(scene.elements);
       setDirty(false);
       setTheme(next.theme);
       setLoaded((prev) => ({ mount: (prev?.mount ?? 0) + 1, readOnly: next.readOnly, scene }));
@@ -124,8 +127,9 @@ function SketchCanvas() {
     host.__dohcSketchTheme = (next) => setTheme(next);
     host.__dohcSketchApplySaved = (next) => {
       const scene = restoreScene(next);
-      baseRef.current = snapshot(scene.elements, scene.appState);
-      setDirty(false);
+      baseRef.current = snapshot(scene.elements);
+      const elements = mergePreserved(scene.elements, next.preserved);
+      setDirty((next.preserved?.length ?? 0) > 0);
       const api = apiRef.current;
       if (!api) return;
       const files = Object.values(scene.files);
@@ -136,7 +140,7 @@ function SketchCanvas() {
         ),
       );
       api.updateScene({
-        elements: scene.elements as unknown as Parameters<
+        elements: elements as unknown as Parameters<
           ExcalidrawImperativeAPI["updateScene"]
         >[0]["elements"],
         appState: appState as unknown as Parameters<
@@ -149,13 +153,13 @@ function SketchCanvas() {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       requestAnimationFrame(() => {
         const api = apiRef.current;
-        if (!api) return post("collected", { token, elements: [], appState: {} });
-        const delta = collectDelta(
-          api.getSceneElementsIncludingDeleted() as unknown as ElementSnapshot[],
-          api.getAppState() as unknown as Record<string, unknown>,
-          baseRef.current,
-        );
-        post("collected", { token, ...delta });
+        const elements = api
+          ? collectDelta(
+              api.getSceneElementsIncludingDeleted() as unknown as ElementSnapshot[],
+              baseRef.current,
+            )
+          : [];
+        post("collected", { token, elements });
       });
     };
     post("started");
@@ -198,21 +202,16 @@ function SketchCanvas() {
         onChange={
           loaded.readOnly
             ? undefined
-            : (elements, appState) => {
+            : (elements) => {
                 if (readOnlyRef.current) return;
-                const delta = collectDelta(
-                  elements as unknown as ElementSnapshot[],
-                  appState as unknown as Record<string, unknown>,
-                  baseRef.current,
-                );
-                setDirty(delta.elements.length > 0 || Object.keys(delta.appState).length > 0);
+                const list = elements as unknown as readonly ElementSnapshot[];
+                setDirty(list.some((e) => isChangedElement(e, baseRef.current)));
               }
         }
       >
         {loaded.readOnly ? null : (
           <MainMenu>
             <MainMenu.DefaultItems.ClearCanvas />
-            <MainMenu.DefaultItems.ChangeCanvasBackground />
           </MainMenu>
         )}
       </Excalidraw>

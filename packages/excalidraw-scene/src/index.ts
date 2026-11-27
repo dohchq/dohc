@@ -177,32 +177,27 @@ export function lostElementRevisions<T extends ElementRevisionIdentity>(
   });
 }
 
+export function validateSceneElements(elements: readonly unknown[]): ElementSnapshot[] {
+  return elements.map(validateElement);
+}
+
 export function applySceneDelta(
   doc: Y.Doc,
-  input: { elements?: readonly unknown[]; appState?: Readonly<Record<string, unknown>> },
+  elements: readonly unknown[],
 ): { update: Uint8Array | null; written: ElementSnapshot[] } {
-  const current = foldScene(doc);
-  const currentById = new Map(current.elements.map((e) => [e.id, e]));
+  const currentById = new Map(foldScene(doc).elements.map((e) => [e.id, e]));
   const scratch = new Y.Doc();
   try {
     Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
     const before = Y.encodeStateVector(scratch);
     const written: ElementSnapshot[] = [];
     let changed = false;
-    for (const raw of input.elements ?? []) {
+    for (const raw of elements) {
       const element = validateElement(raw);
       written.push(element);
       const winner = currentById.get(element.id);
       if (winner && revisionDominates(winner, element.version, element.versionNonce)) continue;
       if (insertElementRevision(scratch, element)) changed = true;
-    }
-    for (const [key, value] of Object.entries(input.appState ?? {})) {
-      if (value === undefined) continue;
-      validateAppStateProperty(key, value as JsonValue);
-      const existing = current.appState[key];
-      if (existing !== undefined && stableJson(existing) === stableJson(value)) continue;
-      setAppStateProperty(scratch, key, value as JsonValue);
-      changed = true;
     }
     return { update: changed ? Y.encodeStateAsUpdate(scratch, before) : null, written };
   } finally {

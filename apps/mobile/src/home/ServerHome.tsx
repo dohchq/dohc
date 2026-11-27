@@ -25,6 +25,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import {
   ActivityIndicator,
@@ -246,8 +247,19 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
-  const fileSection = (id: string, title: string, list: FirstFiles | undefined) => {
-    if (!list?.count) return null;
+  const fileSection = (
+    id: string,
+    title: string,
+    list: FirstFiles | undefined,
+    extra?: {
+      shown?: readonly HomeRow[];
+      openable?: boolean;
+      forceShow?: boolean;
+      footer?: ReactNode;
+    },
+  ) => {
+    if (!extra?.forceShow && !list?.count) return null;
+    const items = extra?.shown ?? list?.shown ?? [];
     return (
       <>
         <SectionHeader
@@ -257,9 +269,14 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           first={false}
           onToggle={() => toggle(setCollapsed, id)}
         />
-        {collapsed.has(id)
-          ? null
-          : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
+        {collapsed.has(id) ? null : (
+          <>
+            {items.map((row) => (
+              <Row key={row.key} row={row} onPress={press} openable={extra?.openable} />
+            ))}
+            {extra?.footer}
+          </>
+        )}
       </>
     );
   };
@@ -332,67 +349,54 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           <Row key={row.key} row={row} onPress={press} onPressIn={pressInRow} />
         ))
       )}
-      {canCreateSketch || (rows?.sketches.count ?? 0) > 0 ? (
-        <>
-          <SectionHeader
-            title={workspaceWords.sketches}
-            collapsed={collapsed.has("sketches")}
-            unread={false}
-            first={false}
-            onToggle={() => toggle(setCollapsed, "sketches")}
-          />
-          {collapsed.has("sketches") ? null : (
-            <>
-              {shownSketches.length === 0 ? (
-                <EmptyLine text={workspaceWords.noSketches} />
-              ) : (
-                shownSketches.map((row) => (
-                  <Row key={row.key} row={row} onPress={press} openable={canOpenSketch} />
-                ))
-              )}
-              {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
-                <Pressable
-                  onPress={() => setShowAllSketches(true)}
-                  android_ripple={ripple(theme)}
-                  style={({ pressed }) => [
-                    styles.row,
-                    styles.app,
-                    pressed ? { backgroundColor: theme.panel2 } : null,
-                  ]}
-                  accessibilityRole="button"
-                >
-                  <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
-                    {workspaceWords.showAllSketches(rows.sketches.count)}
-                  </Text>
-                </Pressable>
-              ) : null}
-              {canCreateSketch ? (
-                <Pressable
-                  disabled={creatingSketch}
-                  onPress={() => void startNewSketch()}
-                  android_ripple={ripple(theme)}
-                  style={({ pressed }) => [
-                    styles.row,
-                    styles.app,
-                    pressed ? { backgroundColor: theme.panel2 } : null,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel={workspaceWords.newSketch}
-                >
-                  {creatingSketch ? (
-                    <ActivityIndicator size="small" />
-                  ) : (
-                    <Plus size={18} color={theme.accent} strokeWidth={2} />
-                  )}
-                  <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
-                    {creatingSketch ? workspaceWords.creatingSketch : workspaceWords.newSketch}
-                  </Text>
-                </Pressable>
-              ) : null}
-            </>
-          )}
-        </>
-      ) : null}
+      {fileSection("sketches", workspaceWords.sketches, rows?.sketches, {
+        shown: shownSketches,
+        openable: canOpenSketch,
+        forceShow: canCreateSketch,
+        footer: (
+          <>
+            {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
+              <Pressable
+                onPress={() => setShowAllSketches(true)}
+                android_ripple={ripple(theme)}
+                style={({ pressed }) => [
+                  styles.row,
+                  styles.app,
+                  pressed ? { backgroundColor: theme.panel2 } : null,
+                ]}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
+                  {workspaceWords.showAllSketches(rows.sketches.count)}
+                </Text>
+              </Pressable>
+            ) : null}
+            {canCreateSketch ? (
+              <Pressable
+                disabled={creatingSketch}
+                onPress={() => void startNewSketch()}
+                android_ripple={ripple(theme)}
+                style={({ pressed }) => [
+                  styles.row,
+                  styles.app,
+                  pressed ? { backgroundColor: theme.panel2 } : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel={workspaceWords.newSketch}
+              >
+                {creatingSketch ? (
+                  <ActivityIndicator size="small" />
+                ) : (
+                  <Plus size={18} color={theme.accent} strokeWidth={2} />
+                )}
+                <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
+                  {creatingSketch ? workspaceWords.creatingSketch : workspaceWords.newSketch}
+                </Text>
+              </Pressable>
+            ) : null}
+          </>
+        ),
+      })}
       {collectionsState.collections?.length ? (
         <SectionHeader
           title={collectionWords.collections}

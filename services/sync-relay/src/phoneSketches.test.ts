@@ -286,7 +286,7 @@ describe("owner-only sketch ops inside /ops/*", () => {
           objectId: "obj-1",
           requestId: "req-1",
           elements: [],
-          appState: { zoom: 2 },
+          appState: { viewBackgroundColor: "#336600" },
         },
       ],
     ] as const) {

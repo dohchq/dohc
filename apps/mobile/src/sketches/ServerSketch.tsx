@@ -1,4 +1,4 @@
-import type { ElementSnapshot, JsonObject } from "@dohc/excalidraw-scene";
+import type { ElementSnapshot } from "@dohc/excalidraw-scene";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { workspaceWords } from "@dohc/interface-words/workspace";
@@ -14,6 +14,8 @@ import { isOutOfSpace } from "../pages/editorFile";
 import { LoadingLines, pageStyles, Strip } from "../pages/pageParts";
 import { shownProblem } from "../server/client";
 import {
+  nextSaveAttempt,
+  preserveLostElements,
   readSketch,
   saveSketch,
   type SketchReadResult,
@@ -27,7 +29,6 @@ import { useProblemText } from "../workspace/useView";
 import { sketchFolderUri, sketchHtmlUri } from "./sketchFile";
 import { sketchTitle } from "./sketchList";
 
-type Delta = { elements: ElementSnapshot[]; appState: JsonObject };
 type ReadState =
   | { kind: "loading" }
   | { kind: "ready"; scene: SketchScene }
@@ -85,11 +86,14 @@ function SketchScreen({ path }: { path: string }) {
   const pendingCollect = useRef<{
     token: number;
     timer: ReturnType<typeof setTimeout>;
-    resolve(d: Delta): void;
+    resolve(elements: ElementSnapshot[]): void;
     reject(e: Error): void;
   } | null>(null);
   const saveAbortRef = useRef<AbortController | null>(null);
-  const saveRequestId = useRef<string | null>(null);
+  const saveAttemptRef = useRef<{
+    readonly fingerprint: string;
+    readonly requestId: string;
+  } | null>(null);
 
   const cancelCollect = useCallback((reason: string) => {
     const p = pendingCollect.current;
@@ -125,6 +129,7 @@ function SketchScreen({ path }: { path: string }) {
     const controller = new AbortController();
     setReadState({ kind: "loading" });
     loadedIntoWeb.current = false;
+    saveAttemptRef.current = null;
     setWebPhase("idle");
     setEdit({ dirty: false, saving: false, error: null, conflicts: 0, missingAssets: 0 });
     readSketch(signIn.client, data.workspaceId, path, controller.signal).then(
@@ -148,9 +153,20 @@ function SketchScreen({ path }: { path: string }) {
   }, [attempt, data, path, problemText, signIn]);
 
   const sendScene = useCallback(
-    (scene: SketchScene, fn: "__dohcSketchLoad" | "__dohcSketchApplySaved") =>
+    (
+      scene: SketchScene,
+      fn: "__dohcSketchLoad" | "__dohcSketchApplySaved",
+      preserved?: readonly ElementSnapshot[],
+    ) =>
       web.current?.injectJavaScript(
-        `window.${fn}?.(${JSON.stringify({ elements: scene.elements, appState: scene.appState, files: scene.files, readOnly: !editable, theme: scheme })}); true;`,
+        `window.${fn}?.(${JSON.stringify({
+          elements: scene.elements,
+          appState: scene.appState,
+          files: scene.files,
+          readOnly: !editable,
+          theme: scheme,
+          ...(preserved && preserved.length > 0 ? { preserved } : {}),
+        })}); true;`,
       ),
     [editable, scheme],
   );
@@ -168,7 +184,7 @@ function SketchScreen({ path }: { path: string }) {
 
   const collectFromWeb = useCallback(
     () =>
-      new Promise<Delta>((resolve, reject) => {
+      new Promise<ElementSnapshot[]>((resolve, reject) => {
         cancelCollect("superseded");
         const token = ++collectToken.current;
         const timer = setTimeout(() => cancelCollect("collect-timeout"), 5_000);
@@ -181,39 +197,42 @@ function SketchScreen({ path }: { path: string }) {
   const performSave = useCallback(async (): Promise<boolean> => {
     if (!data || !editable || edit.saving || !sceneRef.current) return false;
     setEdit((prev) => ({ ...prev, saving: true, error: null, conflicts: 0 }));
-    const requestId = (saveRequestId.current ??= Crypto.randomUUID());
     const controller = new AbortController();
     saveAbortRef.current = controller;
     try {
-      const delta = await collectFromWeb();
+      const elements = await collectFromWeb();
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return false;
+      const attemptState = nextSaveAttempt(saveAttemptRef.current, elements, Crypto.randomUUID);
+      saveAttemptRef.current = attemptState;
       const answer = await saveSketch(
         signIn.client,
         data.workspaceId,
         {
           path,
           objectId: sceneRef.current.objectId,
-          requestId,
-          elements: delta.elements,
-          ...(Object.keys(delta.appState).length > 0 ? { appState: delta.appState } : {}),
+          requestId: attemptState.requestId,
+          elements,
         },
         controller.signal,
       );
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return false;
       if (answer.kind === "saved") {
-        saveRequestId.current = null;
+        saveAttemptRef.current = null;
         sceneRef.current = answer;
+        const preserved = preserveLostElements(elements, answer);
+        const hasConflicts = answer.lostElementIds.length > 0;
         setEdit({
-          dirty: false,
+          dirty: hasConflicts,
           saving: false,
           error: null,
           conflicts: answer.lostElementIds.length,
           missingAssets: answer.missingAssets,
         });
-        sendScene(answer, "__dohcSketchApplySaved");
+        sendScene(answer, "__dohcSketchApplySaved", preserved);
         void data.refresh(views.files);
-        return true;
+        return !hasConflicts;
       }
+      saveAttemptRef.current = null;
       setEdit((prev) => ({
         ...prev,
         saving: false,
@@ -237,6 +256,13 @@ function SketchScreen({ path }: { path: string }) {
       setEdit((prev) => (prev.saving ? { ...prev, saving: false } : prev));
     }
   }, [collectFromWeb, data, edit.saving, editable, path, problemText, sendScene, signIn]);
+
+  const discardConflicts = useCallback(() => {
+    if (!sceneRef.current) return;
+    saveAttemptRef.current = null;
+    sendScene(sceneRef.current, "__dohcSketchApplySaved");
+    setEdit((prev) => ({ ...prev, dirty: false, conflicts: 0, error: null }));
+  }, [sendScene]);
 
   usePreventRemove(editable && edit.dirty && !leaving, ({ repeat }) => {
     const leave = () => setLeaving(() => repeat);
@@ -266,19 +292,12 @@ function SketchScreen({ path }: { path: string }) {
       setEdit((prev) =>
         prev.dirty === msg.dirty ? prev : { ...prev, dirty: msg.dirty as boolean },
       );
-      if (msg.dirty) saveRequestId.current = null;
     } else if (msg.kind === "collected" && pendingCollect.current?.token === msg.token) {
       const p = pendingCollect.current;
       if (!p) return;
       clearTimeout(p.timer);
       pendingCollect.current = null;
-      p.resolve({
-        elements: Array.isArray(msg.elements) ? (msg.elements as ElementSnapshot[]) : [],
-        appState:
-          typeof msg.appState === "object" && msg.appState !== null
-            ? (msg.appState as JsonObject)
-            : {},
-      });
+      p.resolve(Array.isArray(msg.elements) ? (msg.elements as ElementSnapshot[]) : []);
     }
   };
 
@@ -326,8 +345,8 @@ function SketchScreen({ path }: { path: string }) {
           key: "conf",
           icon: "lock" as const,
           text: workspaceWords.sketchSaveConflict(edit.conflicts),
-          action: documentWords.dismiss,
-          onAction: () => setEdit((p) => ({ ...p, conflicts: 0 })),
+          action: documentWords.discardEdits,
+          onAction: discardConflicts,
         }
       : null,
     edit.missingAssets > 0

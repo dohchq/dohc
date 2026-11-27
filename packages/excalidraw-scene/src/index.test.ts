@@ -414,23 +414,20 @@ describe("portable export", () => {
       sha256: SHA256,
     });
 
-    const staleOnly = applySceneDelta(doc, {
-      elements: [element("a", 2, 1, { x: 200 })],
-    });
+    const staleOnly = applySceneDelta(doc, [element("a", 2, 1, { x: 200 })]);
     expect(staleOnly.update).toBeNull();
     expect(staleOnly.written).toHaveLength(1);
     expect(lostElementRevisions(doc, staleOnly.written).map((each) => each.id)).toEqual(["a"]);
 
-    const mixed = applySceneDelta(doc, {
-      elements: [element("a", 2, 1, { x: 200 }), element("b", 1, 7, { x: 50 })],
-      appState: { viewBackgroundColor: "#faf9f5" },
-    });
+    const mixed = applySceneDelta(doc, [
+      element("a", 2, 1, { x: 200 }),
+      element("b", 1, 7, { x: 50 }),
+    ]);
     expect(mixed.update).not.toBeNull();
     Y.applyUpdate(doc, mixed.update!);
     const folded = foldScene(doc);
     expect(folded.elements.find((each) => each.id === "a")?.x).toBe(100);
     expect(folded.elements.find((each) => each.id === "b")?.x).toBe(50);
-    expect(folded.appState.viewBackgroundColor).toBe("#faf9f5");
     expect(folded.assets["asset-1"]?.sha256).toBe(SHA256);
     expect(lostElementRevisions(folded, mixed.written).map((each) => each.id)).toEqual(["a"]);
   });

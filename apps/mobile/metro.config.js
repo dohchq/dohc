@@ -4,7 +4,7 @@ const path = require("node:path");
 const { getDefaultConfig } = require("expo/metro-config");
 
 const sketchManifest = path.join(__dirname, "src/sketches/sketchAssets.generated.ts");
-const sketchHtml = path.join(__dirname, "assets/sketch/sketch.html");
+const sketchHtml = path.join(__dirname, "assets/sketch/index.html");
 if (!fs.existsSync(sketchManifest) || !fs.existsSync(sketchHtml)) {
   execFileSync(process.execPath, [path.join(__dirname, "scripts/build-sketch.mjs")], {
     stdio: "inherit",

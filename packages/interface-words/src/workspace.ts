@@ -12,7 +12,6 @@ export const workspaceWords = {
   newSketch: "New sketch",
   otherFiles: "Other files",
   noPages: "No pages yet.",
-  noSketches: "No sketches yet.",
   showAllSketches: (count: number) => `Show all ${count} sketches`,
   creatingSketch: "Creating…",
   sketchCreateFailed: "dohc could not create a sketch.",
@@ -24,8 +23,8 @@ export const workspaceWords = {
   sketchChangedElsewhere: "This sketch was replaced or deleted elsewhere.",
   sketchSaveConflict: (count: number) =>
     count === 1
-      ? "Someone else changed 1 element at the same time, so that edit was not kept."
-      : `Someone else changed ${count} elements at the same time, so those edits were not kept.`,
+      ? "Someone else changed 1 element. Your edit is still unsaved."
+      : `Someone else changed ${count} elements. Your edits are still unsaved.`,
   sketchAssetsMissing: (count: number) =>
     count === 1 ? "dohc could not load 1 image." : `dohc could not load ${count} images.`,
   sketchUnsavedTitle: "Save changes to this sketch?",

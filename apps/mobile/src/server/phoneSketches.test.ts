@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createServerClient } from "./client";
-import { createSketch, readSketch, saveSketch } from "./phoneSketches";
+import {
+  createSketch,
+  nextSaveAttempt,
+  preserveLostElements,
+  readSketch,
+  saveSketch,
+} from "./phoneSketches";
 import { testServer } from "./testServer";
 
 const signal = new AbortController().signal;
@@ -110,6 +116,7 @@ describe("phone sketch server operations", () => {
           files: {},
           missingAssets: 1,
           lostElementIds: ["el-2"],
+          lostVersions: { "el-2": 7 },
         },
       },
     });
@@ -134,6 +141,7 @@ describe("phone sketch server operations", () => {
       files: {},
       missingAssets: 1,
       lostElementIds: ["el-2"],
+      lostVersions: { "el-2": 7 },
     });
 
     server.on("POST", "/sync/ws-1/ops/saveSketch", {
@@ -188,5 +196,37 @@ describe("phone sketch server operations", () => {
         problem: "invalid",
       });
     }
+  });
+
+  it("binds save requestId to the exact submitted delta and bumps preserved lost edits", () => {
+    let seq = 0;
+    const makeId = () => `req-${++seq}`;
+    const one = { ...sampleElement, id: "one", version: 1, versionNonce: 10 };
+    const two = { ...sampleElement, id: "two", version: 1, versionNonce: 20 };
+
+    const first = nextSaveAttempt(null, [one], makeId);
+    expect(first.requestId).toBe("req-1");
+    expect(nextSaveAttempt(first, [one], makeId).requestId).toBe("req-1");
+    expect(nextSaveAttempt(first, [one, two], makeId).requestId).toBe("req-2");
+
+    const preserved = preserveLostElements(
+      [one, two],
+      {
+        kind: "saved",
+        path: "a.excalidraw",
+        objectId: "obj-1",
+        elements: [{ ...one, version: 4, versionNonce: 5 }],
+        appState: {},
+        files: {},
+        missingAssets: 0,
+        lostElementIds: ["one", "two"],
+        lostVersions: { one: 4, two: 7 },
+      },
+      () => 999,
+    );
+    expect(preserved).toEqual([
+      { ...one, version: 5, versionNonce: 999 },
+      { ...two, version: 8, versionNonce: 999 },
+    ]);
   });
 });

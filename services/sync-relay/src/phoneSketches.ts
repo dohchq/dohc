@@ -8,6 +8,7 @@ import {
   exportPortableScene,
   foldScene,
   lostElementRevisions,
+  validateSceneElements,
   type ElementSnapshot,
   type JsonObject,
 } from "@dohc/excalidraw-scene";
@@ -37,7 +38,6 @@ export const SAVE_SKETCH_MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_SKETCH_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_HYDRATED_ASSET_BYTES = 24 * 1024 * 1024;
 const MAX_SAVE_ELEMENTS = 10_000;
-const EXPORTABLE_APP_STATE = new Set<string>(EXCALIDRAW_EXPORTABLE_APP_STATE);
 const ASSET_MIME_TYPES = new Set([
   "image/svg+xml",
   "image/png",
@@ -99,7 +99,10 @@ export type SketchCreateResult =
   | { readonly ok: true; readonly path: string; readonly objectId: string }
   | { readonly ok: false; readonly refusal: "exists"; readonly reason: string };
 export type SketchSaveResult =
-  | (SketchScenePayload & { readonly lostElementIds: readonly string[] })
+  | (SketchScenePayload & {
+      readonly lostElementIds: readonly string[];
+      readonly lostVersions?: Readonly<Record<string, number>>;
+    })
   | {
       readonly ok: false;
       readonly refusal: "missing" | "object-changed" | "invalid";
@@ -116,7 +119,6 @@ type ParsedRequest =
       readonly objectId: string;
       readonly requestId: string;
       readonly elements: readonly unknown[];
-      readonly appState?: Readonly<Record<string, unknown>>;
     };
 
 const missingSketch = (path: string) =>
@@ -132,7 +134,7 @@ function parseSketchRequest(operation: PhoneSketchOperation, args: unknown): Par
       ? ["path"]
       : operation === "createSketch"
         ? ["path", "requestId"]
-        : ["path", "objectId", "requestId", "elements", "appState"];
+        : ["path", "objectId", "requestId", "elements"];
   const r = asRecord(args);
   if (
     !r ||
@@ -158,21 +160,27 @@ function parseSketchRequest(operation: PhoneSketchOperation, args: unknown): Par
   ) {
     throw badRequest(`the arguments do not fit ${operation}`);
   }
-  let appState: Record<string, unknown> | undefined;
-  if (r.appState !== undefined) {
-    const raw = asRecord(r.appState);
-    if (!raw || Object.keys(raw).some((k) => !EXPORTABLE_APP_STATE.has(k)))
-      throw badRequest(`the arguments do not fit ${operation}`);
-    appState = raw;
-  }
   return {
     operation,
     path: r.path,
     objectId: r.objectId,
     requestId: r.requestId,
     elements: r.elements,
-    ...(appState ? { appState } : {}),
   };
+}
+
+function assertAllowedImages(elements: readonly unknown[], existingAssets: ReadonlySet<string>) {
+  for (const raw of elements) {
+    const el = asRecord(raw);
+    if (
+      el?.type === "image" &&
+      el.isDeleted !== true &&
+      typeof el.fileId === "string" &&
+      !existingAssets.has(el.fileId)
+    ) {
+      throw badRequest("New image files cannot be added to a sketch from a phone yet.");
+    }
+  }
 }
 
 async function hydrateSceneAssets(
@@ -214,14 +222,24 @@ async function hydrateSceneAssets(
   return { files: hydrated, missingAssets };
 }
 
-function parsePortableSketch(path: string, objectId: string, text: string): SketchReadResult {
+type ParsedPortable = {
+  readonly result: SketchReadResult;
+  readonly assetIds: ReadonlySet<string>;
+};
+
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
+function parsePortableSketch(path: string, objectId: string, text: string): ParsedPortable {
   if (text.trim() === "")
-    return { ok: true, path, objectId, elements: [], appState: {}, files: {}, missingAssets: 0 };
+    return {
+      result: { ok: true, path, objectId, elements: [], appState: {}, files: {}, missingAssets: 0 },
+      assetIds: EMPTY_SET,
+    };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return invalidSketch(path, `${path} is not valid JSON.`);
+    return { result: invalidSketch(path, `${path} is not valid JSON.`), assetIds: EMPTY_SET };
   }
   const doc = asRecord(parsed);
   if (
@@ -229,13 +247,16 @@ function parsePortableSketch(path: string, objectId: string, text: string): Sket
     doc.type !== "excalidraw" ||
     (doc.elements !== undefined && !Array.isArray(doc.elements))
   )
-    return invalidSketch(path);
+    return { result: invalidSketch(path), assetIds: EMPTY_SET };
   const elements: ElementSnapshot[] = [];
   for (const raw of (doc.elements as unknown[] | undefined) ?? []) {
     try {
       assertRestorableElement(raw);
     } catch (e) {
-      return invalidSketch(path, e instanceof Error ? e.message : undefined);
+      return {
+        result: invalidSketch(path, e instanceof Error ? e.message : undefined),
+        assetIds: EMPTY_SET,
+      };
     }
     if (raw.isDeleted !== true && typeof raw.id === "string" && raw.id.length > 0)
       elements.push(raw as ElementSnapshot);
@@ -245,10 +266,12 @@ function parsePortableSketch(path: string, objectId: string, text: string): Sket
   for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
     if (rawApp?.[key] !== undefined) appState[key] = rawApp[key] as JsonObject[string];
   }
+  const rawFiles = asRecord(doc.files) ?? {};
+  const assetIds = new Set(Object.keys(rawFiles));
   const files: Record<string, HydratedSketchFile> = {};
   let missingAssets = 0;
   let totalBytes = 0;
-  for (const [id, entry] of Object.entries(asRecord(doc.files) ?? {})) {
+  for (const [id, entry] of Object.entries(rawFiles)) {
     const f = asRecord(entry);
     if (
       !f ||
@@ -271,7 +294,10 @@ function parsePortableSketch(path: string, objectId: string, text: string): Sket
       ...(isNonNegInt(f.version) ? { version: f.version } : {}),
     };
   }
-  return { ok: true, path, objectId, elements, appState, files, missingAssets };
+  return {
+    result: { ok: true, path, objectId, elements, appState, files, missingAssets },
+    assetIds,
+  };
 }
 
 const isFileExistsError = (e: unknown) =>
@@ -355,19 +381,23 @@ async function readPortableFile(
   versionId: string,
   path: string,
   objectId: string,
-): Promise<SketchReadResult> {
+): Promise<ParsedPortable> {
   const file = await files.readTextFile({
     workspaceId,
     versionId,
     path,
     maxBytes: MAX_SKETCH_FILE_BYTES,
   });
-  if (!file || file.contentKind !== "text") return missingSketch(path);
+  if (!file || file.contentKind !== "text")
+    return { result: missingSketch(path), assetIds: EMPTY_SET };
   if (file.text === null || file.byteLength > MAX_SKETCH_FILE_BYTES) {
     return {
-      ok: false,
-      refusal: "too-large",
-      reason: "This sketch is too large to open on a phone.",
+      result: {
+        ok: false,
+        refusal: "too-large",
+        reason: "This sketch is too large to open on a phone.",
+      },
+      assetIds: EMPTY_SET,
     };
   }
   return parsePortableSketch(path, objectId, file.text);
@@ -397,7 +427,7 @@ async function readSketchInCopy(
   } finally {
     await closeSession(provider, false);
   }
-  return readPortableFile(files, workspaceId, version.id, path, objectId);
+  return (await readPortableFile(files, workspaceId, version.id, path, objectId)).result;
 }
 
 const EMPTY_SKETCH_DOCUMENT = JSON.stringify(
@@ -555,63 +585,30 @@ async function createSketchInCopy(
     : { ok: false, refusal: "exists", reason: `${path} could not be created.` };
 }
 
-async function saveSketchInCopy(
+async function applyDeltaInSession(
   replica: AutomationReplica,
-  workspaceId: string,
-  input: Extract<ParsedRequest, { operation: "saveSketch" }>,
-  signal: AbortSignal,
-  authorize: () => Promise<void>,
-): Promise<SketchSaveResult> {
-  const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
-  const version = await files.getActiveVersion({ workspaceId });
-  const currentObjectId = version
-    ? await resolveObjectId(files, workspaceId, input.path, signal)
-    : null;
-  if (!version || !currentObjectId) return missingSketch(input.path);
-  if (currentObjectId !== input.objectId)
-    return { ok: false, refusal: "object-changed", reason: `${input.path} was replaced.` };
-  const openOpts = {
-    versionId: version.id,
-    path: input.path,
-    expectedObjectId: input.objectId,
-  };
-  const provider = await ensureClaimedSceneLineage(files, replica, {
-    workspaceId,
-    ...openOpts,
-    objectId: input.objectId,
-    requestId: input.requestId,
-  });
-  if (!provider) return invalidSketch(input.path);
-  const summary = `Updated ${posix.basename(input.path)}`;
-  let written: ElementSnapshot[] = [];
+  provider: SceneSession,
+  openOpts: { versionId: string; path: string; expectedObjectId: string },
+  elements: readonly unknown[],
+  requestId: string,
+  summary: string,
+): Promise<ElementSnapshot[]> {
   let released = false;
   try {
-    if (provider.head === "absent") return missingSketch(input.path);
-    if (provider.unsettled) await provider.settleNow({ summary });
     const existingAssets = new Set(Object.keys(foldScene(provider.doc).assets));
-    for (const raw of input.elements) {
-      const el = asRecord(raw);
-      if (
-        el?.type === "image" &&
-        el.isDeleted !== true &&
-        typeof el.fileId === "string" &&
-        !existingAssets.has(el.fileId)
-      ) {
-        throw badRequest("New image files cannot be added to a sketch from a phone yet.");
-      }
-    }
+    assertAllowedImages(elements, existingAssets);
     let delta: ReturnType<typeof applySceneDelta>;
     try {
-      delta = applySceneDelta(provider.doc, { elements: input.elements, appState: input.appState });
+      delta = applySceneDelta(provider.doc, elements);
     } catch (e) {
       if (e instanceof SceneCodecError) throw badRequest(e.message);
       throw e;
     }
-    written = delta.written;
     if (delta.update !== null) {
+      if (provider.unsettled) await provider.settleNow({ summary });
       try {
         await provider.applyLocalUpdate(delta.update, {
-          idempotencyKey: `phone-sketch-save:${input.requestId}`,
+          idempotencyKey: `phone-sketch-save:${requestId}`,
           attribution: { actorKind: "human" },
           armSettle: false,
         });
@@ -633,11 +630,117 @@ async function saveSketchInCopy(
       }
     }
     if (!released) {
-      await closeSession(provider, true);
+      await closeSession(provider, delta.update !== null);
       released = true;
     }
+    return delta.written;
   } finally {
     if (!released) await closeSession(provider, false);
+  }
+}
+
+function buildLostVersions(
+  lost: readonly ElementSnapshot[],
+  winners: ReadonlyMap<string, ElementSnapshot>,
+) {
+  const versions: Record<string, number> = {};
+  for (const e of lost) versions[e.id] = winners.get(e.id)?.version ?? e.version;
+  return versions;
+}
+
+async function saveSketchInCopy(
+  replica: AutomationReplica,
+  workspaceId: string,
+  input: Extract<ParsedRequest, { operation: "saveSketch" }>,
+  signal: AbortSignal,
+  authorize: () => Promise<void>,
+): Promise<SketchSaveResult> {
+  const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
+  const version = await files.getActiveVersion({ workspaceId });
+  const currentObjectId = version
+    ? await resolveObjectId(files, workspaceId, input.path, signal)
+    : null;
+  if (!version || !currentObjectId) return missingSketch(input.path);
+  if (currentObjectId !== input.objectId)
+    return { ok: false, refusal: "object-changed", reason: `${input.path} was replaced.` };
+  const openOpts = {
+    versionId: version.id,
+    path: input.path,
+    expectedObjectId: input.objectId,
+  };
+  const summary = `Updated ${posix.basename(input.path)}`;
+  const initial = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
+  if (!initial) return invalidSketch(input.path);
+
+  let written: ElementSnapshot[] = [];
+  if (initial.head === "absent") {
+    await closeSession(initial, false);
+    return missingSketch(input.path);
+  }
+  if (initial.lineage === "existing" && initial.lineageClaimId) {
+    written = await applyDeltaInSession(
+      replica,
+      initial,
+      openOpts,
+      input.elements,
+      input.requestId,
+      summary,
+    );
+  } else {
+    const existingLineage = initial.lineage === "existing";
+    const initialAssets = existingLineage
+      ? new Set(Object.keys(foldScene(initial.doc).assets))
+      : null;
+    await closeSession(initial, false);
+    if (!existingLineage) {
+      const portable = await readPortableFile(
+        files,
+        workspaceId,
+        version.id,
+        input.path,
+        currentObjectId,
+      );
+      if (!portable.result.ok) {
+        return portable.result.refusal === "missing"
+          ? missingSketch(input.path)
+          : invalidSketch(input.path, portable.result.reason);
+      }
+      assertAllowedImages(input.elements, portable.assetIds);
+      try {
+        validateSceneElements(input.elements);
+      } catch (e) {
+        if (e instanceof SceneCodecError) throw badRequest(e.message);
+        throw e;
+      }
+      if (input.elements.length === 0) return { ...portable.result, lostElementIds: [] };
+    } else {
+      assertAllowedImages(input.elements, initialAssets!);
+      try {
+        validateSceneElements(input.elements);
+      } catch (e) {
+        if (e instanceof SceneCodecError) throw badRequest(e.message);
+        throw e;
+      }
+    }
+    const provider = await ensureClaimedSceneLineage(files, replica, {
+      workspaceId,
+      ...openOpts,
+      objectId: input.objectId,
+      requestId: input.requestId,
+    });
+    if (!provider) return invalidSketch(input.path);
+    if (provider.head === "absent") {
+      await closeSession(provider, false);
+      return missingSketch(input.path);
+    }
+    written = await applyDeltaInSession(
+      replica,
+      provider,
+      openOpts,
+      input.elements,
+      input.requestId,
+      summary,
+    );
   }
 
   // Publish and pull concurrent desktop edits before judging winners against post-publication state.
@@ -662,18 +765,19 @@ async function saveSketchInCopy(
   const post = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
   if (!post) {
     if (!fileConflict) return invalidSketch(input.path);
-    const fallback = await readPortableFile(
-      files,
-      workspaceId,
-      version.id,
-      input.path,
-      postObjectId,
-    );
+    const fallback = (
+      await readPortableFile(files, workspaceId, version.id, input.path, postObjectId)
+    ).result;
     if (!fallback.ok)
       return fallback.refusal === "missing"
         ? missingSketch(input.path)
         : invalidSketch(input.path, fallback.reason);
-    return { ...fallback, lostElementIds: written.map((e) => e.id) };
+    const winners = new Map(fallback.elements.map((e) => [e.id, e]));
+    return {
+      ...fallback,
+      lostElementIds: written.map((e) => e.id),
+      ...(written.length > 0 ? { lostVersions: buildLostVersions(written, winners) } : {}),
+    };
   }
   try {
     if (post.head === "absent") return missingSketch(input.path);
@@ -685,7 +789,12 @@ async function saveSketchInCopy(
       post,
     );
     const lost = fileConflict ? written : lostElementRevisions(scene, written);
-    return { ...payload, lostElementIds: lost.map((e) => e.id) };
+    const winners = new Map(scene.elements.map((e) => [e.id, e]));
+    return {
+      ...payload,
+      lostElementIds: lost.map((e) => e.id),
+      ...(lost.length > 0 ? { lostVersions: buildLostVersions(lost, winners) } : {}),
+    };
   } finally {
     await closeSession(post, false);
   }

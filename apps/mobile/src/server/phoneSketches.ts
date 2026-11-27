@@ -29,8 +29,46 @@ export type SketchCreateResult =
   | { readonly kind: "created"; readonly path: string; readonly objectId: string }
   | { readonly kind: "exists" };
 export type SketchSaveResult =
-  | ({ readonly kind: "saved"; readonly lostElementIds: readonly string[] } & SketchScene)
+  | ({
+      readonly kind: "saved";
+      readonly lostElementIds: readonly string[];
+      readonly lostVersions?: Readonly<Record<string, number>>;
+    } & SketchScene)
   | { readonly kind: "missing" | "object-changed" | "invalid" };
+
+export function deltaFingerprint(elements: readonly ElementSnapshot[]): string {
+  const sorted = [...elements].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return JSON.stringify(sorted);
+}
+
+export function nextSaveAttempt(
+  previous: { readonly fingerprint: string; readonly requestId: string } | null,
+  elements: readonly ElementSnapshot[],
+  makeId: () => string,
+): { readonly fingerprint: string; readonly requestId: string } {
+  const fingerprint = deltaFingerprint(elements);
+  return previous?.fingerprint === fingerprint ? previous : { fingerprint, requestId: makeId() };
+}
+
+export function preserveLostElements(
+  submitted: readonly ElementSnapshot[],
+  saved: Extract<SketchSaveResult, { kind: "saved" }>,
+  makeNonce: () => number = () => Math.floor(Math.random() * 0x7fffffff),
+): ElementSnapshot[] {
+  if (saved.lostElementIds.length === 0) return [];
+  const lost = new Set(saved.lostElementIds);
+  const remoteById = new Map(saved.elements.map((e) => [e.id, e]));
+  return submitted
+    .filter((e) => lost.has(e.id))
+    .map((e) => {
+      const floor = Math.max(
+        e.version,
+        remoteById.get(e.id)?.version ?? 0,
+        saved.lostVersions?.[e.id] ?? 0,
+      );
+      return { ...e, version: floor + 1, versionNonce: makeNonce() };
+    });
+}
 
 function readScene(result: Record<string, unknown>): SketchScene | null {
   const elements = each(result.elements, (item) =>
@@ -152,7 +190,6 @@ export const saveSketch = (
     readonly objectId: string;
     readonly requestId: string;
     readonly elements: readonly ElementSnapshot[];
-    readonly appState?: JsonObject;
   },
   signal: AbortSignal,
 ) =>
@@ -165,7 +202,22 @@ export const saveSketch = (
       if (r.ok === true) {
         const scene = readScene(r);
         const lostElementIds = each(r.lostElementIds, (id) => (text(id, 256) ? id : null));
-        return scene && lostElementIds ? { kind: "saved", ...scene, lostElementIds } : null;
+        if (!scene || !lostElementIds) return null;
+        let lostVersions: Record<string, number> | undefined;
+        if (r.lostVersions !== undefined) {
+          if (!isFields(r.lostVersions)) return null;
+          lostVersions = {};
+          for (const [id, v] of Object.entries(r.lostVersions)) {
+            if (!text(id, 256) || !isCount(v)) return null;
+            lostVersions[id] = v;
+          }
+        }
+        return {
+          kind: "saved",
+          ...scene,
+          lostElementIds,
+          ...(lostVersions ? { lostVersions } : {}),
+        };
       }
       return r.refusal === "missing" || r.refusal === "object-changed" || r.refusal === "invalid"
         ? { kind: r.refusal }
