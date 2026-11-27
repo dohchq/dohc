@@ -118,11 +118,15 @@ function verbHelp(
     "",
     verb.summary,
     ...(details.length > 0 ? ["", ...paragraph(details)] : []),
-    "",
-    ...paragraph([where, ...command.notes]),
+    ...(verb.capabilityId === null ? [] : ["", ...paragraph([where, ...command.notes])]),
     "",
     "Options:",
-    ...flagRows([...(verb.flags ?? []), ...GLOBAL_FLAGS]),
+    ...flagRows([
+      ...(verb.flags ?? []),
+      ...(verb.capabilityId === null
+        ? GLOBAL_FLAGS.filter((flag) => flag.name === "--json" || flag.name === "--help")
+        : GLOBAL_FLAGS),
+    ]),
   ];
 }
 

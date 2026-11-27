@@ -497,6 +497,7 @@
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
+    "automation validate": null,
     "sync stop": "workspace.sync.stop",
     "share copy": "share.copy.read",
     "share agents": "share.link.agents.list",
@@ -517,6 +518,7 @@
     "document outside-changes": "capture.outside.read",
     "document keep-outside-change": "capture.outside.keep",
     "workspace search": "workspace.search",
+    "workspace info": null,
     "history agent-run-plan": "history.agent.run.plan",
     "history undo-agent-run": "history.agent.run.undo",
     "app verifyFrontend": "app.frontend.verify",
@@ -544,6 +546,10 @@
     "member-apps sharing": "app.member.sharing",
     "links connections": "links.connections",
     "member-apps source": "app.member.source",
-    "member-apps promote": "app.member.promote"
+    "member-apps promote": "app.member.promote",
+    "collection query": "collection.query",
+    "collection read-record": "collection.record.read",
+    "collection create-record": "collection.record.create",
+    "collection validate": null
   }
 }

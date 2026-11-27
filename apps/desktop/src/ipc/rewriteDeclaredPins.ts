@@ -137,7 +137,7 @@ writeJson(cliPath, cli);
 const capabilitiesPath = here("./cliCapabilities.pinned.json");
 const capabilities = readJson<{
   socket: Record<string, readonly string[]>;
-  public: Record<string, string>;
+  public: Record<string, string | null>;
 }>(capabilitiesPath);
 for (const verb of verbs)
   capabilities.socket[verb] = CLI_CAPABILITIES[verb as keyof typeof CLI_CAPABILITIES];

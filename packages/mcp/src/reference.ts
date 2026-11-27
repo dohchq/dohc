@@ -11,6 +11,7 @@ import {
   type CliVerbSpec,
 } from "@dohc/cli/args";
 import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
+import { ValidateResult, WorkspaceInfoResult } from "@dohc/cli/local";
 import {
   OwnerAppPublicationResult,
   type OwnerAppPublicationRequest,
@@ -209,6 +210,18 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   stop: "liveStop",
   "outside-changes": "outsideChanges",
   ...declaredWriteSocketVerbs("document"),
+};
+
+const COLLECTION_RESULTS: Record<string, CliSocketVerb> = {
+  query: "collectionQuery",
+  "read-record": "collectionRecord",
+  "create-record": "collectionCreateRecord",
+};
+
+const LOCAL_RESULTS: Record<string, z.ZodType> = {
+  "collection validate": ValidateResult,
+  "automation validate": ValidateResult,
+  "workspace info": WorkspaceInfoResult,
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -942,7 +955,9 @@ function checkCovered(
   verbs: readonly string[],
   documented: readonly string[],
 ): void {
-  const missing = verbs.filter((verb) => !documented.includes(verb));
+  const missing = verbs.filter(
+    (verb) => !documented.includes(verb) && !Object.hasOwn(LOCAL_RESULTS, `${command} ${verb}`),
+  );
   const extra = documented.filter((verb) => !verbs.includes(verb));
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(
@@ -990,6 +1005,11 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
+  const local = LOCAL_RESULTS[`${command} ${name}`];
+  if (local) {
+    const shape = shapeText(jsonSchema(local, "output")).replace(/^\{ /, "{ schemaVersion, ");
+    return `With \`--json\`, prints \`${shape}\`.`;
+  }
   const socketVerb =
     command === "file" && name === "duplicate"
       ? "fileDuplicate"
@@ -1026,7 +1046,9 @@ function verbReturns(command: string, name: string): string {
                                   ? VERSION_RESULTS[name]
                                   : command === "account"
                                     ? ACCOUNT_RESULTS[name]
-                                    : undefined;
+                                    : command === "collection"
+                                      ? COLLECTION_RESULTS[name]
+                                      : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -1034,9 +1056,16 @@ function verbReturns(command: string, name: string): string {
     // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result]).filter(
       (branch) =>
-        !["file", "history", "version", "document", "automation", "sync", "account"].includes(
-          command,
-        ) || branch.properties?.ok?.const !== false,
+        ![
+          "file",
+          "history",
+          "version",
+          "document",
+          "collection",
+          "automation",
+          "sync",
+          "account",
+        ].includes(command) || branch.properties?.ok?.const !== false,
     );
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
@@ -1106,6 +1135,8 @@ function commandSection(name: string, command: CliCommandSpec): string {
     checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document")
     checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
+  if (name === "collection")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(COLLECTION_RESULTS));
   if (name === "automation")
     checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
   if (name === "version")

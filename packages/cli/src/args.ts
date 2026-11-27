@@ -55,6 +55,7 @@ import {
   type DeclaredWrite,
   type DeclaredWriteOf,
   type DeclaredWriteVerb,
+  cliRequestSchema,
 } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
@@ -90,6 +91,12 @@ type StdinJsonCommand = {
   };
 }[JsonRequestCommand["verb"]];
 
+type CollectionVerb =
+  | "collectionQuery"
+  | "collectionRecord"
+  | "collectionCreateRecord"
+  | "collectionSetFields";
+
 type CliCommandBody =
   | { verb: "link"; target: CliLinkTarget }
   | { [Verb in DeclaredVerb]: { verb: Verb } & DeclaredRequestInput<Verb> }[DeclaredVerb]
@@ -104,12 +111,10 @@ type CliCommandBody =
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "documentHeld" | "fileChats"; path: string }
-  | {
-      verb: "collectionSetFields";
-      recordPath: string;
-      fields: Record<string, string>;
-      agent?: string;
-    }
+  | { verb: CollectionVerb; args: Record<string, unknown> }
+  | { verb: "collectionValidate"; path: string }
+  | { verb: "automationValidate"; path: string }
+  | { verb: "workspaceInfo" }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "keepOutsideChange"; path: string }
@@ -307,7 +312,8 @@ interface VerbInput {
 }
 
 export interface CliVerbSpec {
-  capabilityId: CapabilityId;
+  /** Null for a verb the CLI runs itself, without the app. */
+  capabilityId: CapabilityId | null;
   summary: string;
   operands: string;
   flags?: readonly CliFlag[];
@@ -562,6 +568,57 @@ function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"
   };
 }
 
+function jsonFlag(input: VerbInput, flag: string): unknown {
+  const text = lastValue(input, flag);
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return fail(`${flag} takes JSON`);
+  }
+}
+
+const recordFieldFlags: readonly CliFlag[] = [
+  {
+    name: "--field",
+    value: "name=value",
+    text: "Set this field to this text. Repeat for more fields.",
+  },
+  {
+    name: "--fields-json",
+    value: "json",
+    text: 'Set fields from a JSON object, such as {"points":3,"done":true,"tags":["a"],"due":null}.',
+  },
+];
+
+function recordFields(input: VerbInput): Record<string, unknown> {
+  const named = Object.fromEntries(
+    allValues(input, "--field").map((entry) => {
+      const at = entry.indexOf("=");
+      if (at <= 0) fail("--field takes name=value");
+      return [entry.slice(0, at), entry.slice(at + 1)];
+    }),
+  );
+  const json = jsonFlag(input, "--fields-json");
+  if (json === undefined) return named;
+  if (typeof json !== "object" || json === null || Array.isArray(json))
+    fail("--fields-json takes a JSON object");
+  if (Object.keys(json).some((name) => Object.hasOwn(named, name)))
+    fail("set each field with --field or --fields-json, not both");
+  return { ...named, ...json };
+}
+
+function socketCommand(verb: CollectionVerb, given: Record<string, unknown>): CliCommandBody {
+  const args = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined));
+  const option = cliRequestSchema.options.find((candidate) => candidate.shape.verb.value === verb)!;
+  const parsed = option.shape.args.safeParse({ cwd: ".", actor: "agent", ...args });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    fail(`invalid ${issue?.path.join(".") || "input"}: ${issue?.message ?? "unrecognized shape"}`);
+  }
+  return { verb, args };
+}
+
 const DOCUMENT_VERBS = {
   read: {
     capabilityId: "document.read",
@@ -654,33 +711,18 @@ const DOCUMENT_VERBS = {
     summary: "Set fields on a Collection record.",
     operands: "<record>",
     flags: [
-      {
-        name: "--field",
-        value: "name=value",
-        text: "Set this field to this text. Repeat for more fields.",
-      },
+      ...recordFieldFlags,
       { name: "--agent", value: "name", text: "Record this agent name with the change." },
     ],
     notes: [
-      "The change lands in the record's frontmatter, and record history attributes it to the agent. Use dohc_set_record_fields for a value that is not text.",
+      "The change lands in the record's frontmatter, and record history attributes it to the agent.",
     ],
     parse: (input) => {
       const recordPath = parsePath(input, "document set-fields");
-      const fields = Object.fromEntries(
-        allValues(input, "--field").map((entry) => {
-          const at = entry.indexOf("=");
-          if (at <= 0) fail("--field takes name=value");
-          return [entry.slice(0, at), entry.slice(at + 1)];
-        }),
-      );
-      if (Object.keys(fields).length === 0) fail("document set-fields requires --field");
-      const agent = lastValue(input, "--agent");
-      return {
-        verb: "collectionSetFields",
-        recordPath,
-        fields,
-        ...(agent === undefined ? {} : { agent }),
-      };
+      const fields = recordFields(input);
+      if (Object.keys(fields).length === 0)
+        fail("document set-fields requires --field or --fields-json");
+      return socketCommand("collectionSetFields", { recordPath, fields, ...chatAgent(input) });
     },
   },
   chats: {
@@ -1433,6 +1475,128 @@ function automationOperands(
   return { collectionPath, automation, run };
 }
 
+function countFlag(input: VerbInput, flag: string): number | undefined {
+  const value = lastValue(input, flag);
+  return value === undefined ? undefined : integerFlag(value, flag, { allowZero: false });
+}
+
+const COLLECTION_VERBS = {
+  query: {
+    capabilityId: "collection.query",
+    summary: "List a Collection's records and their field values.",
+    operands: "<collection>",
+    flags: [
+      {
+        name: "--filter",
+        value: "json",
+        text: 'Keep the records that match, such as {"field":"status","operator":"equals","value":"Open"}. The operator is equals or contains.',
+      },
+      {
+        name: "--sort",
+        value: "field[:desc]",
+        text: "Sort by this field, ascending unless it ends in :desc. Repeat to break ties.",
+      },
+      { name: "--group-by", value: "field", text: "Group the records by this field." },
+      {
+        name: "--resolve-relations",
+        text: "Add the label of each record a relation field names.",
+      },
+      { name: "--limit", value: "count", text: "List at most this many records, up to 500." },
+      {
+        name: "--cursor",
+        value: "json",
+        text: "Continue from the nextCursor an earlier query printed.",
+      },
+    ],
+    parse: (input) => {
+      const collectionPath = parsePath(input, "collection query");
+      const sort = allValues(input, "--sort").map((entry) => {
+        const [, field, direction] = /^(.+?)(?::(asc|desc))?$/u.exec(entry) ?? [];
+        return { field: field ?? entry, direction: direction ?? "asc" };
+      });
+      return socketCommand("collectionQuery", {
+        collectionPath,
+        filter: jsonFlag(input, "--filter"),
+        sort: sort.length > 0 ? sort : undefined,
+        groupBy: lastValue(input, "--group-by"),
+        resolveRelations: input.flags.has("--resolve-relations") || undefined,
+        limit: countFlag(input, "--limit"),
+        cursor: jsonFlag(input, "--cursor"),
+      });
+    },
+  },
+  "read-record": {
+    capabilityId: "collection.record.read",
+    summary: "Read one record of a Collection and the history of its fields.",
+    operands: "<collection> <record>",
+    flags: [
+      {
+        name: "--history-limit",
+        value: "count",
+        text: "List at most this many field changes, up to 500. The default is 50.",
+      },
+      {
+        name: "--before",
+        value: "history-id",
+        text: "List the changes before this historyId from an earlier read.",
+      },
+    ],
+    notes: ["Name the record by its id, as collection query prints it."],
+    parse: (input) => {
+      const [collectionPath, recordId, ...extra] = input.operands;
+      if (!collectionPath || !recordId)
+        fail("collection read-record requires a Collection and a record id");
+      noExtraArgs(extra, "collection read-record");
+      const before = lastValue(input, "--before");
+      return socketCommand("collectionRecord", {
+        collectionPath,
+        recordId,
+        historyLimit: countFlag(input, "--history-limit") ?? 50,
+        beforeHistoryId:
+          before === undefined ? undefined : integerFlag(before, "--before", { allowZero: true }),
+      });
+    },
+  },
+  "create-record": {
+    capabilityId: "collection.record.create",
+    summary: "Create a record: a new Markdown file in the Collection's folder.",
+    operands: "<collection> <name>",
+    flags: [
+      ...recordFieldFlags,
+      {
+        name: "--record-id",
+        value: "id",
+        text: "Give the record this id: rec_ and 26 characters from a to z and 2 to 7.",
+      },
+    ],
+    notes: ["The name is the file name without .md."],
+    parse: (input) => {
+      const [collectionPath, name, ...extra] = input.operands;
+      if (!collectionPath || !name)
+        fail("collection create-record requires a Collection and a name");
+      noExtraArgs(extra, "collection create-record");
+      return socketCommand("collectionCreateRecord", {
+        collectionPath,
+        name,
+        fields: recordFields(input),
+        recordId: lastValue(input, "--record-id"),
+      });
+    },
+  },
+  validate: {
+    capabilityId: null,
+    summary: "Check a collection.yaml file and list its problems.",
+    operands: "<path>",
+    notes: [
+      "Runs without the dohc app. Exits with status 1 when the file has problems. Each problem names a code and a JSON Pointer into the file.",
+    ],
+    parse: (input) => ({
+      verb: "collectionValidate",
+      path: parsePath(input, "collection validate"),
+    }),
+  },
+} satisfies Record<string, CliVerbSpec>;
+
 const AUTOMATION_VERBS = {
   list: {
     capabilityId: "automation.list",
@@ -1618,6 +1782,18 @@ const AUTOMATION_VERBS = {
         ...(requestId ? { requestId } : {}),
       };
     },
+  },
+  validate: {
+    capabilityId: null,
+    summary: "Check an automations.yaml file and list its problems.",
+    operands: "<path>",
+    notes: [
+      "Runs without the dohc app. Exits with status 1 when the file has problems. Each problem names a code, a JSON Pointer into the file, and the automation it is in.",
+    ],
+    parse: (input) => ({
+      verb: "automationValidate",
+      path: parsePath(input, "automation validate"),
+    }),
   },
 } satisfies Record<string, CliVerbSpec>;
 
@@ -2786,6 +2962,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     ],
     verbs: DOCUMENT_VERBS,
   },
+  collection: {
+    summary: "Query, read, and create Collection records, and check a collection.yaml file.",
+    notes: [
+      "Name a Collection by its folder. Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
+      "Field values are JSON. Set fields on a record with document set-fields.",
+    ],
+    verbs: COLLECTION_VERBS,
+  },
   chat: {
     summary: "Read and post in Groups and threads.",
     notes: [
@@ -3001,7 +3185,8 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     },
   },
   automation: {
-    summary: "Press Button fields, read an automation's runs, and try a failed run again.",
+    summary:
+      "Press Button fields, read an automation's runs, try a failed run again, and check an automations.yaml file.",
     notes: [
       "Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml.",
       "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
@@ -3014,12 +3199,26 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     verbs: ACCOUNT_VERBS,
   },
   workspace: {
-    summary: "Search pages, Collections, records, and chats across this workspace.",
+    summary:
+      "List the workspaces on this computer, and search pages, Collections, records, and chats across this workspace.",
     notes: [
-      "Requires the original workspace; received shares and mounted folders are refused.",
+      "Search requires the original workspace; received shares and mounted folders are refused.",
       "Paths in --path-prefix and --collection are relative to the workspace root.",
     ],
-    verbs: {},
+    verbs: {
+      info: {
+        capabilityId: null,
+        summary: "List the workspaces on this computer: each one's id, kind, and folder.",
+        operands: "",
+        notes: [
+          "Runs without the dohc app. Marks as current the workspace --workspace names, or else the one this folder is in.",
+        ],
+        parse: ({ operands }) => {
+          noExtraArgs(operands, "workspace info");
+          return { verb: "workspaceInfo" };
+        },
+      },
+    },
   },
 });
 
@@ -3138,6 +3337,7 @@ export function parseCliArguments(
   const agent =
     (commandName === "history" && (verbName === "undo" || verbName === "undo-agent-run")) ||
     commandName === "document" ||
+    commandName === "collection" ||
     commandName === "file" ||
     global.actorFlag ||
     global.agentId !== undefined ||

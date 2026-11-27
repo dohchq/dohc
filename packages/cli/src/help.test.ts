@@ -84,7 +84,8 @@ describe("CLI help", () => {
         expect(flat(commandText)).toContain(` ${verbName} ${verb.summary}`);
         const verbText = await help(commandName, verbName, "--help");
         expect(verbText).toContain(`Usage: dohc ${commandName} ${verbName} `);
-        for (const flag of [...(verb.flags ?? []), { name: "--as-agent" }, { name: "--json" }]) {
+        const globals = verb.capabilityId === null ? [] : [{ name: "--as-agent" }];
+        for (const flag of [...(verb.flags ?? []), ...globals, { name: "--json" }]) {
           expect(verbText).toMatch(new RegExp(`^  ${flag.name} `, "m"));
         }
         for (const field of Object.keys(verb.fields ?? {}).filter((name) => name !== "action")) {

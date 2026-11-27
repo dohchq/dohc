@@ -20,6 +20,7 @@ import {
   type DeclaredWriteVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { renderLocalResult, runLocalCommand, type LocalCommand } from "./local";
 import { MEMBERS_REFUSED, membersWordsForCli } from "./members";
 import { readPassword, readStdinText } from "./stdin";
 import {
@@ -48,7 +49,10 @@ interface CliExecutionOptions {
   writeStdout?: (text: string) => void;
 }
 
-type ResolvedCliCommand = Exclude<ParsedCliCommand, { stdinJson: unknown }>;
+type ResolvedCliCommand = Exclude<
+  ParsedCliCommand,
+  { stdinJson: unknown } | { verb: LocalCommand["verb"] }
+>;
 
 async function bodyForCommand(
   command: ResolvedCliCommand,
@@ -335,18 +339,15 @@ function buildCliRequest(
         verb: command.verb,
         args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor },
       };
+    case "collectionQuery":
+    case "collectionRecord":
+    case "collectionCreateRecord":
     case "collectionSetFields":
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: {
-          cwd: common.cwd,
-          actor: common.actor,
-          recordPath: command.recordPath,
-          fields: command.fields,
-          ...(command.agent === undefined ? {} : { agent: command.agent }),
-        },
-      };
+        args: { cwd: common.cwd, actor: common.actor, ...command.args },
+      } as CliRequestWithoutToken;
     case "fileChats":
     case "documentRead":
     case "documentHeld":
@@ -773,6 +774,9 @@ const REFUSING_VERBS = new Set([
   "documentHeld",
   "documentEdit",
   "documentCreate",
+  "collectionQuery",
+  "collectionRecord",
+  "collectionCreateRecord",
   "collectionSetFields",
   "fileChats",
   "fileChatStart",
@@ -794,7 +798,7 @@ const REFUSING_VERBS = new Set([
   ),
 ]);
 
-function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
+function jsonOutput(result: object | null): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
 }
 
@@ -804,6 +808,18 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const parsedCommand = parseCliArguments(options.argv, env);
     if ("help" in parsedCommand)
       return { exitCode: 0, stdout: renderCliHelp(parsedCommand), stderr: "" };
+    if (
+      parsedCommand.verb === "collectionValidate" ||
+      parsedCommand.verb === "automationValidate" ||
+      parsedCommand.verb === "workspaceInfo"
+    ) {
+      const result = await runLocalCommand(parsedCommand, options.cwd ?? process.cwd(), {
+        ...options.client,
+        env,
+      });
+      const output = parsedCommand.json ? jsonOutput(result) : renderLocalResult(result);
+      return { exitCode: "ok" in result && !result.ok ? 1 : 0, stdout: `${output}\n`, stderr: "" };
+    }
     const readStdin =
       options.readStdin ??
       (() =>
