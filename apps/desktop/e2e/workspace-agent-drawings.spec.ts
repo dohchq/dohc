@@ -99,6 +99,8 @@ test("an agent creates a drawing and edits it live while the person draws", asyn
   let desktop: Desktop | null = null;
   try {
     const photo = {
+      id: "f",
+      created: 1_700_000_000_000,
       dataURL: `data:image/png;base64,${"A".repeat(3_000_000)}`,
       mimeType: "image/png",
     };
@@ -118,10 +120,26 @@ test("an agent creates a drawing and edits it live while the person draws", asyn
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "readme.md");
     await waitForCliEndpoint(temp.homeDir);
-    expect(await agentCli(temp, "drawingRead", { path: "photo.excalidraw" })).toMatchObject({
+    const closed = await agentCli(temp, "drawingRead", { path: "photo.excalidraw" });
+    expect(closed).toMatchObject({
       live: false,
       elements: [{ id: "photo", type: "image", version: 3 }],
     });
+    expect(
+      await agentCli(temp, "drawingEdit", {
+        path: "photo.excalidraw",
+        update: [{ id: "photo", expectedVersion: closed.elements[0]!.version, x: 50 }],
+      }),
+    ).toEqual({ ok: true, path: "photo.excalidraw", elements: [{ id: "photo", version: 4 }] });
+    await expect
+      .poll(
+        async () =>
+          (
+            JSON.parse(await readFile(join(temp.rootPath, "photo.excalidraw"), "utf8")) as Scene
+          ).elements.find((element) => element.id === "photo")?.x,
+        { timeout: 30_000 },
+      )
+      .toBe(50);
 
     const create = {
       path,

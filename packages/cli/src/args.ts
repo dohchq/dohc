@@ -2570,6 +2570,10 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         const parsed = jsonOperand(edit, "edit-json");
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
           fail("edit-json must be an object with add, update, or delete");
+        if ("path" in parsed || "requestId" in parsed)
+          fail(
+            "edit-json cannot hold path or requestId: give the path before it and use --request-id",
+          );
         return drawingInput(DrawingEditInput, {
           ...parsed,
           path,

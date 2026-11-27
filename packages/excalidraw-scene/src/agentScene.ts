@@ -162,21 +162,24 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
   for (const id of current.keys()) {
     const arrow = existing(id);
     if (placing.has(id) || arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
-    const shift = (key: "startBinding" | "endBinding") => {
+    const ends = arrow.points as [number, number][];
+    const last = ends.length - 1;
+    const shift = (key: "startBinding" | "endBinding", [px, py]: [number, number]) => {
       const target = (arrow[key] as JsonObject | null | undefined)?.elementId;
       const before = typeof target === "string" ? current.get(target) : undefined;
       const after = typeof target === "string" ? existing(target) : undefined;
       if (!before || !after) return [0, 0] as const;
-      return [
-        numberOr(after.x) - numberOr(before.x),
-        numberOr(after.y) - numberOr(before.y),
-      ] as const;
+      const [bx, by] = center(before);
+      const [ax, ay] = center(after);
+      const scale = (size: "width" | "height") =>
+        (numberOr(after[size]) / 2 + GAP) / (numberOr(before[size]) / 2 + GAP);
+      const [x, y] = [numberOr(arrow.x) + px, numberOr(arrow.y) + py];
+      return [ax + (x - bx) * scale("width") - x, ay + (y - by) * scale("height") - y] as const;
     };
-    const [sx, sy] = shift("startBinding");
-    const [ex, ey] = shift("endBinding");
+    const [sx, sy] = shift("startBinding", ends[0]!);
+    const [ex, ey] = shift("endBinding", ends[last]!);
     if (sx === 0 && sy === 0 && ex === 0 && ey === 0) continue;
-    const last = arrow.points.length - 1;
-    const points = (arrow.points as [number, number][]).map(([x, y], index): [number, number] =>
+    const points = ends.map(([x, y], index): [number, number] =>
       index === 0 ? [x, y] : index === last ? [x - sx + ex, y - sy + ey] : [x - sx, y - sy],
     );
     next.set(id, {
@@ -262,7 +265,7 @@ function created(id: string, input: DrawingElementInput, index: string, now: num
       containerId: containerId ?? null,
       autoResize: true,
       lineHeight: LINE_HEIGHT,
-      ...textSize(input.text),
+      ...textSize(input.text, FONT_SIZE, LINE_HEIGHT),
     });
   } else if (input.text !== undefined) {
     throw new DrawingEditRefusal(
@@ -295,7 +298,14 @@ function changed(element: ElementSnapshot, change: DrawingElementChange): Elemen
   const result: ElementSnapshot = { ...element, ...withoutUndefined(fields) };
   if (change.text !== undefined) {
     if (element.type !== "text") throw new DrawingEditRefusal(`${element.id} is not text.`);
-    Object.assign(result, { originalText: change.text, ...textSize(change.text) });
+    Object.assign(result, {
+      originalText: change.text,
+      ...textSize(
+        change.text,
+        numberOr(element.fontSize) || FONT_SIZE,
+        numberOr(element.lineHeight) || LINE_HEIGHT,
+      ),
+    });
   }
   if (change.points !== undefined) {
     if (!LINEAR.has(element.type)) throw new DrawingEditRefusal(`${element.id} has no points.`);
@@ -314,6 +324,7 @@ function link(
   const bind = (targetId: string, type: string) => {
     const target = live(targetId);
     const bound = Array.isArray(target.boundElements) ? target.boundElements : [];
+    if (bound.some((each) => (each as JsonObject).id === id)) return;
     next.set(targetId, { ...target, boundElements: [...bound, { id, type }] });
   };
   if (input.containerId) {
@@ -346,7 +357,10 @@ function link(
   const start = input.start ? live(input.start) : undefined;
   const end = input.end ? live(input.end) : undefined;
   const from = start
-    ? edge(start, end ? center(end) : [input.x + (input.width ?? 160), input.y])
+    ? edge(
+        start,
+        end ? center(end) : [input.x + (input.width ?? 160), input.y + (input.height ?? 0)],
+      )
     : ([input.x, input.y] as const);
   const to = end
     ? edge(end, from)
@@ -382,11 +396,11 @@ function edge(element: ElementSnapshot, toward: readonly [number, number]) {
     : ([cx, cy] as const);
 }
 
-function textSize(text: string) {
+function textSize(text: string, fontSize: number, lineHeight: number) {
   const lines = text.split("\n");
   return {
-    width: Math.max(...lines.map((line) => line.length)) * FONT_SIZE * 0.6,
-    height: lines.length * FONT_SIZE * LINE_HEIGHT,
+    width: Math.max(...lines.map((line) => line.length)) * fontSize * 0.6,
+    height: lines.length * fontSize * lineHeight,
   };
 }
 
