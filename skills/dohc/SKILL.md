@@ -12,6 +12,7 @@ dohc keeps files, Markdown documents, structured Collections, automations, chat,
 1. Through MCP, `dohc_dataset`, `dohc_collection_access`, and `dohc_publish_app` fill in `workspaceId` for the workspace the server serves. The CLI needs it: read it from the `dohc://workspace/info` resource, `dohc_list_workspaces`, or `workspaceId` in `.dohc/manifest.json` at the workspace root. Never guess `"local"`.
 2. Keep the dohc desktop app open for writes, Collections, apps, chat, and Versions.
 3. For Markdown files (`.md`), use `dohc_create_document`, `dohc_read_document`, and `dohc_edit_document`. `dohc_write_file` refuses Markdown documents because live documents own their text.
+4. For drawings (`.excalidraw`), use `dohc_create_drawing`, `dohc_read_drawing`, and `dohc_edit_drawing`. An open canvas shows each edit at once.
 
 ## Core building tools
 
@@ -23,6 +24,7 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 | Explore files | `dohc_list_files`, `dohc_read_file`, `dohc_search_files` | (use workspace files directly) |
 | Write non-Markdown files (code, YAML, JSON) | `dohc_write_file` | (use workspace files directly) |
 | Create, read, and edit Markdown documents | `dohc_create_document`, `dohc_read_document`, `dohc_edit_document` | `dohc document create\|read\|edit` |
+| Create, read, and edit drawings | `dohc_create_drawing`, `dohc_read_drawing`, `dohc_edit_drawing` | `dohc drawing create|read|edit` |
 | Work with document Collections (`collection.yaml`) | `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields` | `dohc document set-fields` |
 | Create, approve, migrate, and invoke transactional Collections (`dataset.json`) | `dohc_dataset` | `dohc dataset <verb> '<JSON>'` |
 | Scaffold, stage, verify, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_publish_app` (in a workspace you own, `verifyFrontend` runs the app) | `dohc app <verb> '<JSON>'` |
@@ -51,5 +53,6 @@ Read the matching reference before authoring schemas, apps, or automations:
 - **Approval arguments**: `dohc_dataset` `approve` takes `{ action: "approve", workspaceId, preparationId, revisionSha256 }` (read `revision.revisionSha256` from `prepare`; omit `datasetPath` and `sourceDigest`). `approveMigration` takes `{ action: "approveMigration", workspaceId, preparationId, revisionSha256, approvalDigest }` (omit `datasetPath`).
 - **Bound apps after Collection migrations**: Migration previews (`prepareSchemaChange`, `prepareMigration`, `prepareRelationChoices`, `prepareHistoryRestore`) and `dataset permissions` list connected local and share-link apps in `boundApps` with `status` (`"compatible"`, `"needs-refresh"`, or `"incompatible"`). Omit `revision` and `revisionSha256` in `app.publish.json` so `prepareLocal`, `prepare`, or `stage` pins the current approved revision automatically. If an older app still pins `revision` and `revisionSha256` in `app.publish.json`, remove those two lines once before re-preparing and approving it. When editing a local app and its Collections together, use `dohc_publish_app` `stage` -> `approveStaged`.
 - **File comments vs. Group posts**: To comment on a file, use `dohc_start_file_chat` (not `dohc_start_group_chat`). To check existing discussions on a file first, use `dohc_list_file_chats`.
+- **Drawings**: Read before you edit, and pass each element's `version` as `expectedVersion`. A refusal means someone changed it: read again and retry. Send `requestId` so a retry never applies twice. Undo Run in History skips a drawing an agent created and any drawing open in an editor.
 - **Versions**: `dohc_create_version` creates the copy and switches the workspace folder to it immediately. Edit files, run `dohc_compare_version`, then merge with `dohc_merge_version`.
 - **Secrets and sharing**: Never include owner-only read operations in a public share-link app's `operations`/`operationIds`. Never read or copy secret files (`.env*`) into workspace apps or databases.

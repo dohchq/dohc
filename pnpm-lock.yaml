@@ -829,6 +829,9 @@ importers:
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts
+      fractional-indexing:
+        specifier: 3.2.0
+        version: 3.2.0
       yjs:
         specifier: 13.6.30
         version: 13.6.30(patch_hash=c939e845e1a34d2f05d2651ac34a20c7e7c5c6244535e5e03273b9e5ddfdebeb)

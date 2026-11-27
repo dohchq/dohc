@@ -34,7 +34,7 @@ When an agent connects, the server sends short instructions and serves the skill
 
 | Category | Tools |
 | --- | --- |
-| **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices), [`dohc_inbox_list`](#dohc_inbox_list), [`dohc_inbox_add`](#dohc_inbox_add), [`dohc_inbox_archive`](#dohc_inbox_archive), [`dohc_inbox_move`](#dohc_inbox_move) |
+| **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_read_drawing`](#dohc_read_drawing), [`dohc_create_drawing`](#dohc_create_drawing), [`dohc_edit_drawing`](#dohc_edit_drawing), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices), [`dohc_inbox_list`](#dohc_inbox_list), [`dohc_inbox_add`](#dohc_inbox_add), [`dohc_inbox_archive`](#dohc_inbox_archive), [`dohc_inbox_move`](#dohc_inbox_move) |
 | **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_connections`](#dohc_links_connections), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
@@ -109,6 +109,43 @@ Changes the workspace, so a shared view does not offer it.
 - `requestId`: `string`
 
 Returns `{ ok: true, path, changed, warning? } | { ok: false, reason }`.
+
+### `dohc_read_drawing`
+
+Read an .excalidraw drawing as a compact element list: id, type, version, position, size, text, colors, links, groups, frames, text containers, and arrow bindings, plus its app state. An open canvas answers with what it holds now (live: true). Line, arrow, and freehand points are left out unless points is true; pointCount says how many there are. Pass each element's version as expectedVersion to dohc_edit_drawing. Owner workspace only.
+
+Only the original workspace opens drawings live. Shared profiles do not offer this read.
+
+- `path`: `string`. Required.
+- `points`: `boolean`
+
+Returns `{ path, live, elements: { id, type, version, x, y, width, height, angle?, text?, strokeColor?, backgroundColor?, link?, groupIds?, frameId?, containerId?, startBinding?, endBinding?, boundElements?, points?, pointCount? }[], appState }`.
+
+### `dohc_create_drawing`
+
+Create a new .excalidraw drawing, optionally with elements, without replacing an existing file. History records it as yours. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. The answer lists each element's id and version. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `elements`: `({ x: number, y: number, width?: number, height?: number, text?: string, strokeColor?: string, backgroundColor?: string, points?: ((any JSON)[])[], link?: string | null, groupIds?: string[], frameId?: string | null, id?: string, type: "rectangle" | "ellipse" | "diamond" | "text" | "arrow" | "line" | "frame", containerId?: string, start?: string, end?: string })[]`
+- `requestId`: `string`
+
+Returns `{ ok: true, path, elements: { id, version }[], warning? } | { ok: false, reason }`.
+
+### `dohc_edit_drawing`
+
+Change an .excalidraw drawing: add elements, update fields of existing ones, or delete them. An open canvas shows the change at once and keeps what the person draws meanwhile. update and delete need each element's id and the version from dohc_read_drawing as expectedVersion; the whole edit is refused if someone changed one of those elements since, so read again and retry. Deleting a shape deletes its text too. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Send requestId to retry safely: the same id answers again without applying twice. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `add`: `({ x: number, y: number, width?: number, height?: number, text?: string, strokeColor?: string, backgroundColor?: string, points?: ((any JSON)[])[], link?: string | null, groupIds?: string[], frameId?: string | null, id?: string, type: "rectangle" | "ellipse" | "diamond" | "text" | "arrow" | "line" | "frame", containerId?: string, start?: string, end?: string })[]`
+- `update`: `({ x?: number, y?: number, width?: number, height?: number, text?: string, strokeColor?: string, backgroundColor?: string, points?: ((any JSON)[])[], link?: string | null, groupIds?: string[], frameId?: string | null, id: string, expectedVersion: integer })[]`
+- `delete`: `({ id: string, expectedVersion: integer })[]`
+- `path`: `string`. Required.
+- `requestId`: `string`
+
+Returns `{ ok: true, path, elements: { id, version }[], warning? } | { ok: false, reason }`.
 
 ### `dohc_query_collection`
 
@@ -319,7 +356,7 @@ Returns `{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?
 
 ### `dohc_write_file`
 
-Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.
+Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and .excalidraw drawings with dohc_create_drawing and dohc_edit_drawing; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1177,6 +1214,50 @@ dohc links resolve <source> <literals-json> [options]
 Resolve links from one document.
 
 With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
+### `dohc drawing`
+
+Read, create, and edit .excalidraw drawings.
+
+#### `dohc drawing create`
+
+```sh
+dohc drawing create <path> [elements-json] [options]
+```
+
+Create a drawing, optionally with elements.
+
+Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
+
+- `--request-id <id>`: Create it at most once for this id.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, elements: { id, version }[], warning? }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc drawing edit`
+
+```sh
+dohc drawing edit <path> <edit-json> [options]
+```
+
+Add, change, or delete a drawing's elements.
+
+edit-json is { add, update, delete }. update and delete name each element's id and the expectedVersion drawing read gave; dohc refuses the whole edit when someone changed that element since. Each element is { type: rectangle|ellipse|diamond|text|arrow|line|frame, x, y } with optional id, width, height, text, strokeColor, backgroundColor, points, link, groupIds, and frameId. A text element with containerId sits inside that shape or arrow. An arrow takes start and end element ids to bind its ends. Undo Run in History skips a drawing an agent created, because removing a drawing can also remove linked assets: delete it individually from History. It also skips a drawing open in an editor until it closes.
+
+- `--request-id <id>`: Apply it at most once for this id.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, elements: { id, version }[], warning? }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc drawing read`
+
+```sh
+dohc drawing read <path> [options]
+```
+
+Read a drawing's elements, as an open canvas holds them.
+
+- `--points`: Include line, arrow, and freehand points.
+
+With `--json`, prints `{ schemaVersion, path, live, elements: { id, type, version, x, y, width, height, angle?, text?, strokeColor?, backgroundColor?, link?, groupIds?, frameId?, containerId?, startBinding?, endBinding?, boundElements?, points?, pointCount? }[], appState }`.
 
 ### `dohc notices`
 

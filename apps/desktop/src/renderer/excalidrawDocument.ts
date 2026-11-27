@@ -9,24 +9,7 @@ export type ExcalidrawDocument = {
   files: Record<string, unknown>;
 };
 
-// The ordinary New file flow creates an empty file first. Treat that exact
-// state as a new blank drawing, then let the guarded autosave write this
-// portable document through the same path as the first canvas change.
-export const EMPTY_EXCALIDRAW_DOCUMENT = JSON.stringify(
-  {
-    type: "excalidraw",
-    version: 2,
-    source: "dohc",
-    elements: [],
-    appState: {
-      gridSize: null,
-      viewBackgroundColor: "#ffffff",
-    },
-    files: {},
-  },
-  null,
-  2,
-);
+export { EMPTY_EXCALIDRAW_DOCUMENT } from "@dohc/excalidraw-scene/agent";
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)

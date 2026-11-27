@@ -26,6 +26,11 @@ import {
 } from "@dohc/workspace-contracts/links";
 import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
+import {
+  DrawingCreateInput,
+  DrawingEditInput,
+  DrawingReadInput,
+} from "@dohc/workspace-contracts/drawing";
 import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { z } from "zod";
@@ -304,6 +309,23 @@ function declaredWrite<Verb extends DeclaredWriteVerb>(
   };
   declaredWriteSpecs.set(verb, spec);
   return spec;
+}
+
+function jsonOperand(text: string, name: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return fail(`${name} is not valid JSON`);
+  }
+}
+
+function drawingInput<Schema extends z.ZodType>(schema: Schema, value: unknown): z.output<Schema> {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    fail(`${issue?.path.join(".") || "input"}: ${issue?.message ?? "invalid drawing input"}`);
+  }
+  return parsed.data;
 }
 
 interface VerbInput {
@@ -2406,6 +2428,15 @@ const DECLARED_PARSERS: {
     noExtraArgs(input.operands, command);
     return OutsideChangesInput.parse({});
   },
+  drawingRead: (input, command) => {
+    const [path, ...extra] = input.operands;
+    if (!path) fail(`${command} requires a path`);
+    noExtraArgs(extra, command);
+    return DrawingReadInput.parse({
+      path,
+      ...(input.flags.has("--points") ? { points: true } : {}),
+    });
+  },
   inboxList: (input, command) => {
     noExtraArgs(input.operands, command);
     const rawStatus = lastValue(input, "--status");
@@ -2518,6 +2549,35 @@ function withDeclaredVerbs(
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclaredVerbs({
   links: { summary: "Read and resolve document links.", notes: [], verbs: {} },
+  drawing: {
+    summary: "Read, create, and edit .excalidraw drawings.",
+    notes: [],
+    verbs: {
+      create: declaredWrite("drawingCreate", (input) => {
+        const [path, elements, ...extra] = input.operands;
+        if (!path) fail("drawing create requires a path");
+        noExtraArgs(extra, "drawing create");
+        return drawingInput(DrawingCreateInput, {
+          path,
+          ...(elements === undefined ? {} : { elements: jsonOperand(elements, "elements-json") }),
+          requestId: lastValue(input, "--request-id"),
+        });
+      }),
+      edit: declaredWrite("drawingEdit", (input) => {
+        const [path, edit, ...extra] = input.operands;
+        if (!path || edit === undefined) fail("drawing edit requires a path and edit JSON");
+        noExtraArgs(extra, "drawing edit");
+        const parsed = jsonOperand(edit, "edit-json");
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+          fail("edit-json must be an object with add, update, or delete");
+        return drawingInput(DrawingEditInput, {
+          ...parsed,
+          path,
+          requestId: lastValue(input, "--request-id"),
+        });
+      }),
+    },
+  },
   notices: {
     summary: "Read this workspace's Notices.",
     notes: ["Listing does not change whether rows are read."],

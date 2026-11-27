@@ -4712,6 +4712,56 @@ describe("CLI socket server", () => {
     expect(waiting).toBe(true);
   });
 
+  it("applies a drawing edit once per request id and remembers an applied failure", async () => {
+    const edits: unknown[] = [];
+    context.drawings = {
+      async create() {
+        throw new Error("creates are not under test");
+      },
+      async edit(input) {
+        edits.push(input);
+        if (input.edit.delete)
+          throw new LiveDocumentEditAppliedError("Someone changed a at the same moment.");
+        if (input.edit.update?.[0]?.expectedVersion === 0)
+          return { ok: false as const, reason: "a is at version 1, not 0" };
+        return { ok: true as const, path: input.path, elements: [{ id: "a", version: 2 }] };
+      },
+    };
+    const args = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      path: "plan.excalidraw",
+      requestId: "draw-1",
+    };
+    const move = { ...args, update: [{ id: "a", expectedVersion: 1, x: 5 }] };
+    const moved = { ok: true, path: "plan.excalidraw", elements: [{ id: "a", version: 2 }] };
+    await expect(invoke("drawingEdit", move)).resolves.toEqual(moved);
+    await expect(invoke("drawingEdit", move)).resolves.toEqual(moved);
+    expect(edits).toHaveLength(1);
+    expect(edits[0]).toMatchObject({
+      origin: { attribution: { actorKind: "agent" } },
+      edit: { update: [{ id: "a", expectedVersion: 1, x: 5 }] },
+    });
+    await expect(invoke("drawingEdit", { ...move, update: [] })).resolves.toEqual({
+      ok: false,
+      reason: "request id draw-1 was already used for a different request",
+    });
+
+    const stale = { ...args, requestId: "draw-2", update: [{ id: "a", expectedVersion: 0 }] };
+    await invoke("drawingEdit", stale);
+    await invoke("drawingEdit", stale);
+    const lost = { ...args, requestId: "draw-3", delete: [{ id: "a", expectedVersion: 2 }] };
+    const lostResult = await invoke("drawingEdit", lost);
+    expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("same moment") });
+    await expect(invoke("drawingEdit", lost)).resolves.toEqual(lostResult);
+    expect(edits).toHaveLength(4);
+
+    context.readOnly = true;
+    registryWorkspace.readOnly = true;
+    await expect(invoke("drawingEdit", { ...move, requestId: "draw-4" })).rejects.toThrow();
+    expect(edits).toHaveLength(4);
+  });
+
   it("answers a resent document edit with its first result", async () => {
     let applied = 0;
     const saving = { release: () => undefined as void };

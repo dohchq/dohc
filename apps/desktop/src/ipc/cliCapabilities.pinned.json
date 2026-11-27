@@ -384,6 +384,15 @@
     ],
     "memberAppPromote": [
       "app.member.promote"
+    ],
+    "drawingRead": [
+      "drawing.read"
+    ],
+    "drawingCreate": [
+      "drawing.create"
+    ],
+    "drawingEdit": [
+      "drawing.edit"
     ]
   },
   "public": {
@@ -550,6 +559,9 @@
     "collection query": "collection.query",
     "collection read-record": "collection.record.read",
     "collection create-record": "collection.record.create",
-    "collection validate": null
+    "collection validate": null,
+    "drawing read": "drawing.read",
+    "drawing create": "drawing.create",
+    "drawing edit": "drawing.edit"
   }
 }

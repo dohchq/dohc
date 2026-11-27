@@ -264,11 +264,14 @@ const DECLARED_WRITE_ANNOTATIONS: Record<keyof typeof DECLARED_WRITE_TOOLS, Tool
   dohc_promote_member_app: ADD,
   dohc_withdraw_member_app: CHANGE_SERVER,
   dohc_set_member_app_sharing: CHANGE_SERVER,
+  dohc_create_drawing: ADD,
+  dohc_edit_drawing: CHANGE,
 };
 
 export const MCP_INSTRUCTIONS = [
   "dohc serves one workspace folder: files, live Markdown documents, Collections, apps, automations, and chat, with History and Versions.",
   "- Markdown files are live documents. Create them with dohc_create_document, read them with dohc_read_document, and change them with dohc_edit_document. dohc_write_file writes every other file and refuses Markdown.",
+  "- .excalidraw files are live drawings: dohc_create_drawing, dohc_read_drawing, and dohc_edit_drawing.",
   "- A document Collection is a folder of Markdown records with collection.yaml: use dohc_query_collection, dohc_create_record, and dohc_set_record_fields. A transactional Collection (a dataset) has dataset.json, SQLite tables, and approved operations: use dohc_dataset.",
   "- An app is a folder with app.publish.json. In a workspace you own, dohc_publish_app action verifyFrontend compiles and runs it in dohc's sandbox; dohc_test_app only checks the folder. Then prepareLocal, approve, and launchLocal.",
   "- dohc_dataset, dohc_collection_access, and dohc_publish_app fill in workspaceId for this workspace when you leave it out.",
@@ -995,7 +998,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.",
+        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and .excalidraw drawings with dohc_create_drawing and dohc_edit_drawing; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),

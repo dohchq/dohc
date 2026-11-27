@@ -1,5 +1,6 @@
 import { captureOperations } from "./captureOperations";
 import { linksOperations } from "./linksOperations";
+import { drawingOperations } from "./drawingOperations";
 import { retrievalOperations } from "./retrievalOperations";
 import { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
@@ -95,6 +96,7 @@ export const OPERATION_TABLES = [
   linksOperations,
   retrievalOperations,
   captureOperations,
+  drawingOperations,
   agentRunHistoryOperations,
   heldChangeOperations,
   workspaceSyncOperations,

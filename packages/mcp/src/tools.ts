@@ -351,7 +351,7 @@ function liveDocumentWriteRefusal(resolved: {
     liveDocumentKindForPath(resolved.realRelative),
   ];
   if (kinds.includes("scene")) {
-    return "This file is a live document. Edit it in dohc; a raw file write cannot update its document state.";
+    return "This file is a live document. Create it with dohc_create_drawing, read it with dohc_read_drawing, and change it with dohc_edit_drawing; a raw file write cannot update its document state.";
   }
   if (kinds.includes("richdoc")) {
     return "This file is a live document. Create it with dohc_create_document, read it with dohc_read_document, and change it with dohc_edit_document; a raw file write cannot update its document state.";

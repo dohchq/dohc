@@ -6,7 +6,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import {
+  liveDocumentKindForPath,
+  type LiveDocumentKind,
+} from "@dohc/workspace-contracts/live-documents";
 import {
   isOwnerOutboxFrozenRefusal,
   isRestoreFencedRefusal,
@@ -398,14 +401,38 @@ export const DOCUMENT_EDIT_SHARED_WARNING =
   "they make to the same blocks before your edit reaches them can still remove its text. Read " +
   "the document to check it is there.";
 
+export interface LiveSessionEditTarget {
+  workspaceId: string;
+  path: string;
+  kind: LiveDocumentKind;
+  allowLossySourceSha256?: string;
+  assertEditable?(path: string): Promise<void>;
+}
+
+/**
+ * An edit against the session that holds a document. `held` says an editor
+ * holds it, and `shared` that it is a shared view's page. `show` hands the
+ * editor an applied update.
+ */
+export type LiveSessionEdit<T> = (
+  provider: EngineYDocSessionProvider,
+  path: string,
+  session: { held: boolean; shared: boolean; assertSame(): void; show(update: Uint8Array): void },
+) => Promise<T>;
+
 /** Main-side reads and edits of live documents, for doors other than the editor. */
 export interface LiveDocumentSessions {
   /** `state` is the encoded Y.Doc an open editor holds, or null when none holds it. */
   readDocument(input: {
     workspaceId: string;
     path: string;
+    kind?: LiveDocumentKind;
   }): Promise<{ path: string; state: Uint8Array | null }>;
   editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome>;
+  editLiveDocument<T>(
+    input: LiveSessionEditTarget,
+    apply: LiveSessionEdit<T>,
+  ): Promise<{ path: string; result: T }>;
   /** A shared view's note, opened through its live session on the server. The caller closes it. */
   openSharedDocument(workspaceId: string, path: string): Promise<EngineYDocSessionProvider>;
 }
@@ -1218,11 +1245,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   async readDocument(input: {
     workspaceId: string;
     path: string;
+    kind?: LiveDocumentKind;
   }): Promise<{ path: string; state: Uint8Array | null }> {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
-      const path = await this.#markdownDocumentPath(authority.workspace, input.path, "read");
+      const path = await this.#documentPath(
+        authority.workspace,
+        input.path,
+        "read",
+        input.kind ?? "richdoc",
+      );
       authority.assertCurrent();
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
@@ -1244,21 +1277,37 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
    * waits for that session to close.
    */
   async editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome> {
+    const { path, result } = await this.editLiveDocument(
+      { ...input, kind: "richdoc" },
+      async (provider, resolved, session) =>
+        await applyDocumentEdit(provider, resolved, input, {
+          keepBlocks: session.held || session.shared || provider.lineageClaimId != null,
+          assertSame: session.assertSame,
+          show: session.show,
+        }),
+    );
+    return { path, ...result };
+  }
+
+  async editLiveDocument<T>(
+    input: LiveSessionEditTarget,
+    apply: LiveSessionEdit<T>,
+  ): Promise<{ path: string; result: T }> {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
       const workspace = authority.workspace;
-      if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) {
+      if (this.#isSharedView(workspace) && (input.kind !== "richdoc" || !this.#sharedCaptureFor)) {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
-      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
+      const path = await this.#documentPath(workspace, input.path, "write", input.kind);
       const key = `${workspace.workspaceId}\u0000${path}`;
       const turn = (this.#documentEdits.get(key) ?? Promise.resolve())
         .catch(() => undefined)
         .then(async () => {
           authority.assertCurrent();
           try {
-            return await this.#editResolved(workspace, path, input);
+            return await this.#editResolved(workspace, path, input, apply);
           } catch (error) {
             if (!isOwnerOutboxFrozenRefusal(error)) throw error;
             this.#onLiveEditsPaused?.(workspace.workspaceId, path);
@@ -1271,9 +1320,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         });
       this.#documentEdits.set(key, turn);
       try {
-        const applied = await turn;
+        const result = await turn;
         this.#onPendingShareMayChange?.(workspace.workspaceId);
-        return { path, ...applied };
+        return { path, result };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
@@ -1298,7 +1347,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const workspace = authority.workspace;
       if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor)
         throw new Error("Only a shared view's notes open here.");
-      const path = await this.#markdownDocumentPath(workspace, requested, "write");
+      const path = await this.#documentPath(workspace, requested, "write", "richdoc");
       const capture = await this.#sharedCaptureFor(workspace);
       authority.assertCurrent();
       if (!capture) throw new Error("dohc could not open this page for editing.");
@@ -1323,7 +1372,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (this.#isSharedView(workspace)) {
         throw new Error("A shared view's documents start live editing on their host.");
       }
-      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
+      const path = await this.#documentPath(workspace, input.path, "write", "richdoc");
       authority.assertCurrent();
       const attachment = workspace.attachmentId;
       const ownsDocument = () => this.#owner.ownsDocument(attachment, path);
@@ -1354,21 +1403,22 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  async #editResolved(
+  async #editResolved<T>(
     workspace: EngineYDocWorkspace,
     path: string,
-    input: LiveDocumentEdit,
-  ): Promise<AppliedEdit> {
-    await input.assertEditable(path);
+    input: LiveSessionEditTarget,
+    apply: LiveSessionEdit<T>,
+  ): Promise<T> {
+    await input.assertEditable?.(path);
     const attachment = workspace.attachmentId;
     const held = this.#owner.documentSession(attachment, path);
-    if (held) return await this.#editHeld(held, path, input);
+    if (held) return await this.#editHeld(held, path, apply);
     try {
       return await this.#documentReservations.runMutation(
         attachment,
         path,
         () => this.#owner.ownsDocument(attachment, path),
-        async () => await this.#editUnheld(workspace, path, input),
+        async () => await this.#editUnheld(workspace, path, input, apply),
       );
     } catch (error) {
       if (!(error instanceof LiveDocumentOwnedError)) throw error;
@@ -1378,27 +1428,25 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  async #markdownDocumentPath(
+  async #documentPath(
     workspace: EngineYDocWorkspace,
     requested: string,
     access: "read" | "write",
+    kind: LiveDocumentKind,
   ): Promise<string> {
-    if (liveDocumentKindForPath(requested) !== "richdoc") {
-      throw new Error(`${requested} is not a Markdown document.`);
-    }
+    const notKind = `${requested} is not a ${kind === "scene" ? "drawing" : "Markdown document"}.`;
+    if (liveDocumentKindForPath(requested) !== kind) throw new Error(notKind);
     const path = await this.#resolveDocumentPath(workspace, requested, access);
     if (path === null) throw new Error(`No document at ${requested}.`);
-    if (liveDocumentKindForPath(path) !== "richdoc") {
-      throw new Error(`${requested} is not a Markdown document.`);
-    }
+    if (liveDocumentKindForPath(path) !== kind) throw new Error(notKind);
     return path;
   }
 
-  async #editHeld(
+  async #editHeld<T>(
     held: NonNullable<ReturnType<EngineYDocIpcSessionOwner["documentSession"]>>,
     path: string,
-    input: LiveDocumentEdit,
-  ): Promise<AppliedEdit> {
+    apply: LiveSessionEdit<T>,
+  ): Promise<T> {
     const owned = held.session;
     // Checked again once the edit is computed: an update computed against one
     // lineage must not land on its replacement.
@@ -1417,18 +1465,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         );
     };
     assertSame();
-    return await applyDocumentEdit(owned.provider, path, input, {
-      keepBlocks: true,
+    return await apply(owned.provider, path, {
+      held: true,
+      shared: false,
       assertSame,
       show: owned.show,
     });
   }
 
-  async #editUnheld(
+  async #editUnheld<T>(
     workspace: EngineYDocWorkspace,
     path: string,
-    input: LiveDocumentEdit,
-  ): Promise<AppliedEdit> {
+    input: LiveSessionEditTarget,
+    apply: LiveSessionEdit<T>,
+  ): Promise<T> {
     // A shared view's page opens through the share's live session on the
     // server, as its editor does, and refuses with the editor's reason.
     const shared = this.#isSharedView(workspace);
@@ -1448,19 +1498,18 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         ? { allowLossySourceSha256: input.allowLossySourceSha256 }
         : {}),
       path,
-      contentKind: "richdoc",
+      contentKind: input.kind,
       // Nothing else reads this session's doc before it closes.
       onRemoteUpdate: () => undefined,
     });
-    let applied: AppliedEdit;
+    let applied: T;
     try {
-      if (provider.contentKind !== "richdoc") {
-        throw new Error(`${path} is not a Markdown document.`);
+      if (provider.contentKind !== input.kind) {
+        throw new Error(`${path} opened as another kind of document.`);
       }
-      applied = await applyDocumentEdit(provider, path, input, {
-        // No editor here holds it, but a replicated lineage or a shared
-        // view's page is shared with others, who may be typing in it.
-        keepBlocks: shared || provider.lineageClaimId != null,
+      applied = await apply(provider, path, {
+        held: false,
+        shared,
         assertSame: () => undefined,
         show: () => undefined,
       });
