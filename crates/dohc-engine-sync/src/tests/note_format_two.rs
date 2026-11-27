@@ -9,7 +9,9 @@ use dohc_engine_collab::{
     ContentKind, DocKey, LocalAppend, SuccessorIdentity, SuccessorIdentityInput,
     fresh_successor_base,
 };
-use dohc_engine_domain::{DeleteTextFile, WriteText, select_snapshot_by_path_in_tx};
+use dohc_engine_domain::{
+    CreateNamedVersion, DeleteTextFile, WriteText, select_snapshot_by_path_in_tx,
+};
 use dohc_engine_storage::hex_sha256;
 
 const NOTE: &str = "A note.\n";
@@ -1301,36 +1303,35 @@ fn the_pass_skips_an_open_note_and_converts_it_on_the_next_run() {
 }
 
 #[test]
-fn the_pass_skips_a_note_with_an_unsent_edit_or_an_open_review() {
+fn the_pass_converts_only_the_main_version() {
     let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO replication_log \
-                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-                 VALUES ('ws','local',5,'moment.append',?1,1,0)",
-                [json!({"versionId": "main", "objectId": "object-a"}).to_string()],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
+    VersionedTextStore::new(&mut store)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: "ws".to_owned(),
+                from_version_id: "main".to_owned(),
+                new_version_id: "named".to_owned(),
+                name: "Named".to_owned(),
+                now_ms: 15,
+                request_id: None,
+            },
+            &NoFaults,
+        )
         .unwrap();
-    let unsent = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(
-        unsent.skipped,
-        vec![(key.clone(), "doc.md".to_owned(), "unsent-edit")]
-    );
-    assert_eq!(note(&store, &key).0, 1);
-    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
-    let (_peer_scratch, mut peer, key) = owner(&base_of(&["A draft.\n", NOTE]));
-    receive(&owner_store, &mut peer, &carrier, "owner").unwrap();
-    assert_eq!(open_reviews(&peer), 1);
-    let reviewed = convert_all(&mut peer, None, 10, &NoLiveLeases);
-    assert_eq!(
-        reviewed.skipped,
-        vec![(key.clone(), "doc.md".to_owned(), "open-conflict")]
-    );
-    assert_eq!(note(&peer, &key).0, 1);
+    let named = DocKey::new("ws", "named", "object-a").unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &named,
+        ContentKind::Richdoc,
+        &base_of(&[NOTE]),
+        &NoFaults,
+        16,
+    )
+    .unwrap();
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((pass.converted, pass.unchanged), (1, 0));
+    assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
+    assert_eq!(note(&store, &named), (1, NOTE.to_owned()));
 }
 
 #[test]
@@ -1412,6 +1413,123 @@ fn head(store: &EngineStore, key: &DocKey) -> (i64, i64) {
     (marker.head_update_seq, marker.head_snapshot_seq)
 }
 
+fn exec(store: &mut EngineStore, sql: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(sql).map_err(SyncError::persist)
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_bare_local_marker_in_a_synced_workspace_counts_as_unchanged() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    assert_eq!(
+        convert_all(&mut store, None, 10, &NoLiveLeases).converted,
+        1
+    );
+    assert_eq!(head(&store, &key), (0, 0));
+    exec(
+        &mut store,
+        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES('ws','probe-origin','epoch','stream',1); \
+         INSERT INTO sync_relay_cursors(workspace_id,cursor,replication_epoch,stream_identity) \
+         VALUES('ws','0','epoch','stream');",
+    );
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((pass.unchanged, pass.skipped), (1, Vec::new()));
+}
+
+#[test]
+fn a_held_local_note_keeps_its_cache() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    exec(
+        &mut store,
+        &format!(
+            "INSERT INTO capture_file_holds VALUES('ws','main','object-a','doc.md','{}',5,\
+             'ydoc-resolution-not-representable',1,1,0)",
+            "a".repeat(64)
+        ),
+    );
+    let before = head(&store, &key);
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(
+        pass.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "held")]
+    );
+    assert_eq!(head(&store, &key), before);
+}
+
+#[test]
+fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    edit(&mut store, &key, OTHER_NOTE, "moment-edit");
+    exec(&mut store, "UPDATE ydoc_docs SET pending_authors_json='[]'");
+    let before = head(&store, &key);
+    let settled = hex_sha256(NOTE.as_bytes());
+    let pass = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &|_, _| Some(settled.clone()),
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        pass.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "ydoc-unsettled")]
+    );
+    assert_eq!(head(&store, &key), before);
+    assert_eq!(note(&store, &key), (1, OTHER_NOTE.to_owned()));
+}
+
+#[test]
+fn a_deleted_local_note_counts_as_unchanged_and_keeps_its_cache() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                moment_id: "moment-deleted".to_owned(),
+                request_id: None,
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 15,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let before = head(&store, &key);
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((pass.unchanged, pass.converted), (1, 0));
+    assert_eq!(head(&store, &key), before);
+}
+
+#[test]
+fn a_local_note_whose_file_format_two_cannot_hold_keeps_its_cache() {
+    let linked = "Run [`npm install`](https://example.com) first\n";
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    write(&mut store, linked, "moment-linked", 13);
+    let before = head(&store, &key);
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
+    assert_eq!(head(&store, &key), before);
+}
+
 #[test]
 fn a_local_only_workspace_drops_its_format_one_cache_offline() {
     let (_scratch, _path, mut store) = open_store();
@@ -1459,13 +1577,8 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
         vec![(key.clone(), "doc.md".to_owned(), "ydoc-unsettled")]
     );
     assert_eq!(head(&store, &key), (1, 0));
-    let projection = hex_sha256(projected(&store, &key).as_bytes());
-    let file_proof = |_: &EngineStore, proven: &DocKey| {
-        (proven.object_id == "object-a").then(|| dohc_engine_collab::CloseProjection {
-            sha256: projection.clone(),
-            materialized_seed_source_sha256: Some(source.clone()),
-        })
-    };
+    let file_proof =
+        |_: &EngineStore, proven: &DocKey| (proven.object_id == "object-a").then(|| source.clone());
     let proven = on(|| {
         convert_notes_to_format_two(
             &mut store,
@@ -1486,6 +1599,12 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
 
 #[test]
 fn a_damaged_note_is_reported_and_the_pass_goes_on() {
+    for damaged in ["snapshot_blob_sha256", "state_vector_blob_sha256"] {
+        pass_over_a_damaged_note(damaged);
+    }
+}
+
+fn pass_over_a_damaged_note(damaged: &str) {
     let (_scratch, _path, mut store) = open_store();
     let keys: Vec<DocKey> = (1..=3)
         .map(|n| {
@@ -1504,9 +1623,7 @@ fn a_damaged_note_is_reported_and_the_pass_goes_on() {
         .write_with(&NoFaults, |tx| {
             let blob: String = tx
                 .query_row(
-                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='note-2' \
-                     UNION ALL SELECT update_blob_sha256 FROM ydoc_updates \
-                     WHERE object_id='note-2' LIMIT 1",
+                    &format!("SELECT {damaged} FROM ydoc_snapshots WHERE object_id='note-2'"),
                     [],
                     |row| row.get(0),
                 )
@@ -1529,13 +1646,14 @@ fn a_damaged_note_is_reported_and_the_pass_goes_on() {
         })
         .unwrap();
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(pass.converted, 2);
+    assert_eq!(pass.converted, 2, "{damaged}");
     assert_eq!(
         pass.failed
             .iter()
             .map(|(key, path, _)| (key, path.as_str()))
             .collect::<Vec<_>>(),
-        vec![(&keys[1], "note-2.md")]
+        vec![(&keys[1], "note-2.md")],
+        "{damaged}"
     );
     assert_eq!(note(&store, &keys[0]).0, 2);
     assert_eq!(note(&store, &keys[2]).0, 2);
