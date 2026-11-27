@@ -135,17 +135,15 @@ it("lists a paused note", async () => {
   expect(await list()).toEqual(listed("pause"));
 });
 
-it("lists a stopped enrolment until the host has drained it", async () => {
+it("lists a stopped enrolment after the host has drained it, as capture still waits on it", async () => {
   const { f, enrol, list, listed } = quietNote();
   enrol("workspace", "live");
   f.write((db) =>
     db.exec(
-      `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,state='off',reason='stopped',owner_stop='retire'`,
+      `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,state='off',reason='stopped',owner_stop='retire',host_drained_at_ms=2`,
     ),
   );
   expect(await list()).toEqual(listed("enrolment"));
-  f.write((db) => db.exec(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=2`));
-  expect(await list()).toEqual([]);
 });
 
 it("lists a note enrolled with the automation host once it has started", async () => {
