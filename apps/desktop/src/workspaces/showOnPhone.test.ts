@@ -91,23 +91,29 @@ describe("Show on phone", () => {
     expect(relay.requests).toHaveLength(2);
   });
 
-  it("confirms nothing when the read fails, and doesn't ask again until the next refresh", async () => {
-    const { showOnPhone, relay, errors } = setup(() => new Response("down", { status: 503 }));
-    expect(await showOnPhone.shows("w")).toBe(false);
-    expect(await showOnPhone.shows("w")).toBe(false);
-    expect(relay.requests).toHaveLength(1);
+  it("returns null on a failed read and reads again once the server recovers", async () => {
+    let available = false;
+    const { showOnPhone, relay, errors } = setup(() =>
+      available
+        ? listing([{ workspaceId: "w", showOnPhone: true }])
+        : new Response("down", { status: 503 }),
+    );
+    expect(await showOnPhone.shows("w")).toBeNull();
+    available = true;
+    expect(await showOnPhone.shows("w")).toBe(true);
+    expect(relay.requests).toHaveLength(2);
     expect(errors).toHaveLength(1);
   });
 
-  it("confirms nothing from an answer of the wrong shape", async () => {
+  it("returns null from an answer of the wrong shape", async () => {
     const { showOnPhone, errors } = setup(() => Response.json({ ok: true, workspaces: [{}] }));
-    expect(await showOnPhone.shows("w")).toBe(false);
+    expect(await showOnPhone.shows("w")).toBeNull();
     expect(errors).toHaveLength(1);
   });
 
   it("hands an expired session to the sign-in handling", async () => {
     const { showOnPhone, session, errors } = setup(() => new Response(null, { status: 401 }));
-    expect(await showOnPhone.shows("w")).toBe(false);
+    expect(await showOnPhone.shows("w")).toBeNull();
     expect(session()!.unauthorized).toHaveBeenCalledOnce();
     expect(errors).toEqual([]);
   });

@@ -335,8 +335,71 @@ describe("background live start", () => {
     expect(started).toEqual([]);
   });
 
-  it("extracts only tracked main Markdown text writes from synced fastForwardedPaths", async () => {
-    const paths = syncedNotePaths([
+  it("defers on transient Show on phone failure and retries once visibility recovers", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      showsOnPhone: async () => (available ? true : null),
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + GAP);
+    expect(started).toEqual([]);
+
+    available = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("keeps deferred retries when a recovery pull fills the queue, and starts them on the next pull", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      relayLiveNotes: async () => (available ? new Set() : null),
+    });
+    queue.note("w", ["deferred.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+
+    available = true;
+    const burst = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED }, (_, i) => `n${i}.md`);
+    queue.note("w", burst);
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET + burst.length * GAP);
+    expect(started).toHaveLength(BACKGROUND_LIVE_START_MAX_QUEUED);
+    expect(started).not.toContain("w:deferred.md");
+
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toContain("w:deferred.md");
+  });
+
+  it("runs catch-up after reading relay live-notes so edits and seeds arriving mid-check are pulled first", async () => {
+    const order: string[] = [];
+    const { queue, started } = setup({
+      relayLiveNotes: async () => {
+        order.push("live-notes");
+        return new Set();
+      },
+      catchUp: async () => {
+        order.push("catch-up");
+        return true;
+      },
+      noteBytes: async () => {
+        order.push("bytes");
+        return 10;
+      },
+      start: async (workspaceId, path) => {
+        order.push("start");
+        started.push(`${workspaceId}:${path}`);
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(order).toEqual(["live-notes", "catch-up", "bytes", "start"]);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("starts only tracked main Markdown text writes from synced fastForwardedPaths, bounded to the queue cap", async () => {
+    const filtered = syncedNotePaths([
       { versionId: "main", path: "notes/synced.md", operation: "write", contentKind: "text" },
       { versionId: "main", path: "notes/UPPER.MD", operation: "write", contentKind: "text" },
       { versionId: "main", path: "notes/deleted.md", operation: "delete", contentKind: "text" },
@@ -346,7 +409,10 @@ describe("background live start", () => {
       { versionId: "main", path: "data/table.json", operation: "write", contentKind: "text" },
       { versionId: "draft-1", path: "notes/branch.md", operation: "write", contentKind: "text" },
     ]);
-    expect(paths).toEqual(["notes/synced.md", "notes/UPPER.MD"]);
+    const single = setup();
+    single.queue.note("w", filtered);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(single.started).toEqual(["w:notes/synced.md", "w:notes/UPPER.MD"]);
 
     const { queue, started } = setup();
     const burst = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED + 6 }, (_, i) => ({

@@ -327,6 +327,13 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
             path: "notes/store-moved.md",
           }),
         ).toMatchObject({ text: "hello\n" });
+        await expect(
+          store.renameTextFile({
+            ...storeInput,
+            fromPath: "notes/other.md",
+            toPath: "notes/other-store-moved.md",
+          }),
+        ).rejects.toThrow("idempotency-key-reuse-mismatch");
       } finally {
         await owner?.close();
       }
@@ -425,7 +432,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         expect(await showOnPhone.liveNotes(workspaceId)).toEqual(new Set([liveObjectId!]));
 
         const outcomes = new Map<string, "existing" | "absent">();
-        const peerSeedPublished = Promise.withResolvers<void>();
+        let peerSeeded = false;
         let liveNotesChecks = 0;
         let pulledPlainDisk: { bytes: Buffer; modified: bigint } | undefined;
         backgroundLiveStart = createBackgroundLiveStart({
@@ -440,17 +447,28 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
                 ? { versionId: resolved.versionId, objectId: file.objectId }
                 : null;
             }),
-          showsOnPhone: async () => {
-            await peerSeedPublished.promise;
-            return true;
-          },
+          showsOnPhone: async () => true,
           catchUp: async (_targetWorkspaceId, signal) => {
             await syncB!.catchUp({ signal });
             return !signal.aborted && syncB!.snapshot().syncFailure === null;
           },
           relayLiveNotes: async (targetWorkspaceId, signal) => {
             liveNotesChecks += 1;
-            return await showOnPhone.liveNotes(targetWorkspaceId, signal);
+            const live = await showOnPhone.liveNotes(targetWorkspaceId, signal);
+            if (!peerSeeded) {
+              // Publish peer A's real Y.Doc seed AFTER GET /live-notes returns and BEFORE B's catch-up.
+              peerSeeded = true;
+              const peerSeed = await a!.capture.openYDocSession({
+                path: "already-seeded.md",
+                contentKind: "richdoc",
+                onRemoteUpdate: () => undefined,
+              });
+              await peerSeed.close();
+              expect(peerSeed.lineageAtOpen).toBe("absent");
+              expect((await pushUntilDrained(a!.relay)).pushed).toBeGreaterThan(0);
+              expect(relayLineageUpdates(seededObjectId!)).toBe(1);
+            }
+            return live;
           },
           noteBytes: async (_targetWorkspaceId, path) =>
             await stat(join(rootB, path)).then(
@@ -496,16 +514,6 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         });
 
         await syncB.start();
-        const peerSeed = await a.capture.openYDocSession({
-          path: "already-seeded.md",
-          contentKind: "richdoc",
-          onRemoteUpdate: () => undefined,
-        });
-        await peerSeed.close();
-        expect(peerSeed.lineageAtOpen).toBe("absent");
-        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
-        expect(relayLineageUpdates(seededObjectId!)).toBe(1);
-        peerSeedPublished.resolve();
 
         await vi.waitFor(
           () => {

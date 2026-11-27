@@ -20,7 +20,7 @@ export interface BackgroundLiveStart {
 export interface BackgroundLiveStartOptions {
   eligible(workspaceId: string): boolean;
   noteIdentity(workspaceId: string, path: string): Promise<BackgroundLiveStartIdentity | null>;
-  showsOnPhone(workspaceId: string): Promise<boolean>;
+  showsOnPhone(workspaceId: string): Promise<boolean | null>;
   catchUp(workspaceId: string, signal: AbortSignal): Promise<boolean>;
   relayLiveNotes(workspaceId: string, signal: AbortSignal): Promise<ReadonlySet<string> | null>;
   noteBytes(workspaceId: string, path: string): Promise<number | null>;
@@ -32,20 +32,10 @@ export interface BackgroundLiveStartOptions {
   gapMs?: number;
 }
 
-const isTrackedNotePath = (path: string) =>
-  liveDocumentKindForPath(path) === "richdoc" &&
-  classifyEngineFilePathForRead(path, process.platform).kind === "tracked";
-
 export function syncedNotePaths(paths: readonly RelayMaterializedPath[]): string[] {
   return paths
-    .filter(
-      (change) =>
-        change.versionId === "main" &&
-        change.operation === "write" &&
-        change.contentKind === "text" &&
-        isTrackedNotePath(change.path),
-    )
-    .map((change) => change.path);
+    .filter((c) => c.versionId === "main" && c.operation === "write" && c.contentKind === "text")
+    .map((c) => c.path);
 }
 
 export const BACKGROUND_LIVE_START_MAX_QUEUED = 32;
@@ -62,14 +52,9 @@ interface InFlight {
   ended: Promise<void>;
 }
 
-const CANCELLED = Symbol("cancelled");
 const keyOf = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
 const identityKeyOf = (workspaceId: string, id: BackgroundLiveStartIdentity) =>
   `${workspaceId}\u0000${id.versionId}\u0000${id.objectId}`;
-const sameIdentity = (
-  a: BackgroundLiveStartIdentity,
-  b: BackgroundLiveStartIdentity | null | typeof CANCELLED,
-) => !!b && b !== CANCELLED && b.versionId === a.versionId && b.objectId === a.objectId;
 
 export function createBackgroundLiveStart(
   options: BackgroundLiveStartOptions,
@@ -110,45 +95,44 @@ export function createBackgroundLiveStart(
   }
 
   function defer(workspaceId: string, path: string): void {
+    if (stopped || paused) return;
     const key = keyOf(workspaceId, path);
-    if (
-      !stopped &&
-      !paused &&
-      (deferred.has(key) || deferred.size < BACKGROUND_LIVE_START_MAX_QUEUED)
-    )
+    if (deferred.has(key) || deferred.size < BACKGROUND_LIVE_START_MAX_QUEUED)
       deferred.set(key, { workspaceId, path });
   }
 
   async function startNote({ workspaceId, path }: QueuedNote, cancel: AbortSignal): Promise<void> {
-    const cancelled = new Promise<typeof CANCELLED>((resolve) =>
-      cancel.addEventListener("abort", () => resolve(CANCELLED), { once: true }),
+    const cancelled = new Promise<typeof cancel>((resolve) =>
+      cancel.addEventListener("abort", () => resolve(cancel), { once: true }),
     );
-    const unlessCancelled = async <T>(answer: Promise<T>): Promise<T | typeof CANCELLED> =>
+    const unlessCancelled = async <T>(answer: Promise<T>): Promise<T | typeof cancel> =>
       await Promise.race([answer, cancelled]);
 
     if (!options.eligible(workspaceId)) return;
     const identity = await unlessCancelled(options.noteIdentity(workspaceId, path));
-    if (!identity || identity === CANCELLED) return;
+    if (!identity || identity instanceof AbortSignal) return;
     const identityKey = identityKeyOf(workspaceId, identity);
+    const sameNote = (other: BackgroundLiveStartIdentity | null | AbortSignal) =>
+      !!other &&
+      !(other instanceof AbortSignal) &&
+      identityKeyOf(workspaceId, other) === identityKey;
     if (started.has(identityKey)) return;
     const shown = await unlessCancelled(options.showsOnPhone(workspaceId));
-    if (shown !== true) return;
+    if (shown === null) return defer(workspaceId, path);
+    if (shown !== true || cancel.aborted || !options.eligible(workspaceId)) return;
+    const liveOnRelay = await unlessCancelled(options.relayLiveNotes(workspaceId, cancel));
+    if (liveOnRelay === null) return defer(workspaceId, path);
+    if (liveOnRelay instanceof AbortSignal || liveOnRelay.has(identity.objectId)) return;
+    const caughtUp = await unlessCancelled(options.catchUp(workspaceId, cancel));
+    if (caughtUp === false) return defer(workspaceId, path);
+    if (caughtUp !== true) return;
+    if (!sameNote(await unlessCancelled(options.noteIdentity(workspaceId, path)))) return;
     const bytes = await unlessCancelled(options.noteBytes(workspaceId, path));
     if (typeof bytes !== "number" || bytes > WYSIWYG_MARKDOWN_THRESHOLD_BYTES) return;
     if ((await unlessCancelled(options.isLossyNote(workspaceId, path))) !== false) return;
     if (cancel.aborted || !options.eligible(workspaceId)) return;
-    const caughtUp = await unlessCancelled(options.catchUp(workspaceId, cancel));
-    if (caughtUp === CANCELLED) return;
-    if (caughtUp !== true) return defer(workspaceId, path);
-    const liveOnRelay = await unlessCancelled(options.relayLiveNotes(workspaceId, cancel));
-    if (liveOnRelay === CANCELLED) return;
-    if (liveOnRelay === null) return defer(workspaceId, path);
-    if (liveOnRelay.has(identity.objectId)) return;
-    if (!sameIdentity(identity, await unlessCancelled(options.noteIdentity(workspaceId, path))))
-      return;
-    if (cancel.aborted || !options.eligible(workspaceId)) return;
     await options.start(workspaceId, path);
-    if (sameIdentity(identity, await options.noteIdentity(workspaceId, path).catch(() => null)))
+    if (sameNote(await options.noteIdentity(workspaceId, path).catch(() => null)))
       remember(identityKey);
   }
 
@@ -194,7 +178,8 @@ export function createBackgroundLiveStart(
       const before = queued.size;
       for (const path of paths) {
         if (queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
-        if (!isTrackedNotePath(path)) continue;
+        if (liveDocumentKindForPath(path) !== "richdoc") continue;
+        if (classifyEngineFilePathForRead(path, process.platform).kind !== "tracked") continue;
         const key = keyOf(workspaceId, path);
         deferred.delete(key);
         queued.set(key, { workspaceId, path });
@@ -206,9 +191,9 @@ export function createBackgroundLiveStart(
     },
     retry(workspaceId) {
       if (stopped || paused || inFlight?.workspaceId === workspaceId || deferred.size === 0) return;
-      const paths = [...deferred.entries()]
-        .filter(([, entry]) => entry.workspaceId === workspaceId)
-        .map(([key, entry]) => (deferred.delete(key), entry.path));
+      const paths = [...deferred.values()].flatMap((e) =>
+        e.workspaceId === workspaceId ? [e.path] : [],
+      );
       if (paths.length > 0) liveStart.note(workspaceId, paths);
     },
     drop,
