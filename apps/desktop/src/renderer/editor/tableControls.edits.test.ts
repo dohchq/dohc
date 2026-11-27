@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Node as PMNode } from "@tiptap/pm/model";
+import { Fragment, Slice, type Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection, type Command, type Plugin } from "@tiptap/pm/state";
 import {
   addColumnAfter,
@@ -105,5 +105,23 @@ describe("makeTableControlsPlugin — edits", () => {
       node.mockRestore();
     }
     expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
+  it("draws no controls on a table whose rows differ in length, and draws them once they match", () => {
+    const even = table(2, 2);
+    const short = even.child(1);
+    const uneven = even.replace(
+      even.content.size - short.nodeSize,
+      even.content.size,
+      new Slice(Fragment.from(short.copy(Fragment.from(short.firstChild!))), 0, 0),
+    );
+    const plugin = makeTableControlsPlugin();
+    let state = EditorState.create({ doc: doc(paragraph("lead"), uneven), plugins: [plugin] });
+    expect(shown(state, plugin).map(({ key }) => key)).toEqual(["table"]);
+    const end = state.doc.content.size - 2;
+    state = state.apply(state.tr.insert(end, short.lastChild!));
+    expect(state.doc.child(1).eq(even)).toBe(true);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+    expect(shown(state, plugin).length).toBeGreaterThan(1);
   });
 });

@@ -64,6 +64,7 @@ import {
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
 import { Mapping } from "@tiptap/pm/transform";
+import { isUnevenTable } from "@dohc/ydoc-projection/body-sequence-tables";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const tableControlsKey = new PluginKey("dohc-table-controls");
@@ -1691,10 +1692,10 @@ function pushTableControls(
   runtime: TableControlsRuntime,
   rowResizeEnabled: boolean,
 ): void {
+  decorations.push(Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }));
+  if (isUnevenTable(node)) return;
   const map = TableMap.get(node);
   const tableStart = pos + 1;
-
-  decorations.push(Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }));
 
   // Column grips: one per column, anchored inside that column's row-0
   // cell. Dedup guards against pasted-in colspan cells (the editor never

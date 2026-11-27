@@ -9,6 +9,7 @@
     "./body-fragment": "./src/body-fragment.ts",
     "./body-sequence-editor": "./src/bodySequenceEditor.ts",
     "./body-sequence-reading": "./src/bodySequenceReading.ts",
+    "./body-sequence-tables": "./src/bodySequenceTables.ts",
     "./body-sequence-tiptap": "./src/bodySequenceTiptap.ts",
     "./body-sequence-testing": "./src/bodySequenceTestSupport.ts",
     "./body-sequence-yjs": "./src/bodySequenceStore.ts",

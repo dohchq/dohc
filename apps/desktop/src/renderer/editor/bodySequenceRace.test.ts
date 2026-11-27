@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { Editor, Extension } from "@tiptap/core";
+import { addColumnAfter, addRowAfter, cellAround, CellSelection } from "@tiptap/pm/tables";
 import { dropPoint } from "@tiptap/pm/transform";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
@@ -17,6 +18,7 @@ import {
   createBodySequenceHistory,
   isBodySequenceChange,
 } from "@dohc/ydoc-projection/body-sequence-editor";
+import { isUnevenTable } from "@dohc/ydoc-projection/body-sequence-tables";
 import { BodySequence } from "@dohc/ydoc-projection/body-sequence-tiptap";
 import {
   boundary,
@@ -727,5 +729,54 @@ describe("the desktop editor's own plugins, which add to a change", () => {
       pane.expectMirror();
       expect(pane.lines()).toEqual(["aABb"]);
     }
+  });
+});
+
+describe("the desktop editor in a table two people's changes left uneven", () => {
+  const unevenTable = () => {
+    const first = desktop(note("before"), 10);
+    first.select([0, 6]);
+    expect(first.editor.commands.insertTable({ rows: 2, cols: 2, withHeaderRow: true })).toBe(true);
+    const baseline = Y.encodeStateAsUpdate(first.doc);
+    const a = desktop(baseline, 20);
+    const b = desktop(baseline, 30);
+    a.select([a.lines().length - 2, 0]);
+    expect(addRowAfter(a.editor.view.state, a.editor.view.dispatch)).toBe(true);
+    b.select([1, 0]);
+    expect(addColumnAfter(b.editor.view.state, b.editor.view.dispatch)).toBe(true);
+    exchange(a, b);
+    const table = a.editor.state.doc.child(1);
+    expect(isUnevenTable(table)).toBe(true);
+    return a;
+  };
+
+  it("adds no row for Tab in the last cell", () => {
+    const a = unevenTable();
+    const lines = a.lines();
+    a.select([lines.length - 1, 0]);
+    const tab = new KeyboardEvent("keydown", { key: "Tab" });
+    expect(a.editor.view.someProp("handleKeyDown", (handle) => handle(a.editor.view, tab))).toBe(
+      true,
+    );
+    expect(a.sent).toEqual([]);
+    expect(a.lines()).toEqual(lines);
+    a.expectMirror();
+  });
+
+  it("turns a selection of cells into a caret in its head cell", () => {
+    const a = unevenTable();
+    const { state } = a.editor;
+    const cells: number[] = [];
+    state.doc.child(1).descendants((node, pos) => {
+      if (node.type.spec.tableRole === "cell") cells.push(state.doc.child(0).nodeSize + 1 + pos);
+      return node.type.spec.tableRole !== "cell";
+    });
+    const $anchor = state.doc.resolve(cells[0]!);
+    const $head = state.doc.resolve(cells.at(-1)!);
+    a.editor.view.dispatch(state.tr.setSelection(new CellSelection($anchor, $head)));
+    const { selection } = a.editor.state;
+    expect(selection).not.toBeInstanceOf(CellSelection);
+    expect(cellAround(selection.$head)?.pos).toBe(cells.at(-1));
+    expect(a.sent).toEqual([]);
   });
 });

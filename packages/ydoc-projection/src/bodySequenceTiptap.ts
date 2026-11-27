@@ -6,6 +6,7 @@ import {
   undoBodySequence,
   type BodySequenceOptions,
 } from "./bodySequenceEditor.js";
+import { unevenTableGuard } from "./bodySequenceTables.js";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -23,7 +24,8 @@ declare module "@tiptap/core" {
  * `bodySequencePlugin`, and use it in place of the Collaboration extension, with the starter
  * kit's `undoRedo` off. Like the Collaboration extension, it binds the undo and redo keys, and
  * its plugin comes before those of extensions of a lower priority, so their views find each
- * edit already written.
+ * edit already written. It also keeps the editor off what `prosemirror-tables` can't do in a
+ * table whose rows differ in length (`unevenTableGuard`).
  *
  * An undo or redo comes back from the sequence as its own transaction, so the `undo` and `redo`
  * commands tell Tiptap not to dispatch the command's own.
@@ -35,7 +37,7 @@ export const BodySequence = Extension.create<Partial<BodySequenceOptions>>({
     const { sequence, containers } = this.options;
     if (!sequence || !containers)
       throw new Error("BodySequence needs the note's sequence and containers.");
-    return [bodySequencePlugin({ ...this.options, sequence, containers })];
+    return [bodySequencePlugin({ ...this.options, sequence, containers }), unevenTableGuard()];
   },
   addCommands() {
     const fromHistory =
