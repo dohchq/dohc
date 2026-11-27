@@ -237,6 +237,7 @@ export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | nu
 type DemoDesktopBridge = Pick<
   DohcDesktopBridge,
   | "platform"
+  | "onLocalAppsChanged"
   | "onSearchResults"
   | "onUpdateState"
   | "getUpdateState"
@@ -610,6 +611,9 @@ const DEMO_PLATFORM = /Mac|iP(hone|[oa]d)/.test(navigator.platform)
 
 const demoBridge = {
   platform: DEMO_PLATFORM,
+  onLocalAppsChanged() {
+    return () => undefined;
+  },
   onUpdateState() {
     return () => undefined;
   },

@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import { SHARE_OMITTED_CONNECTIONS, type LinksEdgesResult } from "@dohc/workspace-contracts/links";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
-import { GraphView, searchMatches } from "./GraphView";
+import { GraphView, detectApprovedEdges, searchMatches } from "./GraphView";
 import type { GraphNode } from "./graphData";
 import { collectionTabPath, siteTabPath } from "./workbenchState";
 import { deferred } from "../../testing/deferred";
@@ -32,6 +32,7 @@ const render = (ui: ReactNode) =>
 function stubDesktop(desktop: object) {
   vi.stubGlobal("dohcDesktop", {
     linksConnections: vi.fn(async () => SHARE_OMITTED_CONNECTIONS),
+    onLocalAppsChanged: vi.fn(() => () => undefined),
     ...desktop,
   });
 }
@@ -1021,3 +1022,309 @@ it.each(["chat-mention-access-changed", "chat-mention-version-changed"])(
     expect(screen.getAllByText("a.md").length).toBeGreaterThan(0);
   },
 );
+
+describe("structural kind hues and approval surge", () => {
+  const mixedConnections = (approval: "requested" | "approved") => ({
+    scope: "workspace" as const,
+    nodes: [
+      {
+        id: "collection:Tasks",
+        kind: "document-collection" as const,
+        path: "Tasks",
+        title: "Tasks",
+        recordCount: 1,
+      },
+      {
+        id: "app:board",
+        kind: "app" as const,
+        path: "board",
+        title: "Board",
+        entryPath: null,
+      },
+      {
+        id: "automation:triage",
+        kind: "automation" as const,
+        path: "Tasks/.dohc/automations/triage.json",
+        title: "Triage",
+        automationId: "triage",
+        enabled: true,
+      },
+      {
+        id: "dataset:ledger",
+        kind: "dataset" as const,
+        path: "ledger",
+        title: "Ledger",
+        datasetId: "ds-1",
+        firstTableId: "t-1",
+      },
+      {
+        id: "group:ops",
+        kind: "group" as const,
+        channelId: "ch-1",
+        title: "Ops",
+      },
+    ],
+    edges: [
+      {
+        source: "app:board",
+        target: "collection:Tasks",
+        kind: "app-uses-data" as const,
+        approval,
+      },
+    ],
+    records: [],
+    complete: true,
+    mountsCovered: true,
+  });
+
+  it("tints structural kinds across Filters, Rows, and Search until a non-empty Color rule is set", async () => {
+    const user = userEvent.setup();
+    stubPages(["note.md"], [], {
+      linksConnections: vi.fn(async () => mixedConnections("approved")),
+    });
+    const view = render(
+      <GraphView
+        workspaceId="ws-hues"
+        activePath={null}
+        refreshKey="0"
+        variant="panel"
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(rowPaths()).toContain("app:board"));
+    const rowSvg = (path: string) =>
+      screen
+        .getAllByTestId("graph-file-row")
+        .find((row) => row.dataset.path === path)!
+        .querySelector("svg")!
+        .getAttribute("class") ?? "";
+    expect(rowSvg("collection:Tasks")).toContain("text-hue-teal");
+    expect(rowSvg("app:board")).toContain("text-hue-indigo");
+    expect(rowSvg("automation:triage")).toContain("text-hue-amber");
+    expect(rowSvg("dataset:ledger")).toContain("text-hue-plum");
+    expect(rowSvg("group:ops")).toContain("text-hue-rose");
+    expect(rowSvg("note.md")).toContain("text-subtle");
+
+    fireEvent.click(screen.getByTestId("graph-settings-toggle"));
+    const filterSvg = (label: string) =>
+      screen
+        .getByRole("switch", { name: label })
+        .parentElement!.querySelector("svg")!
+        .getAttribute("class") ?? "";
+    expect(filterSvg("Show app nodes")).toContain("text-hue-indigo");
+    expect(filterSvg("Show page nodes")).toContain("text-subtle");
+
+    fireEvent.click(screen.getByRole("button", { name: "Color rules" }));
+    fireEvent.click(screen.getByRole("button", { name: "New color rule" }));
+    expect(rowSvg("app:board")).toContain("text-hue-indigo");
+    expect(filterSvg("Show app nodes")).toContain("text-hue-indigo");
+
+    await user.type(screen.getByPlaceholderText("Name or folder"), "note");
+    expect(rowSvg("note.md")).toContain("text-hue-teal");
+    expect(rowSvg("app:board")).toContain("text-subtle");
+    expect(filterSvg("Show app nodes")).toContain("text-subtle");
+
+    view.rerender(
+      <GraphView
+        workspaceId="ws-hues-page"
+        activePath={null}
+        refreshKey="0"
+        variant="page"
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("6"));
+    await user.type(screen.getByTestId("graph-search"), "Board");
+    const option = await screen.findByTestId("graph-search-option");
+    expect(option.querySelector("svg")!.getAttribute("class")).toContain("text-hue-indigo");
+  });
+
+  it("detects approved edges and gates the live surge on onLocalAppsChanged", async () => {
+    expect(
+      detectApprovedEdges(new Set([JSON.stringify(["app:a:1", "collection:b"])]), [
+        { source: "app:a:1", target: "collection:b", kind: "app-uses-data", approval: "approved" },
+        {
+          source: "app:other",
+          target: "collection:b",
+          kind: "app-uses-data",
+          approval: "approved",
+        },
+        { source: "app:a:1", target: "collection:b", kind: "relation" },
+      ]),
+    ).toEqual([["app:a:1", "collection:b"]]);
+
+    const frames = stubAnimationFrames();
+    const arcCalls: unknown[][] = [];
+    const ctxStub = new Proxy(
+      {
+        arc: (...args: unknown[]) => arcCalls.push(args),
+        measureText: (t: string) => ({ width: t.length * 7 }),
+        createRadialGradient: () => ({ addColorStop: () => undefined }),
+      },
+      {
+        get: (target, prop) =>
+          prop in target ? target[prop as keyof typeof target] : () => undefined,
+      },
+    );
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(ctxStub as unknown as CanvasRenderingContext2D);
+    onTestFinished(() => getContext.mockRestore());
+
+    let localAppsListener: ((event: { workspaceId: string }) => void) | null = null;
+    const responses = Array.from({ length: 6 }, () =>
+      deferred<ReturnType<typeof mixedConnections>>(),
+    );
+    let callIndex = 0;
+    const linksConnections = vi.fn(() => responses[callIndex++]!.promise);
+    const onError = vi.fn();
+    stubPages(["note.md"], [], {
+      linksConnections,
+      chatFileMentionsPage: vi.fn(async () => ({ entries: [] })),
+      onLocalAppsChanged: vi.fn((cb: (event: { workspaceId: string }) => void) => {
+        localAppsListener = cb;
+        return () => {
+          localAppsListener = null;
+        };
+      }),
+    });
+
+    const view = render(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="0"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(1));
+    await act(async () => responses[0]!.resolve(mixedConnections("requested")));
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+
+    arcCalls.length = 0;
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="1"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(2));
+    await act(async () => responses[1]!.resolve(mixedConnections("approved")));
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+    expect(arcCalls.some((args) => args[2] === 2.2)).toBe(false);
+
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="2"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(3));
+    await act(async () => responses[2]!.resolve(mixedConnections("requested")));
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+
+    arcCalls.length = 0;
+    act(() => localAppsListener?.({ workspaceId: "ws-surge" }));
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="3"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(4));
+    await act(async () => responses[3]!.resolve(mixedConnections("approved")));
+    let steps = 0;
+    act(() => {
+      while (frames.pending && steps < 120) {
+        frames.runNext();
+        steps++;
+      }
+    });
+    expect(frames.pending).toBe(0);
+    expect(steps).toBeGreaterThan(40);
+    expect(arcCalls.some((args) => args[2] === 2.2)).toBe(true);
+
+    arcCalls.length = 0;
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="3"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+        chatMentionsAvailable
+      />,
+    );
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toBeTruthy());
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+    expect(arcCalls.some((args) => args[2] === 2.2)).toBe(false);
+
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="4"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(5));
+    await act(async () => responses[4]!.resolve(mixedConnections("requested")));
+    act(() => localAppsListener?.({ workspaceId: "ws-surge" }));
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="5"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(6));
+    await act(async () => responses[5]!.reject(new Error("connections failed")));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    arcCalls.length = 0;
+    linksConnections.mockResolvedValueOnce(mixedConnections("approved"));
+    view.rerender(
+      <GraphView
+        workspaceId="ws-surge"
+        activePath={null}
+        refreshKey="6"
+        variant="page"
+        onOpenPath={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(linksConnections).toHaveBeenCalledTimes(7));
+    act(() => {
+      while (frames.pending) frames.runNext();
+    });
+    expect(arcCalls.some((args) => args[2] === 2.2)).toBe(false);
+  });
+});
