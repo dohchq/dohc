@@ -26,7 +26,7 @@ use crate::{
     ReplicationEnvelope, SyncError,
 };
 
-mod note_format_two;
+pub(crate) mod note_format_two;
 
 pub(crate) use note_format_two::{
     CONVERSION_BASE_PENDING, CONVERSION_ID_PREFIX, CONVERSION_PENDING,

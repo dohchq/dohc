@@ -465,7 +465,7 @@ pub fn convert_notes_to_format_two(
     Ok(pass)
 }
 
-fn fails_only_the_note(error: &SyncError) -> bool {
+pub(crate) fn fails_only_the_note(error: &SyncError) -> bool {
     use StorageError as Store;
     match error.original() {
         SyncError::Storage(

@@ -1353,13 +1353,18 @@ fn the_pass_names_a_note_too_large_for_format_two_and_leaves_it() {
     assert!(carriers(&store).is_empty());
 }
 
-fn local_note(store: &mut EngineStore, text: &str, seed_source: Option<&str>) -> DocKey {
+fn local_note(
+    store: &mut EngineStore,
+    text: &str,
+    base: &[u8],
+    seed_source: Option<&str>,
+) -> DocKey {
     let key = seed_note(store, text, "moment-local", None);
     dohc_engine_collab::record_local_update(
         store,
         &mut WriterDocCache::new(),
         &key,
-        &base_of(&[text]),
+        base,
         LocalAppend {
             marker: Some(dohc_engine_collab::MarkerCreation {
                 path: Some("doc.md"),
@@ -1391,19 +1396,20 @@ fn projected(store: &EngineStore, key: &DocKey) -> String {
 }
 
 fn settled_local_note(store: &mut EngineStore, text: &str) -> DocKey {
-    let key = local_note(store, text, None);
+    let key = local_note(store, text, &base_of(&[text]), None);
     let projected = projected(store, &key);
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE ydoc_docs SET last_settled_sha=?1, pending_authors_json='[]'",
-                [hex_sha256(projected.as_bytes())],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
+    settle(store, &projected);
     key
+}
+
+fn settle(store: &mut EngineStore, settled: &str) {
+    exec(
+        store,
+        &format!(
+            "UPDATE ydoc_docs SET last_settled_sha='{}', pending_authors_json='[]'",
+            hex_sha256(settled.as_bytes())
+        ),
+    );
 }
 
 fn head(store: &EngineStore, key: &DocKey) -> (i64, i64) {
@@ -1489,6 +1495,26 @@ fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
     );
     assert_eq!(head(&store, &key), before);
     assert_eq!(note(&store, &key), (1, OTHER_NOTE.to_owned()));
+    let projected = projected(&store, &key);
+    settle(&mut store, &projected);
+    let settled = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((settled.converted, head(&store, &key)), (1, (0, 0)));
+}
+
+#[test]
+fn a_settled_local_note_that_keeps_its_files_bytes_drops_its_cache() {
+    let file = "A note.";
+    let kept = dohc_engine_collab::Ydoc::wire();
+    kept.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, file)
+        .unwrap();
+    let (_scratch, _path, mut store) = open_store();
+    let key = local_note(&mut store, file, &kept.encode_full_state(), None);
+    assert_ne!(projected(&store, &key), file);
+    settle(&mut store, file);
+    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!((pass.converted, pass.skipped), (1, Vec::new()));
+    assert_eq!(head(&store, &key), (0, 0));
+    assert_eq!(text(&mut store), file);
 }
 
 #[test]
@@ -1524,10 +1550,10 @@ fn a_local_note_whose_file_format_two_cannot_hold_keeps_its_cache() {
     let (_scratch, _path, mut store) = open_store();
     let key = settled_local_note(&mut store, NOTE);
     write(&mut store, linked, "moment-linked", 13);
-    let before = head(&store, &key);
+    let before = (head(&store, &key), changes(&store));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
-    assert_eq!(head(&store, &key), before);
+    assert_eq!((head(&store, &key), changes(&store)), before);
 }
 
 #[test]
@@ -1554,23 +1580,10 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
 }
 
 #[test]
-fn a_local_only_note_format_two_cannot_hold_keeps_its_cache() {
-    let linked = "Run [`npm install`](https://example.com) first\n";
-    let (_scratch, _path, mut store) = open_store();
-    let key = settled_local_note(&mut store, linked);
-    let before = (head(&store, &key), changes(&store));
-    let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
-    assert_eq!(pass.converted, 0);
-    assert_eq!((head(&store, &key), changes(&store)), before);
-    assert_eq!(note(&store, &key), (1, linked.to_owned()));
-}
-
-#[test]
 fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
     let (_scratch, _path, mut store) = open_store();
     let source = hex_sha256(NOTE.as_bytes());
-    let key = local_note(&mut store, NOTE, Some(&source));
+    let key = local_note(&mut store, NOTE, &base_of(&[NOTE]), Some(&source));
     let unproven = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!(
         unproven.skipped,
@@ -1595,6 +1608,46 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
     assert_eq!((proven.converted, proven.skipped), (1, Vec::new()));
     assert_eq!(head(&store, &key), (0, 0));
     assert_eq!(text(&mut store), NOTE);
+}
+
+#[test]
+fn a_zero_budget_is_refused_and_converts_nothing() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    let refused = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            0,
+            &NoLiveLeases,
+            &|_, _| None,
+            &NoFaults,
+            21,
+        )
+    });
+    assert!(matches!(refused, Err(SyncError::InvalidInput { .. })));
+    assert_eq!(note(&store, &key).0, 1);
+    assert!(carriers(&store).is_empty());
+}
+
+#[test]
+fn a_sqlite_engine_failure_stops_the_pass_and_a_bad_row_fails_only_its_note() {
+    let corrupt = |source: rusqlite::Error| {
+        SyncError::Storage(dohc_engine_storage::StorageError::StateCorrupt {
+            source: Some(Box::new(source)),
+        })
+    };
+    let io = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+        None,
+    );
+    let row =
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, "bad".into());
+    let fatal = |source| {
+        !crate::conflict_resolve_v1::note_format_two::fails_only_the_note(&corrupt(source))
+    };
+    assert!(fatal(io));
+    assert!(!fatal(row));
 }
 
 #[test]
