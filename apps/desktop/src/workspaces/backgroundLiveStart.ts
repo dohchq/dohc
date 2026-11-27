@@ -10,6 +10,7 @@ export interface BackgroundLiveStartIdentity {
 
 export interface BackgroundLiveStart {
   note(workspaceId: string, paths: readonly string[]): void;
+  retry(workspaceId: string): void;
   drop(workspaceId?: string): Promise<void>;
   pause(): Promise<void>;
   resume(): void;
@@ -20,6 +21,7 @@ export interface BackgroundLiveStartOptions {
   eligible(workspaceId: string): boolean;
   noteIdentity(workspaceId: string, path: string): Promise<BackgroundLiveStartIdentity | null>;
   showsOnPhone(workspaceId: string): Promise<boolean>;
+  catchUp(workspaceId: string, signal: AbortSignal): Promise<boolean>;
   relayLiveNotes(workspaceId: string, signal: AbortSignal): Promise<ReadonlySet<string> | null>;
   noteBytes(workspaceId: string, path: string): Promise<number | null>;
   isLossyNote(workspaceId: string, path: string): Promise<boolean>;
@@ -30,6 +32,10 @@ export interface BackgroundLiveStartOptions {
   gapMs?: number;
 }
 
+const isTrackedNotePath = (path: string) =>
+  liveDocumentKindForPath(path) === "richdoc" &&
+  classifyEngineFilePathForRead(path, process.platform).kind === "tracked";
+
 export function syncedNotePaths(paths: readonly RelayMaterializedPath[]): string[] {
   return paths
     .filter(
@@ -37,8 +43,7 @@ export function syncedNotePaths(paths: readonly RelayMaterializedPath[]): string
         change.versionId === "main" &&
         change.operation === "write" &&
         change.contentKind === "text" &&
-        liveDocumentKindForPath(change.path) === "richdoc" &&
-        classifyEngineFilePathForRead(change.path, process.platform).kind === "tracked",
+        isTrackedNotePath(change.path),
     )
     .map((change) => change.path);
 }
@@ -59,16 +64,12 @@ interface InFlight {
 
 const CANCELLED = Symbol("cancelled");
 const keyOf = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
-const identityKeyOf = (workspaceId: string, identity: BackgroundLiveStartIdentity) =>
-  `${workspaceId}\u0000${identity.versionId}\u0000${identity.objectId}`;
+const identityKeyOf = (workspaceId: string, id: BackgroundLiveStartIdentity) =>
+  `${workspaceId}\u0000${id.versionId}\u0000${id.objectId}`;
 const sameIdentity = (
-  left: BackgroundLiveStartIdentity,
-  right: BackgroundLiveStartIdentity | null | typeof CANCELLED,
-) =>
-  !!right &&
-  right !== CANCELLED &&
-  right.versionId === left.versionId &&
-  right.objectId === left.objectId;
+  a: BackgroundLiveStartIdentity,
+  b: BackgroundLiveStartIdentity | null | typeof CANCELLED,
+) => !!b && b !== CANCELLED && b.versionId === a.versionId && b.objectId === a.objectId;
 
 export function createBackgroundLiveStart(
   options: BackgroundLiveStartOptions,
@@ -77,6 +78,7 @@ export function createBackgroundLiveStart(
   const maxWaitMs = options.maxWaitMs ?? 60_000;
   const gapMs = options.gapMs ?? 1_000;
   const queued = new Map<string, QueuedNote>();
+  const deferred = new Map<string, QueuedNote>();
   const started = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let deadline = 0;
@@ -107,6 +109,16 @@ export function createBackgroundLiveStart(
       started.delete(started.values().next().value!);
   }
 
+  function defer(workspaceId: string, path: string): void {
+    const key = keyOf(workspaceId, path);
+    if (
+      !stopped &&
+      !paused &&
+      (deferred.has(key) || deferred.size < BACKGROUND_LIVE_START_MAX_QUEUED)
+    )
+      deferred.set(key, { workspaceId, path });
+  }
+
   async function startNote({ workspaceId, path }: QueuedNote, cancel: AbortSignal): Promise<void> {
     const cancelled = new Promise<typeof CANCELLED>((resolve) =>
       cancel.addEventListener("abort", () => resolve(CANCELLED), { once: true }),
@@ -125,9 +137,13 @@ export function createBackgroundLiveStart(
     if (typeof bytes !== "number" || bytes > WYSIWYG_MARKDOWN_THRESHOLD_BYTES) return;
     if ((await unlessCancelled(options.isLossyNote(workspaceId, path))) !== false) return;
     if (cancel.aborted || !options.eligible(workspaceId)) return;
+    const caughtUp = await unlessCancelled(options.catchUp(workspaceId, cancel));
+    if (caughtUp === CANCELLED) return;
+    if (caughtUp !== true) return defer(workspaceId, path);
     const liveOnRelay = await unlessCancelled(options.relayLiveNotes(workspaceId, cancel));
-    if (liveOnRelay === CANCELLED || liveOnRelay === null || liveOnRelay.has(identity.objectId))
-      return;
+    if (liveOnRelay === CANCELLED) return;
+    if (liveOnRelay === null) return defer(workspaceId, path);
+    if (liveOnRelay.has(identity.objectId)) return;
     if (!sameIdentity(identity, await unlessCancelled(options.noteIdentity(workspaceId, path))))
       return;
     if (cancel.aborted || !options.eligible(workspaceId)) return;
@@ -157,8 +173,9 @@ export function createBackgroundLiveStart(
   }
 
   async function drop(workspaceId?: string): Promise<void> {
-    for (const [key, note] of queued)
-      if (workspaceId === undefined || note.workspaceId === workspaceId) queued.delete(key);
+    for (const map of [queued, deferred])
+      for (const [key, note] of map)
+        if (workspaceId === undefined || note.workspaceId === workspaceId) map.delete(key);
     if (queued.size === 0) {
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
@@ -170,21 +187,29 @@ export function createBackgroundLiveStart(
     await current.ended;
   }
 
-  return {
+  const liveStart: BackgroundLiveStart = {
     note(workspaceId, paths) {
       if (stopped || paused || !options.eligible(workspaceId)) return;
       quietUntil = Date.now() + quietMs;
       const before = queued.size;
       for (const path of paths) {
         if (queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
-        if (liveDocumentKindForPath(path) !== "richdoc") continue;
-        if (classifyEngineFilePathForRead(path, process.platform).kind !== "tracked") continue;
-        queued.set(keyOf(workspaceId, path), { workspaceId, path });
+        if (!isTrackedNotePath(path)) continue;
+        const key = keyOf(workspaceId, path);
+        deferred.delete(key);
+        queued.set(key, { workspaceId, path });
       }
       if (queued.size === 0) return;
       if (before === 0 && deadline === 0) deadline = Date.now() + maxWaitMs;
       if (inFlight) return;
       scheduleNext();
+    },
+    retry(workspaceId) {
+      if (stopped || paused || inFlight?.workspaceId === workspaceId || deferred.size === 0) return;
+      const paths = [...deferred.entries()]
+        .filter(([, entry]) => entry.workspaceId === workspaceId)
+        .map(([key, entry]) => (deferred.delete(key), entry.path));
+      if (paths.length > 0) liveStart.note(workspaceId, paths);
     },
     drop,
     async pause() {
@@ -199,4 +224,5 @@ export function createBackgroundLiveStart(
       await drop();
     },
   };
+  return liveStart;
 }

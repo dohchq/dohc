@@ -3744,6 +3744,7 @@ function engineForWorkspace(
       if (applied) signalChatWrite(workspace.workspaceId);
       const syncedNotes = syncedNotePaths(fastForwardedPaths);
       if (syncedNotes.length > 0) backgroundLiveStart.note(workspace.workspaceId, syncedNotes);
+      backgroundLiveStart.retry(workspace.workspaceId);
       // A deferred wake's message or decision may have arrived. An empty pull brought nothing to wait for.
       void chatWakes.pulled({ applied, recovered });
       void noticeStore().sync();
@@ -9056,6 +9057,10 @@ const backgroundLiveStart = createBackgroundLiveStart({
       : null;
   },
   showsOnPhone: (workspaceId) => showOnPhone.shows(workspaceId),
+  catchUp: async (workspaceId, signal) => {
+    await activity.catchUpCloudSync(workspaceId, signal);
+    return !signal.aborted && !activity.cloudSyncOffline(workspaceId);
+  },
   relayLiveNotes: (workspaceId, signal) => showOnPhone.liveNotes(workspaceId, signal),
   noteBytes: async (workspaceId, path) => {
     const rootPath = findWorkspace(workspaceId)?.rootPath;

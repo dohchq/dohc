@@ -17,6 +17,7 @@ function setup(overrides: Partial<BackgroundLiveStartOptions> = {}) {
     eligible: () => true,
     noteIdentity: async (_workspaceId, path) => ({ versionId: "main", objectId: `object:${path}` }),
     showsOnPhone: async () => true,
+    catchUp: async () => true,
     relayLiveNotes: async () => new Set(),
     noteBytes: async () => 10,
     isLossyNote: async () => false,
@@ -266,11 +267,55 @@ describe("background live start", () => {
     expect(started).toEqual(["w:plain.md", "w:live.md"]);
   });
 
-  it("fails closed when relay live-notes cannot be confirmed", async () => {
+  it("fails closed on transient live-notes failure and retries after the next pull", async () => {
+    let available = false;
     const { queue, started } = setup({
-      relayLiveNotes: async () => null,
+      relayLiveNotes: async () => (available ? new Set() : null),
     });
     queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + GAP);
+    expect(started).toEqual([]);
+
+    available = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("defers on catch-up failure, ignores retry during its own catch-up, and retries after recovery", async () => {
+    let online = false;
+    let catchUpCalls = 0;
+    const { queue, started } = setup({
+      catchUp: async () => {
+        catchUpCalls += 1;
+        // Simulate afterSuccessfulPull firing while this workspace's startNote is in flight.
+        queue.retry("w");
+        return online;
+      },
+    });
+    queue.note("w", ["a.md", "b.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(started).toEqual([]);
+    expect(catchUpCalls).toBe(2);
+
+    online = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET + 2 * GAP);
+    expect(started).toEqual(["w:a.md", "w:b.md"]);
+  });
+
+  it("drops deferred retries on workspace close", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      relayLiveNotes: async () => (available ? new Set() : null),
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+
+    await queue.drop("w");
+    available = true;
+    queue.retry("w");
     await vi.advanceTimersByTimeAsync(QUIET + GAP);
     expect(started).toEqual([]);
   });

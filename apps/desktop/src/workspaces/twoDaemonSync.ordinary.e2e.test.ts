@@ -335,24 +335,24 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
   );
 
   it(
-    "warms a synced-in Markdown note in the background while skipping notes already live on the relay",
+    "warms a synced-in Markdown note in the background while skipping notes already seeded or live on the relay",
     async () => {
       const workspaceId = `two-daemon-synced-live-start-${randomUUID()}`;
       const relay = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
       const rootA = await createTestScratch("dohc-synced-live-a-");
       const rootB = await createTestScratch("dohc-synced-live-b-");
       const plainText = "---\ntitle: synced\n---\nSynced\n======\n\n* one\n";
+      const seededText = "# Seeded on peer A\n";
       const liveText = "# Already live\n";
-      const serverHoldsLineage = (objectId: string) => {
+      const relayLineageUpdates = (objectId: string) => {
         const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
         try {
-          return (
-            relayDb
-              .prepare(
-                "SELECT 1 FROM sync_relay_log WHERE workspace_id=? AND op_kind='ydoc.update' AND json_extract(payload_json, '$.objectId')=? AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL LIMIT 1",
-              )
-              .get(workspaceId, objectId) !== undefined
-          );
+          const row = relayDb
+            .prepare(
+              "SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id=? AND op_kind='ydoc.update' AND json_extract(payload_json, '$.objectId')=? AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL",
+            )
+            .get(workspaceId, objectId) as { count: number };
+          return row.count;
         } finally {
           relayDb.close();
         }
@@ -371,14 +371,18 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         await pullCaptured(b.relay, b.capture);
 
         await writeAndCapture(a, rootA, "already-live.md", liveText);
+        await writeAndCapture(a, rootA, "already-seeded.md", seededText);
         await writeAndCapture(a, rootA, "synced-plain.md", plainText);
         const plainObjectId = await a.capture.fileObjectIdForPath("synced-plain.md");
+        const seededObjectId = await a.capture.fileObjectIdForPath("already-seeded.md");
         const liveObjectId = await a.capture.fileObjectIdForPath("already-live.md");
         expect(plainObjectId).toBeTruthy();
+        expect(seededObjectId).toBeTruthy();
         expect(liveObjectId).toBeTruthy();
         expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
-        expect(serverHoldsLineage(plainObjectId!)).toBe(false);
-        expect(serverHoldsLineage(liveObjectId!)).toBe(false);
+        expect(relayLineageUpdates(plainObjectId!)).toBe(0);
+        expect(relayLineageUpdates(seededObjectId!)).toBe(0);
+        expect(relayLineageUpdates(liveObjectId!)).toBe(0);
 
         const relayDb = new DatabaseSync(relayServer.dbPath);
         try {
@@ -420,7 +424,8 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         });
         expect(await showOnPhone.liveNotes(workspaceId)).toEqual(new Set([liveObjectId!]));
 
-        const startedPaths: string[] = [];
+        const outcomes = new Map<string, "existing" | "absent">();
+        const peerSeedPublished = Promise.withResolvers<void>();
         let liveNotesChecks = 0;
         let pulledPlainDisk: { bytes: Buffer; modified: bigint } | undefined;
         backgroundLiveStart = createBackgroundLiveStart({
@@ -435,7 +440,14 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
                 ? { versionId: resolved.versionId, objectId: file.objectId }
                 : null;
             }),
-          showsOnPhone: async () => true,
+          showsOnPhone: async () => {
+            await peerSeedPublished.promise;
+            return true;
+          },
+          catchUp: async (_targetWorkspaceId, signal) => {
+            await syncB!.catchUp({ signal });
+            return !signal.aborted && syncB!.snapshot().syncFailure === null;
+          },
           relayLiveNotes: async (targetWorkspaceId, signal) => {
             liveNotesChecks += 1;
             return await showOnPhone.liveNotes(targetWorkspaceId, signal);
@@ -447,13 +459,13 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
             ),
           isLossyNote: async () => false,
           start: async (_targetWorkspaceId, path) => {
-            startedPaths.push(path);
             const session = await b!.capture.openYDocSession({
               path,
               contentKind: "richdoc",
               onRemoteUpdate: () => undefined,
             });
             await session.close();
+            outcomes.set(path, session.lineageAtOpen);
             if (session.lineageAtOpen === "absent") syncB?.queuePull();
           },
           onError: (_message, error) => phoneErrors.push(error),
@@ -479,22 +491,37 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
               };
             }
             if (notes.length > 0) backgroundLiveStart!.note(workspaceId, notes);
+            backgroundLiveStart!.retry(workspaceId);
           },
         });
 
         await syncB.start();
+        const peerSeed = await a.capture.openYDocSession({
+          path: "already-seeded.md",
+          contentKind: "richdoc",
+          onRemoteUpdate: () => undefined,
+        });
+        await peerSeed.close();
+        expect(peerSeed.lineageAtOpen).toBe("absent");
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+        expect(relayLineageUpdates(seededObjectId!)).toBe(1);
+        peerSeedPublished.resolve();
+
         await vi.waitFor(
           () => {
-            expect(liveNotesChecks).toBeGreaterThanOrEqual(2);
-            expect(serverHoldsLineage(plainObjectId!)).toBe(true);
+            expect(liveNotesChecks).toBeGreaterThanOrEqual(3);
+            expect(relayLineageUpdates(plainObjectId!)).toBe(1);
           },
           {
             timeout: REAL_DAEMON_DEADLINE_MS,
             interval: 50,
           },
         );
-        expect(startedPaths).toEqual(["synced-plain.md"]);
-        expect(serverHoldsLineage(liveObjectId!)).toBe(false);
+        expect(outcomes.get("synced-plain.md")).toBe("absent");
+        expect(outcomes.get("already-seeded.md")).toBe("existing");
+        expect(outcomes.has("already-live.md")).toBe(false);
+        expect(relayLineageUpdates(seededObjectId!)).toBe(1);
+        expect(relayLineageUpdates(liveObjectId!)).toBe(0);
         expect(phoneErrors).toEqual([]);
         expect(pulledPlainDisk?.bytes).toEqual(Buffer.from(plainText));
         const afterFile = join(rootB, "synced-plain.md");

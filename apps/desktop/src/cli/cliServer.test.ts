@@ -886,7 +886,7 @@ describe("CLI socket server", () => {
           workspace: { workspaceId: WORKSPACE_ID },
           signalChatWrite: chatWriteSignals.signalChatWrite,
           syncedNotePaths,
-          backgroundLiveStart: { note: vi.fn() },
+          backgroundLiveStart: { note: vi.fn(), retry: vi.fn() },
           noticeStore: () => ({ sync: vi.fn() }),
           shareRosters: { pulled: vi.fn() },
           refreshShareLabels: vi.fn(),

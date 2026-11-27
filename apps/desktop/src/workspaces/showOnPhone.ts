@@ -60,18 +60,13 @@ export function createShowOnPhone(options: {
       const session = await options.session();
       if (!session || signal?.aborted) return null;
       const deadline = new AbortController();
-      const timer = setTimeout(
-        () => deadline.abort(new TypeError("The server did not answer in time.")),
-        liveNotesTimeoutMs,
-      );
+      const timer = setTimeout(() => deadline.abort(new TypeError("timeout")), liveNotesTimeoutMs);
       timer.unref?.();
       try {
         const response = await relayRequest({
           relay: session.relay,
           path: `/sync/${encodeURIComponent(workspaceId)}/live-notes`,
-          init: {
-            signal: signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal,
-          },
+          init: { signal: signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal },
           label: "Live notes",
         });
         const { notes } = LiveNotesResponse.parse(await response.json());
