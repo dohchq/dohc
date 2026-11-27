@@ -428,6 +428,99 @@ fn peer_without_ydoc(
     (scratch, peer, key)
 }
 
+fn successor_edit(owner_store: &EngineStore, carrier: &serde_json::Value, text: &str) -> Vec<u8> {
+    on(|| {
+        let successor = carrier["lineageTransition"]["successor"]["updateBlobSha256"]
+            .as_str()
+            .unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&owner_store.get_binary_blob(successor).unwrap().unwrap())
+            .unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, text)
+            .unwrap()
+    })
+}
+
+fn successor_update(
+    peer: &EngineStore,
+    seq: i64,
+    carrier: &serde_json::Value,
+    update: &[u8],
+) -> ReplicationEnvelope {
+    envelope(
+        "owner",
+        seq,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-a",
+            "path": "doc.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": peer.put_binary_blob(update).unwrap(),
+            "lineageClaimId": successor_claim(carrier),
+            "isBaseState": false
+        }),
+    )
+}
+
+fn predecessor_base(carrier: &serde_json::Value) -> ReplicationEnvelope {
+    envelope(
+        "creator",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-a",
+            "path": "doc.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": predecessor_claim(carrier),
+            "lineageClaimId": predecessor_claim(carrier),
+            "isBaseState": true
+        }),
+    )
+}
+
+const NEW_NOTE: &str = "A new note.\n";
+
+fn new_note_op(store: &mut EngineStore, seq: i64) -> ReplicationEnvelope {
+    let sha = hex_sha256(NEW_NOTE.as_bytes());
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![sha, i64::try_from(NEW_NOTE.len()).unwrap(), NEW_NOTE],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    envelope(
+        "owner",
+        seq,
+        "moment.append",
+        json!({
+            "momentId": "owner-new-moment", "versionId": "main",
+            "objectId": "object-c", "objectCreatedAtMs": 1,
+            "path": "notes.md", "recordedAtMs": 2_000, "operation": "write",
+            "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": "notes.md",
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "absent",
+        }),
+    )
+}
+
+fn passes_held(store: &mut EngineStore, kind: &str, payload: serde_json::Value) -> bool {
+    let op = envelope("owner", 1, kind, payload);
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::deferred::passes_held_work(tx, &op, -1)
+            })
+            .unwrap(),
+    )
+}
+
 #[test]
 fn a_converted_note_projects_the_same_bytes_in_format_two() {
     let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
@@ -673,6 +766,75 @@ fn a_peer_with_no_ydoc_acknowledges_the_conversion_and_pulls_on() {
 }
 
 #[test]
+fn a_peer_with_no_ydoc_waits_for_a_retained_base_then_takes_the_conversion() {
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
+    let identity = read_sync_identity(&peer, "ws").unwrap().unwrap();
+    let base = predecessor_base(&carrier);
+    crate::deferred::retain_waiting(
+        &mut peer,
+        &identity,
+        None,
+        &[&base],
+        &BTreeMap::new(),
+        &NoFaults,
+    )
+    .unwrap();
+    let owner_edit = successor_edit(&owner_store, &carrier, "An owner edit.\n");
+    let client = relay(vec![
+        conversion_op(0, &carrier),
+        new_note_op(&mut peer, 1),
+        successor_update(&peer, 2, &carrier, &owner_edit),
+    ]);
+    let held = pull(&client, &mut peer, &OpenNote("object-a"));
+    assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
+    assert_eq!(claim(&peer, &key), None);
+    assert_eq!(read_at(&mut peer, "notes.md").as_deref(), Some(NEW_NOTE));
+    let retained: i64 = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM relay_deferred_ops WHERE origin_id='owner' \
+                 AND json_extract(envelope_json,'$.opKind')='conflict.resolve'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(retained, 1);
+    for _ in 0..2 {
+        let closed = pull(&client, &mut peer, &NoLiveLeases);
+        assert!(
+            matches!(closed, SyncPassOutcome::Complete { .. }),
+            "{closed:?}"
+        );
+    }
+    assert_eq!(claim(&peer, &key), Some(successor_claim(&carrier)));
+    assert_eq!(note(&peer, &key), (2, "An owner edit.\n".to_owned()));
+    assert_eq!(text(&mut peer), "An owner edit.\n");
+    assert_eq!(read_replication_acked_seq(&peer, "ws", "owner").unwrap(), 2);
+    assert_eq!(open_reviews(&peer), 0);
+}
+
+#[test]
+fn a_conversion_before_its_base_from_another_origin_leaves_the_peer_on_the_base() {
+    let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
+    let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
+    let client = relay(vec![conversion_op(0, &carrier), predecessor_base(&carrier)]);
+    let outcome = pull(&client, &mut peer, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(2), "{outcome:?}");
+    assert_eq!(
+        read_replication_acked_seq(&peer, "ws", "creator").unwrap(),
+        0
+    );
+    assert_eq!(
+        claim(&peer, &key).as_deref(),
+        Some(predecessor_claim(&carrier))
+    );
+    assert_eq!(text(&mut peer), NOTE);
+    assert_eq!(open_reviews(&peer), 0);
+}
+
+#[test]
 fn a_peer_that_deleted_the_note_offline_keeps_it_deleted_and_pulls_on() {
     let (_owner_scratch, owner_store, carrier) = prebuilt_owner(&base_of(&[NOTE]));
     let (_scratch, mut peer, key) = peer_without_ydoc(&owner_store, &carrier);
@@ -728,61 +890,12 @@ fn a_conversion_held_behind_an_open_note_holds_only_that_note() {
     );
     hand_over(&owner_store, &mut peer, &carrier);
     hand_over(&owner_store, &mut peer, &other_carrier);
-    let owner_edit = on(|| {
-        let successor = &carrier["lineageTransition"]["successor"]["updateBlobSha256"];
-        let doc = dohc_engine_collab::Ydoc::wire();
-        doc.apply(
-            &owner_store
-                .get_binary_blob(successor.as_str().unwrap())
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "An owner edit.\n")
-            .unwrap()
-    });
-    let new_note = "A new note.\n";
-    let new_sha = hex_sha256(new_note.as_bytes());
-    peer.write_with(&NoFaults, |tx| {
-        tx.execute(
-            "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
-            params![new_sha, i64::try_from(new_note.len()).unwrap(), new_note],
-        )
-        .map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    })
-    .unwrap();
+    let owner_edit = successor_edit(&owner_store, &carrier, "An owner edit.\n");
     let client = relay(vec![
         conversion_op(0, &carrier),
         conversion_op(1, &other_carrier),
-        envelope(
-            "owner",
-            2,
-            "moment.append",
-            json!({
-                "momentId": "owner-new-moment", "versionId": "main",
-                "objectId": "object-c", "objectCreatedAtMs": 1,
-                "path": "notes.md", "recordedAtMs": 2_000, "operation": "write",
-                "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
-                "payloadAfterBlobSha256": new_sha, "payloadAfterPath": "notes.md",
-                "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
-                "beforePresent": "absent",
-            }),
-        ),
-        envelope(
-            "owner",
-            3,
-            "ydoc.update",
-            json!({
-                "versionId": "main",
-                "objectId": "object-a",
-                "path": "doc.md",
-                "contentKind": "richdoc",
-                "updateBlobSha256": peer.put_binary_blob(&owner_edit).unwrap(),
-                "lineageClaimId": successor_claim(&carrier),
-                "isBaseState": false
-            }),
-        ),
+        new_note_op(&mut peer, 2),
+        successor_update(&peer, 3, &carrier, &owner_edit),
     ]);
     let held = pull(&client, &mut peer, &OpenNote("object-a"));
     assert!(matches!(held, SyncPassOutcome::Complete { .. }), "{held:?}");
@@ -791,9 +904,67 @@ fn a_conversion_held_behind_an_open_note_holds_only_that_note() {
         Some(successor_claim(&other_carrier))
     );
     assert_eq!(note(&peer, &other_key), (2, OTHER_NOTE.to_owned()));
-    assert_eq!(read_at(&mut peer, "notes.md").as_deref(), Some(new_note));
+    assert_eq!(read_at(&mut peer, "notes.md").as_deref(), Some(NEW_NOTE));
     assert_ne!(claim(&peer, &key), Some(successor_claim(&carrier)));
     assert_eq!(note(&peer, &key), (1, NOTE.to_owned()));
+    let reshaped = |field: &str, value: serde_json::Value| {
+        let mut carrier = other_carrier.clone();
+        carrier[field] = value;
+        carrier
+    };
+    let file = "moment.append";
+    for (label, kind, payload, passes) in [
+        (
+            "a rename of the held note",
+            file,
+            json!({"objectId": "object-a", "beforePath": "doc.md", "path": "renamed.md"}),
+            false,
+        ),
+        (
+            "a move of the held note",
+            file,
+            json!({"objectId": "object-a", "beforePath": "doc.md", "path": "notes/doc.md"}),
+            false,
+        ),
+        (
+            "a delete of the held note",
+            file,
+            json!({"objectId": "object-a", "path": "doc.md", "operation": "delete"}),
+            false,
+        ),
+        (
+            "a new note at the held path",
+            file,
+            json!({"objectId": "object-z", "path": "Doc.md"}),
+            false,
+        ),
+        (
+            "a new note elsewhere",
+            file,
+            json!({"objectId": "object-z", "path": "elsewhere.md"}),
+            true,
+        ),
+        (
+            "a conversion of another note",
+            "conflict.resolve",
+            other_carrier.clone(),
+            true,
+        ),
+        (
+            "a resolve with an effect",
+            "conflict.resolve",
+            reshaped("effects", json!([{"kind": "write"}])),
+            false,
+        ),
+        (
+            "a resolve that took the other side",
+            "conflict.resolve",
+            reshaped("resolution", json!("applied-incoming")),
+            false,
+        ),
+    ] {
+        assert_eq!(passes_held(&mut peer, kind, payload), passes, "{label}");
+    }
     let closed = pull(&client, &mut peer, &NoLiveLeases);
     assert!(
         matches!(closed, SyncPassOutcome::Complete { .. }),
