@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
+import { planNewApp } from "@dohc/workspace-core/app-source";
 import {
   createApp,
   deleteWorkspacePath,
@@ -110,6 +111,27 @@ describe("MCP authored file writes", () => {
     ]);
     expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
     expect(await readdir(ctx.root)).toEqual([]);
+  });
+
+  it("writes the same app files the desktop's New app writes", async () => {
+    const ctx = await context();
+    const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => ({
+      ok: false,
+      reason: "Engine unavailable. Restart dohc.",
+      written: [],
+    }));
+    ctx.request = request;
+    await createApp(ctx, { appRoot: "New app" }, "Client");
+    const sent = request.mock.calls[0]?.[0];
+    if (sent?.verb !== "fileWrite") throw new Error("Expected fileWrite");
+    const desktop = planNewApp({ appRoot: "New app", folder: "missing" });
+    if (!desktop.ok) throw new Error(desktop.reason);
+    expect(
+      sent.args.files.map((file) => ({
+        path: file.path,
+        content: Buffer.from(file.contentBase64, "base64").toString(),
+      })),
+    ).toEqual(desktop.files);
   });
 
   it("sends an imported database as one create-only authored write", async () => {

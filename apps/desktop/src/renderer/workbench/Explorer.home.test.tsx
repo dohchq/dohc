@@ -405,6 +405,26 @@ describe("Explorer Home", () => {
     expect(screen.getByTestId("explorer-apps-toggle").hasAttribute("aria-describedby")).toBe(false);
   });
 
+  it("offers New app in place of an empty Apps line, and from its header", async () => {
+    const user = userEvent.setup();
+    const onNewApp = vi.fn();
+    render(
+      <Explorer
+        {...explorerProps({
+          apps: apps({
+            state: { status: "ready", workspaceId: "workspace-1", apps: [] },
+            onNewApp,
+          }),
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    await user.click(screen.getByTestId("explorer-apps-new"));
+    await user.click(screen.getByTestId("explorer-apps-add"));
+    expect(onNewApp).toHaveBeenCalledTimes(2);
+  });
+
   it("holds Apps' place while its first read runs, and says nothing yet", () => {
     render(<Explorer {...explorerProps({ apps: apps({ state: { status: "loading" } }) })} />);
 

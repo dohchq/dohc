@@ -11,6 +11,7 @@ afterEach(cleanup);
 
 const DOCUMENT = "Page";
 const LABELS = {
+  app: "App",
   markdown: DOCUMENT,
   collection: "Collection",
   drawing: FILE_KIND_RECORDS.drawing.name,
@@ -25,7 +26,7 @@ const FILES = [
 function renderStart(overrides: Partial<Parameters<typeof EmptyEditorGroup>[0]> = {}) {
   const props = {
     platform: "win32",
-    create: { markdown: vi.fn(), collection: vi.fn(), drawing: vi.fn() },
+    create: { app: vi.fn(), markdown: vi.fn(), collection: vi.fn(), drawing: vi.fn() },
     recent: [],
     files: FILES,
     onOpen: vi.fn(),
@@ -36,7 +37,7 @@ function renderStart(overrides: Partial<Parameters<typeof EmptyEditorGroup>[0]> 
 }
 
 describe("start surface tiles", () => {
-  it.each(["markdown", "collection", "drawing"] as const)(
+  it.each(["app", "markdown", "collection", "drawing"] as const)(
     "runs the %s action from its tile",
     async (kind) => {
       const { create } = renderStart();
@@ -87,6 +88,8 @@ describe("start surface tiles", () => {
     const user = userEvent.setup();
     const { create } = renderStart();
 
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: LABELS.app }));
     await user.tab();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: DOCUMENT }));
     await user.keyboard("{Enter}");
@@ -194,6 +197,20 @@ describe("start surface drop zone", () => {
   ])("is absent when %s", (_name, overrides) => {
     renderStart(overrides);
     expect(screen.queryByTestId("start-drop")).toBeNull();
+  });
+});
+
+describe("start surface agent action", () => {
+  it("opens agent settings from an empty workspace", () => {
+    const onConnectAgent = vi.fn();
+    renderStart({ create: {}, files: [], onConnectAgent });
+    fireEvent.click(screen.getByRole("button", { name: "Connect an agent" }));
+    expect(onConnectAgent).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a workspace with files to its work", () => {
+    renderStart({ onConnectAgent: vi.fn() });
+    expect(screen.queryByRole("button", { name: "Connect an agent" })).toBeNull();
   });
 });
 

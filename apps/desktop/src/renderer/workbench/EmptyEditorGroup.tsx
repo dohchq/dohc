@@ -17,6 +17,7 @@ type ListedFile = { path: string; kind?: WorkspaceFileEntry["kind"]; icon?: stri
 // Each kind keeps one hue. styles.css has no kind hues yet, so these borrow
 // the identity hues.
 const KIND_TONE: Record<StartKind, string> = {
+  app: "text-hue-amber",
   markdown: "text-ink",
   collection: "text-hue-teal",
   drawing: "text-hue-plum",
@@ -31,6 +32,11 @@ const START_KINDS: readonly {
   glyph: ReactNode;
   shortcut?: "new-file";
 }[] = [
+  {
+    kind: "app",
+    label: "App",
+    glyph: <ObjectGlyph kind="app" size={16} className={KIND_TONE.app} />,
+  },
   {
     kind: "markdown",
     label: "Page",
@@ -82,6 +88,7 @@ export function EmptyEditorGroup(props: {
   onDropFiles?: (files: File[]) => void;
   // Opens the file picker when clicking the empty-workspace drop zone.
   onImportFiles?: () => void;
+  onConnectAgent?: () => void;
 }) {
   const recentId = useId();
   // A press while an action runs does nothing, so a double click creates once.
@@ -97,8 +104,9 @@ export function EmptyEditorGroup(props: {
   });
   const onDropFiles = props.files?.length === 0 ? props.onDropFiles : undefined;
   const onImportFiles = props.files?.length === 0 ? props.onImportFiles : undefined;
+  const onConnectAgent = props.files?.length === 0 ? props.onConnectAgent : undefined;
 
-  if (tiles.length === 0 && recent.length === 0 && !onDropFiles) {
+  if (tiles.length === 0 && recent.length === 0 && !onDropFiles && !onConnectAgent) {
     return <EmptyState data-testid="start-surface" title="Select a file" />;
   }
 
@@ -126,7 +134,9 @@ export function EmptyEditorGroup(props: {
       <div className="mx-auto flex w-full max-w-176 flex-col gap-8 px-8 pb-8">
         {/* One row where every label fits whole, else a column. */}
         {tiles.length > 0 ? (
-          <div className="grid grid-cols-1 gap-4 @sm:grid-cols-3">
+          <div
+            className={`grid grid-cols-1 gap-4 ${tiles.length === 4 ? "@sm:grid-cols-2 @xl:grid-cols-4" : "@sm:grid-cols-3"}`}
+          >
             {tiles.map((tile) => (
               <button
                 key={tile.kind}
@@ -166,6 +176,17 @@ export function EmptyEditorGroup(props: {
               </button>
             ))}
           </div>
+        ) : null}
+        {onConnectAgent ? (
+          <button
+            type="button"
+            data-testid="start-connect-agent"
+            onClick={onConnectAgent}
+            className="flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-line text-[13px] text-muted transition-colors duration-100 hover:border-ink/30 hover:bg-hover hover:text-ink"
+          >
+            <ObjectGlyph kind="agent" size={16} />
+            Connect an agent
+          </button>
         ) : null}
         {onDropFiles ? <DropZone onDrop={onDropFiles} onImportFiles={onImportFiles} /> : null}
         {recent.length > 0 ? (

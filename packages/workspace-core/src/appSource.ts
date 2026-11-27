@@ -33,3 +33,39 @@ createRoot(document.getElementById("root")!).render(<App />);
     },
   ];
 }
+
+export function appTitleFromRoot(root: string): string {
+  const name = root.split("/").pop() || "App";
+  return name
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+export type NewAppFolder = "missing" | "file" | { entryCount: number };
+
+export type NewAppPlan =
+  | { ok: true; appRoot: string; files: AppSourceFile[] }
+  | { ok: false; reason: string };
+
+export function planNewApp(input: {
+  appRoot: string;
+  folder: NewAppFolder;
+  title?: string | undefined;
+}): NewAppPlan {
+  const { appRoot, folder } = input;
+  if (!appRoot) return { ok: false, reason: "appRoot must name a folder" };
+  if (folder === "file") return { ok: false, reason: `appRoot is not a directory: ${appRoot}` };
+  if (folder !== "missing" && folder.entryCount > 0) {
+    return { ok: false, reason: `app folder already exists and is not empty: ${appRoot}` };
+  }
+  const title = input.title?.trim() || appTitleFromRoot(appRoot);
+  return {
+    ok: true,
+    appRoot,
+    files: generateAppSource({ title }).map((file) => ({
+      ...file,
+      path: `${appRoot}/${file.path}`,
+    })),
+  };
+}
