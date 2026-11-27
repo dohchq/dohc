@@ -299,7 +299,7 @@ export default function MemberLivePage({
       {!live && readView}
       {editing && (
         <NamedDocumentEditor
-          key={editing.session.doc.guid}
+          key={editing.session.id}
           session={editing.session}
           path={path}
           link

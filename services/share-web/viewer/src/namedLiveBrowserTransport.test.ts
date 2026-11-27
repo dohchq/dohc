@@ -15,7 +15,7 @@ import {
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
-import { draftNeedsReview } from "./NamedDocumentEditor";
+import { draftNeedsReview, editingOf } from "./NamedDocumentEditor";
 import { memberDocument } from "./memberLive";
 import {
   createNamedLiveBrowserTransport,
@@ -135,6 +135,7 @@ function fixture(
   authorize?: Parameters<
     typeof createNamedLiveBrowserTransport<NamedLiveSelection>
   >[0]["authorize"],
+  reopenOnLineage = false,
 ) {
   const sockets: Socket[] = [],
     requests: { path: string; init: RequestInit }[] = [],
@@ -177,6 +178,7 @@ function fixture(
     publicOrigin: "https://share.example",
     limits: input,
     fetch: fetcher,
+    reopenOnLineage,
     ...(authorize ? { authorize } : {}),
     openSocket(url, offered) {
       const socket = new Socket();
@@ -366,8 +368,8 @@ function edit(value: Session, text: string) {
     content.insert(content.length, text);
   });
 }
-async function live(authorize?: Parameters<typeof fixture>[1]) {
-  const f = fixture(limits(), authorize),
+async function live(authorize?: Parameters<typeof fixture>[1], reopenOnLineage = false) {
+  const f = fixture(limits(), authorize, reopenOnLineage),
     connecting = f.value.reconnect(),
     socket = await f.socketAt(0),
     peer = host(socket, f.value),
@@ -632,6 +634,114 @@ describe("named browser transport", () => {
     expect(getDohcYDocBodyFragment(f.value.doc).toString()).toContain("draft");
     expect(getDohcYDocBodyFragment(f.value.doc).toString()).not.toContain("RESTORED");
     expect(peer.submissions()).toHaveLength(0);
+  });
+  async function replaceLineage(reopenOnLineage = true) {
+    const f = await live(undefined, reopenOnLineage);
+    edit(f.value, " saved");
+    f.peer.ack(await f.peer.submitted());
+    await waitState(f.value, (state) => state.pendingUpdates === 0);
+    const replaced = f.value.doc,
+      successor = document("base saved"),
+      next = { ...binding, lineageClaimId: "successor" };
+    f.socket.close();
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value, 2);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    return { ...f, replaced, successor, next, socket, peer };
+  }
+  it("reopens on a fresh document when the relay replaces the note's lineage, and the next edit lands there", async () => {
+    const f = await replaceLineage(),
+      old = editingOf(f.value, f.replaced),
+      removed: string[] = [];
+    f.value.onRemovedText((text) => removed.push(text.text));
+    expect(old.canEdit()).toBe(true);
+    const replacing = f.peer.initial(f.successor, f.next);
+    const reopened = await f.socketAt(2),
+      fresh = host(reopened, f.value, 2),
+      late = document("LATE");
+    expect(f.socket.listenerCount).toBe(0);
+    expect(
+      f.value.seed(
+        encodeLiveFrameSync(
+          {
+            binding: f.next,
+            hostVector: Y.encodeStateVector(late),
+            missingStateUpdate: Y.encodeStateAsUpdate(late),
+          },
+          limits().provider.frames.receive,
+        ),
+        9,
+      ),
+    ).toBe(false);
+    reopened.open();
+    await fresh.greet();
+    await fresh.initial(f.successor, f.next);
+    await replacing;
+    expect(f.value.state()).toMatchObject({ status: "live", binding: f.next, pendingUpdates: 0 });
+    expect(f.value.doc).not.toBe(f.replaced);
+    expect(getDohcYDocBodyFragment(f.value.doc).toString()).toBe(
+      getDohcYDocBodyFragment(f.successor).toString(),
+    );
+    const refused = vi.fn();
+    expect(old.canEdit()).toBe(false);
+    expect(old.edit(refused)).toBe(false);
+    expect(refused).not.toHaveBeenCalled();
+    const unseen = new Y.Doc();
+    cleanup.push(() => unseen.destroy());
+    Y.applyUpdate(unseen, Y.encodeStateAsUpdate(f.successor));
+    expect(edit(f.value, " more")).toBe(true);
+    const submission = await fresh.submitted();
+    Y.applyUpdate(f.successor, submission.bytes);
+    expect(getDohcYDocBodyFragment(f.successor).toString()).toContain("base saved more");
+    expect(f.peer.submissions()).toHaveLength(0);
+    fresh.ack(submission);
+    const before = Y.encodeStateVector(unseen);
+    getDohcYDocBodyFragment(unseen).delete(0, 1);
+    fresh.applied(Y.encodeStateAsUpdate(unseen, before), 2);
+    await vi.waitFor(() => expect(removed).toEqual([" more"]));
+  });
+  it("stops when the reopened note's first sync names another path than the binding that replaced it", async () => {
+    const f = await replaceLineage();
+    const replacing = f.peer.initial(f.successor, f.next);
+    const reopened = await f.socketAt(2),
+      fresh = host(reopened, f.value, 2);
+    reopened.open();
+    await fresh.greet();
+    await fresh.initial(f.successor, { ...f.next, currentPath: "moved.md" });
+    await replacing;
+    expect(f.value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
+  });
+  it("stops on a replaced lineage, keeping its document, unless the caller asked to reopen", async () => {
+    const f = await replaceLineage(false);
+    await f.peer.initial(f.successor, f.next);
+    expect(f.value.state()).toMatchObject({ status: "quarantined", reason: "lineage-replaced" });
+    expect(f.value.doc).toBe(f.replaced);
+    expect(f.sockets).toHaveLength(2);
+  });
+  it("keeps typing the relay never confirmed for review when the note's lineage is replaced", async () => {
+    const f = await live(undefined, true);
+    edit(f.value, " unconfirmed");
+    await f.peer.submitted();
+    f.socket.close();
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value, 2);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    await peer.initial(document("base"), { ...binding, lineageClaimId: "successor" });
+    expect(f.value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "lineage-replaced",
+      pendingUpdates: 1,
+    });
+    expect(draftNeedsReview(f.value.state())).toBe(true);
+    expect(f.value.unsentText()).toMatchObject({ text: " unconfirmed" });
+    expect(peer.submissions()).toHaveLength(0);
+    expect(f.sockets).toHaveLength(2);
   });
   it("cancels a connecting socket without accepting a late open", async () => {
     const f = fixture(),

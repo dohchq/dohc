@@ -197,7 +197,7 @@ export function LinkDocumentEditor({
       )}
       {session && (
         <NamedDocumentEditor
-          key={session.doc.guid}
+          key={session.id}
           session={session}
           path={path}
           link

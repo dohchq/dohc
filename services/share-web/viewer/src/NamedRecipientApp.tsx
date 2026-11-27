@@ -175,6 +175,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
         publicOrigin: location.origin,
         limits: files.limits,
         fetch: fetchShareWeb,
+        reopenOnLineage: true,
         recordingContext: (selection) => ({ kind: "account", accountId: selection.accountId }),
       });
       const session = transport.current.select({
@@ -335,7 +336,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
           </nav>
           {selection ? (
             <NamedDocumentEditor
-              key={selection.session.doc.guid}
+              key={selection.session.id}
               session={selection.session}
               path={selection.path}
               bodyHidden={synced !== selection}

@@ -993,7 +993,7 @@ describe("named live browser provider", () => {
       hostEpoch: 2,
     });
   });
-  it.each(["selectorPaths", "lineageClaimId", "currentPath"] as const)(
+  it.each(["selectorPaths", "lineageClaimId", "currentPath", "restoreFenceGeneration"] as const)(
     "fences changed %s before any merge",
     async (field) => {
       const { value, host } = await live();
@@ -1007,9 +1007,15 @@ describe("named live browser provider", () => {
           ? { ...binding, selectorPaths: ["document.md", "other.md"] }
           : field === "lineageClaimId"
             ? { ...binding, lineageClaimId: "other" }
-            : { ...binding, currentPath: "other.md", selectorPaths: ["other.md"] };
+            : field === "restoreFenceGeneration"
+              ? { ...binding, lineageClaimId: "other", restoreFenceGeneration: 1 }
+              : { ...binding, currentPath: "other.md", selectorPaths: ["other.md"] };
       await second.initial(document("new document"), selected);
-      expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
+      expect(value.state()).toMatchObject({
+        status: "quarantined",
+        reason: field === "lineageClaimId" ? "lineage-replaced" : "binding-changed",
+      });
+      expect(value.replacement()).toEqual(field === "lineageClaimId" ? selected : null);
       expect(getDohcYDocBodyFragment(value.doc).toString()).toBe(old);
     },
   );

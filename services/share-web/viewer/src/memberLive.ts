@@ -139,6 +139,7 @@ export function memberDocument(input: {
     publicOrigin: location.origin,
     limits: parseNamedLiveBrowserLimits(input.admission.limits),
     fetch: fetchShareWeb,
+    reopenOnLineage: true,
     recordingContext: (selection) => ({ kind: "account", accountId: selection.accountId }),
     async authorize(_selection, signal) {
       const admitted = first ?? (await openMemberPage(input.target, input.path, signal));

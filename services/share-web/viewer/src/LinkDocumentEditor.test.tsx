@@ -36,6 +36,7 @@ function fixture() {
     for (const listener of listeners) listener(state);
   };
   const session = {
+    id: "link-session",
     doc,
     state: () => state,
     subscribe(listener: (value: NamedLiveBrowserState) => void) {
@@ -133,6 +134,14 @@ async function opened() {
   await settle(() => container.querySelector('[role="textbox"]') !== null);
   return { ...f, onClose };
 }
+it("keeps the same editor when the page renders again after the session reopens on a new document", async () => {
+  const f = await opened();
+  const shell = container.querySelector('section[aria-label="Shared file"]');
+  expect(shell).not.toBeNull();
+  f.session.doc = markdownToYDoc("Reopened text");
+  await render(true);
+  expect(container.querySelector('section[aria-label="Shared file"]')).toBe(shell);
+});
 it("shows no draft panel while an ordinary change saves", async () => {
   const f = await opened();
   await act(async () => f.update({ pendingUpdates: 1 }));

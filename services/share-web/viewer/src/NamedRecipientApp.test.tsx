@@ -60,6 +60,7 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOrigi
           sessions.push(row);
           close = row.close;
           return {
+            id: doc.guid,
             doc,
             state: current,
             close: row.close,
