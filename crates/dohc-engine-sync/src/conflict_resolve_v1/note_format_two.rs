@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_collab::CloseProjection;
 use dohc_engine_collab::ydoc::without_final_markdown_newline;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 
@@ -122,23 +123,14 @@ pub fn convert_note_to_format_two_in_tx(
         &predecessor_state_vector_sha256,
         &predecessor_delete_set_sha256,
     );
-    let identity = SuccessorIdentity::derive_with_schema_version(
-        SuccessorIdentityInput {
-            key,
-            predecessor_claim_id: &predecessor_claim_id,
-            predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
-            artifact_op_kind: "note.format-two",
-            artifact_id: &conflict_id,
-            artifact_preimage_sha256: text_sha256,
-            content_kind: ContentKind::Richdoc,
-            result_sha256: text_sha256,
-        },
-        2,
-    );
-    let Some(successor) = fresh_successor_base(&identity, text)
-        .ok()
-        .filter(|successor| holds_in_format_two(successor, text))
-    else {
+    let Some(successor) = successor_in_format_two(
+        key,
+        &predecessor_claim_id,
+        &predecessor_state_vector_sha256,
+        &conflict_id,
+        text,
+        text_sha256,
+    ) else {
         return Ok(DoesNotFit);
     };
     let created = object_created_at_ms(tx, &key.workspace_id, &key.object_id)?;
@@ -232,9 +224,33 @@ fn in_format_two(update: &[u8]) -> Option<dohc_engine_collab::Ydoc> {
     fits.then_some(doc)
 }
 
-fn holds_in_format_two(successor: &SuccessorBase, text: &str) -> bool {
-    in_format_two(&successor.update)
-        .is_some_and(|doc| settled_source(&doc, text).as_deref() == Some(text))
+fn successor_in_format_two(
+    key: &DocKey,
+    claim: &str,
+    state_vector: &str,
+    artifact_id: &str,
+    text: &str,
+    text_sha256: &str,
+) -> Option<SuccessorBase> {
+    let identity = SuccessorIdentity::derive_with_schema_version(
+        SuccessorIdentityInput {
+            key,
+            predecessor_claim_id: claim,
+            predecessor_state_vector_sha256: state_vector,
+            artifact_op_kind: "note.format-two",
+            artifact_id,
+            artifact_preimage_sha256: text_sha256,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: text_sha256,
+        },
+        2,
+    );
+    fresh_successor_base(&identity, text)
+        .ok()
+        .filter(|successor| {
+            in_format_two(&successor.update)
+                .is_some_and(|doc| settled_source(&doc, text).as_deref() == Some(text))
+        })
 }
 
 pub(super) enum Received {
@@ -313,17 +329,23 @@ pub struct FormatTwoPass {
     pub unchanged: usize,
     pub skipped: Vec<(DocKey, String, &'static str)>,
     pub does_not_fit: Vec<(DocKey, String)>,
+    pub failed: Vec<(DocKey, String, String)>,
     pub resume_after: Option<DocKey>,
 }
 
+/// Proves that a local-only note's file still holds what its pristine seed imported.
+pub type FileProof<'a> = &'a dyn Fn(&EngineStore, &DocKey) -> Option<CloseProjection>;
+
 /// Convert up to `budget` of a workspace's notes after `after` to format 2,
 /// skipping notes `live` holds. `resume_after` is where the next call starts.
+#[allow(clippy::too_many_arguments)]
 pub fn convert_notes_to_format_two(
     store: &mut EngineStore,
     workspace_id: &str,
     after: Option<&DocKey>,
     budget: usize,
     live: &dyn LeaseProbe,
+    file_proof: FileProof<'_>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoPass, SyncError> {
@@ -371,20 +393,27 @@ pub fn convert_notes_to_format_two(
         let key =
             DocKey::new(workspace_id, version_id, object_id).map_err(map_local_collab_error)?;
         let outcome = if *local && offline {
-            drop_local_format_one(store, &key, live, faults, now_ms)?
+            drop_local_format_one(store, &key, live, file_proof, faults, now_ms)
         } else {
-            match store.write_with(faults, |tx| {
-                convert_note_to_format_two_in_tx(tx, &key, live, now_ms)
-            })? {
-                TxnOutcome::Committed(outcome) => outcome,
-                TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
-            }
+            store
+                .write_with(faults, |tx| {
+                    convert_note_to_format_two_in_tx(tx, &key, live, now_ms)
+                })
+                .and_then(|outcome| match outcome {
+                    TxnOutcome::Committed(outcome) => Ok(outcome),
+                    TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+                })
         };
         match outcome {
-            Converted => pass.converted += 1,
-            NothingToConvert => pass.unchanged += 1,
-            NotNow(reason) => pass.skipped.push((key.clone(), path.clone(), reason)),
-            DoesNotFit => pass.does_not_fit.push((key.clone(), path.clone())),
+            Ok(Converted) => pass.converted += 1,
+            Ok(NothingToConvert) => pass.unchanged += 1,
+            Ok(NotNow(reason)) => pass.skipped.push((key.clone(), path.clone(), reason)),
+            Ok(DoesNotFit) => pass.does_not_fit.push((key.clone(), path.clone())),
+            Err(error) if fails_only_the_note(&error) => {
+                pass.failed
+                    .push((key.clone(), path.clone(), error.to_string()));
+            }
+            Err(error) => return Err(error),
         }
         pass.resume_after = Some(key);
     }
@@ -394,25 +423,47 @@ pub fn convert_notes_to_format_two(
     Ok(pass)
 }
 
+fn fails_only_the_note(error: &SyncError) -> bool {
+    match error {
+        SyncError::FaultCrash => false,
+        SyncError::Storage(storage) => matches!(
+            storage,
+            StorageError::StateCorrupt { .. } | StorageError::InvalidInput { .. }
+        ),
+        _ => true,
+    }
+}
+
 fn drop_local_format_one(
     store: &mut EngineStore,
     key: &DocKey,
     live: &dyn LeaseProbe,
+    file_proof: FileProof<'_>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
     if live.is_live(key) {
         return Ok(FormatTwoConversion::NotNow("ydoc-session-live"));
     }
-    let format_one = dohc_engine_collab::load_persisted(store, key)
+    let Some(persisted) = dohc_engine_collab::load_persisted(store, key)
         .map_err(map_local_collab_error)?
-        .is_some_and(|persisted| {
+        .filter(|persisted| {
             persisted.marker.head_update_seq > 0 && persisted.doc.note_schema_version() == 1
-        });
-    if !format_one {
+        })
+    else {
         return Ok(FormatTwoConversion::NothingToConvert);
+    };
+    let text = persisted
+        .doc
+        .project(ContentKind::Richdoc)
+        .map_err(map_local_collab_error)?
+        .content;
+    let text_sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    if successor_in_format_two(key, "", "", "", &text, &text_sha256).is_none() {
+        return Ok(FormatTwoConversion::DoesNotFit);
     }
-    match dohc_engine_collab::close_session(store, key, false, None, faults, now_ms) {
+    let proof = file_proof(store, key);
+    match dohc_engine_collab::close_session(store, key, false, proof.as_ref(), faults, now_ms) {
         Ok(TxnOutcome::Committed(_)) => Ok(FormatTwoConversion::Converted),
         Ok(TxnOutcome::Crashed { .. }) => Err(SyncError::FaultCrash),
         Err(dohc_engine_collab::CollabError::UnsettledClose) => {
