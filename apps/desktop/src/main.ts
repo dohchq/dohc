@@ -915,6 +915,7 @@ import {
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
 import { createOwedRunNotices } from "./agents/owedRunNotices";
+import { createAgentMemory } from "./agents/agentMemory";
 import {
   isAppImageBoot,
   isTemporaryMacAppPath,
@@ -5153,6 +5154,7 @@ const chatDispatchService = createChatDispatchService({
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
   readRunLogKeepDays: async () => runLogKeepDays(await readCachedUserSettingsFile(stateDir())),
+  agentMemory: createAgentMemory(() => join(stateDir(), "agent-memory.json")),
   agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,

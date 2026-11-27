@@ -128,6 +128,9 @@ export const AgentSettings = z
     workspaces: z.array(SettingsWorkspaceId).max(MAX_AGENT_WORKSPACES).optional(),
     changesFiles: z.boolean().default(true),
     allowShell: z.boolean().optional(),
+    // Claude Code keeps chat runs' memory per workspace on this computer
+    // (agents/agentMemory.ts). A new id starts fresh.
+    memory: z.uuid().optional(),
     // Pause and Resume. dohc starts, and forwards to, only an enabled agent.
     enabled: z.boolean(),
     timeoutMinutes: z.number().int().min(1).max(1440).default(30),
@@ -445,6 +448,8 @@ export function agentProblem(id: string, entry: unknown): string {
     case "thread":
       // The rules across keys: a thread takes the place of `launch`, and its settings need it.
       return issue.code === "custom" ? issue.message : "dohc can't read `thread`.";
+    case "memory":
+      return "`memory` must be an id that dohc made.";
     case "whileBusy":
       return "`whileBusy` must be line, own-chat, or steer.";
     case "note":

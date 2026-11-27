@@ -183,6 +183,7 @@ export function agentProfileArguments(
   runArguments: readonly string[] = [],
   readOnly = false,
   shell = false,
+  memory?: { sessionId: string; resume: boolean },
 ): string[] {
   const own = readOnly ? [] : (profile.arguments ?? []);
   // If the person's last flag needs a value, it takes the next argument. That
@@ -224,7 +225,9 @@ export function agentProfileArguments(
         ...repeat,
         "--permission-prompts",
         "none",
-        "--no-session-persistence",
+        ...(memory
+          ? [memory.resume ? "--resume" : "--session-id", memory.sessionId]
+          : ["--no-session-persistence"]),
         "--setting-sources",
         "user",
         ...runArguments,

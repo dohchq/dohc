@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
+  Brain,
   Check,
   ChevronLeft,
   CircleAlert,
@@ -758,6 +759,7 @@ export function AgentPage(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState<"timeout" | "command" | null>(null);
   const [confirmShell, setConfirmShell] = useState(false);
+  const [confirmMemory, setConfirmMemory] = useState<"on" | "fresh" | null>(null);
   const runLabelId = useId();
   const launched = agent.launch !== undefined;
   // dohc forwards to this agent's own thread and never starts it.
@@ -968,6 +970,36 @@ export function AgentPage(props: {
                     </span>
                   </PageRow>
                 ) : null}
+                {tool.id === "claude" ? (
+                  <PageRow icon={<Brain size={14} />} label="Memory">
+                    <span className={VALUE}>
+                      {agent.memory ? (
+                        <button
+                          type="button"
+                          className={LINK}
+                          data-testid="agent-memory-fresh"
+                          onClick={() => setConfirmMemory("fresh")}
+                        >
+                          Start fresh
+                        </button>
+                      ) : null}
+                      <SwitchControl
+                        label={`Let ${agent.name} remember earlier chats`}
+                        tooltip={
+                          agent.memory
+                            ? "Remembers earlier chats in each workspace"
+                            : "Reads only the chat it answers"
+                        }
+                        checked={agent.memory !== undefined}
+                        onChange={(on) =>
+                          on
+                            ? setConfirmMemory("on")
+                            : onChange(({ memory: _off, ...current }) => current)
+                        }
+                      />
+                    </span>
+                  </PageRow>
+                ) : null}
                 <PageRow icon={<Workflow size={14} />} label="When an automation wakes it">
                   <span className={VALUE}>Replies only</span>
                 </PageRow>
@@ -1030,6 +1062,38 @@ export function AgentPage(props: {
                 It runs them without asking, with your access to this computer. What it reads in
                 chats and files can steer them, and dohc cannot undo them.
               </p>
+            </ConfirmDialog>
+          ) : null}
+          {confirmMemory ? (
+            <ConfirmDialog
+              title={
+                confirmMemory === "on"
+                  ? `Let ${agent.name} remember earlier chats?`
+                  : `Start ${agent.name}'s memory fresh?`
+              }
+              icon={Brain}
+              confirmLabel={confirmMemory === "on" ? "Turn on memory" : "Start fresh"}
+              onCancel={() => setConfirmMemory(null)}
+              onConfirm={() => {
+                setConfirmMemory(null);
+                onChange((current) => ({ ...current, memory: crypto.randomUUID() }));
+              }}
+              testId="agent-memory-dialog"
+              cancelTestId="agent-memory-cancel"
+              confirmTestId="agent-memory-confirm"
+            >
+              {confirmMemory === "on" ? (
+                <p>
+                  Claude Code saves each chat it answers, including other people's messages, in its
+                  folder on this computer. What it reads in one chat carries into the workspace's
+                  other chats, and it keeps earlier command output after you turn off Commands.
+                </p>
+              ) : (
+                <p>
+                  It forgets earlier chats in every workspace. Claude Code keeps what it saved in
+                  its folder on this computer.
+                </p>
+              )}
             </ConfirmDialog>
           ) : null}
         </>

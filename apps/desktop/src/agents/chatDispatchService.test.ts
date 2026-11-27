@@ -29,11 +29,13 @@ type RunnerSettings = {
   command: string;
   profile?: AgentLaunchProfile;
   allowShell?: boolean;
+  memory?: string;
   enabled: boolean;
   timeoutMinutes: number;
 };
 import type { PostNoticeInput } from "../notices/noticeStore";
 import { createOwedRunNotices, type OwedRunNotices } from "./owedRunNotices";
+import { createAgentMemory } from "./agentMemory";
 import { EngineClientError, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
@@ -585,11 +587,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
           enabled: runner.enabled,
           timeoutMinutes: runner.timeoutMinutes,
           ...(runner.allowShell ? { allowShell: true } : {}),
+          ...(runner.memory ? { memory: runner.memory } : {}),
         }),
         launch: runner.profile ?? launchFromCommand(runner.command) ?? undefined,
       },
       ...(options.agents ?? []),
     ],
+    agentMemory: createAgentMemory(() => join(stateRoot, "agent-memory.json")),
     agentToolVersion: async () =>
       options.claudeVersion === undefined ? "2.1.317" : options.claudeVersion,
     stateDir: () => stateRoot,
@@ -1090,6 +1094,132 @@ describe("chatDispatchService", () => {
       expect(call.args).not.toContain("PowerShell");
       expect(call.args.slice(-3)).toEqual(["Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
     }
+  });
+
+  describe("memory", () => {
+    const MEMORY_ID = "0b7f9c1e-3c55-4b8e-9a51-2f0d8f3b6a10";
+    const sessionFlags = (call: SpawnCall) => {
+      const at = call.args.findIndex((arg) =>
+        ["--session-id", "--resume", "--no-session-persistence"].includes(arg),
+      );
+      return call.args[at] === "--no-session-persistence"
+        ? call.args.slice(at, at + 1)
+        : call.args.slice(at, at + 2);
+    };
+    const memoryFixture = () =>
+      createFixture({
+        runner: {
+          command: "",
+          profile: { tool: "claude", executable: resolve("test-claude.exe") },
+          memory: MEMORY_ID,
+        },
+      });
+    async function answer(fixture: Fixture, body: string, replies = true) {
+      const asked = await createAgentThread(fixture, { body, authorUserId: "user_local" });
+      const count = fixture.spawnCalls.length;
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(count + 1));
+      const run = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+      if (replies) await linkAgentReply(fixture, asked.threadId, run.run.runId);
+      return { asked, run, call: fixture.spawnCalls[count]! };
+    }
+    async function end(fixture: Fixture, call: SpawnCall, exitCode: number) {
+      call.process.emitExit(exitCode);
+      await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+    }
+
+    it("continues one session per workspace across chats, one run at a time", async () => {
+      const fixture = await memoryFixture();
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.", false);
+      const [flag, sessionId] = sessionFlags(first.call);
+      expect(flag).toBe("--session-id");
+      expect(sessionId).toMatch(/^[0-9a-f-]{36}$/u);
+      await createAgentThread(fixture, { body: "Pack the bags.", authorUserId: "user_local" });
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      await linkAgentReply(fixture, first.asked.threadId, first.run.run.runId);
+      first.call.process.emitExit(0);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+      expect(sessionFlags(fixture.spawnCalls[1]!)).toEqual(["--resume", sessionId]);
+    });
+
+    it("keeps automations, tests, and a request's second attempt out of memory", async () => {
+      const fixture = await memoryFixture();
+      await activate(fixture);
+      const failed = await answer(fixture, "Book the hotel.", false);
+      expect(sessionFlags(failed.call)[0]).toBe("--session-id");
+      await end(fixture, failed.call, 1);
+      await expect(
+        fixture.service.retryStoppedRun(WORKSPACE_ID, failed.asked.threadId, failed.run.run.runId),
+      ).resolves.toBe(true);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+      expect(sessionFlags(fixture.spawnCalls[1]!)).toEqual(["--no-session-persistence"]);
+      await end(fixture, fixture.spawnCalls[1]!, 1);
+
+      const channel = await fixture.chat.ensureAgentChannel({
+        workspaceId: WORKSPACE_ID,
+        agentId: "default",
+        name: "Nova",
+      });
+      const wake = await fixture.chat.startChannelThread({
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        channelId: channel.id,
+        author: { kind: "automation", displayName: "Answer the Group" },
+        authorOwnerDisplayName: "Sam",
+        automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+        body: "Summarize the bookings.",
+      });
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: wake.message.id,
+        threadId: wake.thread.id,
+        agentId: "default",
+      });
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(3));
+      expect(sessionFlags(fixture.spawnCalls[2]!)).toEqual(["--no-session-persistence"]);
+      await end(fixture, fixture.spawnCalls[2]!, 1);
+
+      void fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(4));
+      expect(sessionFlags(fixture.spawnCalls[3]!)).toEqual(["--no-session-persistence"]);
+    });
+
+    it("starts fresh, once, when Claude Code no longer has the session", async () => {
+      const fixture = await memoryFixture();
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.");
+      const [, lost] = sessionFlags(first.call);
+      await end(fixture, first.call, 0);
+      const resumed = await answer(fixture, "Pack the bags.", false);
+      expect(sessionFlags(resumed.call)).toEqual(["--resume", lost]);
+      await writeFile(
+        join(fixture.stateRoot, "run-logs", `${resumed.run.run.runId}.log`),
+        `No conversation found with session ID: ${lost}\n`,
+      );
+      await end(fixture, resumed.call, 1);
+      await vi.waitFor(async () =>
+        expect(
+          (await fixture.service.dispatchStateForThread(WORKSPACE_ID, resumed.asked.threadId))
+            .failedRun?.words,
+        ).toBe(
+          "Nova did not reply. Claude Code no longer had its memory of this workspace, so it starts fresh. Try again.",
+        ),
+      );
+      await expect(
+        fixture.service.retryStoppedRun(
+          WORKSPACE_ID,
+          resumed.asked.threadId,
+          resumed.run.run.runId,
+        ),
+      ).resolves.toBe(true);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(3));
+      const [flag, fresh] = sessionFlags(fixture.spawnCalls[2]!);
+      expect(flag).toBe("--session-id");
+      expect(fresh).not.toBe(lost);
+    });
   });
 
   it("doesn't let an automation start an agent that runs the person's own command", async () => {
