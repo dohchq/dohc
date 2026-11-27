@@ -26,12 +26,15 @@ use crate::{
     ReplicationEnvelope, SyncError,
 };
 
-mod note_format_two;
+pub(crate) mod note_format_two;
 
 pub(crate) use note_format_two::{
     CONVERSION_BASE_PENDING, CONVERSION_ID_PREFIX, CONVERSION_PENDING,
 };
-pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
+pub use note_format_two::{
+    FormatTwoConversion, FormatTwoPass, convert_note_to_format_two_in_tx,
+    convert_notes_to_format_two,
+};
 
 const FORMAT_VERSION: i64 = 1;
 
@@ -3924,8 +3927,8 @@ fn prepare_local_lineage_in_tx(
     }
 }
 
-fn live_document_bound(tx: &Transaction<'_>, key: &DocKey) -> Result<bool, SyncError> {
-    tx.query_row(
+fn live_document_bound(conn: &rusqlite::Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
          OR EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
          OR EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
