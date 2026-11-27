@@ -9887,7 +9887,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         }
         registerIpcHandlers();
         // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
-        // Registered before the window so the first load can already fetch.
+        // Registered before the window so its first image can already load.
         const workspaceFiles = createWorkspaceFileProtocol({
           findWorkspace,
           readOwnedWorkspaceAsset,

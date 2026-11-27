@@ -295,8 +295,8 @@ the request comes from a top-level frame that passes the IPC sender check, and
 the handler refuses any request without it. Worker loads never pass through
 `webRequest`, so they never get the header. The admission is the default
 session's only `onBeforeSendHeaders` listener. A second registration would
-replace it, and the window's own images and audio would stop loading. Static previews also send a CSP whose `*`
-leaves out custom schemes.
+replace it, and the window's own images and audio would stop loading. Static
+previews also send a CSP whose `*` leaves out custom schemes.
 
 ## A phone runs an app in a locked web view
 
