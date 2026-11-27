@@ -1283,6 +1283,15 @@ function withheldLinks(
   for (const field of CHAT_TEXT_FIELDS[opKind]!) {
     if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
   }
+  // A withheld link's words can run longer than the link, and the engine
+  // refuses a poll with an explanation over its limit, so that one goes.
+  if (Array.isArray(payload.optionDetails)) {
+    payload.optionDetails = payload.optionDetails.map((detail: unknown) =>
+      typeof detail === "string" && trimLikeEngine(detail).length > MAX_POLL_OPTION_DETAIL_UNITS
+        ? null
+        : detail,
+    );
+  }
   return { ...decision, payload };
 }
 
@@ -1691,7 +1700,7 @@ function pollDetailsValid(details: unknown, optionCount: number): boolean {
   if (details.length !== optionCount) return false;
   return details.every((detail) => {
     if (detail === null) return true;
-    if (typeof detail !== "string") return false;
+    if (typeof detail !== "string" || !detail.isWellFormed()) return false;
     const trimmed = trimLikeEngine(detail);
     return trimmed.length <= MAX_POLL_OPTION_DETAIL_UNITS && !/[\r\n]/u.test(trimmed);
   });

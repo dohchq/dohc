@@ -816,6 +816,7 @@ describe("shared channels (MU-C4)", () => {
       ["x".repeat(301), null],
       ["two\nlines", null],
       [7, null],
+      ["\uD800", null],
     ]) {
       const badDetails = await h(
         request(

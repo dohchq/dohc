@@ -116,6 +116,7 @@ export async function buildRunnerThreadContext(input: RunnerThreadContextInput):
       {
         state: decision.state,
         ...(decision.options ? { options: decision.options } : {}),
+        ...(decision.optionDetails ? { optionDetails: decision.optionDetails } : {}),
         ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
       },
     ]),

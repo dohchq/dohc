@@ -1519,6 +1519,25 @@ describe("chat share op filter", () => {
       expect(decision.allowed).toBe(true);
       expect(JSON.stringify(decision.allowed && decision.payload)).not.toContain("finance");
     }
+    // An explanation the withheld words would push past the engine's limit goes.
+    const near = `${"x".repeat(300 - linked.length)}${linked}`;
+    const longer = filterOpForShare(
+      group,
+      "chat.decision.set",
+      JSON.stringify({
+        threadId: "thread-in",
+        messageId: "m1",
+        state: "open",
+        atMs: 1,
+        options: ["Go", "Stay"],
+        optionDetails: [near, "Short"],
+      }),
+      resolver,
+    );
+    expect(longer.allowed && (longer.payload as { optionDetails: unknown }).optionDetails).toEqual([
+      null,
+      "Short",
+    ]);
     const append = filterOpForShareAppend(
       channelShare,
       "chat.message.append",
