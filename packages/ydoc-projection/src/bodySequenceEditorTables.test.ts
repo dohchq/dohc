@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import type { ResolvedPos } from "@tiptap/pm/model";
+import { Fragment, Slice, type ResolvedPos } from "@tiptap/pm/model";
 import type { Command } from "@tiptap/pm/state";
 import {
   addColumnAfter,
@@ -28,6 +28,7 @@ import {
   exchange,
   page,
   person,
+  schema,
   stopEveryone,
   type Person,
 } from "./bodySequenceTestSupport.js";
@@ -260,6 +261,28 @@ describe("table changes the editor writes", () => {
     expect(selection).not.toBeInstanceOf(CellSelection);
     expect(cellAround(selection.$head)!.index(-1)).toBe(2);
     a.expectMirror();
+  });
+
+  it("pastes nothing, and leaves nothing to the browser, for cells an uneven table can't fit", () => {
+    const frames: Frame[] = [
+      ["TB", "table"],
+      ...["R1", "R2", "R3", "R4"].map((id): Frame => [id, "tableRow"]),
+      ...["A1", "A2", "A3", "B1", "B2", "C1", "C2", "D1"].map((id): Frame => [id, "tableCell"]),
+    ];
+    const rows = ["R1 A1", "R1 A2", "R1 A3", "R2 B1", "R2 B2", "R3 C1", "R3 C2", "R4 D1"].map(
+      (path): Row => [["TB", ...path.split(" ")], path.slice(3).toLowerCase()],
+    );
+    const a = person(noteIn(frames, rows), 10, "bare", [unevenTableGuard(), tableEditing()]);
+    const { tableRow, tableCell, paragraph } = schema.nodes;
+    const cell = (text: string) =>
+      tableRow!.create(null, tableCell!.create(null, paragraph!.create(null, schema.text(text))));
+    const cells = new Slice(Fragment.from([cell("x"), cell("y"), cell("z")]), 1, 1);
+    const lines = a.lines();
+    caretIn(a, "b2");
+    const paste = new Event("paste") as ClipboardEvent;
+    expect(a.view.someProp("handlePaste", (handle) => handle(a.view, paste, cells))).toBe(true);
+    expect(a.sent).toEqual([]);
+    expect(a.lines()).toEqual(lines);
   });
 
   it("writes a letter typed in an uneven table and refuses the repair the table plugin adds to it", () => {
