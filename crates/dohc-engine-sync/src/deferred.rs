@@ -103,12 +103,12 @@ pub(crate) fn base_retained(
     .map_err(SyncError::corrupt)
 }
 
-pub(crate) fn conversion_retained(
+pub(crate) fn wait_for_conversion(
     conn: &Connection,
     key: &DocKey,
     claim: &str,
-) -> Result<bool, SyncError> {
-    conn.query_row(
+) -> Result<(), SyncError> {
+    let retained: bool = conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}
              AND {}
@@ -120,7 +120,13 @@ pub(crate) fn conversion_retained(
         params![key.workspace_id, key.version_id, key.object_id, claim],
         |row| row.get(0),
     )
-    .map_err(SyncError::corrupt)
+    .map_err(SyncError::corrupt)?;
+    if retained {
+        return Err(SyncError::RetryableState {
+            reason: crate::conflict_resolve_v1::CONVERSION_PENDING,
+        });
+    }
+    Ok(())
 }
 
 fn file_of(op: &ReplicationEnvelope) -> &str {
