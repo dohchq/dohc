@@ -370,6 +370,71 @@ describe("discoverDatasetBoundApps", () => {
     ]);
   });
 
+  it("lists an app sent to your phones, with its name, as complete", async () => {
+    const cap = resolveAppDatasetCapability(
+      {
+        kind: "dataset",
+        datasetId: rev1.datasetId,
+        revision: 1,
+        revisionSha256: rev1.revisionSha256,
+        operationIds: [id(10)],
+      },
+      rev1,
+    );
+    const ownerPubId = sha("owner-books");
+    const result = await discoverDatasetBoundApps({
+      datasetId: rev1.datasetId,
+      targetRevision: rev1,
+      permissionsPage: async () => ({
+        permissions: [
+          {
+            kind: "app",
+            principal: ownerPubId,
+            current: true,
+            metadata: {
+              kind: "dataset",
+              datasetId: rev1.datasetId,
+              revision: 1,
+              revisionSha256: rev1.revisionSha256,
+              operationIds: [id(10)],
+            },
+          },
+        ],
+        nextCursor: null,
+      }),
+      lookupLocalApps: async () => new Map(),
+      readShareLinkPublication: async () =>
+        parseShareLinkPublication("w", "owner", ownerPubId, {
+          publicationId: ownerPubId,
+          active: true,
+          authorityRevision: 2,
+          ownerState: "current",
+          owner: { workspaceId: "w", ownerUserId: "owner" },
+          candidate: makeCandidate("apps/books", [cap]),
+        }),
+      signal: new AbortController().signal,
+    });
+    expect(result.boundAppsIncomplete).toBeUndefined();
+    expect(result.boundApps).toEqual([
+      expect.objectContaining({
+        scope: "owner",
+        publicationId: ownerPubId,
+        authorityRevision: 2,
+        appRoot: "apps/books",
+      }),
+    ]);
+    expect(result.boundApps[0]).not.toHaveProperty("shareId");
+    expect(
+      parseShareLinkPublication("w", "owner", ownerPubId, {
+        publicationId: ownerPubId,
+        active: true,
+        authorityRevision: 2,
+        owner: { workspaceId: "w", ownerUserId: "owner" },
+        candidate: makeCandidate("apps/books", [cap]),
+      }),
+    ).toBeNull();
+  });
+
   it("warns about a contract-only change to an action an app with current access uses", async () => {
     const withAction = (revision: number, contract: DatasetOperationContract) => {
       const definition = makeDef(id(1), "Orders");

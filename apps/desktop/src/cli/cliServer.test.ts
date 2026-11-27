@@ -886,6 +886,7 @@ describe("CLI socket server", () => {
             work(),
           projectPendingChatBookmarks: vi.fn(async () => undefined),
           chatWakes: { pulled: vi.fn(async () => undefined) },
+          phoneAppSender: null,
         };
         const callback = stripTypeScriptTypes(`({${source.slice(start, end)}})`);
         const afterSuccessfulPull = new Function(

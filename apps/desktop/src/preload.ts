@@ -116,6 +116,7 @@ import {
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  phoneAppOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
@@ -607,6 +608,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceSecretsOperations, invoke),
   ...operationBridge(incomingWebhooksOperations, invoke),
   ...operationBridge(chatDispatchNoticeOperations, invoke),
+  ...operationBridge(phoneAppOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
   onLiveDraftRecoveryChanged: (listener) =>

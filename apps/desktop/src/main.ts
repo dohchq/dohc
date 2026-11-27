@@ -172,6 +172,7 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
+import { atSyncedHead, createPhoneAppSender } from "./workspaces/phoneAppSender";
 import {
   createLocalOwnerAppPublicationHandler,
   localOwnerCliCaller,
@@ -435,6 +436,7 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  phoneAppOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
@@ -3092,6 +3094,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     await appViews?.closeWorkspace(binding.workspaceId);
     forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
+    phoneAppSender?.close(binding.workspaceId);
     const physicalWorkspace = {
       ...workspaceAtDisposal,
       rootPath: binding.canonicalRootPath,
@@ -3772,6 +3775,7 @@ function engineForWorkspace(
           { workspaceId: workspace.workspaceId },
           (lease) => lease.state.relayedPresses,
         )?.start();
+      phoneAppSender?.pulled(workspace.workspaceId, !!applied);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );
@@ -3963,7 +3967,12 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
-        aroundVersionSwitch: (work) => sitePreviews.holdVersionSwitch(workspace.workspaceId, work),
+        aroundVersionSwitch: (work) => {
+          phoneAppSender?.versionSwitched(workspace.workspaceId);
+          return sitePreviews
+            .holdVersionSwitch(workspace.workspaceId, work)
+            .finally(() => phoneAppSender?.versionSwitched(workspace.workspaceId));
+        },
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -4015,10 +4024,15 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   onWatcherBatch: (workspace, events) => {
     onWatcherBatch(workspace, events);
     withWorkspaceAttachment(workspace, () => folderAppDetection.settledEvents(workspace, events));
+    phoneAppSender?.filesChanged(
+      workspace.workspaceId,
+      events.map((event) => event.path),
+    );
   },
   onObservationResync: async (workspace) => {
     await onObservationResync(workspace);
     folderAppDetection.invalidate(workspace);
+    phoneAppSender?.schedule(workspace.workspaceId);
   },
   observationFor: (workspace, callbacks) => {
     const daemon = desktopEngine.daemon;
@@ -4134,6 +4148,9 @@ const activity = {
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
       pendingShareWhileOpen: pendingShareWhileOpen(workspaceId),
+      ...(phoneAppSender?.notSent(workspaceId).length
+        ? { appsNotSent: phoneAppSender.notSent(workspaceId) }
+        : {}),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -4195,6 +4212,10 @@ const activity = {
   pushRecorded: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.pushRecorded(lease.state.activity),
+    ),
+  syncSnapshot: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.syncSnapshot(lease.state.activity),
     ),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -8210,6 +8231,8 @@ let personalMemberApps:
       }>;
     }
   | undefined;
+type PhoneAppWorkspace = DesktopWorkspaceOperation["workspace"];
+let phoneAppSender: ReturnType<typeof createPhoneAppSender<PhoneAppWorkspace>> | null = null;
 let ownerAppPublicationForCli:
   | ((
       input: OwnerAppPublicationRequest,
@@ -10399,6 +10422,7 @@ const settingsIpc = createSettingsIpc<
     chatWakes.resume();
     // The save comes first, so the pass that follows reads the saved agents.
     agentThreads().settingsChanged();
+    phoneAppSender?.settingChanged(settings.settings.apps.sendToPhones);
   },
   publishRunners: () => {
     void chatWakes.runnersChanged();
@@ -12121,6 +12145,51 @@ function registerIpcHandlers(): void {
   });
   ownerAppPublicationForCli = (input, agent) =>
     cliOwnerPublication(input.workspaceId, input, agent);
+  const sendsToPhones = async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones;
+  const atServerHead = (workspaceId: string) =>
+    atSyncedHead(activity.syncSnapshot(workspaceId), activity.getStatus(workspaceId));
+  phoneAppSender = createPhoneAppSender<PhoneAppWorkspace>({
+    ...ownerPublicationDependencies,
+    resolveDatasetRevision,
+    open: async (workspaceId, work) => {
+      await warmCredentialCache();
+      const entry = findWorkspace(workspaceId);
+      const credentials = cachedCredentials;
+      if (
+        !(await sendsToPhones()) ||
+        !entry?.remote ||
+        shareViewIsPresent(entry.shareView) ||
+        !credentials ||
+        !workspaceRemoteMatchesCredentials(entry.remote, credentials)
+      )
+        return;
+      await workspaceAuthorities.withOperation(workspaceId, (operation) =>
+        work(operation.workspace, operation.signal, credentials),
+      );
+    },
+    admitted: async (workspace, credentials) => {
+      if (credentials !== cachedCredentials || !(await sendsToPhones())) return false;
+      const active = await withEngineAdapter(workspace, (adapter) =>
+        adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
+      );
+      return (active?.id ?? "main") === "main";
+    },
+    sync: async (workspace) => {
+      await ownerPublicationDependencies.flushCapture(workspace);
+      const drained = await activity.pushRecorded(workspace.workspaceId).then(
+        () => true,
+        () => false,
+      );
+      return drained && atServerHead(workspace.workspaceId);
+    },
+    synced: (workspace) => atServerHead(workspace.workspaceId),
+    changed: (workspaceId) => notifyRenderer({ workspaceId }),
+  });
+  void sendsToPhones().then((enabled) => phoneAppSender?.settingChanged(enabled));
+  registerOperations(operationBoundary, phoneAppOperations, {
+    retryPhoneApp: ({ workspaceId, appRoot }) => void phoneAppSender?.retry(workspaceId, appRoot),
+  });
   const undoAcceptedResponse = async (
     workspace: DesktopRendererWorkspaceOperation["workspace"],
     input: AppResponseUndoSelection,

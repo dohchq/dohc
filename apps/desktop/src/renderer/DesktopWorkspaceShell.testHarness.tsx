@@ -572,6 +572,7 @@ function makeBaseBridge(
     })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     retryChatWakes: vi.fn(async () => {}),
+    retryPhoneApp: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
       settings: {
         ...DEFAULT_USER_SETTINGS,

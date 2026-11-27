@@ -70,6 +70,8 @@ function renderApps(overrides: Partial<Parameters<typeof AppsSettings>[0]> = {})
     onDefaultReset: vi.fn(),
     trust: { trusted: true, onOpen: vi.fn() },
     pinned: [],
+    sendToPhones: true,
+    onSendToPhonesChange: vi.fn(),
     onSetPinned: vi.fn(),
     onOpenApp: vi.fn(),
     onError: vi.fn(),
@@ -175,6 +177,15 @@ describe("AppsSettings", () => {
     expect(props.onSetPinned).toHaveBeenCalledWith("apps/trip", false);
     await user.click(screen.getByTestId("settings-app-open"));
     expect(props.onOpenApp).toHaveBeenCalledWith("apps/trip");
+  });
+
+  it("turns off sending apps to your phones on this computer", async () => {
+    const user = userEvent.setup();
+    const { props } = renderApps();
+    const send = screen.getByRole("switch", { name: "Send apps to your phones" });
+    expect(send.getAttribute("aria-checked")).toBe("true");
+    await user.click(send);
+    expect(props.onSendToPhonesChange).toHaveBeenCalledWith(false);
   });
 
   it("says when Restricted Mode holds the mode an app starts in", async () => {

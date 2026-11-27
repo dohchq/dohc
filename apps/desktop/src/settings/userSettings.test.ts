@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentsSettings,
   DEFAULT_AGENT_RUN_LOGS_SETTINGS,
+  DEFAULT_APPS_SETTINGS,
   DEFAULT_PRIVACY_SETTINGS,
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -76,6 +77,7 @@ describe("desktop user settings model", () => {
       agents: {},
       sidebar: DEFAULT_SIDEBAR_SETTINGS,
       privacy: DEFAULT_PRIVACY_SETTINGS,
+      apps: DEFAULT_APPS_SETTINGS,
       agentRunLogs: DEFAULT_AGENT_RUN_LOGS_SETTINGS,
     });
   });
