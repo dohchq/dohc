@@ -19,7 +19,7 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-dohc is a free, open-source desktop app and local-first runtime for personal apps. You and your agents can build, run, and share small apps that live as plain files in a workspace folder next to your documents and notes. Collections for structured data, permissions, chat, version history, sync, and browser share links are built in.
+dohc is a free, open-source desktop app and local-first runtime for personal apps. Open a folder as a workspace to build, run, and share small apps with your agents. dohc handles structured data, permissions, chat, version history, sync, and browser share links.
 
 When an agent builds you an app, you can run it in your workspace with only the data you approve, publish it to a share link, and keep working on it with people and agents in chat.
 

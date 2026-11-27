@@ -1,6 +1,6 @@
 # dohc
 
-dohc is a local-first workspace and runtime for personal apps. In the desktop app, people and their agents build, run, share, and manage small apps next to their files, documents, data, and chat. The workspace is the primary object. dohc handles sync, sharing, permissions, isolation, and history. People own their work and choose their own tools and agents.
+dohc is a local-first desktop app and runtime for personal apps. People and their agents build, run, share, and manage small apps in a workspace folder. The workspace is the primary object. dohc handles data, sync, sharing, permissions, isolation, history, and chat. People own their work and choose their own tools and agents.
 
 dohc is an early alpha, released as nightly builds. There are no users outside the team yet.
 
