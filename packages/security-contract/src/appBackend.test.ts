@@ -74,10 +74,16 @@ describe("verified app backend callers", () => {
 
 describe("bounded app backend JSON and requests", () => {
   it("copies nested JSON and counts its encoded UTF-8 bytes, including escapes", () => {
-    const input = { rows: [{ value: "🍎\n" }], empty: null, yes: true };
+    const input = { rows: [{ value: "🍎\n é€" }], ключ: null, yes: true };
     const serializedBytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
     expect(parseAppBackendJson(input, serializedBytes)).toEqual(input);
     expect(() => parseAppBackendJson(input, serializedBytes - 1)).toThrow();
+    expect(parseAppBackendUploadRequest({ ...upload(), name: "\ud800".repeat(85) }).name).toBe(
+      "\ud800".repeat(85),
+    );
+    expect(() =>
+      parseAppBackendUploadRequest({ ...upload(), name: "\udc00".repeat(86) }),
+    ).toThrow();
     const request = invoke();
     const result = parseAppBackendInvokeRequest(request);
     expect(result).toEqual(request);

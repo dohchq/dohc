@@ -106,11 +106,22 @@ export function parseAppBackendRefusal(value: unknown): AppBackendRefusal {
   return { code: row.code, message: row.message };
 }
 
-const encoder = new TextEncoder();
 const forbiddenKeys = new Set(["__proto__", "prototype", "constructor"]);
 const operationPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const datasetAliasPattern = /^[a-z][a-z0-9_-]{0,63}$/;
-const bytes = (value: string) => encoder.encode(value).byteLength;
+function bytes(value: string): number {
+  let total = value.length;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) continue;
+    if (code < 0x800) total += 1;
+    else if ((code & 0xfc00) === 0xd800 && (value.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      total += 2;
+      index++;
+    } else total += 2;
+  }
+  return total;
+}
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
