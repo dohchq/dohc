@@ -71,8 +71,8 @@ import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   linkRefusal,
+  liveNoteRefusal,
   namedLiveStoppedRefusal,
-  sessionHostRefusal,
   unboundLinkRefusal,
   type LiveNoteStanding,
   type SessionHostBlock,
@@ -618,7 +618,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           }
         } else {
           const note = liveNote?.(document);
-          if (note && !reaches(context, document.objectId) && namedReaches(context, document))
+          if (note && namedReaches(context, document))
             return note === "starting" && blocked() !== "held"
               ? linkRefusal("link_live_starting")
               : namedLiveStoppedRefusal();
@@ -626,12 +626,13 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const block = blocked();
         if (block && context.kind === "link") toldToTryAgain(`the host says ${block}`);
         // A link holder's reach was checked above. An invited editor learns why only for a document they reach.
-        if (block)
-          return context.kind === "link"
-            ? sessionHostRefusal(block)
-            : block === "held" && reaches(context, objectId as string)
-              ? namedLiveStoppedRefusal()
-              : refusal();
+        if (context.kind === "link") {
+          const refused = liveNoteRefusal(liveNote?.(document), block);
+          if (refused) return refused;
+        } else if (block)
+          return block === "held" && reaches(context, objectId as string)
+            ? namedLiveStoppedRefusal()
+            : refusal();
         const minted = await options.tickets.mint({ objectId }, context, signal);
         signal.throwIfAborted();
         check();

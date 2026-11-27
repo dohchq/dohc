@@ -11,7 +11,7 @@ import {
 } from "@dohc/live-session-contract/live-frame";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { createLinkLiveClient } from "./linkLiveClient";
-import { remoteLiveDocument } from "./remoteLiveDocument";
+import { LIVE_DOCUMENT_PREPARING, remoteLiveDocument } from "./remoteLiveDocument";
 import {
   LIVE_UPDATE_REFUSAL_VALUES,
   type LiveUpdateRefusal,
@@ -54,8 +54,10 @@ afterEach(async () => {
 const accessToken = "A".repeat(43),
   resource = `https://share.example.test/mcp/s/${"S".repeat(43)}`;
 
+// A note still starting reads as a personal agent's preparing. Every other refusal keeps its link code, so an agent tells
+// a note that will go live from one only its owner can start again.
 it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])(
-  "returns the same scoped message to an agent: %s",
+  "returns the same scoped message and code to an agent: %s",
   async (code) => {
     const client = createLinkLiveClient({
       relayUrl: "https://relay.test",
@@ -83,7 +85,9 @@ it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])(
     expect(result).toMatchObject({
       ok: false,
       outcome: "not-applied",
-      error: LINK_REFUSALS[code].error,
+      ...(code === "link_live_starting"
+        ? { code: "preparing", error: LIVE_DOCUMENT_PREPARING }
+        : { code, error: LINK_REFUSALS[code].error }),
     });
   },
 );

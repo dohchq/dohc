@@ -24,6 +24,15 @@ const LIVE_DOCUMENTS_BYTES = 1_048_576 + KEPT_EDITS_PAGE_BYTES;
 // A page of saves holds at least one, of up to 20 MiB, as base64.
 const JOURNAL_PAGE_BYTES = 28 * 1024 * 1024;
 
+/** Why the owner's computer couldn't list the server's live documents, when the cause won't clear by itself soon. */
+export class OwnerLiveDiscoveryError extends Error {
+  constructor(
+    readonly reason: "live-hosting-unavailable" | "server-unreachable",
+    options?: ErrorOptions,
+  ) {
+    super(`Owner live document discovery failed: ${reason}.`, options);
+  }
+}
 export function createServerOwnerConnection(options: {
   stateDir(): string;
   workspaces(): RegistryEntry[];
@@ -492,18 +501,23 @@ export function createServerOwnerConnection(options: {
           const cached = discovery.get(workspace.workspaceId);
           if (!fresh && cached?.credentials === session.value && cached.until > Date.now())
             return cached.value;
-          const response = await options.fetch(
-            `${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,
-            {
+          const response = await options
+            .fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`, {
               headers: { authorization: `Bearer ${session.value.token}` },
               signal: requestSignal,
               redirect: "error",
-            },
-          );
+            })
+            .catch((error: unknown) => {
+              requestSignal.throwIfAborted();
+              throw new OwnerLiveDiscoveryError("server-unreachable", { cause: error });
+            });
           assertCurrent();
           requestSignal.throwIfAborted();
           if (!response.ok || !response.body) {
             await response.body?.cancel();
+            // A server without live editing, or one that doesn't let this account host the workspace, answers 404.
+            if (response.status === 404)
+              throw new OwnerLiveDiscoveryError("live-hosting-unavailable");
             throw new Error("Owner live document discovery failed.");
           }
           const reader = response.body.getReader();

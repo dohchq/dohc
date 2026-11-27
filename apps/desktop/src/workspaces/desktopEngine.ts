@@ -57,6 +57,7 @@ import {
   startServerOwnerDelivery,
   type ListedOwnerDeliveryDocument,
 } from "./serverOwnerDelivery";
+import { OwnerLiveDiscoveryError } from "./serverOwnerConnection";
 import type { LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import {
   readOwnerLiveQuarantines,
@@ -175,7 +176,8 @@ type OwnerLiveDeliveryReason =
   | "live-start-failing"
   | "note-format-off"
   | "restart-required"
-  | "unsent-edits-limit";
+  | "unsent-edits-limit"
+  | OwnerLiveDiscoveryError["reason"];
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -703,16 +705,22 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         .filter((row) => !row.saveOnly)
         .map((row) => row.path),
     );
+  // `why` is for the log alone: what made a pass retry, which the owner's words don't name.
   const setOwnerDeliveryStatus = (
     workspaceId: string,
     status: OwnerLiveDeliveryStatus | undefined,
     reason?: OwnerLiveDeliveryReason,
+    why?: string,
   ) => {
     if (
       ownerDeliveryStatus.get(workspaceId) === status &&
       ownerDeliveryReason.get(workspaceId) === reason
     )
       return;
+    if (status === "retrying")
+      console.warn(
+        `[desktop] owner live editing of workspace ${workspaceId} is retrying: ${reason ?? why ?? "unknown"}`,
+      );
     if (status) ownerDeliveryStatus.set(workspaceId, status);
     else ownerDeliveryStatus.delete(workspaceId);
     if (reason) ownerDeliveryReason.set(workspaceId, reason);
@@ -1448,6 +1456,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                         : paused.size && !reason
                           ? "unsent-edits-limit"
                           : reason,
+                      unavailable
+                        ? "the server lists a document it can't host now"
+                        : "a document's delivery asks to retry",
                     );
                     return {
                       documentCount: documents.length,
@@ -1460,10 +1471,17 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       generation === ownerDeliveryGeneration &&
                       !isQuitting()
                     ) {
+                      const previous = ownerDeliveryReason.get(workspaceId);
                       setOwnerDeliveryStatus(
                         workspaceId,
                         "retrying",
-                        ownerDeliveryReason.get(workspaceId),
+                        error instanceof OwnerLiveDiscoveryError
+                          ? error.reason
+                          : previous === "live-hosting-unavailable" ||
+                              previous === "server-unreachable"
+                            ? undefined
+                            : previous,
+                        error instanceof Error ? error.message : "a pass failed",
                       );
                     }
                     throw error;

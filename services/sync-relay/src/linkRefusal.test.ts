@@ -92,6 +92,21 @@ it.each(["link", "link-lane-owner", "linkx", "link-refresh", "link-handoff", "li
   },
 );
 
+// A note live on its record is still starting until its host serves it. One its host refused waits for its owner.
+it.each([
+  ["live", { status: "ready" }, undefined],
+  ["live", { status: "preparing" }, "starting"],
+  ["live", { status: "unavailable", reason: "live-start-failing" }, "starting"],
+  ["live", { status: "unavailable" }, undefined],
+  ["live", { status: "unavailable", reason: "note-format-off" }, undefined],
+  ["live", { status: "unavailable", reason: "session-host-refused" }, "off"],
+  ["starting", { status: "unavailable", reason: "live-document-without-lineage" }, "off"],
+  ["starting", { status: "unavailable" }, "starting"],
+  ["stopping", { status: "ready" }, "off"],
+] as const)("answers a %s note whose readiness is %o with %s", (state, readiness, standing) => {
+  expect(liveNoteStanding(state, () => readiness)).toBe(standing);
+});
+
 // A note with no record may never get one, so only a record that says starting or off answers.
 it.each([
   [undefined, undefined],

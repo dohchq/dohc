@@ -108,7 +108,10 @@ function liveDeliveryLabel(
   )
     return "Live editing cannot start";
   if (reason === "conflict-parent-withheld") return "Live editing cannot resume";
-  return reason ? "Live editing paused" : "Live editing retrying";
+  if (reason === "live-hosting-unavailable") return "Live editing unavailable";
+  return reason && reason !== "server-unreachable"
+    ? "Live editing paused"
+    : "Live editing retrying";
 }
 
 // The sync state names the server as the problem. No server connection, an
@@ -265,7 +268,10 @@ export function WorkspaceSyncStatus({
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;
   // A retry with no reason is dohc still dialling by itself, so it is a ring.
-  const liveDialling = liveDelivery === "retrying" && !syncStatus?.ownerLiveDeliveryReason;
+  const liveDialling =
+    liveDelivery === "retrying" &&
+    (!syncStatus?.ownerLiveDeliveryReason ||
+      syncStatus.ownerLiveDeliveryReason === "server-unreachable");
   return (
     <>
       <span

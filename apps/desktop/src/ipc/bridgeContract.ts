@@ -1798,6 +1798,8 @@ const SYNC_STATUS_BASE_FIELDS = {
       "note-format-off",
       "restart-required",
       "unsent-edits-limit",
+      "live-hosting-unavailable",
+      "server-unreachable",
     ])
     .optional(),
   // Files that take no edits until the ones waiting for the server reach it.

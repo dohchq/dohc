@@ -361,6 +361,16 @@ describe("sync status surface", () => {
       reason: "live-start-failing" as const,
       label: "Live editing cannot start",
     },
+    {
+      delivery: "retrying" as const,
+      reason: "server-unreachable" as const,
+      label: "Live editing retrying",
+    },
+    {
+      delivery: "retrying" as const,
+      reason: "live-hosting-unavailable" as const,
+      label: "Live editing unavailable",
+    },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
     const live = screen.getByTestId("owner-live-delivery-status");
@@ -392,6 +402,13 @@ describe("sync status surface", () => {
       />,
     );
     expect(liveDot()).toBeUndefined();
+    rerender(
+      <WorkspaceSyncStatus
+        syncStatus={liveDeliveryStatus("retrying", "server-unreachable")}
+        failedSaves={0}
+      />,
+    );
+    expect(liveDot()).toBe("working");
     rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
     expect(liveDot()).toBeUndefined();
   });

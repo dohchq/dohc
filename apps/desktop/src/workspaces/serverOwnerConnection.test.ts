@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { createServerOwnerConnection } from "./serverOwnerConnection";
+import { createServerOwnerConnection, OwnerLiveDiscoveryError } from "./serverOwnerConnection";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { deferred } from "../testing/deferred";
@@ -428,6 +428,21 @@ it("rejects discovery errors and bounds response bytes before parsing", async ()
     f.fetch.mockResolvedValue(response);
     const session = await f.connection.connect(f.workspace, new AbortController().signal);
     await expect(session!.documents(new AbortController().signal)).rejects.toThrow(error);
+  }
+});
+
+// A server without live editing answers 404, and a server that can't be reached answers nothing. Each keeps its cause.
+it("names why discovery failed when the server doesn't host live editing or can't be reached", async () => {
+  for (const [answer, reason] of [
+    [() => Promise.resolve(new Response("", { status: 404 })), "live-hosting-unavailable"],
+    [() => Promise.reject(new TypeError("fetch failed")), "server-unreachable"],
+  ] as const) {
+    const f = fixture();
+    const session = await f.connection.connect(f.workspace, new AbortController().signal);
+    f.fetch.mockImplementation(answer);
+    await expect(session!.documents(new AbortController().signal)).rejects.toEqual(
+      expect.objectContaining({ constructor: OwnerLiveDiscoveryError, reason }),
+    );
   }
 });
 

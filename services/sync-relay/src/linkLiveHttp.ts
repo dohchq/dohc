@@ -18,6 +18,7 @@ import { parseNamedLiveRouteLimits, type NamedLiveRouteLimits } from "./namedLiv
 import type { SyncRelayStorage } from "./storage";
 import {
   linkRefusal,
+  liveNoteRefusal,
   opaqueLinkRefusal,
   sessionHostRefusal,
   type LiveNoteStanding,
@@ -188,7 +189,11 @@ export function createLinkLiveHttp(options: {
               : sessionHostRefusal(block ?? "stopped");
           }
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
-          if (block) return sessionHostRefusal(block);
+          const refused = liveNoteRefusal(
+            options.liveNote?.({ workspaceId: context.workspaceId, objectId }),
+            block,
+          );
+          if (refused) return refused;
           // The state comes only where a ticket would: a link that takes no more browsers refuses this one.
           if (state && options.storage.liveLinkFull(context)) return linkRefusal("link_full");
           return { objectId, current };

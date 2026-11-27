@@ -913,6 +913,23 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // Neither clears by itself soon, and the owner can't fix either in dohc. Try again checks once more.
+  if (reason === "live-hosting-unavailable") {
+    return {
+      title: "Live editing unavailable",
+      body: "This server doesn't host live editing for this workspace, so others can't edit its files live. Your edits are saved on this computer and keep syncing.",
+      recovery: "retry",
+      Icon: AlertTriangle,
+    };
+  }
+  if (reason === "server-unreachable") {
+    return {
+      title: "Live editing retrying",
+      body: "dohc can't reach the server's live editing. Your edits are saved on this computer, and dohc keeps trying.",
+      recovery: "retry",
+      Icon: RefreshCw,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",
@@ -932,6 +949,10 @@ function liveDeliveryCopy(
 // A retry dohc is still fixing by itself toasts and adds a row only once its
 // ring has shown in the title bar this long.
 const QUIET_RETRY_MS = 15_000;
+// A server that can't be reached, or doesn't host live editing, can be a moment's answer: a restart, a network change.
+function quietLiveRetry(reason: SyncStatusResult["ownerLiveDeliveryReason"]): boolean {
+  return reason === "server-unreachable" || reason === "live-hosting-unavailable";
+}
 
 // Whether `key` has stayed the same, and not null, for `ms`. A key that
 // changes or clears starts the wait again.
@@ -1714,7 +1735,7 @@ export function NoticeCenter(props: {
   const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
   const liveDeliveryKey = useLasted(
     serverNamed ? null : liveRetryKey,
-    liveDeliveryReason ? 0 : QUIET_RETRY_MS,
+    liveDeliveryReason && !quietLiveRetry(liveDeliveryReason) ? 0 : QUIET_RETRY_MS,
   )
     ? liveRetryKey
     : null;

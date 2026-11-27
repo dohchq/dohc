@@ -149,6 +149,7 @@ import {
 import {
   createServiceHostEnrollmentRoutes,
   isServiceHostEnrollmentPath,
+  serviceHostReadiness,
 } from "./serviceHostEnrollmentRoutes";
 import {
   createPersonalLiveDocumentRoute,
@@ -1369,13 +1370,22 @@ const sessionHostBlocked = selfHost
         ? selfHost.sessionBlock(document)
         : undefined
   : undefined;
-const liveNote = selfHost
+const readiness =
+  selfHost &&
+  serviceHostReadiness({
+    storage,
+    history: deployment!.history,
+    host: selfHost,
+    activation: storage.createServiceActivationStore(deployment!.history),
+  });
+const liveNote = readiness
   ? (document: { workspaceId: string; objectId: string }) => {
       if (storage.getLiveHostControl()?.configuredMode !== "service") return undefined;
-      return liveNoteStanding(
-        storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId)?.note
-          .state,
+      const row = storage.readServiceHostEnrollmentByObjectId(
+        document.workspaceId,
+        document.objectId,
       );
+      return row ? liveNoteStanding(row.note.state, () => readiness.state(row)) : undefined;
     }
   : undefined;
 if (selfHost && deployment)

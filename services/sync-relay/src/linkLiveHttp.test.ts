@@ -339,6 +339,28 @@ it("opens a starting or off note with no state, so its ticket gives the answer",
   ]);
 });
 
+// A note whose record says live before its host serves it, or that its host won't start, answers before any ticket.
+it("tells a holder a bound note still starting to wait, and one only its owner can start that it is off", async () => {
+  let note: LiveNoteStanding | undefined;
+  const f = await fixture(undefined, {
+    readAwakeState: async () => undefined,
+    liveNote: () => note,
+  });
+  const ask = async (route?: string) => {
+    const response = await f.handle(request(undefined, route));
+    return [response.status, await response.json().catch(() => null)];
+  };
+  expect(await ask()).toEqual([200, { objectId: binding.objectId }]);
+  for (const [standing, code] of [
+    ["starting", "link_live_starting"],
+    ["off", "link_live_stopped"],
+  ] as const) {
+    note = standing;
+    for (const route of ["/sync/live/link-document", "/sync/live/link-document-state"])
+      expect(await ask(route)).toEqual([503, linkRefusalBody(code)]);
+  }
+});
+
 // A link reader's page asks for a note's state before it opens a socket, so it can show the note at once.
 const stateRequest = (body?: unknown, headers?: Record<string, string>) =>
   request(body, "/sync/live/link-document-state", headers);

@@ -50,6 +50,7 @@ import {
 } from "./ownerLiveQuarantine";
 import { liveRecoveryUpdates, parseLiveRecoveryPackage } from "./ownerLiveRecoveryCopy";
 import * as Y from "yjs";
+import { OwnerLiveDiscoveryError } from "./serverOwnerConnection";
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 
 const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
@@ -2531,6 +2532,7 @@ describe("server owner peer lifecycle", () => {
         open: unexpectedOpen,
         documents: async () => {
           lists += 1;
+          if (rows[0] instanceof Error) throw rows[0];
           return { ok: true, diverged, documents: rows };
         },
       }),
@@ -2694,6 +2696,27 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
       expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(passes);
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+      // A server that doesn't host live editing, or can't be reached, says so. A later failure with no cause doesn't keep it.
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      for (const reason of ["live-hosting-unavailable", "server-unreachable"] as const) {
+        rows = [new OwnerLiveDiscoveryError(reason)];
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe(reason));
+        expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+        expect(warned).toHaveBeenLastCalledWith(
+          `[desktop] owner live editing of workspace owner is retrying: ${reason}`,
+        );
+      }
+      rows = [new Error("Owner live document discovery failed.")];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined());
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      expect(warned).toHaveBeenLastCalledWith(
+        "[desktop] owner live editing of workspace owner is retrying: Owner live document discovery failed.",
+      );
+      rows = [ready];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
     } finally {
       credentials.abort();
       await f.close();
