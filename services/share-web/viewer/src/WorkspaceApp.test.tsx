@@ -202,7 +202,6 @@ function server(
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
-    groupsFail = options.groupsFail ?? 0,
     deleteFails = options.deleteFails ?? 0,
     holdGroups = options.holdGroups ?? 0,
     workspacesFail = options.workspacesFail ?? 0;
@@ -326,8 +325,8 @@ function server(
     }
     if (url.pathname === "/api/named-chat/channels" && options.groupsGone)
       return jsonResponse({ ok: false, error: "not found" }, 404);
-    if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {
-      groupsFail -= 1;
+    if (url.pathname === "/api/named-chat/channels" && (options.groupsFail ?? 0) > 0) {
+      options.groupsFail! -= 1;
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     const listing = () => ({
@@ -787,6 +786,25 @@ it("shows a Group added just after the workspace opened, as soon as it reaches t
   );
   await settle(() => following("chat").length === 1);
   expect(channelReads(fetch)).toBe(2);
+});
+
+it("reads the Groups again with backoff when reading a new one fails", async () => {
+  const options: { groups: Array<{ wire: string; name: string }>; groupsFail?: number } = {
+    groups: [],
+  };
+  const fetch = server(options);
+  await render();
+  await settle(() => following("chat").length === 1);
+  options.groups = [{ wire: "wire-plans", name: "plans" }];
+  options.groupsFail = 1;
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => channelReads(fetch) === 2);
+  expect(groupPanel().textContent).toContain("No Groups in this workspace yet.");
+  expect(groupPanel().querySelector(".load-failed")).toBeNull();
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(channelReads(fetch)).toBe(3);
 });
 
 it("lists a new Group as soon as a message in it arrives, and keeps the open Group following", async () => {

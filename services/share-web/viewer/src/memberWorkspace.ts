@@ -190,7 +190,7 @@ type Waiter = {
  * `client`, served from the same request; `onMessages` hears how many messages
  * from other people each Group received, so the page can count them.
  * The relay answers a follow as soon as the workspace's log moves, so `onMoved`
- * hears each page that moved it without a message: something else changed, such as a new Group.
+ * hears each page that moved it, with or without a message: a Group may have been added.
  */
 export function createGroupFollow(options: {
   shareId: string;
@@ -260,7 +260,7 @@ export function createGroupFollow(options: {
         counts.set(channelWireId, (counts.get(channelWireId) ?? 0) + 1);
       }
     }
-    const moved = page.nextCursor > reached && page.messages.length === 0;
+    const moved = page.nextCursor > reached;
     reached = Math.max(reached, page.nextCursor);
     cursor = page.nextCursor;
     deletes = [

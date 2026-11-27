@@ -251,16 +251,16 @@ it("serves each open Group from one follow, and counts others' messages in every
   const waiting = plans.follow(14, 30_000, signal);
   open()[0]!.answer([["wire-plans", 15]], 16);
   expect((await waiting).messages.map((item) => item.relaySeq)).toEqual([15]);
-  expect(onMoved).not.toHaveBeenCalled();
+  expect(onMoved).toHaveBeenCalledTimes(2);
   // A Group whose history ends earlier starts the follow again there. Pages it has read already move nothing.
   const late = hub.client(group("wire-late"), false).follow(8, 30_000, signal);
   await vi.waitFor(() => expect(open()[0]?.since).toBe(8));
   open()[0]!.answer([], 16);
   expect((await late).nextCursor).toBe(16);
-  expect(onMoved).not.toHaveBeenCalled();
+  expect(onMoved).toHaveBeenCalledTimes(2);
   await vi.waitFor(() => expect(open()[0]?.since).toBe(16));
   open()[0]!.answer([], 17);
-  await vi.waitFor(() => expect(onMoved).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(onMoved).toHaveBeenCalledTimes(3));
   hub.close();
 });
 
