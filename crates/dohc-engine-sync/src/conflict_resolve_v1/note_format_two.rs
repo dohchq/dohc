@@ -192,8 +192,11 @@ fn ready_to_convert(
     if doc.note_schema_version() == 2 {
         return Ok(Err(NothingToConvert));
     }
-    if here.is_live(key) || elsewhere.is_live(key) || live_document_bound(conn, key)? {
-        return Ok(Err(NotNow("ydoc-session-live")));
+    if here.is_live(key) {
+        return Ok(Err(NotNow("open-here")));
+    }
+    if elsewhere.is_live(key) || live_document_bound(conn, key)? {
+        return Ok(Err(NotNow("open-elsewhere")));
     }
     if doc.has_pending_dependencies() {
         return Ok(Err(NotNow("ydoc-incomplete-lineage")));
@@ -437,7 +440,15 @@ pub fn convert_notes_to_format_two(
         ))
     })?;
     for (object_id, path, local) in notes.iter().take(budget) {
-        let key = DocKey::new(workspace_id, "main", object_id).map_err(map_local_collab_error)?;
+        pass.resume_after = Some(object_id.clone());
+        let key = match DocKey::new(workspace_id, "main", object_id) {
+            Ok(key) => key,
+            Err(error) => {
+                pass.failed
+                    .push((object_id.clone(), path.clone(), error.to_string()));
+                continue;
+            }
+        };
         let outcome = if *local && offline {
             drop_local_format_one(store, &key, here, elsewhere, file_proof, faults, now_ms)
         } else {
@@ -461,7 +472,6 @@ pub fn convert_notes_to_format_two(
             }
             Err(error) => return Err(error),
         }
-        pass.resume_after = Some(object_id.clone());
     }
     if notes.len() <= budget {
         pass.resume_after = None;
@@ -547,13 +557,13 @@ fn drop_local_format_one(
     let Some(projection) = settled_source(&ready.doc, &ready.text) else {
         return Ok(NotNow("ydoc-unsettled"));
     };
+    let materialized_seed_source_sha256 = match ready.marker.path.as_deref() {
+        Some(path) => file_proof(store, key, path).map_err(map_local_collab_error)?,
+        None => None,
+    };
     let witness = CloseProjection {
         sha256: dohc_engine_storage::hex_sha256(projection.as_bytes()),
-        materialized_seed_source_sha256: ready
-            .marker
-            .path
-            .as_deref()
-            .and_then(|path| file_proof(store, key, path).ok().flatten()),
+        materialized_seed_source_sha256,
     };
     match dohc_engine_collab::close_session(store, key, false, Some(&witness), faults, now_ms) {
         Ok(TxnOutcome::Committed(CloseOutcome::Pruned { .. })) => Ok(Converted),

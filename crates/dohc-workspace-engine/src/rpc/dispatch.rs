@@ -508,6 +508,10 @@ impl EngineService {
                 self.sync_first_exports_held_open(&ctx, request.workspace)
                     .await?
             }
+            "sync.convertNotes" => {
+                self.sync_convert_notes(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "sync.collectionsWaiting" => {
                 self.sync_collections_waiting(&ctx, request.workspace)
                     .await?

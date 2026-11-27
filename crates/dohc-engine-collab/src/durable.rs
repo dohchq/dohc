@@ -3808,6 +3808,14 @@ pub(crate) fn map_sql(e: rusqlite::Error) -> CollabError {
     }) {
         return StorageError::persist_public(e).into();
     }
+    if e.sqlite_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+        )
+    }) {
+        return StorageError::corrupt_public(e).into();
+    }
     CollabError::Corrupt {
         reason: e.to_string(),
     }

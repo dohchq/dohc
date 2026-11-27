@@ -4771,8 +4771,14 @@ pub(crate) fn convert_notes_on_store(
         &NoFaults,
         now_ms,
     );
-    if !matches!(&pass, Ok(pass) if pass.converted.is_empty()) {
-        cache.clear();
+    match &pass {
+        Ok(pass) => {
+            for key in &pass.converted {
+                cache.remove(key);
+                cache.unpin(key);
+            }
+        }
+        Err(_) => cache.clear(),
     }
     Ok(pass?)
 }

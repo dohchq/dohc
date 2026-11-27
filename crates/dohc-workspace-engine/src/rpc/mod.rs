@@ -14,6 +14,7 @@ pub(super) mod kept_copies;
 pub(crate) mod live_application;
 pub(super) mod live_changes;
 pub(super) mod markdown_recovery;
+pub(super) mod note_format;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
 pub(super) mod reads;
