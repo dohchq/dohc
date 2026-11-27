@@ -186,7 +186,7 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
 
     const page = await shared.browser.newPage();
     await page.goto(`${sharedDatasetViewerOrigin}/s#${secret}`);
-    await page.getByRole("button", { name: "collection.yaml", exact: true }).click();
+    await page.getByRole("treeitem", { name: "collection.yaml", exact: true }).click();
     await page.getByRole("button", { name: "Edit file" }).click();
     const editor = page.getByRole("textbox", { name: SCHEMA_PATH });
     await expect(editor).toHaveValue(SCHEMA);
