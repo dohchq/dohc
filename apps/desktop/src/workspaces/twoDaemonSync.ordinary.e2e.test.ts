@@ -432,13 +432,15 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         expect(await showOnPhone.liveNotes(workspaceId)).toEqual(new Set([liveObjectId!]));
 
         const outcomes = new Map<string, "existing" | "absent">();
+        let activePath: string | undefined;
         let peerSeeded = false;
         let liveNotesChecks = 0;
         let pulledPlainDisk: { bytes: Buffer; modified: bigint } | undefined;
         backgroundLiveStart = createBackgroundLiveStart({
           eligible: () => true,
-          noteIdentity: async (targetWorkspaceId, path) =>
-            await b!.sessions.run(b!.workspace, async ({ client, workspace: handle }) => {
+          noteIdentity: async (targetWorkspaceId, path) => {
+            activePath = path;
+            return await b!.sessions.run(b!.workspace, async ({ client, workspace: handle }) => {
               const resolved = await new VersionedLiveAdapter(client, handle, {
                 workspaceId: targetWorkspaceId,
               }).resolveFiles({ workspaceId: targetWorkspaceId, targets: [{ path }] });
@@ -446,7 +448,8 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
               return resolved.versionId === "main" && file?.status === "found"
                 ? { versionId: resolved.versionId, objectId: file.objectId }
                 : null;
-            }),
+            });
+          },
           showsOnPhone: async () => true,
           catchUp: async (_targetWorkspaceId, signal) => {
             await syncB!.catchUp({ signal });
@@ -455,8 +458,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
           relayLiveNotes: async (targetWorkspaceId, signal) => {
             liveNotesChecks += 1;
             const live = await showOnPhone.liveNotes(targetWorkspaceId, signal);
-            if (!peerSeeded) {
-              // Publish peer A's real Y.Doc seed AFTER GET /live-notes returns and BEFORE B's catch-up.
+            if (activePath === "already-seeded.md" && !peerSeeded) {
               peerSeeded = true;
               const peerSeed = await a!.capture.openYDocSession({
                 path: "already-seeded.md",
@@ -525,6 +527,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
             interval: 50,
           },
         );
+        expect(peerSeeded).toBe(true);
         expect(outcomes.get("synced-plain.md")).toBe("absent");
         expect(outcomes.get("already-seeded.md")).toBe("existing");
         expect(outcomes.has("already-live.md")).toBe(false);

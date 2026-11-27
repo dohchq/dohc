@@ -335,6 +335,31 @@ describe("background live start", () => {
     expect(started).toEqual([]);
   });
 
+  it("skips starting if the path changed to another note during the lossiness check", async () => {
+    const objects: Record<string, string> = { "a.md": "plain" };
+    const { queue, started } = setup({
+      noteIdentity: async (_workspaceId, path) =>
+        objects[path] ? { versionId: "main", objectId: objects[path] } : null,
+      relayLiveNotes: async () => new Set(["live-elsewhere"]),
+      isLossyNote: async () => {
+        objects["a.md"] = "live-elsewhere";
+        return false;
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+  });
+
+  it("does not delay a queued Markdown note when non-Markdown paths arrive", async () => {
+    const { queue, started } = setup();
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    queue.note("w", ["data.json", ".dohc/internal.md"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
   it("defers on transient Show on phone failure and retries once visibility recovers", async () => {
     let available = false;
     const { queue, started } = setup({

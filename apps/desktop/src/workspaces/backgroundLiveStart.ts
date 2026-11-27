@@ -126,10 +126,10 @@ export function createBackgroundLiveStart(
     const caughtUp = await unlessCancelled(options.catchUp(workspaceId, cancel));
     if (caughtUp === false) return defer(workspaceId, path);
     if (caughtUp !== true) return;
-    if (!sameNote(await unlessCancelled(options.noteIdentity(workspaceId, path)))) return;
     const bytes = await unlessCancelled(options.noteBytes(workspaceId, path));
     if (typeof bytes !== "number" || bytes > WYSIWYG_MARKDOWN_THRESHOLD_BYTES) return;
     if ((await unlessCancelled(options.isLossyNote(workspaceId, path))) !== false) return;
+    if (!sameNote(await unlessCancelled(options.noteIdentity(workspaceId, path)))) return;
     if (cancel.aborted || !options.eligible(workspaceId)) return;
     await options.start(workspaceId, path);
     if (sameNote(await options.noteIdentity(workspaceId, path).catch(() => null)))
@@ -174,23 +174,26 @@ export function createBackgroundLiveStart(
   const liveStart: BackgroundLiveStart = {
     note(workspaceId, paths) {
       if (stopped || paused || !options.eligible(workspaceId)) return;
-      quietUntil = Date.now() + quietMs;
       const before = queued.size;
+      let accepted = false;
       for (const path of paths) {
-        if (queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
         if (liveDocumentKindForPath(path) !== "richdoc") continue;
         if (classifyEngineFilePathForRead(path, process.platform).kind !== "tracked") continue;
         const key = keyOf(workspaceId, path);
+        if (!queued.has(key) && queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
+        accepted = true;
         deferred.delete(key);
         queued.set(key, { workspaceId, path });
       }
-      if (queued.size === 0) return;
+      if (!accepted) return;
+      quietUntil = Date.now() + quietMs;
       if (before === 0 && deadline === 0) deadline = Date.now() + maxWaitMs;
       if (inFlight) return;
       scheduleNext();
     },
     retry(workspaceId) {
       if (stopped || paused || inFlight?.workspaceId === workspaceId || deferred.size === 0) return;
+      if (queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) return;
       const paths = [...deferred.values()].flatMap((e) =>
         e.workspaceId === workspaceId ? [e.path] : [],
       );
