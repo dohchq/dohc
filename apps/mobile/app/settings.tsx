@@ -262,30 +262,36 @@ function SettingsScreen() {
             {workspaces.workspaces.length === 0 ? (
               <Empty text={accountWords.noWorkspaces(server)} />
             ) : null}
-            {groups.own.map((workspace) => (
-              <ShowOnPhoneRow
-                key={workspace.workspaceId}
-                workspace={workspace}
-                pending={workspaces.pending.has(workspace.workspaceId)}
-                onChange={setShowOnPhone}
-              />
-            ))}
+            {(
+              [
+                [accountWords.yourWorkspaces, groups.own],
+                [accountWords.sharedWithYou, groups.shared],
+              ] as const
+            ).map(([heading, rows]) =>
+              rows.length === 0 ? null : (
+                <View key={heading} style={styles.group}>
+                  {groups.shared.length > 0 ? (
+                    <Text
+                      style={[styles.subheading, { color: theme.muted }]}
+                      accessibilityRole="header"
+                    >
+                      {heading}
+                    </Text>
+                  ) : null}
+                  {rows.map((workspace) => (
+                    <ShowOnPhoneRow
+                      key={workspace.workspaceId}
+                      workspace={workspace}
+                      pending={workspaces.pending.has(workspace.workspaceId)}
+                      onChange={setShowOnPhone}
+                    />
+                  ))}
+                </View>
+              ),
+            )}
           </>
         ) : null}
       </Section>
-
-      {workspaces.status === "ready" && groups.shared.length > 0 ? (
-        <Section title={accountWords.sharedWithYou}>
-          {groups.shared.map((workspace) => (
-            <ShowOnPhoneRow
-              key={workspace.workspaceId}
-              workspace={workspace}
-              pending={workspaces.pending.has(workspace.workspaceId)}
-              onChange={setShowOnPhone}
-            />
-          ))}
-        </Section>
-      ) : null}
 
       {alerts ? <AlertsSection alerts={alerts} server={server} /> : null}
 
@@ -614,6 +620,8 @@ const styles = StyleSheet.create({
   page: { paddingHorizontal: 16, paddingBottom: 48, gap: 32 },
   section: { gap: 8 },
   heading: { fontSize: 15, fontWeight: "600" },
+  group: { paddingTop: 4 },
+  subheading: { fontSize: 13, fontWeight: "600", paddingTop: 8 },
   row: {
     flexDirection: "row",
     alignItems: "center",

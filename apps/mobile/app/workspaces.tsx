@@ -15,9 +15,16 @@ import { signedInOnly } from "../src/sampleOnly";
 // up yet is listed, dimmed, with why, and can't be chosen.
 function WorkspacesSheet() {
   const theme = useTheme();
-  const { workspaces } = useShownWorkspaces();
+  const router = useRouter();
+  const { current, workspaces, choose } = useShownWorkspaces();
   const { own, shared } = workspaceGroups(workspaces);
   const split = shared.length > 0;
+  const open = (workspaceId: string) => {
+    void Haptics.selectionAsync();
+    choose(workspaceId);
+    router.back();
+  };
+  const chosenId = current?.id ?? null;
   return (
     // A scroll view, so the sheet stops at the screen's height and every workspace stays reachable.
     <ScrollView contentContainerStyle={styles.sheet}>
@@ -27,13 +34,33 @@ function WorkspacesSheet() {
       {workspaces.length === 0 ? (
         <Text style={[styles.empty, { color: theme.muted }]}>{accountWords.noneShown}</Text>
       ) : null}
-      <Group heading={split && own.length > 0 ? accountWords.yourWorkspaces : null} rows={own} />
-      <Group heading={split ? accountWords.sharedWithYou : null} rows={shared} />
+      <Group
+        heading={split && own.length > 0 ? accountWords.yourWorkspaces : null}
+        rows={own}
+        chosenId={chosenId}
+        onChoose={open}
+      />
+      <Group
+        heading={split ? accountWords.sharedWithYou : null}
+        rows={shared}
+        chosenId={chosenId}
+        onChoose={open}
+      />
     </ScrollView>
   );
 }
 
-function Group({ heading, rows }: { heading: string | null; rows: readonly PhoneWorkspace[] }) {
+function Group({
+  heading,
+  rows,
+  chosenId,
+  onChoose,
+}: {
+  heading: string | null;
+  rows: readonly PhoneWorkspace[];
+  chosenId: string | null;
+  onChoose(workspaceId: string): void;
+}) {
   const theme = useTheme();
   if (rows.length === 0) return null;
   return (
@@ -44,17 +71,27 @@ function Group({ heading, rows }: { heading: string | null; rows: readonly Phone
         </Text>
       ) : null}
       {rows.map((workspace) => (
-        <WorkspaceRow key={workspace.id} workspace={workspace} />
+        <WorkspaceRow
+          key={workspace.id}
+          workspace={workspace}
+          chosen={workspace.id === chosenId}
+          onChoose={onChoose}
+        />
       ))}
     </View>
   );
 }
 
-function WorkspaceRow({ workspace }: { workspace: PhoneWorkspace }) {
+function WorkspaceRow({
+  workspace,
+  chosen,
+  onChoose,
+}: {
+  workspace: PhoneWorkspace;
+  chosen: boolean;
+  onChoose(workspaceId: string): void;
+}) {
   const theme = useTheme();
-  const router = useRouter();
-  const { current, choose } = useShownWorkspaces();
-  const chosen = workspace.id === current?.id;
   const disabled = workspace.canOpen === false;
   return (
     <Pressable
@@ -65,11 +102,7 @@ function WorkspaceRow({ workspace }: { workspace: PhoneWorkspace }) {
       }
       disabled={disabled}
       android_ripple={{ color: theme.panel2 }}
-      onPress={() => {
-        void Haptics.selectionAsync();
-        choose(workspace.id);
-        router.back();
-      }}
+      onPress={() => onChoose(workspace.id)}
       style={({ pressed }) => [
         styles.row,
         pressed && Platform.OS === "ios" ? { backgroundColor: theme.panel2 } : null,

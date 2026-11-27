@@ -623,6 +623,31 @@ describe("the change feed", () => {
     );
   });
 
+  it("keeps a view's failures through a replace, so a second failure still reports", async () => {
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/listFiles",
+      ops(files(), "0.5.2"),
+      { status: 503, body: { ok: false, code: "server_busy" } },
+    );
+    const answer = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual([]));
+    await data.refresh(views.files);
+    expect(data.state(views.files).failures).toBe(1);
+    const reread = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => reread.promise);
+    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(3));
+    expect(data.state(views.files)).toMatchObject({ value: null, loading: true, failures: 1 });
+    reread.resolve({ status: 503, body: { ok: false, code: "server_busy" } });
+    await vi.waitFor(() => expect(data.state(views.files).failures).toBe(2));
+  });
+
   it("drops a closed view's read that a change overtakes, and reads it again when it opens", async () => {
     const server = testServer();
     const cache = createReadCache();

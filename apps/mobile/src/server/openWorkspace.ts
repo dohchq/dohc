@@ -1,4 +1,5 @@
 import type { SignIn } from "./account";
+import type { AccountWorkspace } from "./api";
 import {
   cacheScope,
   createWorkspaceData,
@@ -49,6 +50,7 @@ export function createOpenWorkspace(options: {
     choosing: saved !== null,
   };
   let unsubscribe: (() => void) | null = null;
+  const roles = new Map<string, AccountWorkspace["role"]>();
 
   function open(workspaceId: string, joined: boolean): WorkspaceData {
     const data = createWorkspaceData({
@@ -92,8 +94,18 @@ export function createOpenWorkspace(options: {
   }
 
   function update() {
-    if (stopped || state.choosing) return;
+    if (stopped) return;
     const listed = list.state();
+    const changed = new Set<string>();
+    if (listed.status === "ready") {
+      for (const entry of listed.workspaces) {
+        const before = roles.get(entry.workspaceId);
+        if (before !== undefined && before !== entry.role) changed.add(entry.workspaceId);
+        roles.set(entry.workspaceId, entry.role);
+      }
+    }
+    for (const workspaceId of changed) cache.drop(cacheScope(signIn, workspaceId));
+    if (state.choosing) return;
     const openable =
       listed.status === "ready"
         ? listed.workspaces
@@ -101,13 +113,8 @@ export function createOpenWorkspace(options: {
             .map((entry) => entry.workspaceId)
         : [];
     const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
-    const roleChanged =
-      current !== null &&
-      current === state.currentWorkspaceId &&
-      state.data !== null &&
-      state.data.joined !== joinedNow(current);
-    if (roleChanged) cache.drop(cacheScope(signIn, current));
-    if (current !== state.currentWorkspaceId || roleChanged) show(current);
+    if (current !== state.currentWorkspaceId || (current !== null && changed.has(current)))
+      show(current);
   }
 
   update();

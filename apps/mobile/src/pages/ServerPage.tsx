@@ -303,6 +303,9 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     if (!webShown) host.gone();
   }, [webShown]);
   useEffect(() => {
+    if (markdown === null && !holding && sentTo(mount) !== null) host.gone();
+  }, [markdown, holding, mount]);
+  useEffect(() => {
     if (!editsLive || !webShown || !data) return;
     host.open((post) =>
       createPageLive({ client: signIn.client, workspaceId: data.workspaceId, path, post }),

@@ -796,7 +796,12 @@ export function createWorkspaceData(options: {
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
           target.stale = false;
-          set(target, { value: null, loading: true, problem: null, failures: 0 });
+          set(target, {
+            value: null,
+            loading: true,
+            problem: null,
+            failures: target.state.failures,
+          });
           void read(target, "feed");
           continue;
         }

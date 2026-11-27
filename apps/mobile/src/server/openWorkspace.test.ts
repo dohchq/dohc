@@ -248,3 +248,15 @@ describe("a workspace the account joined", () => {
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
   });
 });
+
+describe("a joined workspace whose role changes", () => {
+  it("drops what the phone saved of it, and opens it afresh, when an Admin becomes a Member", async () => {
+    const context = setup(listed({ ...A, role: "admin" }), listed({ ...A, role: "member" }));
+    context.server.on("GET", feedPath("ws-a"), held);
+    const a = await readA(context);
+    context.list.reload();
+    await vi.waitFor(() => expect(context.open.state().data).not.toBe(a));
+    expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
+    expect(context.open.state().data!.joined).toBe(true);
+  });
+});
