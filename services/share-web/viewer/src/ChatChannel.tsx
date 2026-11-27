@@ -122,7 +122,7 @@ function usePostWakes(
       if (watching().length > 0) later();
     };
     const visible = () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible" || (waits === 1 && timer !== undefined)) return;
       clearTimeout(timer);
       void tick();
     };

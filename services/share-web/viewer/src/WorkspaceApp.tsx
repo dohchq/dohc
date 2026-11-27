@@ -1225,7 +1225,7 @@ function MemberWorkspace({
               found={listing.found}
               reads={listing.reads}
               onRetry={listing.retry}
-              onMoved={refreshListing}
+              onMoved={listing.catchUp}
               since={files.nextCursor}
               shown={showing === "chats"}
               onEnded={placeGone}

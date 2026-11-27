@@ -203,7 +203,6 @@ function server(
 ) {
   let signedIn = options.signedIn ?? true,
     deleteFails = options.deleteFails ?? 0,
-    holdGroups = options.holdGroups ?? 0,
     workspacesFail = options.workspacesFail ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
@@ -343,8 +342,8 @@ function server(
         access: options.groupRules?.[group.wire] ?? access(),
       })),
     });
-    if (url.pathname === "/api/named-chat/channels" && holdGroups > 0) {
-      holdGroups -= 1;
+    if (url.pathname === "/api/named-chat/channels" && (options.holdGroups ?? 0) > 0) {
+      options.holdGroups! -= 1;
       return hold("groups", url, signal, listing());
     }
     if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
@@ -804,6 +803,30 @@ it("reads the Groups again with backoff when reading a new one fails", async () 
   expect(groupPanel().textContent).toContain("No Groups in this workspace yet.");
   expect(groupPanel().querySelector(".load-failed")).toBeNull();
   await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(channelReads(fetch)).toBe(3);
+});
+
+it("shows a Group read while the follow keeps moving, and reads once more after it", async () => {
+  const options: { groups: Array<{ wire: string; name: string }>; holdGroups?: number } = {
+    groups: [],
+  };
+  const fetch = server(options);
+  await render();
+  await settle(() => following("chat").length === 1);
+  options.groups = [{ wire: "wire-plans", name: "plans" }];
+  options.holdGroups = 2;
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => held.some((item) => item.path === "groups") && following("chat").length === 1);
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 9, hasMore: false }),
+  );
+  await settle(() => following("chat").length === 1);
+  const first = held.find((item) => item.path === "groups")!;
+  await act(async () => first.answer(first.body));
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  await settle(() => held.some((item) => item.path === "groups"));
   expect(channelReads(fetch)).toBe(3);
 });
 
@@ -2904,7 +2927,9 @@ describe("the owner's page", () => {
     });
     const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
     await settle(() => groupPanel().textContent!.includes("@claude plan it"));
-    await act(async () => vi.advanceTimersByTime(1_999));
+    await act(async () => vi.advanceTimersByTime(1_000));
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => vi.advanceTimersByTime(999));
     expect(wakeReads()).toEqual([]);
     expect(line()).toBeUndefined();
     await act(async () => vi.advanceTimersByTime(1));

@@ -24,8 +24,9 @@ export type MemberListing = "loading" | "failed" | MemberGroups;
 /**
  * The membership's share and Groups, which Chats and Comments both use, read once `place` is set:
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
- * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
- * A refresh that fails keeps the Groups shown and tries again with backoff.
+ * `refresh` reads them again without showing a load, and an answer already on its way no longer shows, so a changed
+ * rule shows. `catchUp` reads them once more after any read in flight, whose answer still shows, so a Group added
+ * while the workspace is open appears. A read after the first that fails keeps the Groups shown and tries again with backoff.
  * `reads` counts the reads that arrived, including one that brought the same Groups.
  */
 export function useMemberListing(
@@ -38,7 +39,7 @@ export function useMemberListing(
     [attempt, setAttempt] = useState(0);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
-  const request = useRef<(() => void) | null>(null);
+  const request = useRef<((stale: boolean) => void) | null>(null);
   useEffect(() => {
     setFound("loading");
     if (place === null) return;
@@ -47,12 +48,14 @@ export function useMemberListing(
     // and only the newest read asked for shows, so an older answer never replaces a newer level.
     let asked = 0,
       pending = false,
+      queued = false,
       loaded = false,
       retry: ReturnType<typeof setTimeout> | undefined,
       delay = RETRY_INITIAL_MS;
     const read = () => {
       const number = asked;
       pending = true;
+      queued = false;
       clearTimeout(retry);
       void openMemberGroups(place, controller.signal)
         .then(
@@ -85,26 +88,27 @@ export function useMemberListing(
             if (number !== asked) return;
             if (!loaded) setFound("failed");
             else if (!reason) {
-              retry = setTimeout(refresh, delay);
+              retry = setTimeout(() => ask(false), delay);
               delay = Math.min(delay * 2, RETRY_MAX_MS);
             }
           },
         )
         .finally(() => {
           pending = false;
-          if (!controller.signal.aborted && number !== asked) read();
+          if (!controller.signal.aborted && (number !== asked || queued)) read();
         });
     };
-    const refresh = () => {
+    const ask = (stale: boolean) => {
       if (pending) {
-        asked += 1;
+        if (stale) asked += 1;
+        else queued = true;
         return;
       }
       if (!loaded) return;
       asked += 1;
       read();
     };
-    request.current = refresh;
+    request.current = ask;
     read();
     return () => {
       controller.abort();
@@ -112,12 +116,12 @@ export function useMemberListing(
       request.current = null;
     };
   }, [place, accountId, attempt]);
-  const refresh = useCallback(() => request.current?.(), []);
   return {
     found,
     reads,
     retry: useCallback(() => setAttempt((value) => value + 1), []),
-    refresh,
+    refresh: useCallback(() => request.current?.(true), []),
+    catchUp: useCallback(() => request.current?.(false), []),
   };
 }
 
