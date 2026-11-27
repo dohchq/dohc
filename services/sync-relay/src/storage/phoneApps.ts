@@ -186,8 +186,9 @@ export function issuePhoneAppGrant(
 
 /**
  * Consumes a grant: one statement turns it into a launch for `launchHost`, so
- * of two redemptions one wins. A grant that has expired, or that names another
- * workspace or publication, is consumed and refused.
+ * of two redemptions one wins. A grant that has expired, that names another
+ * workspace or publication, or whose Owner Publication is no longer current, is
+ * consumed and refused.
  */
 export function redeemPhoneAppGrant(
   storage: SyncRelayStorage,
@@ -209,10 +210,15 @@ export function redeemPhoneAppGrant(
       )
       .get(input.launchHash, input.launchHost, input.grantHash);
     if (!row) return null;
+    const publication = db(storage)
+      .prepare("SELECT owner_state FROM sync_relay_app_publications WHERE publication_id = ?")
+      .get(input.publicationId);
     if (
       Number(row.expires_at_ms) <= input.nowMs ||
       row.workspace_id !== input.workspaceId ||
-      row.publication_id !== input.publicationId
+      row.publication_id !== input.publicationId ||
+      !publication ||
+      (publication.owner_state ?? "current") !== "current"
     ) {
       db(storage)
         .prepare(`DELETE FROM ${PHONE_APP_LAUNCHES} WHERE token_hash = ?`)

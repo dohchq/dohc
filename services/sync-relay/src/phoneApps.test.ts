@@ -314,6 +314,7 @@ it("lists, reviews and shows the source of the owner's published apps, and nothi
     apps: [
       {
         publicationId: r.publicationId,
+        audience: "link",
         authorityRevision: 1,
         appRoot: "docs/app",
         sourceRevision: "1".repeat(64),
@@ -324,6 +325,7 @@ it("lists, reviews and shows the source of the owner's published apps, and nothi
   });
   const review = await r.op("user:ana", "appReview", { publicationId: r.publicationId });
   expect(review.body.result).toMatchObject({
+    audience: "link",
     authorityRevision: 1,
     capabilities: [capability],
     approval: null,
@@ -389,6 +391,7 @@ it("lists and launches an app that requests nothing in the workspace, and serves
   expect(listed).toHaveLength(2);
   expect(listed).toContainEqual({
     publicationId: app,
+    audience: "link",
     authorityRevision: 1,
     appRoot: "docs/app",
     sourceRevision: "1".repeat(64),

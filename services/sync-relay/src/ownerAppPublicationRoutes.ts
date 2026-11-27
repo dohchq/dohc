@@ -75,9 +75,11 @@ export function createOwnerAppPublicationRoutes(options: {
     if (route.action === "publish" && request.method === "GET") {
       const query = new URL(request.url).searchParams;
       if (
-        [...query.keys()].some((key) => key !== "appRoot" && key !== "cursor") ||
+        [...query.keys()].some((key) => !["appRoot", "cursor", "audience"].includes(key)) ||
         query.getAll("appRoot").length > 1 ||
-        query.getAll("cursor").length > 1
+        query.getAll("cursor").length > 1 ||
+        query.getAll("audience").length > 1 ||
+        (query.has("audience") && query.get("audience") !== "owner")
       )
         throw badRequest("Invalid publication list query.");
       const cursor = query.get("cursor") ?? undefined,
@@ -100,6 +102,7 @@ export function createOwnerAppPublicationRoutes(options: {
           limits,
           cursor,
           appRoot,
+          ...(query.has("audience") ? { audience: "owner" as const } : {}),
         }),
       );
     }
@@ -188,13 +191,26 @@ export function createOwnerAppPublicationRoutes(options: {
             }),
       );
     }
-    const workspace =
-      !!raw && typeof raw === "object" && (raw as Record<string, unknown>).audience === "workspace";
-    const input = workspace
-      ? record(raw, ["audience", "candidate"], ["agent"])
-      : record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"], ["agent"]);
+    const audience =
+      !!raw && typeof raw === "object" ? (raw as Record<string, unknown>).audience : undefined;
+    const workspace = audience === "workspace",
+      own = audience === "owner";
+    const input = own
+      ? record(raw, ["audience", "candidate", "expectedCurrentPublicationId"], ["agent"])
+      : workspace
+        ? record(raw, ["audience", "candidate"], ["agent"])
+        : record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"], ["agent"]);
     let owner;
-    if (workspace) {
+    if (own) {
+      const expected = input.expectedCurrentPublicationId;
+      if (expected !== null && (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)))
+        throw badRequest("Invalid current publication.");
+      owner = {
+        workspaceId: route.workspaceId,
+        ownerUserId,
+        expectedCurrentPublicationId: typeof expected === "string" ? expected : null,
+      };
+    } else if (workspace) {
       const membership = getWorkspaceMembership(storage as StorageContext, route.workspaceId);
       if (!membership)
         throw relayError(
@@ -242,6 +258,10 @@ export function createOwnerAppPublicationRoutes(options: {
     );
     if (creates && candidate.external)
       throw badRequest("Apps that create Collection files can't call outside services.");
+    if (own && (creates || candidate.external))
+      throw badRequest(
+        "Apps that create Collection files or call outside services open on your phone only through a link.",
+      );
     if (candidate.external) await desktopOnly(fromDesktop);
     if (workspace && creates)
       throw badRequest("Apps that create Collection files share only on a link.");

@@ -47,6 +47,7 @@ import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
 import {
+  activateOwnerPublication,
   publicationIdOf,
   requireLinkAppPublication,
   WHOLE_WORKSPACE,
@@ -616,6 +617,29 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     resolve();
     return { candidate, authorityRevision, resolveAuthority: resolve };
   }
+  function ownPublication(
+    auth: Extract<AppBackendAuth, { kind: "named" }>,
+    publicationId: string,
+    row: Record<string, unknown>,
+    candidate: AppPublicationCandidate,
+  ) {
+    const publisher = { workspaceId: auth.workspaceId, ownerUserId: String(row.owner_user_id) };
+    if (
+      auth.userId !== publisher.ownerUserId ||
+      auth.grantId !== undefined ||
+      (!auth.launch && !auth.device) ||
+      candidate.versionId !== MAIN_VERSION_ID ||
+      candidate.appRoot !== row.app_root ||
+      publicationIdOf(publisher, hash(JSON.stringify(candidate))) !== publicationId
+    )
+      throw notFound();
+    const authorityRevision = Number(row.authority_revision);
+    const authority = {
+      ...owner(auth, auth.workspaceId),
+      authorityToken: String(authorityRevision),
+    };
+    return { candidate, authorityRevision, resolveAuthority: () => authority };
+  }
   function memberReach(workspaceId: string, userId: string, datasetId: string | undefined) {
     const role = workspaceRoleOf(storage, workspaceId, userId)?.role;
     if (role === "owner") return { access: "edit" as ShareAccess, operationIds: null, token: role };
@@ -833,6 +857,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       return memberPublication(auth, publicationId, row, candidate, reviewing);
     if (row.audience === "workspace")
       return workspacePublication(auth, publicationId, row, candidate);
+    if (row.audience === "owner") return ownPublication(auth, publicationId, row, candidate);
     const currentGrant = readCurrentShareGrant(storage, {
       grantId: String(row.grant_id),
       generation: Number(row.grant_generation),
@@ -2245,6 +2270,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         host.setBindings(auth, { workspaceId: input.workspaceId, operations }, () => {
           for (const { datasetId } of operations)
             requireDatasetActiveForApproval(input.workspaceId, datasetId);
+          activateOwnerPublication(storage, input.publicationId, nowMs());
         });
         return operations.map((entry) => entry.datasetId);
       },

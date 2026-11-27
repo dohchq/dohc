@@ -249,7 +249,7 @@ Source-backed web content living in the workspace, from a static page to a dynam
 _Avoid_: site, dashboard, artifact
 
 **Publication**:
-An immutable, owner-approved bundle of one app revision shared to a Share link or to the Workspace. Authority comes from the publication, never from the app's source or manifest alone.
+An immutable, owner-approved bundle of one app revision shared to a Share link, to the Workspace, or to its owner's phones. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object), member app
 
 **Personal app**:

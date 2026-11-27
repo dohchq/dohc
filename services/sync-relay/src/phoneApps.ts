@@ -27,7 +27,7 @@ import {
   type PhoneAppBinding,
   type PhoneAppLaunchScope,
 } from "./storage/phoneApps";
-import { publicationLinkIsCurrent } from "./storage/publications";
+import { publicationAudience, publicationLinkIsCurrent } from "./storage/publications";
 
 /** How long the phone has to hand a grant to share-web. */
 export const PHONE_APP_GRANT_MS = 30_000;
@@ -109,18 +109,28 @@ export function createPhoneApps(options: {
 }) {
   const { storage } = options;
   const context = storage as StorageContext;
-  function served(userId: string, workspaceId: string, id: string, reviewing: boolean): Served {
+  function served(
+    userId: string,
+    workspaceId: string,
+    id: string,
+    reviewing: boolean,
+    phone: boolean,
+  ): Served {
     try {
-      return options.served({ kind: "named", workspaceId, userId }, id, reviewing);
+      return options.served(
+        { kind: "named", workspaceId, userId, ...(phone ? { device: "phone" as const } : {}) },
+        id,
+        reviewing,
+      );
     } catch (error) {
       if (error instanceof MemberAppRefusal) throw relayError("conflict", error.message);
       if (storage.unavailable.aborted) throw error;
       throw notFound();
     }
   }
-  function servable(userId: string, workspaceId: string, id: string): boolean {
+  function servable(userId: string, workspaceId: string, id: string, phone: boolean): boolean {
     try {
-      const published = served(userId, workspaceId, id, false);
+      const published = served(userId, workspaceId, id, false, phone);
       return !!published && !published.local;
     } catch (error) {
       if (storage.unavailable.aborted) throw error;
@@ -129,8 +139,15 @@ export function createPhoneApps(options: {
   }
 
   // Active, not taken down, its share still current, not under a hidden path, and over one transactional
-  // Collection or nothing in the workspace.
-  function publication(userId: string, workspaceId: string, id: string) {
+  // Collection or nothing in the workspace. An Owner Publication reaches only a phone, and while not current only
+  // the launch still running it, which started while it was current and bound.
+  function publication(
+    userId: string,
+    workspaceId: string,
+    id: string,
+    phone: boolean,
+    running = false,
+  ) {
     if (!options.limits) throw notFound();
     let row;
     try {
@@ -148,9 +165,10 @@ export function createPhoneApps(options: {
       !row.active ||
       row.operatorTakedown ||
       hiddenFile(row.candidate.appRoot) ||
+      (row.ownerState !== undefined && row.ownerState !== "current" && !running) ||
       row.candidate.capabilities.some((capability) => capability.kind !== "dataset") ||
       !publicationLinkIsCurrent(storage as StorageContext, row.owner) ||
-      !servable(userId, workspaceId, id)
+      !servable(userId, workspaceId, id, phone)
     )
       throw notFound();
     return row;
@@ -166,7 +184,7 @@ export function createPhoneApps(options: {
       )
       .get(workspaceId, id);
     if (!row || !options.limits) throw notFound();
-    const published = served(userId, workspaceId, id, false);
+    const published = served(userId, workspaceId, id, false, false);
     if (
       !published ||
       published.local ||
@@ -186,7 +204,7 @@ export function createPhoneApps(options: {
   function memberApp(userId: string, workspaceId: string, id: string, reviewing: boolean) {
     const row = memberAppRow(context, id);
     if (!row || row.workspaceId !== workspaceId || !options.limits) throw notFound();
-    const published = served(userId, workspaceId, id, reviewing);
+    const published = served(userId, workspaceId, id, reviewing, false);
     if (!published?.member || published.local || hiddenFile(published.candidate.appRoot))
       throw notFound();
     return { ...published, member: published.member, createdAtMs: row.createdAtMs };
@@ -217,11 +235,18 @@ export function createPhoneApps(options: {
     )
       throw notFound();
   }
-  const app = (userId: string, workspaceId: string, id: string, reviewing: boolean) =>
+  const app = (
+    userId: string,
+    workspaceId: string,
+    id: string,
+    reviewing: boolean,
+    phone = false,
+    running = false,
+  ) =>
     isMemberApp(workspaceId, id)
       ? memberApp(userId, workspaceId, id, reviewing)
       : storage.workspaceIsOwnedBy(workspaceId, userId)
-        ? publication(userId, workspaceId, id)
+        ? publication(userId, workspaceId, id, phone, running)
         : workspaceApp(userId, workspaceId, id);
   // The sign-in, read from the session table, then the rest after that wait, and the publication in full.
   async function recheck(binding: PhoneAppBinding, launchHash: string): Promise<void> {
@@ -231,7 +256,7 @@ export function createPhoneApps(options: {
       throw notFound();
     }
     holds(binding, launchHash);
-    const current = app(userId, workspaceId, binding.publicationId, false);
+    const current = app(userId, workspaceId, binding.publicationId, false, true, true);
     if (current.authorityRevision !== binding.authorityRevision) throw notFound();
   }
 
@@ -333,11 +358,13 @@ export function createPhoneApps(options: {
         if (!options.limits) return { apps: [], nextCursor: null };
         const listed = (row: {
           publicationId: string;
+          audience: "link" | "workspace" | "owner";
           authorityRevision: number;
           appRoot: string;
           sourceRevision: string;
         }) => ({
           publicationId: row.publicationId,
+          audience: row.audience,
           authorityRevision: row.authorityRevision,
           appRoot: row.appRoot,
           sourceRevision: row.sourceRevision,
@@ -357,7 +384,15 @@ export function createPhoneApps(options: {
                   publicationId,
                 );
                 const { appRoot, sourceRevision } = candidate;
-                return [listed({ publicationId, authorityRevision, appRoot, sourceRevision })];
+                return [
+                  listed({
+                    publicationId,
+                    audience: "workspace",
+                    authorityRevision,
+                    appRoot,
+                    sourceRevision,
+                  }),
+                ];
               } catch (error) {
                 if (error instanceof RelayError) return [];
                 throw error;
@@ -371,6 +406,7 @@ export function createPhoneApps(options: {
           ownerUserId: userId,
           limits: options.limits,
           ...(cursor === undefined ? {} : { cursor }),
+          ...(caller.clientKind === "phone" ? { audience: "all" as const } : {}),
         });
         return {
           apps: page.publications.flatMap((row) =>
@@ -382,7 +418,7 @@ export function createPhoneApps(options: {
             row.datasetCapabilities === "unavailable" ||
             row.collectionCapability !== null ||
             // Serves only a dataset app or one that requests nothing; a Collection awaiting approval is neither.
-            !servable(userId, workspaceId, row.publicationId)
+            !servable(userId, workspaceId, row.publicationId, caller.clientKind === "phone")
               ? []
               : [listed(row)],
           ),
@@ -410,7 +446,13 @@ export function createPhoneApps(options: {
         ended(launchHashes);
         return { revoked };
       }
-      const row = app(userId, workspaceId, id, operation !== "appLaunch");
+      const row = app(
+        userId,
+        workspaceId,
+        id,
+        operation !== "appLaunch",
+        caller.clientKind === "phone",
+      );
       const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
       const approved =
         "member" in row
@@ -421,6 +463,7 @@ export function createPhoneApps(options: {
         const provenance = "member" in row ? undefined : row.approvalProvenance;
         return {
           publicationId: id,
+          audience: "owner" in row ? publicationAudience(row.owner) : ("workspace" as const),
           authorityRevision: row.authorityRevision,
           createdAtMs: row.createdAtMs,
           appRoot: candidate.appRoot,
