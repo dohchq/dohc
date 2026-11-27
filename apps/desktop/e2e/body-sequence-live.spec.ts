@@ -46,11 +46,6 @@ const paragraphs = (root: ReturnType<Page["locator"]>) =>
     .locator("p")
     .allInnerTexts()
     .then((texts) => texts.map((text) => text.replace(/\s+/gu, " ").trim()));
-const markdownLines = (text: string) =>
-  text
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
 
 test("@body-sequence-live an owner's desktop and two share pages join and split lines of one format-2 note through a relay deployed the self-hosted way", async () => {
   test.setTimeout(900_000);
@@ -189,6 +184,9 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
         await expect(sharedEditor(page)).toHaveAttribute("contenteditable", "true", {
           timeout: 120_000,
         });
+        await expect(page.getByText("Ready to edit", { exact: true })).toBeVisible({
+          timeout: 120_000,
+        });
       }
       for (const page of [desk, one.page, two.page])
         await expect
@@ -203,7 +201,13 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       }
     };
     const offline = (person: Person, off: boolean) => person.context.setOffline(off);
-    const everyoneReads = async (note: Note, expected: string[]) => {
+    const saved = (...persons: Person[]) =>
+      Promise.all(
+        persons.map(({ page }) =>
+          expect(page.getByText("Changes saved", { exact: true })).toBeVisible({ timeout: 60_000 }),
+        ),
+      );
+    const everyoneReads = async (note: Note, expected: string[], markdown: string) => {
       await expect
         .poll(
           async () => [
@@ -219,8 +223,11 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
         () => relayStoredFile(relay, WORKSPACE_ID, pathOf(note), TOKEN),
       ])
         await expect
-          .poll(async () => markdownLines(await stored()), { timeout: 60_000, intervals: [500] })
-          .toEqual(expected.filter(Boolean));
+          .poll(async () => (await stored()).replace(/\r\n/gu, "\n"), {
+            timeout: 60_000,
+            intervals: [500],
+          })
+          .toBe(markdown);
     };
     const shoot = async (name: string) => {
       for (const page of [desk, two.page]) {
@@ -235,7 +242,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       for (const person of [one, two]) await press(person, "bb", "Backspace");
       expect(await paragraphs(ownerEditor)).toEqual(NOTES.joinSame);
       await Promise.all([offline(one, false), offline(two, false)]);
-      await everyoneReads("joinSame", ["aabb"]);
+      await saved(one, two);
+      await everyoneReads("joinSame", ["aabb"], "aabb\n");
     });
 
     await test.step("2. one person joins a line while another splits it", async () => {
@@ -245,7 +253,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       await press(two, "twothree", "ArrowRight", "ArrowRight", "ArrowRight", "Enter");
       await expect.poll(() => paragraphs(ownerEditor)).toEqual(["one", "two", "three"]);
       await offline(one, false);
-      await everyoneReads("joinSplit", ["onetwo", "three"]);
+      await saved(one, two);
+      await everyoneReads("joinSplit", ["onetwo", "three"], "onetwo\n\nthree\n");
     });
 
     await test.step("3. two people split one line at the same place", async () => {
@@ -255,7 +264,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
         await press(person, "abcd", "ArrowRight", "ArrowRight", "Enter");
       await expect.poll(() => paragraphs(ownerEditor)).toEqual(["ab", "cd"]);
       await offline(one, false);
-      await everyoneReads("splitSame", ["ab", "", "cd"]);
+      await saved(one, two);
+      await everyoneReads("splitSame", ["ab", "", "cd"], "ab\n\n\n\ncd\n");
     });
 
     await test.step("4. two people join a / bc, and one types X between b and c before receiving the other's join", async () => {
@@ -263,18 +273,19 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       await offline(two, true);
       await press(two, "bc", "Backspace");
       await press(one, "bc", "Backspace");
-      await everyoneReads("joinType", ["abc"]);
+      await everyoneReads("joinType", ["abc"], "abc\n");
       await two.page.keyboard.press("ArrowRight");
       await caretSettles(two.page);
       await two.page.keyboard.type("X");
       await offline(two, false);
-      await everyoneReads("joinType", ["abXc"]);
+      await saved(one, two);
+      await everyoneReads("joinType", ["abXc"], "abXc\n");
       await shoot("case 4");
     });
 
     await test.step("6. the person who typed X undoes it", async () => {
       await two.page.keyboard.press("ControlOrMeta+z");
-      await everyoneReads("joinType", ["abc"]);
+      await everyoneReads("joinType", ["abc"], "abc\n");
     });
 
     await test.step("5. pp / kk / ll: one joins ll into kk offline, the other joins kk and then ll into pp", async () => {
@@ -285,7 +296,8 @@ test("@body-sequence-live an owner's desktop and two share pages join and split 
       await press(two, "ll", "Backspace");
       await expect.poll(() => paragraphs(ownerEditor)).toEqual(["ppkkll"]);
       await offline(one, false);
-      await everyoneReads("joinChain", ["ppkkll"]);
+      await saved(one, two);
+      await everyoneReads("joinChain", ["ppkkll"], "ppkkll\n");
       await shoot("case 5");
     });
 
