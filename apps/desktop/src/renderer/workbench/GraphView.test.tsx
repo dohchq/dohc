@@ -204,7 +204,7 @@ describe("GraphView", () => {
     expect(screen.getAllByTestId("graph-file-row")[1]!.dataset.active).toBe("true");
     expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3");
     expect(screen.getByTestId("graph-local-badge").textContent).toBe("Local");
-    expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 files");
+    expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 items");
 
     view.rerender(
       <GraphView workspaceId="ws" activePath="nowhere.md" refreshKey="0" onOpenPath={vi.fn()} />,
@@ -343,12 +343,12 @@ describe("GraphView", () => {
       ).toEqual(["gamma.md"]),
     );
     expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("1");
-    expect(screen.getByTestId("graph-doc-count").textContent).toBe("1 of 3 files");
+    expect(screen.getByTestId("graph-doc-count").textContent).toBe("1 of 3 items");
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenCalledWith("gamma.md");
     await user.clear(screen.getByTestId("graph-search"));
     await user.type(screen.getByTestId("graph-search"), "zzz");
-    expect(await screen.findByText('No files match "zzz".')).toBeTruthy();
+    expect(await screen.findByText('No items match "zzz".')).toBeTruthy();
   });
 
   it("moves keyboard focus onto the graph's nodes and opens one with Enter", async () => {
@@ -460,11 +460,33 @@ describe("GraphView", () => {
     fireEvent.click(screen.getByTestId("graph-settings-toggle"));
     fireEvent.click(screen.getByRole("switch", { name: "Show drawing nodes" }));
     await waitFor(() =>
-      expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 of 4 files"),
+      expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 of 4 items"),
     );
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 of 2 links");
-    fireEvent.click(screen.getByRole("switch", { name: "Show files with no links" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Show items with no links" }));
     await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("2"));
+  });
+
+  it("shows arrows until they are turned off", async () => {
+    stubPages(["a.md", "b.md"], [["a.md", "b.md"]]);
+    render(
+      <GraphView
+        workspaceId="ws-arrows"
+        activePath={null}
+        refreshKey="0"
+        variant="page"
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("2"));
+    fireEvent.click(screen.getByTestId("graph-settings-toggle"));
+    fireEvent.click(screen.getByRole("button", { name: "Display" }));
+    const arrows = screen.getByRole("switch", { name: "Arrows" });
+    expect(arrows.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(arrows);
+    expect(screen.getByRole("switch", { name: "Arrows" }).getAttribute("aria-checked")).toBe(
+      "false",
+    );
   });
 
   it("groups the digits of large counts", async () => {
@@ -483,7 +505,7 @@ describe("GraphView", () => {
     );
     await waitFor(() =>
       expect(screen.getByTestId("graph-doc-count").textContent).toBe(
-        `${(1200).toLocaleString()} files`,
+        `${(1200).toLocaleString()} items`,
       ),
     );
   });
@@ -540,10 +562,10 @@ describe("GraphView", () => {
         ],
       }),
     );
-    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 files"));
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 items"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
     // The counts truncate together in a narrow panel, so their tooltip holds both.
-    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 files · 1 link");
+    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 items · 1 link");
     const row = screen.getAllByTestId("graph-file-row").find((row) => row.dataset.path === "a.md")!;
     expect(row.textContent).toBe("a.md1");
     expect(screen.queryByText("Gathering linked mentions…")).toBeNull();
