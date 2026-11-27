@@ -208,7 +208,7 @@ fn ready_to_convert(
                 params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )
-            .map_err(SyncError::corrupt)?;
+            .map_err(SyncError::persist)?;
         if waits {
             return Ok(Err(NotNow(reason)));
         }
@@ -429,7 +429,17 @@ pub fn convert_notes_to_format_two(
                             after,
                             i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1)
                         ],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| {
+                            let path = row.get_ref(1)?.as_bytes().map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                            let path = String::from_utf8_lossy(path).into_owned();
+                            Ok((row.get(0)?, path, row.get(2)?))
+                        },
                     )?
                     .collect::<Result<Vec<(String, String, bool)>, _>>()
             })

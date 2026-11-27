@@ -19,9 +19,6 @@ struct Params {
 }
 
 impl EngineService {
-    /// `sync.convertNotes`: convert up to `budget` of the owner's main notes
-    /// after `after` to format 2. Each note holds the session lock from its
-    /// check to its commit, so an editor cannot open between them.
     pub(super) async fn sync_convert_notes(
         &self,
         ctx: &RequestContext,
@@ -65,11 +62,10 @@ impl EngineService {
             let pass = Self::read_under_ctx(
                 &cancellation,
                 "sync.convertNotes",
-                open.actor.convert_notes(
+                open.actor.convert_next_note(
                     open.workspace_id.clone(),
                     open.root.clone(),
                     after.clone(),
-                    1,
                     here.clone(),
                     Arc::clone(&relay_live),
                     now_ms()?,

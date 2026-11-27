@@ -1405,15 +1405,13 @@ impl ActorHandle {
         .await
     }
 
-    /// Convert up to `budget` main notes after `after` to format 2, skipping
-    /// notes open under `here` and the relay's live notes in `elsewhere`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn convert_notes(
+    /// Convert the next main note after `after` to format 2, skipping it when
+    /// it is open under `here` or live on the relay in `elsewhere`.
+    pub async fn convert_next_note(
         &self,
         workspace_id: String,
         root_dir: PathBuf,
         after: Option<String>,
-        budget: usize,
         here: dohc_engine_collab::LeaseRegistry,
         elsewhere: std::sync::Arc<HashSet<String>>,
         now_ms: i64,
@@ -1424,7 +1422,7 @@ impl ActorHandle {
                 cache,
                 &workspace_id,
                 after.as_deref(),
-                budget,
+                1,
                 &here,
                 &elsewhere,
                 &root_dir,
@@ -4699,9 +4697,7 @@ fn close_projection(
     }))
 }
 
-/// The seed source a note's file still holds, when the note's pristine seed
-/// imported those bytes for this object and they are on disk at `path`.
-pub(crate) fn materialized_seed_proof(
+fn materialized_seed_proof(
     store: &EngineStore,
     key: &DocKey,
     path: &str,
