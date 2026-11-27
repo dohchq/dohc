@@ -28,7 +28,9 @@ use crate::{
 
 mod note_format_two;
 
-pub(crate) use note_format_two::{CONVERSION_BASE_PENDING, CONVERSION_ID_PREFIX};
+pub(crate) use note_format_two::{
+    CONVERSION_BASE_PENDING, CONVERSION_ID_PREFIX, CONVERSION_PENDING,
+};
 pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
 
 const FORMAT_VERSION: i64 = 1;

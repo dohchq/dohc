@@ -6675,6 +6675,7 @@ fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
         crate::conflict_resolve_v1::CONVERSION_BASE_PENDING => op.op_kind == "conflict.resolve",
+        crate::conflict_resolve_v1::CONVERSION_PENDING => op.op_kind == "ydoc.update",
         _ => false,
     }
 }

@@ -7,6 +7,8 @@ use dohc_engine_domain::WaitingVersion;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use dohc_engine_collab::DocKey;
+
 use crate::conflict_resolve_v1::CONVERSION_ID_PREFIX;
 use crate::{BlobKind, RelayError, ReplicationEnvelope, SyncError, SyncIdentity};
 
@@ -44,7 +46,7 @@ const SCOPE_JSON: &str = "json_extract(d.envelope_json,'$.opKind','$.payload.con
     '$.payload.objectId','$.payload.beforeObjectId','$.payload.path',
     '$.payload.payloadBeforePath','$.payload.payloadAfterPath','$.payload.beforePath',
     '$.payload.transition.current.objectId','$.payload.paths[0]',
-    '$.payload.resolution','$.payload.effects[0]')";
+    '$.payload.resolution','$.payload.effects')";
 const SCOPE_PAYLOAD: [&str; 11] = [
     "/conflictId",
     "/objectId",
@@ -56,16 +58,70 @@ const SCOPE_PAYLOAD: [&str; 11] = [
     NOTE_OBJECT,
     NOTE_PATH,
     "/resolution",
-    "/effects/0",
+    "/effects",
 ];
 const NOTE_OBJECT: &str = "/transition/current/objectId";
 const NOTE_PATH: &str = "/paths/0";
-const FILE_JSON: &str = "COALESCE(json_extract(d.envelope_json,'$.payload.objectId'),
-    CASE WHEN json_extract(d.envelope_json,'$.opKind')='conflict.resolve'
-      AND json_extract(d.envelope_json,'$.payload.conflictId') LIKE 'note-format-two-%'
-      AND json_extract(d.envelope_json,'$.payload.resolution')='kept-current'
-      AND json_extract(d.envelope_json,'$.payload.effects[0]') IS NULL
-    THEN json_extract(d.envelope_json,'$.payload.transition.current.objectId') END)";
+
+fn conversion_json() -> String {
+    format!(
+        "json_extract(d.envelope_json,'$.opKind')='conflict.resolve'
+        AND substr(json_extract(d.envelope_json,'$.payload.conflictId'),1,{})='{CONVERSION_ID_PREFIX}'
+        AND json_extract(d.envelope_json,'$.payload.resolution')='kept-current'
+        AND json_array_length(d.envelope_json,'$.payload.effects')=0",
+        CONVERSION_ID_PREFIX.len()
+    )
+}
+
+fn file_json() -> String {
+    format!(
+        "COALESCE(json_extract(d.envelope_json,'$.payload.objectId'),CASE WHEN {}
+        THEN json_extract(d.envelope_json,'$.payload.transition.current.objectId') END)",
+        conversion_json()
+    )
+}
+
+pub(crate) fn base_retained(
+    conn: &Connection,
+    key: &DocKey,
+    claim: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}
+             AND json_extract(d.envelope_json,'$.opKind')='ydoc.update'
+             AND json_extract(d.envelope_json,'$.payload.versionId')=?2
+             AND json_extract(d.envelope_json,'$.payload.objectId')=?3
+             AND json_extract(d.envelope_json,'$.payload.lineageClaimId')=?4
+             AND json_extract(d.envelope_json,'$.payload.isBaseState')=1
+             AND NOT EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2
+               AND s.path=json_extract(d.envelope_json,'$.payload.path') AND s.object_id!=?3))"
+        ),
+        params![key.workspace_id, key.version_id, key.object_id, claim],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+pub(crate) fn conversion_retained(
+    conn: &Connection,
+    key: &DocKey,
+    claim: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}
+             AND {}
+             AND json_extract(d.envelope_json,'$.payload.targetVersionId')=?2
+             AND json_extract(d.envelope_json,'$.payload.transition.current.objectId')=?3
+             AND json_extract(d.envelope_json,'$.payload.lineageTransition.successor.lineageClaimId')=?4)",
+            conversion_json()
+        ),
+        params![key.workspace_id, key.version_id, key.object_id, claim],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
 
 fn file_of(op: &ReplicationEnvelope) -> &str {
     let field = match (op.op_kind.as_str(), scope(op)) {
@@ -113,7 +169,9 @@ fn scope_of<'a>(
                 .is_some_and(|id| id.starts_with(CONVERSION_ID_PREFIX))
                 && field("/resolution").and_then(serde_json::Value::as_str)
                     == Some("kept-current")
-                && field("/effects/0").is_none_or(serde_json::Value::is_null) =>
+                && field("/effects")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty) =>
         {
             (&[NOTE_OBJECT], &[NOTE_PATH])
         }
@@ -265,9 +323,9 @@ pub(crate) fn read(
              (SELECT origin_id,MAX(checked_sequence) AS checked FROM relay_deferred_ops
               WHERE workspace_id=?1 GROUP BY origin_id) q ON q.origin_id=d.origin_id
              WHERE d.workspace_id=?1
-             WINDOW file AS (PARTITION BY d.origin_id,{FILE_JSON})
+             WINDOW file AS (PARTITION BY d.origin_id,{})
              ORDER BY q.checked,d.origin_id,MIN(d.checked_sequence) OVER file,
-               ROW_NUMBER() OVER (file ORDER BY d.origin_seq),d.origin_seq LIMIT ?2"))?;
+               ROW_NUMBER() OVER (file ORDER BY d.origin_seq),d.origin_seq LIMIT ?2", file_json()))?;
         let encoded = stmt.query_map(params![workspace, REPLAY_PAGE], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>((mismatched, encoded, origins))
@@ -772,7 +830,7 @@ pub(crate) fn claim_report(
             for (origin, objects) in files {
                 let objects = serde_json::to_string(&objects).map_err(SyncError::corrupt)?;
                 tx.execute(&format!("UPDATE relay_deferred_ops AS d SET checked_sequence=?4 WHERE d.workspace_id=?1 AND d.origin_id=?2
-                    AND COALESCE({FILE_JSON},'') IN (SELECT value FROM json_each(?3))"),
+                    AND COALESCE({},'') IN (SELECT value FROM json_each(?3))", file_json()),
                     params![workspace,origin,objects,next]).map_err(SyncError::persist)?;
             }
         }
