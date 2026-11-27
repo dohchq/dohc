@@ -170,7 +170,7 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
-import { createPhoneAppSender } from "./workspaces/phoneAppSender";
+import { atSyncedHead, createPhoneAppSender } from "./workspaces/phoneAppSender";
 import {
   createLocalOwnerAppPublicationHandler,
   localOwnerCliCaller,
@@ -4209,6 +4209,10 @@ const activity = {
   pushRecorded: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.pushRecorded(lease.state.activity),
+    ),
+  syncSnapshot: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.syncSnapshot(lease.state.activity),
     ),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -12119,10 +12123,8 @@ function registerIpcHandlers(): void {
     cliOwnerPublication(input.workspaceId, input, agent);
   const sendsToPhones = async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones;
-  const atServerHead = (workspaceId: string) => {
-    const status = activity.getStatus(workspaceId);
-    return status.pendingChangeCount === 0 && !status.syncFailure && !!status.lastSyncedAtMs;
-  };
+  const atServerHead = (workspaceId: string) =>
+    atSyncedHead(activity.syncSnapshot(workspaceId), activity.getStatus(workspaceId));
   phoneAppSender = createPhoneAppSender<PhoneAppWorkspace>({
     ...ownerPublicationDependencies,
     resolveDatasetRevision,
@@ -12142,8 +12144,8 @@ function registerIpcHandlers(): void {
         work(operation.workspace, operation.signal, credentials),
       );
     },
-    admitted: async (workspace) => {
-      if (!(await sendsToPhones())) return false;
+    admitted: async (workspace, credentials) => {
+      if (credentials !== cachedCredentials || !(await sendsToPhones())) return false;
       const active = await withEngineAdapter(workspace, (adapter) =>
         adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
       );
@@ -12160,6 +12162,7 @@ function registerIpcHandlers(): void {
     synced: (workspace) => atServerHead(workspace.workspaceId),
     changed: (workspaceId) => notifyRenderer({ workspaceId }),
   });
+  void sendsToPhones().then((enabled) => phoneAppSender?.settingChanged(enabled));
   registerOperations(operationBoundary, phoneAppOperations, {
     retryPhoneApp: ({ workspaceId, appRoot }) => void phoneAppSender?.retry(workspaceId, appRoot),
   });

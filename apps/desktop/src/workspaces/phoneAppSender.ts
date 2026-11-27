@@ -8,6 +8,7 @@ import {
 } from "@dohc/workspace-core";
 import type { createOwnerAppPublicationHandler } from "../ipc/ownerAppPublicationIpc";
 import type { CloudCredentials } from "./cloudCredentialStore";
+import type { CloudSyncSnapshot } from "./relaySyncEngine";
 import { prepareOwnerAppPublication, readLocalAppSource } from "./ownerAppPublication";
 
 const SIGNALS = new Set(SITE_DISCOVERY_FILE_NAMES);
@@ -31,6 +32,20 @@ export function sendableRoots(paths: readonly string[]): string[] {
       : [],
   );
 }
+
+export const atSyncedHead = (
+  snapshot: CloudSyncSnapshot | null,
+  status: { syncPause?: unknown; state: string },
+) =>
+  !!snapshot &&
+  !snapshot.authExpired &&
+  !snapshot.updateRequired &&
+  !snapshot.syncFailure &&
+  snapshot.pendingChangeCount === 0 &&
+  snapshot.lastSyncedAtMs !== null &&
+  !status.syncPause &&
+  status.state !== "not-connected" &&
+  status.state !== "account-unconfirmed";
 
 const OwnerPage = z.object({
   publications: z.array(
@@ -85,7 +100,7 @@ export interface PhoneAppSenderDependencies<
       credentials: CloudCredentials,
     ) => Promise<void>,
   ): Promise<void>;
-  admitted(workspace: Workspace): Promise<boolean>;
+  admitted(workspace: Workspace, credentials: CloudCredentials): Promise<boolean>;
   sync(workspace: Workspace): Promise<boolean>;
   synced(workspace: Workspace): boolean;
   changed(workspaceId: string): void;
@@ -97,7 +112,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
   deps: PhoneAppSenderDependencies<Workspace>,
 ) {
   const watches = new Map<string, Watch>();
-  let sending: boolean | null = null;
+  let sending = true;
   let running = Promise.resolve();
   const watch = (workspaceId: string) => {
     let entry = watches.get(workspaceId);
@@ -106,13 +121,15 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     return entry;
   };
   const settle = (workspaceId: string, appRoot: string, failure: Failure | null) => {
-    const { failures } = watch(workspaceId);
+    const failures = watches.get(workspaceId)?.failures;
+    if (!failures) return;
     const changed = failures.get(appRoot)?.reason !== failure?.reason;
     if (failure) failures.set(appRoot, failure);
     else failures.delete(appRoot);
     if (changed) deps.changed(workspaceId);
   };
   const later = (workspaceId: string) => {
+    if (!sending) return;
     const entry = watch(workspaceId);
     clearTimeout(entry.timer);
     entry.timer = setTimeout(() => {
@@ -156,7 +173,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     const assertCurrent = () => signal.throwIfAborted();
     const admit = async () => {
       signal.throwIfAborted();
-      if (!(await deps.admitted(workspace))) entry.pass?.abort();
+      if (!(await deps.admitted(workspace, credentials))) entry.pass?.abort();
       signal.throwIfAborted();
     };
     const engine = async <Result>(work: (adapter: VersionedLiveAdapter) => Promise<Result>) => {
@@ -209,7 +226,7 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
           assertCurrent,
           compile: deps.compile,
           resolveDatasetRevision: (binding) =>
-            deps.resolveDatasetRevision(workspace, binding, signal),
+            deps.resolveDatasetRevision(workspace, binding, deadline()),
           deferredWrites: [],
         }),
       );
@@ -232,18 +249,23 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     if (!published) return;
     if (!(await deps.sync(workspace))) return void (entry.parked = true);
     entry.parked = false;
-    const listing = await engine((adapter) =>
-      adapter.listTextFileMetadata({ workspaceId, versionId: "main" }),
-    );
-    const paths = listing.map((file) => file.path);
+    const mainPaths = async () =>
+      (
+        await engine((adapter) => adapter.listTextFileMetadata({ workspaceId, versionId: "main" }))
+      ).map((file) => file.path);
+    const paths = await mainPaths();
     const apps = sendableRoots(paths);
     await admit();
     entry.roots = [...apps, ...published.keys()];
     for (const appRoot of entry.failures.keys())
       if (appRoot && !apps.includes(appRoot)) settle(workspaceId, appRoot, null);
     const inputs = new Set<string>();
-    const onSelected = (selected: readonly string[]) =>
-      selected.forEach((path) => inputs.add(path));
+    const onSelected = (selected: readonly string[]) => {
+      for (const path of selected) {
+        inputs.add(path);
+        entry.inputs.add(path);
+      }
+    };
     for (const appRoot of apps) {
       await admit();
       let revision: string | null = null;
@@ -269,8 +291,11 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
       }
     }
     entry.inputs = inputs;
+    const gone = (folder: readonly string[], appRoot: string) =>
+      !folder.some((path) => path.startsWith(`${appRoot}/`));
     for (const [appRoot, { current, pending }] of published) {
-      if (paths.some((path) => path.startsWith(`${appRoot}/`))) continue;
+      if (!gone(paths, appRoot) || !gone(await mainPaths(), appRoot) || !deps.synced(workspace))
+        continue;
       for (const row of [pending, current])
         if (row)
           await post(`${base}/${row.publicationId}/withdraw`, {
@@ -292,7 +317,8 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     },
     pulled(workspaceId: string, applied: boolean) {
       const entry = watch(workspaceId);
-      if (applied || !entry.pulled || entry.parked || entry.failures.has("")) later(workspaceId);
+      if (applied || (!entry.pass && (!entry.pulled || entry.parked || entry.failures.has(""))))
+        later(workspaceId);
       entry.pulled = true;
     },
     schedule: later,
@@ -308,8 +334,9 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
         if (enabled) continue;
         clearTimeout(entry.timer);
         entry.pass?.abort();
-        if (entry.failures.size) deps.changed(workspaceId);
+        const filed = entry.failures.size > 0;
         entry.failures.clear();
+        if (filed) deps.changed(workspaceId);
       }
     },
     close(workspaceId: string) {

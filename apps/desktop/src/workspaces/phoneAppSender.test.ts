@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { prepareOwnerAppPublication, readLocalAppSource } from "./ownerAppPublication";
-import { createPhoneAppSender, sendableRoots } from "./phoneAppSender";
+import { atSyncedHead, createPhoneAppSender, sendableRoots } from "./phoneAppSender";
+import type { CloudSyncSnapshot } from "./relaySyncEngine";
 
 vi.mock("./ownerAppPublication", () => ({
   readLocalAppSource: vi.fn(),
@@ -65,6 +66,7 @@ function harness(input: { files: string[]; revisions: Record<string, string>; de
     refuseNextPublish: false,
     refuseNextActivate: false,
     publishReportsCurrent: false,
+    failAfterOpen: false,
     files: input.files,
     revisions: input.revisions,
     sourcePaths: {} as Record<string, string[]>,
@@ -131,11 +133,17 @@ function harness(input: { files: string[]; revisions: Record<string, string>; de
   } as unknown as VersionedLiveAdapter;
   const upload = vi.fn(async () => {});
   const changed = vi.fn();
-  const sync = vi.fn(async () => state.atHead);
+  const sync = vi.fn(async () => {
+    sender.pulled("ws", false);
+    return state.atHead;
+  });
   const sender = createPhoneAppSender<{ workspaceId: string }>({
     open: async (workspaceId, work) => {
       if (state.enabled && state.signedIn)
         await work({ workspaceId }, new AbortController().signal, credentials);
+      if (!state.failAfterOpen) return;
+      sender.close(workspaceId);
+      throw new Error("The workspace closed.");
     },
     admitted: async () => state.enabled && state.onMain,
     sync,
@@ -147,9 +155,10 @@ function harness(input: { files: string[]; revisions: Record<string, string>; de
     compile: async () => {
       throw new Error("Unexpected compile.");
     },
-    resolveDatasetRevision: async () => {
-      throw new Error("Unexpected Collection lookup.");
-    },
+    resolveDatasetRevision: (_workspace, _binding, signal) =>
+      new Promise((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason)),
+      ),
     relayJson,
     relayJsonOrUnavailable: async (_credentials, path, init) =>
       state.unavailable
@@ -192,7 +201,96 @@ describe("sendableRoots", () => {
   });
 });
 
+describe("atSyncedHead", () => {
+  const synced: CloudSyncSnapshot = {
+    syncing: false,
+    lastSyncedAtMs: 1,
+    pendingChangeCount: 0,
+    conflictCount: 0,
+    authExpired: false,
+    sharingDeclined: [],
+    syncFailure: null,
+    retrying: false,
+  };
+  it("needs an attached, signed-in, connected engine with nothing left to send", () => {
+    const status = { state: "synced" };
+    expect(atSyncedHead(synced, status)).toBe(true);
+    expect(atSyncedHead(null, status)).toBe(false);
+    expect(atSyncedHead({ ...synced, authExpired: true }, status)).toBe(false);
+    expect(atSyncedHead({ ...synced, updateRequired: "app" }, status)).toBe(false);
+    expect(atSyncedHead({ ...synced, pendingChangeCount: 1 }, status)).toBe(false);
+    expect(atSyncedHead({ ...synced, lastSyncedAtMs: null }, status)).toBe(false);
+    expect(atSyncedHead(synced, { state: "synced", syncPause: {} })).toBe(false);
+    expect(atSyncedHead(synced, { state: "not-connected" })).toBe(false);
+  });
+});
+
 describe("createPhoneAppSender", () => {
+  it("doesn't start another pass from the pulls its own sync makes", async () => {
+    vi.useFakeTimers();
+    const test = harness({ files: [], revisions: {} });
+    test.owner.set("apps/old", row("old-1", "r1"));
+    test.state.withdrawFails = true;
+    await test.sender.run("ws");
+    expect(test.sender.notSent("ws")).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps an app folder restored on main while the pass ran", async () => {
+    const test = harness({ files: html("apps/a"), revisions: { "apps/a": "r1" } });
+    test.owner.set("apps/b", row("b-1", "r0"));
+    prepare.mockImplementationOnce(async (selection) => {
+      test.state.files = [...test.state.files, "apps/b/index.html"];
+      return prepared(selection.appRoot, "r1");
+    });
+    await test.sender.run("ws");
+    expect(test.posts.map((post) => post.path)).toEqual(["/sync/ws/app-publications"]);
+  });
+
+  it("watches a newly declared outside input as soon as it is read", async () => {
+    vi.useFakeTimers();
+    const test = harness({ files: html("apps/trip"), revisions: { "apps/trip": "r1" } });
+    readSource.mockImplementationOnce(async (_source, options) => {
+      options.onSelected?.(["apps/trip/index.html", "shared/new.css"]);
+      test.sender.filesChanged("ws", ["shared/new.css"]);
+      return { sourceRevision: "r1", sourcePaths: [] };
+    });
+    await test.sender.run("ws");
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("gives up on a stalled Collection lookup at the request deadline", async () => {
+    const test = harness({ files: html("apps/books"), revisions: { "apps/books": "r1" } });
+    prepare.mockImplementationOnce(async (selection, _grant, options) => {
+      await options.resolveDatasetRevision!({ datasetId: "books" });
+      return prepared(selection.appRoot, "r1");
+    });
+    await test.sender.run("ws");
+    expect(test.sender.notSent("ws")).toEqual([
+      { appRoot: "apps/books", reason: expect.stringContaining("timeout") },
+    ]);
+  });
+
+  it("schedules nothing while sending is off, and clears rows before reporting the change", async () => {
+    vi.useFakeTimers();
+    const test = harness({ files: html("apps/trip"), revisions: { "apps/trip": "r1" } });
+    prepare.mockRejectedValueOnce(new Error("index.html has a syntax error."));
+    await test.sender.run("ws");
+    const seen: unknown[] = [];
+    test.changed.mockImplementation(() => seen.push(test.sender.notSent("ws")));
+    test.sender.settingChanged(false);
+    expect(seen).toEqual([[]]);
+    test.sender.schedule("ws");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("doesn't bring back a closed workspace's state when its pass ends", async () => {
+    const test = harness({ files: html("apps/trip"), revisions: { "apps/trip": "r1" } });
+    test.state.failAfterOpen = true;
+    await test.sender.run("ws");
+    expect(test.sender.notSent("ws")).toEqual([]);
+  });
+
   it("sends a changed app as the owner's, and skips one the phones already have", async () => {
     const test = harness({
       files: html("apps/trip", "apps/poll"),

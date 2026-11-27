@@ -1051,6 +1051,10 @@ export function createWorkspaceActivity(
     }
   }
 
+  function syncSnapshot(state: WorkspaceActivityState) {
+    return state.entry?.engine?.snapshot() ?? null;
+  }
+
   // Pushes everything the workspace recorded so far. Rejects when a pass fails.
   async function pushRecorded(state: WorkspaceActivityState): Promise<void> {
     await state.entry?.engine?.pushRecorded();
@@ -1288,6 +1292,7 @@ export function createWorkspaceActivity(
     queueCloudSync,
     retryCloudSync,
     syncNow,
+    syncSnapshot,
     pushRecorded,
     queueCloudPull,
     cloudSyncOffline,
