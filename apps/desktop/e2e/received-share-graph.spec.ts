@@ -229,6 +229,17 @@ test("a standalone received share's Graph shows its Collections and Relations at
       await page.screenshot({ path: test.info().outputPath(`graph-page-${theme}.png`) });
     }
 
+    await peer.writeTextFiles([
+      {
+        path: "trip/People/collection.yaml",
+        text: "name: Travellers\nfields:\n  Title:\n    type: text\n",
+      },
+    ]);
+    await expect(async () => {
+      await page.getByTestId("shared-view-refresh").click();
+      await expect(row("collection:trip/People")).toContainText("Travellers", { timeout: 5_000 });
+    }).toPass({ timeout: 60_000 });
+
     const revoke = await relayJson(relay.baseUrl, OWNER, `/sync/shares/${shareId}/revoke`, {
       method: "POST",
     });
