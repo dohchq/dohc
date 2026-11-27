@@ -665,6 +665,11 @@ Each server release serves a range of relay API versions, and `GET /ready` on th
 A desktop newer than that range tells its user that the server runs an older version of dohc.
 Upgrade the server to serve that desktop again.
 
+`DOHC_RELAY_ENGINE_API_MIN` in `.env.self-host` sets the oldest relay API version a desktop may sync with. It is 1 by default.
+Raise it to 2 and restart only once every desktop that uses the server is updated.
+An older desktop then stops syncing and asks its user to update dohc. Its changes stay on that computer.
+Phones and share pages keep working. `GET /ready` reports the setting as `engineApiMin`.
+
 An upgrade needs one stop.
 Stop the deployment first, then save a relay snapshot and a private archive:
 

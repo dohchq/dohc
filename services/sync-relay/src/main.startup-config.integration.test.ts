@@ -9,7 +9,9 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDaemonWorkspaceSessions";
 import { initializeRelayDeployment } from "./relayDeployment";
+import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { RELAY_API_VERSIONS } from "./apiVersion";
+import { AUTOMATION_REPLICA_BEARER_PREFIX } from "./automationReplicaCredential";
 import { relayProcessFixture, projectionEngine, productionEnv } from "./mainProcessTestSupport";
 
 const { tempRoot, spawnRunningRelay, spawnRelayExpectExit } = relayProcessFixture();
@@ -73,6 +75,7 @@ describe("sync relay startup guards", () => {
           service: "sync-relay",
           selfHostedLive: true,
           apiVersions: RELAY_API_VERSIONS,
+          engineApiMin: 1,
           automations: "on",
         });
       },
@@ -138,6 +141,53 @@ describe("sync relay startup guards", () => {
       await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
+
+  it.each(["", "0", "3", "two"])(
+    "refuses an invalid engine API minimum before opening storage: %j",
+    async (value) => {
+      const dbPath = join(await tempRoot("invalid-engine-api-min"), "relay.sqlite");
+      const { code, stderr } = await spawnRelayExpectExit({
+        NODE_ENV: "test",
+        SYNC_RELAY_TEST_AUTH: "1",
+        SYNC_RELAY_PORT: "0",
+        SYNC_RELAY_DB_PATH: dbPath,
+        DOHC_RELAY_ENGINE_API_MIN: value,
+      });
+      expect(code).toBe(1);
+      expect(stderr).toContain("DOHC_RELAY_ENGINE_API_MIN must be a whole number from 1 to 2.");
+      await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it("reports the engine API minimum and refuses older engines only on the engine routes", async () => {
+    const relay = await spawnRunningRelay(join(await tempRoot("engine-api-min"), "relay.sqlite"), {
+      DOHC_RELAY_ENGINE_API_MIN: "2",
+    });
+    const ready = await fetch(`${relay.baseUrl}/ready`);
+    expect(await ready.json()).toMatchObject({ apiVersions: RELAY_API_VERSIONS, engineApiMin: 2 });
+    const codeFor = async (path: string, version?: string, authorization?: string) =>
+      (
+        (await (
+          await fetch(relay.baseUrl + path, {
+            headers: {
+              ...(version === undefined ? {} : { [RELAY_API_VERSION_HEADER]: version }),
+              ...(authorization === undefined ? {} : { authorization }),
+            },
+          })
+        ).json()) as { code?: string }
+      ).code ?? "";
+    expect(await codeFor("/sync/ws-a/log", "1")).toBe("api_version_too_old");
+    const replica = await fetch(`${relay.baseUrl}/sync/ws-a/log`, {
+      headers: {
+        [RELAY_API_VERSION_HEADER]: "1",
+        authorization: `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`,
+      },
+    });
+    expect(replica.status).toBe(404);
+    expect(((await replica.json()) as { code?: string }).code ?? "").not.toMatch(/^api_version/);
+    expect(await codeFor("/sync/ws-a/log", "2")).not.toMatch(/^api_version/);
+    expect(await codeFor("/sync/account/sessions")).not.toMatch(/^api_version/);
+  });
 
   it.each([
     {
