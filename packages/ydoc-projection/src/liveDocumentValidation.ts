@@ -1005,6 +1005,20 @@ export function liveEditRefusal(
   const invalid: LiveEditRefusal = { reason: "invalid-update" };
   if (!holdsBodySequence(copy)) return editFitsFormat1(copy, update) ? undefined : invalid;
   if (!bodySequenceNotesAdmitted) return invalid;
+  return bodySequenceEditRefusal(copy, update, policy, work);
+}
+
+/**
+ * Why a room would not take an edit to a note whose body is one sequence, whether or not this
+ * process admits such notes: `liveEditRefusal` for a process that does.
+ */
+export function bodySequenceEditRefusal(
+  copy: Y.Doc,
+  update: Uint8Array,
+  policy: OrderedLiveUpdateCutPolicy = WORKER_LIVE_VALIDATION_POLICY,
+  work?: BodySequenceIntakeWork,
+): LiveEditRefusal | undefined {
+  const invalid: LiveEditRefusal = { reason: "invalid-update" };
   try {
     const limit = bodySequenceChangeLimit(update, policy, work);
     if (limit !== undefined) return { reason: "capacity-refused", limit };

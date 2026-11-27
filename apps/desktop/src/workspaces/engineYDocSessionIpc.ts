@@ -20,6 +20,7 @@ import {
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import { YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import * as Y from "yjs";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { windowShowsWorkspace } from "../window/workspaceWindowReuse";
 
@@ -1989,7 +1990,9 @@ async function applyDocumentEdit(
   // but the agent must not hear that its text is there.
   if (!editLanded(provider.doc, update)) {
     throw new LiveDocumentEditAppliedError(
-      `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
+      readsBodySequence(provider.doc)
+        ? `Someone changed the blocks this edit went into at the same moment, so some or all of this edit is not in ${path}. Read the document again and redo what is missing.`
+        : `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
     );
   }
   // This checks the document as main holds it. A change the person made just

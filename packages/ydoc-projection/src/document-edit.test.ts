@@ -1,13 +1,18 @@
 import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
-import { describe, expect, test } from "vitest";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { BODY_SEQUENCE_FIELD, holdsBodySequence, readsBodySequence } from "./bodySequenceStore.js";
+import { tokensOf } from "./bodySequenceTestSupport.js";
+import { writeNewBody } from "./bodySequenceWriter.js";
 import {
   DOCUMENT_OPEN_REFUSAL,
   FRONTMATTER_REFUSAL,
   documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
+  documentMarkdownOf,
   settledDocumentMarkdown,
   type DocumentEdit,
 } from "./document-edit.js";
@@ -18,6 +23,8 @@ import {
   startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
+import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
+import { LIVE_UPDATE_MAX_BYTES } from "./liveValidationPolicy.js";
 
 const open = { keepBlocks: true };
 const closed = { keepBlocks: false };
@@ -369,4 +376,456 @@ test("changes a block's text beside a list a merge left empty, while the documen
   } finally {
     doc.destroy();
   }
+});
+
+describe("an edit to a note whose body is one sequence", () => {
+  beforeAll(() => admitBodySequenceNotes(true));
+  afterAll(() => admitBodySequenceNotes(false));
+
+  const schema = getDohcProseMirrorSchema();
+
+  function sequenceNote(markdown: string): Y.Doc {
+    const doc = markdownToYDoc(markdown, { bodySequence: true });
+    expect(readsBodySequence(doc)).toBe(true);
+    return doc;
+  }
+
+  function writtenNote(body: ProseMirrorNode): Y.Doc {
+    const doc = new Y.Doc();
+    doc.getMap("meta").set("schemaVersion", 2);
+    writeNewBody(schema, doc, body, (_, at) => at.toString(36));
+    expect(readsBodySequence(doc)).toBe(true);
+    return doc;
+  }
+
+  const copyOf = (doc: Y.Doc) => {
+    const copy = new Y.Doc();
+    Y.applyUpdate(copy, state(doc));
+    return copy;
+  };
+
+  function landed(doc: Y.Doc, update: Uint8Array | null): Y.Doc {
+    expect(update).not.toBeNull();
+    expect(liveEditRefusal(copyOf(doc), update!)).toBeUndefined();
+    Y.applyUpdate(doc, update!);
+    expect(readsBodySequence(doc)).toBe(true);
+    return doc;
+  }
+
+  const editedNote = (doc: Y.Doc, edit: DocumentEdit) =>
+    landed(doc, documentEditUpdate(state(doc), edit, open));
+  const tokens = (doc: Y.Doc) => tokensOf(doc.getText(BODY_SEQUENCE_FIELD));
+  const ids = (doc: Y.Doc) => tokens(doc).map((token) => token.id);
+  const boundaries = (doc: Y.Doc) =>
+    tokens(doc)
+      .filter((token) => token.kind === "boundary")
+      .map((token) => token.id);
+
+  test("reads as the same note in the first format does", () => {
+    const markdown = "---\ntitle: Trip\n---\n\n# Kyoto\n\n- Day one\n- Day two\n\nA **bold** plan.";
+    expect(markdownOf(sequenceNote(markdown))).toBe(markdownOf(markdownToYDoc(markdown)));
+    expect(markdownOf(sequenceNote(""))).toBe("");
+  });
+
+  const TRIP = "# Kyoto\n\nDay one: temples.\n\nDay two: markets.";
+  const TWO = "Day two: markets.";
+  test.each([
+    ["replaces text", TRIP, { find: "temples", replacement: "shrines" }],
+    ["adds a block", TRIP, { find: "temples.", replacement: "temples.\n\nLunch." }],
+    ["adds at the end", TRIP, { replacement: "## Day three\n\nRest." }],
+    ["removes a block", TRIP, { find: "\n\nDay two: markets.", replacement: "" }],
+    ["joins two blocks", TRIP, { find: "temples.\n\nDay two", replacement: "temples. Day two" }],
+    ["splits a block", TRIP, { find: "one: temples", replacement: "one:\n\ntemples" }],
+    ["changes a heading's level", TRIP, { find: "# Kyoto", replacement: "## Kyoto" }],
+    ["wraps a block into a quote", TRIP, { find: "Day one", replacement: "> Day one" }],
+    ["turns text into a rule", TRIP, { find: TWO, replacement: "---" }],
+    ["turns text into math", TRIP, { find: TWO, replacement: "$$\nx^2\n$$" }],
+    ["turns text into raw HTML", TRIP, { find: TWO, replacement: "<aside>x</aside>" }],
+    [
+      "turns a marked paragraph with an item into code",
+      "A **bold** [[Wiki]] plan.",
+      { find: "A **bold** [[Wiki]] plan.", replacement: "```\nA bold plan.\n```" },
+    ],
+    ["turns a rule into text", "Above.\n\n---\n\nBelow.", { find: "---", replacement: "Plain." }],
+    ["turns a list item into a heading", "- foo", { find: "- foo", replacement: "# foo" }],
+    ["turns a heading into a list item", "# foo", { find: "# foo", replacement: "- foo" }],
+    [
+      "changes a list's start number",
+      "1. a\n2. b",
+      { find: "1. a\n2. b", replacement: "3. a\n4. b" },
+    ],
+    [
+      "writes into a paragraph the reading added to a list item",
+      "- ```\n  code\n  ```",
+      { find: "- \n", replacement: "- intro\n" },
+    ],
+    ["edits one table cell", "| a | b |\n| - | - |\n| c | d |", { find: "c", replacement: "xyz" }],
+    [
+      "edits beside a hard break in bold",
+      "**a  \nb** and c",
+      { find: "and c", replacement: "and d" },
+    ],
+    ["edits beside a bold link", "**[[Wiki]]** and c", { find: "and c", replacement: "and d" }],
+    ["deletes the last list item", "- first\n- last", { find: "\n- last", replacement: "" }],
+    [
+      "deletes the last table row",
+      "| a | b |\n| - | - |\n| c | d |",
+      { find: "\n| c   | d   |", replacement: "" },
+    ],
+    [
+      "turns multiline code into text with a hard break",
+      "```\nA\nB\n```",
+      { find: "```\nA\nB\n```", replacement: "A  \nB" },
+    ],
+  ])("%s, as the first format does", (_case, markdown, edit) => {
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    expect(markdownOf(editedNote(sequenceNote(markdown), edit))).toBe(expected);
+  });
+
+  test("changes only the letters and kinds the edit names", () => {
+    const doc = sequenceNote(TRIP);
+    const before = tokens(doc);
+    editedNote(doc, { find: "# Kyoto", replacement: "## Kyoto" });
+    expect(ids(doc)).toEqual(before.map((token) => token.id));
+    editedNote(doc, { find: "temples", replacement: "shrines" });
+    const kept = new Set(ids(doc));
+    const gone = before.filter((token) => !kept.has(token.id));
+    expect(gone.map((token) => (token.kind === "letter" ? token.text : "")).join("")).toBe("templ");
+    editedNote(doc, { find: "Day one: shrines.", replacement: "- Day one: shrines." });
+    expect(boundaries(doc)).toEqual(
+      before.filter((token) => token.kind === "boundary").map((token) => token.id),
+    );
+  });
+
+  test.each([
+    ["foo\n\n", 1],
+    ["\n\nfoo", 0],
+  ])(
+    "deleting %j takes the block it names, merged with a peer's delete in either order",
+    (find, kept) => {
+      const doc = sequenceNote("foo\n\nfoo bar");
+      const blocks = [tokens(doc).slice(0, 4), tokens(doc).slice(4, 8)];
+      const peer = copyOf(doc);
+      const theirs = documentEditUpdate(state(peer), { find: " bar", replacement: "" }, open)!;
+      const ours = documentEditUpdate(state(doc), { find, replacement: "" }, open)!;
+      const first = copyOf(doc);
+      const second = copyOf(doc);
+      landed(first, ours);
+      Y.applyUpdate(first, theirs);
+      Y.applyUpdate(second, theirs);
+      Y.applyUpdate(second, ours);
+      expect(markdownOf(first)).toBe("foo\n");
+      expect(ids(second)).toEqual(ids(first));
+      expect(ids(first)).toEqual(blocks[kept]!.map((token) => token.id));
+    },
+  );
+
+  test("leaves the other cells of a table alone", () => {
+    const doc = sequenceNote("| a | b |\n| - | - |\n| c | d |");
+    const before = ids(doc);
+    editedNote(doc, { find: "c", replacement: "x" });
+    const after = new Set(ids(doc));
+    expect(before.filter((id) => !after.has(id))).toHaveLength(1);
+  });
+
+  test("refuses an edit whose block reads back differently outside it", () => {
+    const cell = (...texts: string[]) => ({
+      type: "tableCell",
+      content: texts.map((text) => paragraph(text)),
+    });
+    const table = {
+      type: "table",
+      content: [{ type: "tableRow", content: [cell("a", "b"), cell("c")] }],
+    };
+    const doc = writtenNote(schema.nodeFromJSON({ type: "doc", content: [table] }));
+    expect(() => documentEditUpdate(state(doc), { find: "c", replacement: "x" }, open)).toThrow(
+      "reads back differently",
+    );
+  });
+
+  test("shows a code block's stored formatting when it becomes text", () => {
+    const bold = schema.text("x", [schema.marks.bold!.create()]);
+    const doc = writtenNote(
+      schema.topNodeType.create(null, schema.nodes.codeBlock!.create(null, bold)),
+    );
+    expect(markdownOf(doc)).toBe("```\nx\n```\n");
+    expect(markdownOf(editedNote(doc, { find: "```\nx\n```", replacement: "x" }))).toBe("**x**\n");
+  });
+
+  test("keeps what a peer types through a join and a kind change", () => {
+    for (const edit of [
+      { find: "temples.\n\nDay two", replacement: "temples. Day two" },
+      { find: TWO, replacement: `## ${TWO}` },
+    ]) {
+      const doc = sequenceNote(TRIP);
+      const peer = copyOf(doc);
+      const typed = documentEditUpdate(
+        state(peer),
+        { find: "markets.", replacement: "markets. More" },
+        open,
+      )!;
+      const ours = documentEditUpdate(state(doc), edit, open)!;
+      landed(doc, ours);
+      Y.applyUpdate(doc, typed);
+      Y.applyUpdate(peer, typed);
+      Y.applyUpdate(peer, ours);
+      expect(markdownOf(peer)).toBe(markdownOf(doc));
+      expect(markdownOf(doc)).toContain("markets. More");
+    }
+  });
+
+  test("writes the first text of an empty note", () => {
+    const doc = sequenceNote("");
+    landed(doc, documentCreateUpdate(state(doc), "# Hi\n\nThere.", open));
+    expect(markdownOf(doc)).toBe("# Hi\n\nThere.\n");
+  });
+
+  test.each([
+    ["the find starts inside", { find: "\uDE00 now", replacement: "\uDE03 now" }],
+    ["the replacement holds", { find: "now", replacement: "then \uD83D" }],
+  ])("refuses an edit where %s half of a character", (_case, edit) => {
+    const doc = sequenceNote("Smile 😀 now");
+    expect(() => documentEditUpdate(state(doc), edit, open)).toThrow("half of a character");
+  });
+
+  test.each([
+    ["starts", { find: "\uDE00 now", replacement: "later" }],
+    ["ends", { find: "Smile \uD83D", replacement: "Hi" }],
+  ])("refuses a find that %s inside a character, in either format", (_case, edit) => {
+    for (const doc of [sequenceNote("Smile 😀 now"), markdownToYDoc("Smile 😀 now")])
+      expect(() => documentEditUpdate(state(doc), edit, open)).toThrow("half of a character");
+  });
+
+  test("finds the match in a note that holds the letter it probes with", () => {
+    const [M, N] = ["\uE000", "\uE001"];
+    const doc = sequenceNote(`${M}${N}x${M}${N}`);
+    const letters = () => tokens(doc).filter((token) => token.kind === "letter");
+    const before = letters().map((token) => token.id);
+    editedNote(doc, { find: `x${M}`, replacement: "" });
+    const kept = new Set(letters().map((token) => token.id));
+    expect(before.filter((id) => !kept.has(id))).toEqual([before[2], before[3]]);
+    expect(markdownOf(doc)).toBe(`${M}${N}${N}\n`);
+  });
+
+  test("refuses an attribute a note can't hold instead of dropping it", () => {
+    const doc = sequenceNote("```js\nx\n```");
+    expect(() =>
+      documentEditUpdate(state(doc), { find: "js", replacement: "foo\u2028bar" }, open),
+    ).toThrow("a value a note can't hold");
+    editedNote(doc, { find: "js", replacement: "foo bar" });
+    expect(markdownOf(doc)).toBe("```foo bar\nx\n```\n");
+  });
+
+  test.each([
+    ["an entity", "x a&. y", "a&amp;"],
+    ["a less-than sign", "x a<. y", "a&lt;"],
+  ])("keeps the letter after a match that ends in %s", (_case, markdown, find) => {
+    const doc = sequenceNote(markdown);
+    const dot = () =>
+      tokens(doc).find((token) => token.kind === "letter" && token.text === ".")?.id;
+    const before = dot();
+    expect(() => documentEditUpdate(state(doc), { find, replacement: "a\\" }, open)).toThrow(
+      "outside the text to replace",
+    );
+    const edit = { find, replacement: "b" };
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect(dot()).toBe(before);
+  });
+
+  test("refuses an edit that would retype the formatted letter after its match", () => {
+    const doc = sequenceNote("a **b**");
+    expect(() => documentEditUpdate(state(doc), { find: "a **", replacement: "a" }, open)).toThrow(
+      "outside the text to replace",
+    );
+  });
+
+  test("asks for the link text when an edit changes only a link's address or title", () => {
+    for (const [markdown, find, replacement] of [
+      ["See [docs](https://example.com) here.", "example.com", "dohc.app"],
+      ['See [docs](https://example.com "Guide") here.', "Guide", "Manual"],
+    ]) {
+      const doc = sequenceNote(markdown!);
+      expect(() =>
+        documentEditUpdate(state(doc), { find: find!, replacement: replacement! }, open),
+      ).toThrow("for a link, the link text");
+    }
+    const doc = sequenceNote("See [docs](https://example.com) here.");
+    editedNote(doc, {
+      find: "[docs](https://example.com)",
+      replacement: "[docs](https://dohc.app)",
+    });
+    expect(markdownOf(doc)).toBe("See [docs](https://dohc.app) here.\n");
+  });
+
+  const TABLE = "| a | b |\n| - | - |\n| c | d |\n| e | f |";
+  test.each([
+    [
+      "inserts a row",
+      { find: "| c   | d   |", replacement: "| c   | d   |\n| x   | y   |" },
+      "abcdef",
+    ],
+    ["replaces a row", { find: "| c   | d   |", replacement: "| x   | y   |" }, "abef"],
+    ["replaces the header row", { find: "| a   | b   |", replacement: "| x   | y   |" }, "cdef"],
+    ["deletes a row", { find: "\n| c   | d   |", replacement: "" }, "abef"],
+  ])("%s of a table and keeps the other rows", (_case, edit, kept) => {
+    const doc = sequenceNote(TABLE);
+    const letter = (text: string) =>
+      tokens(doc).find((token) => token.kind === "letter" && token.text === text)?.id;
+    const before = [...kept].map(letter);
+    expect(before.every((id) => id !== undefined)).toBe(true);
+    const expected = markdownOf(edited(markdownToYDoc(TABLE), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect([...kept].map(letter)).toEqual(before);
+  });
+
+  const WIDEST = "| a   | b   |\n| --- | --- |\n| c   | d   |\n| ijk | lmn |";
+  const COLUMNS = "| col1  | col2 | col3  |\n| ----- | ---- | ----- |\n| alpha | beta | gamma |";
+  test.each([
+    ["edits inside inline code", "``a`b``", { find: "`b", replacement: "c" }, "a"],
+    [
+      "edits inside inline code beside a backtick",
+      "``a`b``",
+      { find: "`b", replacement: "`c" },
+      "a`",
+    ],
+    [
+      "edits the first letter of a table's widest cell",
+      WIDEST,
+      { find: "i", replacement: "z" },
+      "abcdjklmn",
+    ],
+    ["replaces a table's widest cell", WIDEST, { find: "ijk", replacement: "xyz" }, "abcdlmn"],
+    ["replaces two whole table cells", TABLE, { find: "c   | d", replacement: "x   | y" }, "abef"],
+  ])(
+    "%s as the first format does and keeps the letters around it",
+    (_case, markdown, edit, kept) => {
+      const doc = sequenceNote(markdown);
+      const letter = (text: string) =>
+        tokens(doc).find((token) => token.kind === "letter" && token.text === text)?.id;
+      const before = [...kept].map(letter);
+      expect(before.every((id) => id !== undefined)).toBe(true);
+      const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+      expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+      expect([...kept].map(letter)).toEqual(before);
+    },
+  );
+
+  test("replaces a rule beside raw blocks in a quote and keeps every block", () => {
+    const markdown = "> ---\n>\n> <aside>a</aside>\n>\n> <aside>b</aside>";
+    const edit = { find: "> ---", replacement: "> x" };
+    const doc = sequenceNote(markdown);
+    const before = ids(doc);
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect(ids(doc)).toEqual(expect.arrayContaining(before));
+  });
+
+  test.each([
+    [
+      "adds a table column",
+      TABLE,
+      {
+        find: "| a   | b   |\n| --- | --- |",
+        replacement: "| a   | b   | z   |\n| --- | --- | --- |",
+      },
+      "adding or removing a table column",
+    ],
+    [
+      "edits parts of three table cells",
+      COLUMNS,
+      { find: "ta | gam", replacement: "TA | GAM" },
+      "editing parts of several table cells",
+    ],
+    [
+      "edits parts of two table cells",
+      "| alpha beta | gamma delta |\n| ---------- | ----------- |\n| one two    | three four  |",
+      { find: "two    | three", replacement: "TWO    | THREE" },
+      "editing parts of several table cells",
+    ],
+    [
+      "lifts a block out of a list item",
+      "- ```\n  code\n  ```",
+      { find: "- \n  ```\n  code\n  ```", replacement: "```\ncode\n```" },
+      "moving a block out of a list item",
+    ],
+  ])("refuses an edit that %s and says what to do instead", (_case, markdown, edit, said) => {
+    expect(() => documentEditUpdate(state(sequenceNote(markdown)), edit, open)).toThrow(said);
+  });
+
+  test("keeps a peer's edit to a cell that an edit to parts of several cells would retype", () => {
+    for (const peer of [
+      { find: "beta", replacement: "BEta" },
+      { find: "beta", replacement: "bXeta" },
+    ]) {
+      const doc = sequenceNote(COLUMNS);
+      const agent = () =>
+        documentEditUpdate(state(doc), { find: "ta | gam", replacement: "TA | GAM" }, open);
+      expect(agent).toThrow("editing parts of several table cells");
+      const expected = markdownOf(edited(markdownToYDoc(COLUMNS), peer, closed));
+      expect(markdownOf(editedNote(doc, peer))).toBe(expected);
+    }
+  });
+
+  test("refuses formatting a note can't hold together, and keeps bold around inline items", () => {
+    const link = "[`npm install`](https://docs.example/install)";
+    expect(() =>
+      documentEditUpdate(state(sequenceNote("Run it.")), { find: "it", replacement: link }, open),
+    ).toThrow("a link on inline code");
+    const edit = { find: "it", replacement: "**[[Wiki]]** and **a  \nb**" };
+    const expected = markdownOf(edited(markdownToYDoc("Run it."), edit, closed));
+    expect(markdownOf(editedNote(sequenceNote("Run it."), edit))).toBe(expected);
+  });
+
+  test("reads a note in the newer format without declaring the older body", () => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, state(sequenceNote("Hi")));
+    expect(documentMarkdownOf(doc)).toBe("Hi\n");
+    expect(doc.share.has("body")).toBe(false);
+  });
+
+  test("refuses a block nested deeper than a note holds", () => {
+    const doc = sequenceNote("Top.");
+    expect(() =>
+      documentEditUpdate(state(doc), { replacement: `${"> ".repeat(70)}x` }, open),
+    ).toThrow("more than 64");
+  });
+
+  const PAST =
+    /^dohc can't save this edit in a live note, so nothing changed\. .*\d.*\. Split it into smaller edits\.$/;
+
+  test("names the limit an edit is past", () => {
+    const doc = sequenceNote("Top.");
+    expect(() =>
+      documentEditUpdate(state(doc), { replacement: "w\n\n".repeat(30_000) }, open),
+    ).toThrow(PAST);
+  });
+
+  test("checks the whole update of an edit that needs a boundary first", () => {
+    const empty = state(sequenceNote(""));
+    const letters = (count: number) => documentCreateUpdate(empty, "w".repeat(count), open);
+    const fits = 2_000_000;
+    const most = LIVE_UPDATE_MAX_BYTES - (letters(fits)!.byteLength - fits);
+    const outcomes = [most - 64, most, most + 4, most + 8, most + 64].map((count) => {
+      try {
+        const update = letters(count);
+        expect(update!.byteLength).toBeLessThanOrEqual(LIVE_UPDATE_MAX_BYTES);
+        landed(sequenceNote(""), update);
+        return "landed";
+      } catch (error) {
+        expect((error as Error).message).toMatch(PAST);
+        return "refused";
+      }
+    });
+    expect([outcomes[0], outcomes[4]]).toEqual(["landed", "refused"]);
+  });
+
+  test("refuses a note marked as one sequence whose text is still in the older format", () => {
+    const doc = markdownToYDoc("Hi");
+    doc.getMap("meta").set("schemaVersion", 2);
+    expect(holdsBodySequence(doc) && !readsBodySequence(doc)).toBe(true);
+    expect(() =>
+      documentEditUpdate(state(doc), { find: "Hi", replacement: "Hello" }, open),
+    ).toThrow("its text is still in the older one");
+  });
 });

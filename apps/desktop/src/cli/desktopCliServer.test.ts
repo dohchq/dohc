@@ -43,6 +43,7 @@ import {
   markdownToYDoc,
   yDocToMarkdown,
 } from "@dohc/ydoc-projection";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -1392,6 +1393,58 @@ describe("desktop CLI workspace context", () => {
       ).rejects.toThrow("dohc can't change readme.md without also changing parts it can't show");
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  const PLAN = "# Plan\n\nDay one.\n\nDay two.";
+
+  async function sequenceContext(prefix: string, note: Y.Doc) {
+    const root = await mkdtemp(join(tmpdir(), prefix));
+    expect(readsBodySequence(note)).toBe(true);
+    await writeFile(join(root, "plan.md"), `${PLAN}\n`);
+    const f = fixture(root);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    vi.mocked(f.dependencies.liveDocuments.readDocument).mockResolvedValueOnce({
+      path: "plan.md",
+      state: Y.encodeStateAsUpdate(note),
+    });
+    return { root, f, context };
+  }
+
+  it("reads a note whose body is one sequence", async () => {
+    const note = markdownToYDoc(PLAN, { bodySequence: true });
+    const { root, context } = await sequenceContext("dohc-cli-sequence-read-", note);
+    try {
+      expect(await context.documents!.read("plan.md")).toEqual({
+        path: "plan.md",
+        markdown: `${PLAN}\n`,
+      });
+    } finally {
+      note.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("edits a note whose body is one sequence", async () => {
+    const note = markdownToYDoc(PLAN, { bodySequence: true });
+    const { root, f, context } = await sequenceContext("dohc-cli-sequence-edit-", note);
+    try {
+      await context.documents!.edit({
+        path: "plan.md",
+        edit: { find: "Day one.\n\nDay two.", replacement: "## Day one and two." },
+        origin: { attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
+      });
+      const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      const update = await input.change(Y.encodeStateAsUpdate(note), {
+        keepBlocks: true,
+        headSha256: null,
+      });
+      Y.applyUpdate(note, update!);
+      expect(readsBodySequence(note)).toBe(true);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(note))).toBe("# Plan\n\n## Day one and two.\n");
+    } finally {
+      note.destroy();
       await rm(root, { recursive: true, force: true });
     }
   });

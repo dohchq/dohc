@@ -2670,8 +2670,12 @@ describe("engine Y.Doc IPC adapter", () => {
 
     // A session over a real document: an applied update lands in its doc, the
     // way the capture's canonical doc takes a journaled update.
-    function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
-      const doc = markdownToYDoc(markdown);
+    function editableSession(
+      trace: string[] = [],
+      markdown = "# Plan\n\nBefore.",
+      bodySequence = false,
+    ) {
+      const doc = markdownToYDoc(markdown, { bodySequence });
       const session = providerSession({
         doc,
         applyDecidedLocalUpdate: vi.fn(async (decide, onArmed) => {
@@ -2920,6 +2924,29 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe(
         "# Plan for May\n\n## Before noon.\n",
       );
+      await h.ipc.shutdown();
+    });
+
+    it("tells the agent when a person's join took a kind change but not the text", async () => {
+      const session = editableSession([], "# Plan\n\nBefore.", true);
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const join = documentEditUpdate(
+        Y.encodeStateAsUpdate(session.doc),
+        { find: "Plan\n\nBefore.", replacement: "Plan Before." },
+        { keepBlocks: true },
+      )!;
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        Y.applyUpdate(session.doc, join);
+        return { materialized: true } as SettleResult;
+      });
+
+      const lost = h.ipc.editDocument(edit({ find: "Before.", replacement: "## Before." }));
+      await expect(lost).rejects.toThrow(
+        "some or all of this edit is not in notes/a.md. Read the document again and redo what is missing.",
+      );
+      await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan Before.\n");
       await h.ipc.shutdown();
     });
 
