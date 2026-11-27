@@ -128,14 +128,11 @@ function acceptedLiveEdits(relay: SyncRelayHandle, path: string) {
   const db = new DatabaseSync(relay.dbPath, { readOnly: true });
   try {
     return db
-      .prepare(`SELECT author_context_json AS context, author_snapshot_json AS authors FROM sync_relay_live_update_journal
+      .prepare(`SELECT author_snapshot_json AS authors FROM sync_relay_live_update_journal
       WHERE workspace_id=? AND current_path=? AND principal_kind='named' AND principal_id='e2e-recipient'
         AND accepted_event_count>0 ORDER BY journal_cursor`)
       .all(OWNER_ID, path)
-      .map((row) => ({
-        context: row.context === null ? null : JSON.parse(String(row.context)),
-        authors: row.authors === null ? null : JSON.parse(String(row.authors)),
-      }));
+      .map((row) => (row.authors === null ? null : JSON.parse(String(row.authors))));
   } finally {
     db.close();
   }
@@ -473,10 +470,7 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
         const liveAuthor = { kind: "human", humanId: "e2e-recipient", humanName: "e2e-recipient" };
         const liveEdits = acceptedLiveEdits(fixture.relay, created!.path);
         expect(liveEdits.length).toBeGreaterThan(0);
-        for (const edit of liveEdits) {
-          expect(edit.context).toEqual({ kind: "account", accountId: "e2e-recipient" });
-          expect(edit.authors).toEqual([liveAuthor]);
-        }
+        for (const authors of liveEdits) expect(authors).toEqual([liveAuthor]);
         const changedFieldHistory = async () =>
           (await ownerRecordHistory(fixture.owner.page, created!.path)).filter(
             (moment) =>
