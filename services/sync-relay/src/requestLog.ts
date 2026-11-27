@@ -136,6 +136,7 @@ export const RELAY_ENTRY_PATTERNS = [
   "/sync/live/named-sessions",
   "/sync/live/named-sessions/resolve",
   "/sync/live/named-documents",
+  "/sync/live/named-collections",
   "/sync/named-chat/*",
   "/sync/push/*",
   // Service-to-service replication, which a bearer kind selects.

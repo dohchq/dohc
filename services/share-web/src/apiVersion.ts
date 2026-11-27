@@ -34,6 +34,7 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/live/member-open": ["POST"],
   "/api/live/member-ready": ["POST"],
   "/api/live/owner-open": ["POST"],
+  "/api/named/collections": ["POST"],
   "/api/apps": ["GET"],
   "/api/apps/launch": ["POST"],
   "/api/apps/summary": ["POST"],

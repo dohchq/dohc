@@ -27,6 +27,7 @@ import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import { createMemberAppRoutes, MEMBER_APP_UPLOAD_BYTES } from "./memberAppRoutes";
 import { createPhoneApps } from "./phoneApps";
 import { createPhoneCollections } from "./phoneCollections";
+import { createNamedCollectionsRoute, NAMED_COLLECTIONS_PATH } from "./namedCollectionsRoute";
 import type { PhoneAppLaunchScope } from "./storage/phoneApps";
 import { readOwnerAppResponses } from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
@@ -938,6 +939,19 @@ export function createSyncRelayHandler({
           revoked: (userId, sessionId) => phoneApps.end({ userId, sessionId }),
         })
       : undefined;
+  const phoneCollections = createPhoneCollections({ storage, host: datasetHost });
+  const namedCollections =
+    resolveAccountSession && shareWebOrigin && relayExchangeKeyHash
+      ? createNamedCollectionsRoute({
+          storage,
+          collections: phoneCollections,
+          resolveAccountSession,
+          publicOrigin: shareWebOrigin,
+          hasExchangeKey: hasValidRelayExchangeKey,
+          limiter: accountOperationRateLimiter,
+          nowMs,
+        })
+      : undefined;
   const respondToAccountOperation = resolvePhoneCapableAccountSession
     ? createAccountOperationRoute({
         storage,
@@ -952,7 +966,7 @@ export function createSyncRelayHandler({
           claimPendingShares(userId, signal, MEMBER_IDENTITY_MAX_AGE_MS),
         serverUrl: relayPublicOrigin,
         phoneApps,
-        phoneCollections: createPhoneCollections({ storage, host: datasetHost }),
+        phoneCollections,
         ...(phonePages ? { phonePages } : {}),
         ...(shareWebOrigin && relayExchangeKeyHash
           ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
@@ -1483,6 +1497,9 @@ export function createSyncRelayHandler({
         pathname === "/sync/live/named-sessions/resolve"
       ) {
         return namedBrowser ? await namedBrowser(request) : errorResponse(notFound());
+      }
+      if (pathname === NAMED_COLLECTIONS_PATH) {
+        return namedCollections ? await namedCollections(request) : errorResponse(notFound());
       }
       if (pathname === "/sync/live/named-documents") {
         return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());

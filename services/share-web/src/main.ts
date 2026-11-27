@@ -16,6 +16,7 @@ import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
 import { ownerLiveSession } from "./liveGatewayRequest";
 import { clientAddress } from "./clientAddress";
+import { NAMED_COLLECTIONS_API, NAMED_COLLECTIONS_REQUEST_BYTES } from "./namedCollections";
 import {
   createShareWebApplication,
   SHARE_WEB_REQUEST_LOG,
@@ -85,16 +86,18 @@ const server = serveFetchHandler({
       url.pathname,
     ) && config.linkLive
       ? config.linkLive.requests.maxRequestBytes
-      : [
-            "/api/live/named-session",
-            "/api/live/named-ticket",
-            "/api/live/named-documents",
-            "/api/named-chat/messages",
-            "/api/members/join-preview",
-            "/api/members/join",
-          ].includes(url.pathname) && config.namedBrowserSessionLimits
-        ? config.namedBrowserSessionLimits.maxRequestBytes
-        : MAX_REQUEST_BODY_BYTES),
+      : url.pathname === NAMED_COLLECTIONS_API && config.namedBrowserSessionLimits
+        ? NAMED_COLLECTIONS_REQUEST_BYTES
+        : [
+              "/api/live/named-session",
+              "/api/live/named-ticket",
+              "/api/live/named-documents",
+              "/api/named-chat/messages",
+              "/api/members/join-preview",
+              "/api/members/join",
+            ].includes(url.pathname) && config.namedBrowserSessionLimits
+          ? config.namedBrowserSessionLimits.maxRequestBytes
+          : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
   // A page keeps a read open for up to 30 s to hear of a change: the log, chat, comment activity, and a shared app's
   // Collection.

@@ -21,6 +21,7 @@ import {
 import { DiscardDraft } from "./DiscardDraft";
 import { DohcMark, Icon, fileIcon } from "./icons";
 import { NamedSignIn, signInErrorMessage } from "./NamedSignIn";
+import { CollectionList, CollectionTable, type Collection } from "./NamedCollections";
 
 type Account = { id: string; name: string };
 type Selection = { session: NamedDocumentSession; path: string; objectId: string };
@@ -49,6 +50,10 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     [synced, setSynced] = useState<Selection | null>(null);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const [collection, setCollection] = useState<Collection | null>(null),
+    [listed, setListed] = useState(0);
+  const tableDirty = useRef(false);
+  const chosen = selection ?? collection;
   const request = useRef<AbortController | null>(null),
     transport = useRef<ReturnType<
       typeof createNamedLiveBrowserTransport<NamedLiveSelection>
@@ -67,6 +72,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     currentSelection.current = null;
     setSelection(null);
     setSessionState(null);
+    setCollection(null);
     setFilesOpen(true);
   };
   const start = () => {
@@ -101,6 +107,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
   const refresh = () => {
     clearSelection();
     setFiles(null);
+    setListed((n) => n + 1);
     const controller = start();
     void load(controller)
       .catch((cause: unknown) => {
@@ -125,7 +132,9 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     };
   }, [grantId]);
   useEffect(() => {
-    if (selection) {
+    if (collection) {
+      document.title = `${collection.name} · dohc`;
+    } else if (selection) {
       const name =
         selection.path
           .split("/")
@@ -137,11 +146,14 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     } else {
       document.title = "Shared with dohc";
     }
-  }, [selection, files?.subjectName]);
+  }, [selection, collection, files?.subjectName]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       const state = currentSelection.current?.session.state();
-      if (state && (state.pendingUpdates > 0 || state.status === "quarantined")) {
+      if (
+        tableDirty.current ||
+        (state && (state.pendingUpdates > 0 || state.status === "quarantined"))
+      ) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -151,7 +163,10 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
   }, []);
   const leave = (action: () => void) => {
     const state = currentSelection.current?.session.state();
-    if (state && (state.pendingUpdates > 0 || state.status === "quarantined"))
+    if (
+      tableDirty.current ||
+      (state && (state.pendingUpdates > 0 || state.status === "quarantined"))
+    )
       setLeaving(() => action);
     else action();
   };
@@ -171,6 +186,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
         objectId,
       });
       const value = { session, path, objectId };
+      setCollection(null);
       currentSelection.current = value;
       setSelection(value);
       setSessionState(session.state());
@@ -179,11 +195,18 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
       void session.reconnect();
     });
   };
+  const openCollection = (value: Collection) =>
+    leave(() => {
+      clearSelection();
+      setCollection(value);
+      if (narrow) focusFilesToggle.current = true;
+      setFilesOpen(false);
+    });
   useEffect(() => {
-    if (!focusFilesToggle.current || !narrow || !selection || filesOpen) return;
+    if (!focusFilesToggle.current || !narrow || !chosen || filesOpen) return;
     focusFilesToggle.current = false;
     filesToggleRef.current?.focus();
-  }, [narrow, selection, filesOpen]);
+  }, [narrow, chosen, filesOpen]);
   const signIn = (credentials: { email: string; password: string }) => {
     const controller = start();
     void namedRequest("/api/account/sign-in", controller.signal, credentials)
@@ -258,11 +281,11 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
         <main className="layout named-recipient-layout">
           <nav
             className={
-              narrow && selection && !filesOpen ? "named-file-list collapsed" : "named-file-list"
+              narrow && chosen && !filesOpen ? "named-file-list collapsed" : "named-file-list"
             }
-            aria-label="Shared Markdown files"
+            aria-label="Shared files"
           >
-            {narrow && selection ? (
+            {narrow && chosen ? (
               <button
                 ref={filesToggleRef}
                 type="button"
@@ -277,7 +300,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
             ) : (
               <p className="section-label">Files</p>
             )}
-            <div id="named-files-panel" hidden={narrow && selection !== null && !filesOpen}>
+            <div id="named-files-panel" hidden={narrow && chosen !== null && !filesOpen}>
               {files?.files.map((file) => (
                 <button
                   className="handoff-button secondary named-file"
@@ -292,6 +315,15 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
               ))}
               {files && !files.files.length && (
                 <p>No Markdown files are available. Refresh after the owner adds a file.</p>
+              )}
+              {files && (
+                <CollectionList
+                  grantId={files.grantId}
+                  reload={listed}
+                  selected={collection?.datasetId ?? null}
+                  disabled={busy}
+                  onOpen={openCollection}
+                />
               )}
               <button
                 className="handoff-button secondary named-refresh"
@@ -311,6 +343,15 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
               path={selection.path}
               bodyHidden={synced !== selection}
               onState={receiveState}
+            />
+          ) : collection && files ? (
+            <CollectionTable
+              key={collection.datasetId}
+              grantId={files.grantId}
+              collection={collection}
+              onDirty={(dirty) => {
+                tableDirty.current = dirty;
+              }}
             />
           ) : (
             <section className="content">
