@@ -7,6 +7,7 @@ import { retrievalOperations } from "./ipc/retrievalOperations";
 import {
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./ipc/writeOperations";
@@ -623,6 +624,7 @@ const bridge: DohcDesktopBridge = {
   onAgentRunState: (listener) => onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
+  ...operationBridge(noteFormatOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
   ...operationBridge(liveNoteOperations, invoke),
   ...operationBridge(memberAppsReadOperations, invoke),

@@ -443,7 +443,8 @@
     "desktop:links-connections",
     "desktop:member-app-source",
     "desktop:member-app-promote",
-    "desktop:drawing-read"
+    "desktop:drawing-read",
+    "desktop:convert-notes"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -533,6 +534,7 @@
     "desktop:links-connections": "active-workspace",
     "desktop:member-app-source": "active-workspace",
     "desktop:member-app-promote": "active-workspace",
-    "desktop:drawing-read": "active-workspace"
+    "desktop:drawing-read": "active-workspace",
+    "desktop:convert-notes": "active-workspace"
   }
 }

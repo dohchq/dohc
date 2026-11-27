@@ -270,6 +270,7 @@ import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspace
 import {
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   protectedCopyOperations,
 } from "./ipc/writeOperations";
 import { createInboxIpcHandlers } from "./ipc/inboxIpc";
@@ -864,6 +865,8 @@ import {
   recordedShareSelector,
 } from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
+import { createNoteConversion, type NoteConversionRelay } from "./workspaces/noteConversion";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
 import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
@@ -2251,6 +2254,80 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
   if (!existsSync(join(workspace.rootPath, ".dohc", "manifest.json"))) return;
   await recordSynced(workspace.rootPath);
   syncRecorded.add(workspace.workspaceId);
+}
+
+const convertNotesInWorkspace = createNoteConversion();
+const RELAY_UNREACHABLE = "dohc could not reach the relay. Check your connection.";
+
+async function relayForNoteConversion(
+  workspace: RegistryEntry,
+): Promise<NoteConversionRelay | null> {
+  if (!workspace.remote && !workspace.pausedRemote) return null;
+  if (!workspace.remote)
+    throw new Error(
+      "dohc could not convert notes because sync is paused. Resume sync in Settings, then try again.",
+    );
+  const { credentials } = await remoteForWorkspace(workspace);
+  const reach = async <T>(request: () => Promise<T>): Promise<T> => {
+    try {
+      return await request();
+    } catch (error) {
+      if (error instanceof TypeError || (error instanceof Error && error.name === "TimeoutError"))
+        throw new Error(RELAY_UNREACHABLE);
+      throw error;
+    }
+  };
+  return {
+    engineApiMin: () =>
+      reach(async () => {
+        if (!credentials.relayUrl)
+          throw new Error(
+            "Reconnect your server to refresh its connection settings, then try again.",
+          );
+        const response = await relayShareFetch(`${normalizeServerUrl(credentials.relayUrl)}/ready`);
+        if (!response.ok) throw new TypeError("The relay is not ready.");
+        const { engineApiMin } = z
+          .object({ engineApiMin: z.number().int().optional() })
+          .parse(await response.json());
+        return engineApiMin;
+      }),
+    liveNotes: () =>
+      reach(async () =>
+        z
+          .object({ notes: z.array(z.object({ objectId: z.string() })) })
+          .parse(
+            await relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/${encodeURIComponent(workspace.workspaceId)}/live-notes`,
+            ),
+          )
+          .notes.map(({ objectId }) => objectId),
+      ),
+    pushRecorded: () => activity.pushRecorded(workspace.workspaceId),
+  };
+}
+
+// The owner's Convert notes, from Settings or the socket. A window's run
+// stops between batches once that window leaves the workspace.
+async function convertNotesForOperation(operation: {
+  workspace: PhysicalWorkspace<RegistryEntry>;
+  assertCurrent(): void;
+}): Promise<ConvertNotesResult> {
+  operation.assertCurrent();
+  if (shareViewIsPresent(operation.workspace.shareView))
+    throw new Error("This is a shared view. Only the original workspace converts its notes.");
+  const sessions = desktopEngine.sessions;
+  if (!sessions) throw new Error("Rust engine workspace sessions are unavailable.");
+  const relay = await relayForNoteConversion(operation.workspace);
+  const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
+  return convertNotesInWorkspace(operation.workspace.workspaceId, {
+    relay,
+    assertCurrent: () => operation.assertCurrent(),
+    convert: (params) =>
+      sessions.run(engineWorkspace, ({ client, workspace }) =>
+        new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),
+      ),
+  });
 }
 
 // Relay-share HTTP: grant-side calls go to the SYNC RELAY (not the
@@ -8434,6 +8511,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   workspaceMembers,
   memberApps,
   beforeMove: moveAcceptedEdits.beforeMove,
+  noteConversion: {
+    convert: (workspaceId) => withPhysicalWorkspaceOperation(workspaceId, convertNotesForOperation),
+  },
   ownerLiveRecovery: {
     keptEdits: (workspaceId) => desktopEngine.ownerLiveQuarantines(workspaceId),
     pendingShare: (workspaceId) => ownerPendingShare.paths(workspaceId),
@@ -11343,6 +11423,9 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);
   registerOperations(operationBoundary, liveNoteOperations, relayShareHandlers);
+  registerOperations(operationBoundary, noteFormatOperations, {
+    convertNotes: (_input, { operation }) => convertNotesForOperation(operation),
+  });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {

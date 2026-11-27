@@ -1878,6 +1878,10 @@ const LISTED_CAPABILITIES = {
   "document.save.retry": capability("Try again to save an open document to its file.", {
     ipc: ["retryEngineYDocSave"],
   }),
+  "workspace.notes.convert": capability("Convert a workspace's notes to the new format.", {
+    ipc: [],
+    mcp: {},
+  }),
   "workspace.name.suggest": capability(
     "Suggest a new workspace's folder name that is free in a location dohc offered.",
     { ipc: ["suggestWorkspaceFolderName"] },

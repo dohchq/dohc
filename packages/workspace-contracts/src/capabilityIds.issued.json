@@ -360,6 +360,7 @@
   "work.reference.make",
   "workspace.list",
   "workspace.name.suggest",
+  "workspace.notes.convert",
   "workspace.open.failures.take",
   "workspace.open.retry",
   "workspace.search",

@@ -4,6 +4,7 @@ import { DRAWING_WRITE_DECLARATIONS } from "./drawingWriteDeclarations";
 import { INBOX_WRITE_DECLARATIONS } from "./inboxWriteDeclarations";
 import { LIVE_NOTE_WRITE_DECLARATIONS } from "./liveNoteWriteDeclarations";
 import { MEMBER_APPS_WRITE_DECLARATIONS } from "./memberAppsWriteDeclarations";
+import { NOTE_FORMAT_WRITE_DECLARATIONS } from "./noteFormatWriteDeclarations";
 import { ENVELOPE_FIELDS } from "./operationDeclaration";
 import { PROTECTED_COPY_WRITE_DECLARATIONS } from "./protectedCopyWriteDeclarations";
 import { STOPPED_RUN_WRITE_DECLARATIONS } from "./stoppedRunWriteDeclarations";
@@ -21,6 +22,7 @@ export const WRITE_DECLARATION_FAMILIES = {
   memberApps: MEMBER_APPS_WRITE_DECLARATIONS,
   drawing: DRAWING_WRITE_DECLARATIONS,
   agentSetup: AGENT_SETUP_WRITE_DECLARATIONS,
+  noteFormat: NOTE_FORMAT_WRITE_DECLARATIONS,
 } as const;
 
 // The type refuses these, but a cast can hide one from it.

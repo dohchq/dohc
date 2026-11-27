@@ -1,4 +1,5 @@
 import { AGENT_RUN_SCAN_MAX_PAGES } from "@dohc/workspace-contracts/agent-run-undo";
+import { leftNoteGroups } from "@dohc/workspace-contracts/note-format";
 import type { CliGrepContextMessage, CliGrepMatch, CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 import {
@@ -605,6 +606,21 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return moved.outcome === "moved"
         ? "The server runs this workspace's automations now."
         : "The server already runs this workspace's automations.";
+    }
+    case "notesConvert": {
+      const run = result as Extract<CliResultByVerb["notesConvert"], { ok: true }>;
+      const lines = [
+        `Converted ${run.converted} notes. ${run.unchanged} were already converted.`,
+        ...(run.sent
+          ? []
+          : ["dohc could not send them to the server yet. It sends them on the next sync."]),
+      ];
+      for (const group of leftNoteGroups(run)) {
+        lines.push("", `${group.title} (${group.notes.length}):`);
+        for (const note of group.notes)
+          lines.push(`  ${lineSafe(note.path)}${note.reason ? `: ${lineSafe(note.reason)}` : ""}`);
+      }
+      return lines.join("\n");
     }
     case "webhookCreate": {
       const created = result as Extract<CliResultByVerb["webhookCreate"], { ok: true }>;

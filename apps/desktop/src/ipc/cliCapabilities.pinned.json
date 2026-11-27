@@ -405,6 +405,9 @@
     ],
     "webhookList": [
       "workspace.webhooks.list"
+    ],
+    "notesConvert": [
+      "workspace.notes.convert"
     ]
   },
   "public": {
@@ -578,6 +581,7 @@
     "automation use-server": "automation.host.choose",
     "webhook create": "workspace.webhooks.create",
     "webhook list": "workspace.webhooks.list",
-    "automation host": "automation.host.read"
+    "automation host": "automation.host.read",
+    "notes convert": "workspace.notes.convert"
   }
 }

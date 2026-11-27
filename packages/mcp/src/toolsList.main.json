@@ -153,6 +153,25 @@
       }
     },
     {
+      "name": "dohc_convert_notes",
+      "description": "Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_create_app",
       "description": "Scaffold an app folder with app.publish.json and src/App.tsx, which use React and dohc/ui from the built-in app kit. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       "inputSchema": {

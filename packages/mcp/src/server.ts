@@ -269,6 +269,7 @@ const DECLARED_WRITE_ANNOTATIONS: Record<keyof typeof DECLARED_WRITE_TOOLS, Tool
   dohc_edit_drawing: CHANGE,
   dohc_use_server_for_automations: CHANGE_SERVER,
   dohc_create_incoming_webhook: ADD_SERVER,
+  dohc_convert_notes: CHANGE_SERVER,
 };
 
 export const MCP_INSTRUCTIONS = [
