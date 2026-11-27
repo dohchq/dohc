@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   RELAY_API_VERSION,
   RELAY_API_VERSION_HEADER,
@@ -10,14 +10,7 @@ import {
   relayApiVersionRefusal,
   relayApiVersionsFor,
 } from "./apiVersion";
-import {
-  AUTOMATION_REPLICA_BEARER_PREFIX,
-  deriveAutomationReplicaBearer,
-  verifiesAutomationReplica,
-} from "./automationReplicaCredential";
-import { closeTestStorages, testStorage } from "./testing";
-
-afterEach(closeTestStorages);
+import { AUTOMATION_REPLICA_BEARER_PREFIX } from "./automationReplicaCredential";
 
 function headers(version?: string): Headers {
   return new Headers(version === undefined ? {} : { [RELAY_API_VERSION_HEADER]: version });
@@ -27,14 +20,12 @@ function refusalCode(
   path: string,
   engineMin: number,
   version?: string,
-  ownReplica: (request: Request) => boolean = () => false,
   authorization?: string,
 ): string | null {
   const request = new Request(`http://relay.test${path}`, { headers: headers(version) });
   if (authorization) request.headers.set("authorization", authorization);
   return (
-    relayApiVersionRefusal(request.headers, relayApiVersionsFor(request, engineMin, ownReplica))
-      ?.code ?? null
+    relayApiVersionRefusal(request.headers, relayApiVersionsFor(request, engineMin))?.code ?? null
   );
 }
 
@@ -107,34 +98,15 @@ describe("relay API version", () => {
     }
   });
 
-  it("serves the relay's own automation replica below the engine minimum, and no one else", async () => {
-    const storage = await testStorage();
-    storage.claimWorkspace({ workspaceId: "ws-a", ownerUserId: "owner", createdAtMs: 1 });
-    storage.claimWorkspaceIdentity({
-      workspaceId: "ws-a",
-      replicationEpoch: "epoch",
-      streamIdentity: "stream",
-    });
-    const row = storage.joinAutomationWorkspace({
-      workspaceId: "ws-a",
-      nowMs: 0,
-      reasons: ["automation"],
-    })!;
-    const key = { key: new Uint8Array(32).fill(7), namespace: "api-version-test" };
-    const ownReplica = verifiesAutomationReplica(storage, key);
-    const replica = `Bearer ${deriveAutomationReplicaBearer(row, key)}`;
-    expect(refusalCode("/sync/ws-a/log", 2, "1", ownReplica, replica)).toBeNull();
-    expect(refusalCode("/sync/ws-a/log", 2, undefined, ownReplica, replica)).toBeNull();
-    for (const authorization of [
-      undefined,
-      "Bearer test:owner",
-      `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`,
-    ]) {
-      expect(refusalCode("/sync/ws-a/log", 2, "1", ownReplica, authorization), authorization).toBe(
+  it("leaves an automation-replica bearer to the replica handler below the engine minimum", () => {
+    const replica = `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`;
+    expect(refusalCode("/sync/ws-a/log", 2, "1", replica)).toBeNull();
+    expect(refusalCode("/sync/ws-a/log", 2, undefined, replica)).toBeNull();
+    for (const authorization of [undefined, "Bearer test:owner", "Bearer dohc-service-v1.x"]) {
+      expect(refusalCode("/sync/ws-a/log", 2, "1", authorization), authorization).toBe(
         "api_version_too_old",
       );
     }
-    expect(refusalCode("/sync/ws-b/log", 2, "1", ownReplica, replica)).toBe("api_version_too_old");
   });
 
   it("reads the engine minimum from 1 up to the newest version it serves", () => {

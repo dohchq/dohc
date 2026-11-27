@@ -7,7 +7,6 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createServiceHostFeed } from "./serviceHostFeed";
 import type { SyncRelayStorage } from "./storage";
 import { errorResponse, notFound } from "./errors";
-import { replicationCredential } from "./serviceHostCredential";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { DiscussionActivityHub } from "./discussionActivity";
 
@@ -67,10 +66,19 @@ export function createServiceHostReplication(options: {
     : undefined;
   return async (request: Request): Promise<Response> => {
     try {
-      const parts = new URL(request.url).pathname.split("/");
-      const credential = replicationCredential(request, options.prefix);
-      if (!credential) throw notFound();
-      const { workspaceId } = credential;
+      const url = new URL(request.url),
+        parts = url.pathname.split("/");
+      if (parts[1] !== "sync" || parts.length < 4) throw notFound();
+      const workspaceId = decodeURIComponent(parts[2]!);
+      const authorization = request.headers.get("authorization") ?? "";
+      if (!authorization.startsWith(`Bearer ${options.prefix}`) || request.headers.has("cookie"))
+        throw notFound();
+      const credential = {
+        workspaceId,
+        bearer: authorization.slice(7),
+        method: request.method,
+        pathname: url.pathname,
+      };
       const ownerUserId = options.authorize(credential);
       if (!ownerUserId) throw notFound();
       const guard = () => {

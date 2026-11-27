@@ -11,6 +11,7 @@ import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDa
 import { initializeRelayDeployment } from "./relayDeployment";
 import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { RELAY_API_VERSIONS } from "./apiVersion";
+import { AUTOMATION_REPLICA_BEARER_PREFIX } from "./automationReplicaCredential";
 import { relayProcessFixture, projectionEngine, productionEnv } from "./mainProcessTestSupport";
 
 const { tempRoot, spawnRunningRelay, spawnRelayExpectExit } = relayProcessFixture();
@@ -164,15 +165,25 @@ describe("sync relay startup guards", () => {
     });
     const ready = await fetch(`${relay.baseUrl}/ready`);
     expect(await ready.json()).toMatchObject({ apiVersions: RELAY_API_VERSIONS, engineApiMin: 2 });
-    const codeFor = async (path: string, version?: string) =>
+    const codeFor = async (path: string, version?: string, authorization?: string) =>
       (
         (await (
           await fetch(relay.baseUrl + path, {
-            headers: version === undefined ? {} : { [RELAY_API_VERSION_HEADER]: version },
+            headers: {
+              ...(version === undefined ? {} : { [RELAY_API_VERSION_HEADER]: version }),
+              ...(authorization === undefined ? {} : { authorization }),
+            },
           })
         ).json()) as { code?: string }
       ).code ?? "";
     expect(await codeFor("/sync/ws-a/log", "1")).toBe("api_version_too_old");
+    expect(
+      await codeFor(
+        "/sync/ws-a/log",
+        "1",
+        `Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`,
+      ),
+    ).not.toMatch(/^api_version/);
     expect(await codeFor("/sync/ws-a/log", "2")).not.toMatch(/^api_version/);
     expect(await codeFor("/sync/account/sessions")).not.toMatch(/^api_version/);
   });

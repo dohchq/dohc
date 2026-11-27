@@ -172,7 +172,6 @@ import { untilRelayAnswers } from "./relayAnswers";
 import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
   authorizeAutomationReplication,
-  verifiesAutomationReplica,
 } from "./automationReplicaCredential";
 import { serverLogLine } from "./serverLogWords";
 import { createStartTimeline } from "./startTimeline";
@@ -660,9 +659,6 @@ const automationServer = automationsOn
 const automationReplicaKey = copiesOn
   ? { key: Buffer.from(linkKey!), namespace: deployment!.history.namespace }
   : undefined;
-const ownAutomationReplica = automationReplicaKey
-  ? verifiesAutomationReplica(storage, automationReplicaKey)
-  : () => false;
 // One wait hub for every route that writes the log, so a write any of them takes wakes every wait on it.
 const discussionActivity = new DiscussionActivityHub();
 const automationReplication = automationReplicaKey
@@ -1058,7 +1054,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   }
   const refusal = relayApiVersionRefusal(
     request.headers,
-    relayApiVersionsFor(request, engineApiMin, ownAutomationReplica),
+    relayApiVersionsFor(request, engineApiMin),
   );
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
   const path = new URL(request.url).pathname;
