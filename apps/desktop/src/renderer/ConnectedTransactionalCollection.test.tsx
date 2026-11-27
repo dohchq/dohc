@@ -147,6 +147,8 @@ vi.mock("./TransactionalCollectionPage", () => ({
     recordsVersion?: number;
     recordsChanged?: number;
     buttons?: TransactionalButtons;
+    rulesStatus?: ReactNode;
+    rulesNotice?: ReactNode;
     onRefresh?(): void;
     onCreateForm?(): void;
     onHistory?(): void;
@@ -184,6 +186,8 @@ vi.mock("./TransactionalCollectionPage", () => ({
           </button>
         )}
         {props.panel}
+        {props.rulesStatus}
+        {props.rulesNotice}
         {props.onOpenSource && <button onClick={props.onOpenSource}>Open source</button>}
         {props.views && (
           <section aria-label="View tabs">
@@ -270,6 +274,12 @@ const dataset: DatasetDescription = {
       fieldIds: [id(3)],
     },
   ],
+};
+const ownerApproval = {
+  kind: "approval",
+  revisionSha256: dataset.revisionSha256,
+  approvedBy: null,
+  needsOwnerConfirmation: false,
 };
 // A builder left with changes keeps its draft for the next panel, so each test starts with none.
 afterEach(() => {
@@ -1454,6 +1464,7 @@ it("loads owner pending responses and requires confirmation before clearing a sa
   let cleared = false;
   backend.dataset.mockImplementation(async (input) => {
     if (input.action === "describe") return { kind: "description", dataset };
+    if (input.action === "approval") return ownerApproval;
     if (input.action === "pendingAttempts")
       return {
         kind: "pending-attempts",
@@ -1609,6 +1620,7 @@ it("cancels an unconfirmed response only after owner acknowledgement and reports
   let cancelled = false;
   backend.dataset.mockImplementation(async (input) => {
     if (input.action === "describe") return { kind: "description", dataset };
+    if (input.action === "approval") return ownerApproval;
     if (input.action === "pendingAttempts")
       return {
         kind: "pending-attempts",
@@ -2283,9 +2295,9 @@ describe("a dataset table's ⚡ panel", () => {
         (onError.mock.calls[0]![2] as () => void)();
       });
       expect(await screen.findByRole("button", { name: "Approve change" })).toBeTruthy();
-      const calls = backend.dataset.mock.calls.map(
-        ([input]) => input as { action: string; revisionSha256?: string },
-      );
+      const calls = backend.dataset.mock.calls
+        .map(([input]) => input as { action: string; revisionSha256?: string })
+        .filter((call) => call.action !== "approval");
       expect(calls.map((call) => call.action)).toEqual([
         "describe",
         "prepareSchemaChange",
@@ -2383,9 +2395,9 @@ describe("a dataset table's ⚡ panel", () => {
     await act(async () => reads[0]!.resolve());
     await act(async () => reads[1]!.resolve());
     expect(await screen.findByRole("button", { name: "Approve change" })).toBeTruthy();
-    const calls = backend.dataset.mock.calls.map(
-      ([input]) => input as { action: string; revisionSha256?: string },
-    );
+    const calls = backend.dataset.mock.calls
+      .map(([input]) => input as { action: string; revisionSha256?: string })
+      .filter((call) => call.action !== "approval");
     expect(calls.at(-1)).toMatchObject({
       action: "prepareSchemaChange",
       revisionSha256: moved.revisionSha256,
@@ -2943,5 +2955,216 @@ describe("relation label resolution through connected resolver", () => {
       new AbortController().signal,
     );
     expect(memberReads).toEqual([{ limit: 100 }, { limit: 20, search: "Al" }]);
+  });
+});
+
+describe("who approved a Collection's rules", () => {
+  const approval = (
+    approvedBy: object | null,
+    needsOwnerConfirmation = false,
+    revisionSha256 = dataset.revisionSha256,
+  ) => ({ kind: "approval", revisionSha256, approvedBy, needsOwnerConfirmation });
+  const renderPage = (owner: boolean, onError = vi.fn(), onSettled = vi.fn()) =>
+    render(
+      <ConnectedTransactionalCollection
+        owner={owner}
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={onError}
+        onSettled={onSettled}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+  const answer = (
+    approved: ReturnType<typeof approval> | (() => never),
+    confirmed?: ReturnType<typeof approval> | (() => never),
+    described: DatasetDescription = dataset,
+  ) =>
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      const result =
+        input.action === "approval"
+          ? approved
+          : input.action === "confirmApproval"
+            ? confirmed
+            : { kind: "description", dataset: { ...described } };
+      return typeof result === "function" ? result() : result;
+    });
+  const formerAda = { role: "admin", name: "Ada", former: true, approvedAtMs: 1 };
+
+  it.each([
+    [{ role: "admin", name: "Ada", former: false, approvedAtMs: 1 }, "Approved by Ada · Admin"],
+    [formerAda, "Approved by Ada · former Admin"],
+    [{ role: "admin", name: null, former: false, approvedAtMs: 1 }, "Approved by an Admin"],
+    [{ role: "admin", name: null, former: true, approvedAtMs: 1 }, "Approved by a former Admin"],
+  ])("names an Admin who approved them beside the Collection's status", async (by, line) => {
+    answer(approval(by));
+    renderPage(true);
+    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(line);
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
+  });
+
+  it("says nothing when the Owner approved them, and reads nothing for a member", async () => {
+    answer(approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 1 }));
+    renderPage(true);
+    await waitFor(() =>
+      expect(backend.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "approval" })),
+    );
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+    cleanup();
+    backend.dataset.mockClear();
+    renderPage(false);
+    await screen.findByLabelText("Collection view state");
+    expect(backend.dataset).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "approval" }),
+    );
+  });
+
+  it("stops naming who approved them when reading that again fails", async () => {
+    answer(approval({ role: "admin", name: "Ada", former: false, approvedAtMs: 1 }));
+    renderPage(true);
+    await screen.findByTestId("collection-approved-by");
+    answer(() => {
+      throw Error("offline");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    await waitFor(() => expect(screen.queryByTestId("collection-approved-by")).toBeNull());
+    const reread = Promise.withResolvers<ReturnType<typeof approval>>();
+    answer(() => reread.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    await waitFor(() =>
+      expect(
+        backend.dataset.mock.calls.filter(([input]) => input.action === "approval"),
+      ).toHaveLength(3),
+    );
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+    await act(async () =>
+      reread.resolve(approval({ role: "admin", name: "Ada", former: false, approvedAtMs: 1 })),
+    );
+    expect(await screen.findByTestId("collection-approved-by")).toBeTruthy();
+  });
+
+  it("clears a failed confirmation once another computer confirmed, and reports nothing after the page closes", async () => {
+    const former = approval(formerAda, true);
+    answer(former, () => {
+      throw Error("conflict");
+    });
+    const onError = vi.fn(),
+      onSettled = vi.fn();
+    const page = renderPage(true, onError, onSettled);
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    onSettled.mockClear();
+    answer(approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 2 }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    await waitFor(() =>
+      expect(onSettled).toHaveBeenCalledWith("collection-approval:data/dataset.json"),
+    );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
+
+    const refused = Promise.withResolvers<never>();
+    answer(former, () => refused.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
+    await waitFor(() =>
+      expect(backend.dataset).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "confirmApproval" }),
+      ),
+    );
+    page.unmount();
+    await act(async () => {
+      refused.reject(Error("conflict"));
+      await refused.promise.catch(() => undefined);
+    });
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it("shows the rules the Owner confirms: a newer approval refreshes the Collection first", async () => {
+    const renamed = structuredClone({ ...dataset, revision: 2, revisionSha256: "b".repeat(64) });
+    renamed.tables[0]!.fields[0]!.name = "Guest";
+    const newer = approval(formerAda, true, renamed.revisionSha256);
+    let described = 0;
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      if (input.action === "approval") return newer;
+      described++;
+      return { kind: "description", dataset: described === 1 ? dataset : renamed };
+    });
+    renderPage(true);
+    await waitFor(() => expect(described).toBe(2));
+    expect(await screen.findByTestId("collection-confirm-approval")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Collection view state").getAttribute("data-fields")?.split(",")[0],
+    ).toBe("Guest");
+  });
+
+  it("names no approver and offers no confirmation for rules the page isn't showing", async () => {
+    answer(approval(formerAda, true, "b".repeat(64)));
+    renderPage(true);
+    await waitFor(() =>
+      expect(
+        backend.dataset.mock.calls.filter(([input]) => input.action === "describe"),
+      ).toHaveLength(2),
+    );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
+    expect(screen.queryByTestId("collection-approved-by")).toBeNull();
+  });
+
+  it("lets the Owner confirm rules a former Admin approved, and refreshes the Collection when that fails", async () => {
+    const former = approval(formerAda, true);
+    const confirmed = approval({ role: "owner", name: "Owner", former: false, approvedAtMs: 2 });
+    answer(former, () => {
+      throw Error("conflict");
+    });
+    const onError = vi.fn();
+    renderPage(true, onError);
+    const notice = await screen.findByTestId("collection-confirm-approval");
+    expect(screen.getByTestId("collection-approved-by").textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
+    expect(notice.textContent).toBe(
+      "Ada approved these rules and is no longer an Admin. They keep running. Confirm to approve them as yourself.Confirm approval",
+    );
+    fireEvent.click(within(notice).getByRole("button", { name: "Confirm approval" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const [words, , retry, identity] = onError.mock.calls[0]! as [
+      string,
+      unknown,
+      () => void,
+      string,
+    ];
+    expect(words).toBe("dohc could not confirm this approval.");
+    expect(identity).toBe("collection-approval:data/dataset.json");
+    backend.dataset.mockClear();
+    answer(former, confirmed);
+    act(() => retry());
+    await waitFor(() =>
+      expect(backend.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "describe" })),
+    );
+    expect(backend.dataset).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "confirmApproval" }),
+    );
+    fireEvent.click(
+      within(await screen.findByTestId("collection-confirm-approval")).getByRole("button", {
+        name: "Confirm approval",
+      }),
+    );
+    answer(confirmed, confirmed);
+    await waitFor(() => expect(screen.queryByTestId("collection-confirm-approval")).toBeNull());
+    expect(backend.dataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "confirmApproval",
+        revisionSha256: dataset.revisionSha256,
+      }),
+    );
   });
 });

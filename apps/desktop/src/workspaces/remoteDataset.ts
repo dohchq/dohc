@@ -14,6 +14,7 @@ import {
   DatasetMigrationPreviewPage,
   DatasetDeletePreview,
   DatasetDeleted,
+  DatasetApproval,
 } from "@dohc/cli/dataset";
 import type { ResolvedDatasetRequest as DatasetRequest } from "./datasetAddress";
 import {
@@ -162,7 +163,15 @@ export interface OwnerDatasetData {
 
 /** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
 export type RemoteDatasetData = OwnerDatasetData &
-  Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">>;
+  Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">> &
+  DatasetGovernance;
+
+/** Who approved the rules a Collection on the server runs. */
+export interface DatasetGovernance {
+  approval(datasetId: string): Promise<DatasetApproval>;
+  /** The Owner approves the rules the Collection runs again. */
+  confirmApproval(datasetId: string, revisionSha256: string): Promise<DatasetApproval>;
+}
 
 /** A press the server runs: who pressed is the server's to know; an agent that pressed for them is provenance. */
 export interface DatasetServerPressInput {
@@ -511,6 +520,22 @@ export function createRemoteDatasetData(input: {
         result.cursor.approvedRevisionHash !== result.revision.revisionSha256
       )
         throw new Error("The server returned different Collection rules.");
+      return result;
+    },
+    async approval(datasetId) {
+      if (input.shareId !== undefined)
+        throw new Error("Open the original workspace to see who approved these rules.");
+      return DatasetApproval.parse(await request(`${path(datasetId)}/approval`));
+    },
+    async confirmApproval(datasetId, revisionSha256) {
+      if (input.shareId !== undefined) throw new Error("Only the Owner can approve these rules.");
+      const result = DatasetApproval.parse(
+        await request(`${path(datasetId)}/confirm-approval`, {
+          revisionSha256: sha256.parse(revisionSha256),
+        }),
+      );
+      if (result.revisionSha256 !== revisionSha256 || result.approvedBy?.role !== "owner")
+        throw new Error("The server did not confirm this approval. Refresh the Collection.");
       return result;
     },
     async prepareMigrationCandidate(value) {

@@ -6,6 +6,7 @@ import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type {
+  DatasetApproval,
   DatasetCopyStatus,
   DatasetMigrationPreparation,
   DatasetSchemaChange,
@@ -54,6 +55,7 @@ import {
   automationsFile,
 } from "./collections/CollectionCustomizeDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
+import { CollectionApprovedBy, ConfirmApprovalNotice } from "./collections/CollectionApproval";
 
 export interface ConnectedTransactionalCollectionProps {
   owner?: boolean;
@@ -416,6 +418,64 @@ function ScopedCollection({
     },
     [retryQuietly],
   );
+  const approvalIdentity = `collection-approval:${datasetPath}`;
+  const approval = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${datasetPath}\0${datasetId}`,
+    manual: true,
+    load: async (): Promise<DatasetApproval | null> => {
+      if (!owner || !datasetId) return null;
+      const result = await bridge()
+        .dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "approval" })
+        .catch(() => null);
+      return result?.kind === "approval" ? result : null;
+    },
+  });
+  const rereadApproval = approval.retry;
+  useEffect(() => {
+    void rereadApproval();
+  }, [dataset, rereadApproval]);
+  const approvalRead = approval.value;
+  useEffect(() => {
+    if (approvalRead && !approvalRead.needsOwnerConfirmation) onSettled?.(approvalIdentity);
+  }, [approvalRead, approvalIdentity, onSettled]);
+  const shownApproval =
+    approvalRead && approvalRead.revisionSha256 === dataset?.revisionSha256 ? approvalRead : null;
+  const refreshedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!approvalRead || !dataset || approvalRead.revisionSha256 === dataset.revisionSha256) return;
+    if (refreshedFor.current === approvalRead.revisionSha256) return;
+    refreshedFor.current = approvalRead.revisionSha256;
+    void refresh();
+  }, [approvalRead, dataset, refresh]);
+  const toConfirm = shownApproval?.needsOwnerConfirmation ? shownApproval : null;
+  const [confirming, setConfirming] = useState(false);
+  const confirmApproval = async (confirmed: DatasetApproval) => {
+    setConfirming(true);
+    try {
+      const result = await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: datasetId,
+        action: "confirmApproval",
+        revisionSha256: confirmed.revisionSha256,
+      });
+      if (result.kind !== "approval") throw Error("dohc could not confirm this approval.");
+      onSettled?.(approvalIdentity);
+      await approval.retry();
+    } catch (error) {
+      if (!pageOpen.current) return;
+      onError(
+        "dohc could not confirm this approval.",
+        error,
+        () => {
+          void refresh();
+        },
+        approvalIdentity,
+      );
+    } finally {
+      setConfirming(false);
+    }
+  };
   // This computer's copy came up to date from the server, as with another
   // computer's change or the server coming back: the page and its records show it.
   useEffect(
@@ -732,6 +792,20 @@ function ScopedCollection({
           views={views ?? undefined}
           onOpenSource={() => onOpenFile(datasetPath)}
           copy={copy}
+          rulesStatus={
+            shownApproval?.approvedBy?.role === "admin" ? (
+              <CollectionApprovedBy approvedBy={shownApproval.approvedBy} />
+            ) : undefined
+          }
+          rulesNotice={
+            toConfirm ? (
+              <ConfirmApprovalNotice
+                approval={toConfirm}
+                confirming={confirming}
+                onConfirm={() => void confirmApproval(toConfirm)}
+              />
+            ) : undefined
+          }
           onRefresh={() => {
             void refresh();
           }}

@@ -13,14 +13,20 @@ import type { NamedDatasetPageCache } from "./namedDatasetCache";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { joinedByAccount } from "./shareWriteGate";
+import { isDatasetServerNotFound } from "../ipc/errorWords";
+import type { DatasetApproval } from "@dohc/cli/dataset";
 
+const NOT_SHOWN =
+  "The server didn't show you who approved this Collection's rules. You may no longer be an Admin, or the Owner keeps this Collection on their computer.";
 /** Source View/Edit and Collection data permissions are separate. The relay resolves the named grant. */
 /** A member's Collection data through their share. An Admin manages grants and defaults on the workspace's own routes, where the server checks their role. */
 export type NamedDatasetData = Pick<
   OwnerDatasetData,
   "list" | "describe" | "inspect" | "invoke" | "upload" | "file"
 > &
-  Required<Pick<OwnerDatasetData, "permissions" | "setGrant" | "setDefaults">>;
+  Required<Pick<OwnerDatasetData, "permissions" | "setGrant" | "setDefaults">> & {
+    approval(datasetId: string): Promise<DatasetApproval>;
+  };
 export function createNamedDatasetData(input: {
   workspaceId: string;
   shareView: unknown;
@@ -95,10 +101,16 @@ export function createNamedDatasetData(input: {
       throw new Error("Only an Admin of a joined workspace manages Collection access.");
     return createRemoteDatasetData({ ...input, workspaceId: membersWorkspaceId });
   };
-  const managed: Pick<NamedDatasetData, "permissions" | "setGrant" | "setDefaults"> = {
+  const managed: Pick<NamedDatasetData, "permissions" | "setGrant" | "setDefaults" | "approval"> = {
     permissions: async (value) => manager().permissions(value),
     setGrant: async (value) => manager().setGrant(value),
     setDefaults: async (value) => manager().setDefaults(value),
+    approval: async (datasetId) =>
+      manager()
+        .approval(datasetId)
+        .catch((error: unknown) => {
+          throw isDatasetServerNotFound(error) ? new Error(NOT_SHOWN) : error;
+        }),
   };
   const exposed = {
     list: data.list,

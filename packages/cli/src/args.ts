@@ -1930,6 +1930,16 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     ],
   },
   discardMigration: { summary: "Discard a prepared migration." },
+  approval: {
+    summary: "Show who approved the rules a Collection runs.",
+    notes: [
+      "approvedBy is null for a Collection kept on this computer. needsOwnerConfirmation is true when the Admin who approved the rules is no longer one.",
+    ],
+  },
+  confirmApproval: {
+    summary: "Approve the rules a Collection runs again as its Owner, without changing them.",
+    take: [{ field: "revisionSha256", from: "approval", path: "revisionSha256" }],
+  },
   invoke: {
     summary: "Run an approved operation.",
     notes: [

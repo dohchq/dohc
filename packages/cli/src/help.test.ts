@@ -46,6 +46,7 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
     deletePreview: resultOf(DatasetResult, "delete-preview"),
     pendingAttempts: resultOf(DatasetResult, "pending-attempts"),
     prepareRecovery: resultOf(DatasetResult, "recovery-prepared"),
+    approval: resultOf(DatasetResult, "approval"),
   },
   app: {
     createLink: z.union([

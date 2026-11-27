@@ -12,7 +12,7 @@ import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
-import { isDatasetOwnerOnly, readError } from "./errorWords";
+import { datasetOwnerOnlyError, isDatasetOwnerOnly, readError } from "./errorWords";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
@@ -149,7 +149,7 @@ function fixture(
   collectionPlace?: () => Promise<DatasetPlace>,
   extra: Pick<
     Parameters<typeof createDatasetHandler>[0],
-    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock"
+    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock" | "governanceForWorkspace"
   > = {},
 ) {
   const abort = new AbortController();
@@ -804,6 +804,9 @@ it("allows named Collection data actions without opening a local owner store or 
     invoke: vi.fn(),
     upload: vi.fn(),
     file: vi.fn(),
+    approval: vi.fn(async () => {
+      throw datasetOwnerOnlyError();
+    }),
   };
   const f = fixture(undefined, named as unknown as NamedDatasetData);
   f.workspace.shareView = { shareId: "shared" };
@@ -1634,15 +1637,20 @@ it("flushes and retries a missing address once after an agent moves its folder",
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(2);
 });
 
-it.each(["approve", "approveMigration"])(
+it.each(["approve", "approveMigration", "confirmApproval"])(
   "refuses automation and received-share %s authority before calling a host",
   async (action) => {
-    const f = fixture(),
+    const governed = { approval: vi.fn(), confirmApproval: vi.fn() };
+    const f = fixture(undefined, undefined, undefined, undefined, undefined, {
+        governanceForWorkspace: async () => governed,
+      }),
       input = {
         action,
         workspaceId: "workspace",
-        preparationId: datasetId,
         revisionSha256: f.revision.revisionSha256,
+        ...(action === "confirmApproval"
+          ? { datasetPath: "data/dataset.json" }
+          : { preparationId: datasetId }),
         ...(action === "approveMigration" ? { approvalDigest: "a".repeat(64) } : {}),
       };
     await expect(f.handler("agent", input, { depth: 1 })).rejects.toThrow(
@@ -1650,6 +1658,7 @@ it.each(["approve", "approveMigration"])(
     );
     f.workspace.shareView = {};
     await expect(f.handler("agent", input, { depth: 0 })).rejects.toThrow("original workspace");
+    expect(governed.confirmApproval).not.toHaveBeenCalled();
   },
 );
 
@@ -1942,6 +1951,80 @@ it("sends an Admin's grants and defaults in a received workspace to its server, 
   expect(await f.handler("cli", { ...selection, action: "permissions" })).toMatchObject({
     kind: "permissions",
   });
+  expect(localHost).not.toHaveBeenCalled();
+});
+
+it("reads who approved a Collection's rules, and lets only its Owner confirm them", async () => {
+  const approval = {
+    revisionSha256: "c".repeat(64),
+    approvedBy: { role: "admin" as const, name: "Ada", former: true, approvedAtMs: 1 },
+    needsOwnerConfirmation: true,
+  };
+  const confirmed = {
+    ...approval,
+    approvedBy: { role: "owner" as const, name: null, former: false, approvedAtMs: 2 },
+    needsOwnerConfirmation: false,
+  };
+  const governed = {
+    approval: vi.fn(async () => approval),
+    confirmApproval: vi.fn(async () => confirmed),
+  };
+  const selection = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
+  const governanceForWorkspace = vi.fn(async () => governed);
+  const owner = fixture(undefined, undefined, undefined, undefined, undefined, {
+    governanceForWorkspace,
+  });
+  expect(await owner.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    ...approval,
+  });
+  expect(
+    await owner.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: approval.revisionSha256,
+    }),
+  ).toEqual({ kind: "approval", ...confirmed });
+  expect(governed.confirmApproval).toHaveBeenCalledWith(datasetId, approval.revisionSha256);
+  expect(governanceForWorkspace).toHaveBeenCalledWith(
+    owner.workspace,
+    datasetId,
+    expect.any(AbortSignal),
+  );
+
+  const local = fixture();
+  expect(await local.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    revisionSha256: local.revision.revisionSha256,
+    approvedBy: null,
+    needsOwnerConfirmation: false,
+  });
+  await expect(
+    local.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: local.revision.revisionSha256,
+    }),
+  ).rejects.toThrow("This Collection is kept on this computer. Its rules need no confirmation.");
+
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const named = { approval: governed.approval };
+  const admin = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
+  admin.workspace.shareView = { shareId: "s" };
+  expect(await admin.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    ...approval,
+  });
+  await expect(
+    admin.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: approval.revisionSha256,
+    }),
+  ).rejects.toThrow("Open the original workspace to manage this Collection.");
+  expect(governed.confirmApproval).toHaveBeenCalledTimes(1);
   expect(localHost).not.toHaveBeenCalled();
 });
 

@@ -38,7 +38,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import type { OwnerDatasetData, RemoteDatasetData } from "../workspaces/remoteDataset";
 import type { NamedDatasetData } from "../workspaces/namedDataset";
 import {
   approveLocalDatasetMigration,
@@ -116,6 +116,12 @@ export function createDatasetHandler<
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<NamedDatasetData>;
+  /** Where the Owner approves a Collection's rules on its server, or null where this computer keeps them. */
+  governanceForWorkspace?(
+    workspace: W,
+    datasetId: string,
+    signal: AbortSignal,
+  ): Promise<Pick<RemoteDatasetData, "approval" | "confirmApproval"> | null>;
   /** Writes a joined workspace's Collection types into the member's Personal app folder. */
   writePersonalTypes?(
     workspace: W,
@@ -373,6 +379,7 @@ export function createDatasetHandler<
                 "setGrant",
                 "removeGrant",
                 "setDefaults",
+                "approval",
               ].includes(input.action)
             )
               throw datasetOwnerOnlyError();
@@ -385,6 +392,11 @@ export function createDatasetHandler<
               const result = await data.permissions(input);
               current();
               return { kind: "permissions" as const, ...result };
+            }
+            if (input.action === "approval") {
+              const result = await data.approval(input.datasetId);
+              current();
+              return { kind: "approval" as const, ...result };
             }
             if (input.action === "setDefaults") {
               await data.setDefaults(input);
@@ -448,7 +460,7 @@ export function createDatasetHandler<
           if (
             agent &&
             agent.depth > 0 &&
-            (input.action === "approve" || input.action === "approveMigration")
+            ["approve", "approveMigration", "confirmApproval"].includes(input.action)
           )
             throw new Error("Automations cannot approve Collection rules.");
           const approvalAgent = agent
@@ -596,6 +608,7 @@ export function createDatasetHandler<
             "approveMigration",
             "discardMigration",
             "migrationPreviewPage",
+            "approval",
           ].includes(input.action);
           const openData = async () =>
             readsData && dependencies.dataForWorkspace
@@ -624,6 +637,34 @@ export function createDatasetHandler<
               // The Explorer lists after every change. A refusal thrown here would reach Electron's log each time.
               return { kind: "collections-refused" as const, refusal };
             }
+          }
+          if (input.action === "approval" || input.action === "confirmApproval") {
+            const governing = await dependencies.governanceForWorkspace?.(
+              operation.workspace,
+              input.datasetId,
+              operation.signal,
+            );
+            current();
+            if (!governing) {
+              if (input.action === "confirmApproval")
+                throw new Error(
+                  "This Collection is kept on this computer. Its rules need no confirmation.",
+                );
+              const { revision } = await (await openData()).approvedArtifacts(input.datasetId);
+              current();
+              return {
+                kind: "approval" as const,
+                revisionSha256: revision.revisionSha256,
+                approvedBy: null,
+                needsOwnerConfirmation: false,
+              };
+            }
+            const result =
+              input.action === "approval"
+                ? await governing.approval(input.datasetId)
+                : await governing.confirmApproval(input.datasetId, input.revisionSha256);
+            current();
+            return { kind: "approval" as const, ...result };
           }
           const data = await openData();
           current();

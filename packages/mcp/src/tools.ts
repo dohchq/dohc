@@ -139,6 +139,7 @@ export const MCP_TOOL_CAPABILITIES = distinct(
       DATASET_CAPABILITIES.setGrant,
       DATASET_CAPABILITIES.removeGrant,
       DATASET_CAPABILITIES.setDefaults,
+      DATASET_CAPABILITIES.approval,
     ],
     dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
     dohc_members: Object.values(MEMBERS_CAPABILITIES).filter(

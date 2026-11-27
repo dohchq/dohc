@@ -1521,6 +1521,21 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
   }),
+  "dataset.approval.read": capability("Show who approved the rules a Collection runs.", {
+    ipc: ["dataset"],
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
+    mcpReason:
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
+  }),
+  "dataset.approval.confirm": capability(
+    "Approve the rules a Collection runs again as the Owner, without changing them.",
+    {
+      ipc: ["dataset"],
+      mcp: { owner: ["dohc_dataset"] },
+      mcpReason:
+        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+    },
+  ),
   "dataset.create": capability("Write source for a new Collection, ready to approve.", {
     ipc: ["dataset"],
     mcp: { owner: ["dohc_dataset"] },

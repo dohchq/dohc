@@ -2,7 +2,9 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { activityPin, settingsNavPin } from "../src/testPins";
+import { collectionCommand } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { noticedRefusals } from "./helpers/engineDb";
@@ -14,6 +16,7 @@ import {
   explorerRow,
   openAboutPanel,
   openChatsView,
+  openExplorerHome,
   openExplorerView,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
@@ -1406,6 +1409,252 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await relay?.stop();
     await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(member, memberTemp);
+    await cleanupDesktopWorkspace(owner, ownerTemp);
+  }
+});
+
+// An Admin changes the rules of the owner's Collection on the server. The
+// owner sees who approved them, and once that person is no longer an Admin,
+// confirms the rules as their own without changing them.
+test("@two-client an admin changes the owner's Collection rules, and the owner confirms its rules after the admin leaves the role", async () => {
+  test.setTimeout(600_000);
+  const ownerTemp = await createTempWorkspace();
+  const adminTemp = await createTempWorkspace();
+  const workspaceId = "members-rules";
+  const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+  let relay: SyncRelayHandle | null = null;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let admin: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = (name: string) => test.info().outputPath(`${name}.png`);
+  const openCollection = async (page: Page, name: string) => {
+    await openExplorerHome(page);
+    await page
+      .getByRole("region", { name: "Collections", exact: true })
+      .getByRole("button", { name, exact: true })
+      .click();
+    return page.getByRole("region", { name, exact: true });
+  };
+  const themed = async (page: Page, name: string, ready: () => Promise<Locator>) => {
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(page, theme);
+      await (await ready()).screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+    }
+  };
+  const setRole = async (memberId: string, role: "admin" | "member") => {
+    const set = await relayJson(
+      relay!.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/members/${memberId}/role`,
+      { method: "POST", body: JSON.stringify({ role }) },
+    );
+    expect(set.status, set.body).toBe(200);
+  };
+
+  try {
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      linkBoundary: relayLinkBoundary(),
+    });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
+    await seedWorkspaceManifest(ownerTemp, workspaceId);
+    await writeWorkspaceFiles(ownerTemp, [
+      { path: "notes/plan.md", contents: "# Plan\n\nRead this first.\n" },
+    ]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      {
+        workspaceId,
+        rootPath: ownerTemp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user },
+      },
+    ]);
+    await seedCloudCredentials(ownerTemp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: OWNER.email,
+      userId: OWNER.user,
+      token: OWNER.token,
+    });
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    const page = owner.page;
+    await openWorkspaceFromFirstRun(page, ownerTemp);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+
+    await page.keyboard.press("ControlOrMeta+k");
+    await page
+      .getByTestId("command-palette")
+      .getByRole("option", { name: "New Collection", exact: true })
+      .click();
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Registrations");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const registrations = page.getByRole("region", { name: "Registrations", exact: true });
+    await expect(registrations).toBeVisible({ timeout: 30_000 });
+    await expect(registrations.getByTestId("collection-approved-by")).toHaveCount(0);
+    const shared = await page.evaluate(async (workspaceId) => {
+      const listed = await window.dohcDesktop!.dataset({ workspaceId, action: "list" });
+      if (listed.kind !== "list") throw Error(`Expected a list: ${listed.kind}`);
+      const datasetPath = listed.datasets[0]!.datasetPath!;
+      const permissions = await window.dohcDesktop!.dataset({
+        workspaceId,
+        datasetPath,
+        action: "permissions",
+      });
+      if (permissions.kind !== "permissions" || !permissions.rules)
+        throw Error(`Expected permissions: ${permissions.kind}`);
+      const { rules } = permissions;
+      return window.dohcDesktop!.dataset({
+        workspaceId,
+        datasetPath,
+        action: "setDefaults",
+        defaults: {
+          view: rules.actions.filter((action) => action.readOnly).map((a) => a.operationId),
+          comment: [],
+          edit: [],
+          revision: rules.revision,
+          revisionSha256: rules.revisionSha256,
+        },
+      });
+    }, workspaceId);
+    expect(shared.kind).toBe("grant-updated");
+
+    const invited = await relayJson(
+      relay.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/members/invites`,
+      {
+        method: "POST",
+        body: JSON.stringify({ email: ADMIN.email, workspaceName: "Members rules" }),
+      },
+    );
+    expect(invited.status, invited.body).toBe(200);
+    const kaiId = (await membersView(relay, OWNER.token, workspaceId)).people.find(
+      (person) => person.email === ADMIN.email,
+    )!.memberId;
+    await setRole(kaiId, "admin");
+    const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
+
+    // --- Kai, an Admin, renames a field on the Collection's server ---------
+    admin = await openMembership(relay, adminTemp, ADMIN, workspaceName, syncEnv);
+    const kai = admin.page;
+    const joined = JSON.parse(
+      await readFile(join(await joinedRoot(adminTemp), ".dohc", "manifest.json"), "utf8"),
+    ) as { workspaceId: string };
+    const dataset = (input: Record<string, unknown>) =>
+      kai.evaluate(
+        async (request) => window.dohcDesktop!.dataset(JSON.parse(request)),
+        JSON.stringify({ workspaceId: joined.workspaceId, ...input }),
+      );
+    let listed: { datasetId: string; datasetPath: string | null } | undefined;
+    await expect
+      .poll(
+        async () => {
+          const result = await dataset({ action: "list" }).catch(() => null);
+          listed = result?.kind === "list" ? result.datasets[0] : undefined;
+          return listed?.datasetPath ?? "missing";
+        },
+        { timeout: 120_000, intervals: [2_000] },
+      )
+      .not.toBe("missing");
+    const asKai = async (action: string, body?: unknown) => {
+      const answer = await relayJson(
+        relay!.baseUrl,
+        ADMIN.token,
+        `/sync/${workspaceId}/datasets/${listed!.datasetId}/${action}`,
+        body === undefined ? {} : { method: "POST", body: JSON.stringify(body) },
+      );
+      expect(answer.status, answer.body).toBe(200);
+      return JSON.parse(answer.body);
+    };
+    const approved = await asKai("artifacts");
+    const definition = structuredClone(approved.revision.definition);
+    definition.tables[0].fields.find((field: { name: string }) => field.name === "Name").name =
+      "Guest";
+    const candidate = await asKai("prepare-migration", {
+      revision: describeDatasetRevision({
+        definition,
+        revision: approved.revision.revision + 1,
+        schemaSql: approved.schemaSql,
+        operationSource: approved.operationSource,
+      }),
+      schemaSql: approved.schemaSql,
+      operationSource: approved.operationSource,
+      expected: approved.cursor,
+      migrationSql: "SELECT 1;",
+    });
+    await asKai("approve-migration", {
+      candidateId: candidate.candidateId,
+      checkpointSha256: candidate.checkpointSha256,
+      changeSha256: candidate.changeSha256,
+    });
+    expect(await dataset({ action: "approval", datasetPath: listed!.datasetPath })).toMatchObject({
+      kind: "approval",
+      approvedBy: { role: "admin", former: false },
+      needsOwnerConfirmation: false,
+    });
+    expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await admin.close();
+    admin = null;
+
+    // --- The owner sees who approved the rules -------------------------------
+    let opened = page.getByRole("region", { name: "Registrations", exact: true });
+    await expect(async () => {
+      opened = await openCollection(page, "Registrations");
+      await expect(opened.getByTestId("collection-approved-by")).toHaveText(
+        /^Approved by .+ · Admin$/,
+        { timeout: 5_000 },
+      );
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await expect(opened.getByTestId("collection-confirm-approval")).toHaveCount(0);
+    const guest = () => opened.getByRole("columnheader").filter({ hasText: "Guest" });
+    await expect(guest()).toBeVisible();
+    await themed(page, "rules-approved-by-admin", async () => {
+      const region = await openCollection(page, "Registrations");
+      await expect(region.getByTestId("collection-approved-by")).toBeVisible();
+      return region;
+    });
+
+    // --- Kai is no longer an Admin; the owner confirms the rules -------------
+    await setRole(kaiId, "member");
+    await (await collectionCommand(opened, "Refresh")).click();
+    await expect(opened.getByTestId("collection-confirm-approval")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(opened.getByTestId("collection-approved-by")).toHaveText(
+      /^Approved by .+ · former Admin$/,
+    );
+    await expect(guest()).toBeVisible();
+    await themed(page, "rules-confirm-approval", async () => {
+      const region = await openCollection(page, "Registrations");
+      await expect(region.getByTestId("collection-confirm-approval")).toBeVisible();
+      await expect(region.getByTestId("collection-approved-by")).toBeVisible();
+      await expect(region.getByRole("columnheader").filter({ hasText: "Guest" })).toBeVisible();
+      return region;
+    });
+    await expect(guest()).toBeVisible();
+    await opened.getByRole("button", { name: "Confirm approval", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(opened.getByTestId("collection-confirm-approval")).toHaveCount(0, {
+      timeout: 30_000,
+    });
+    await expect(opened.getByTestId("collection-approved-by")).toHaveCount(0);
+    const datasetId = await page.evaluate(async (id) => {
+      const result = await window.dohcDesktop!.dataset({ workspaceId: id, action: "list" });
+      return result.kind === "list" ? result.datasets[0]!.datasetId : "";
+    }, workspaceId);
+    const approval = await relayJson(
+      relay.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/datasets/${datasetId}/approval`,
+    );
+    expect(JSON.parse(approval.body)).toMatchObject({
+      approvedBy: { role: "owner" },
+      needsOwnerConfirmation: false,
+    });
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
+    await relay?.stop();
+    await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
   }
 });

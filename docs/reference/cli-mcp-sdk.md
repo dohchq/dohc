@@ -159,7 +159,7 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. approval says who approved the rules the Collection runs; when needsOwnerConfirmation is true, an Admin who approved them is no longer one, and confirmApproval with that revisionSha256 records the Owner as their approver without changing them. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -849,11 +849,11 @@ Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLe
 
 ### `dohc_collection_access`
 
-As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.
+As an Admin of a workspace you joined, read and set who can run a Collection's actions. Address it with datasetPath, its dataset.json path relative to the MCP server folder. permissions lists per-person grants, the workspace defaults, and rules: the approved revision, revisionSha256, and the actions grants and defaults may hold. setDefaults sets the actions each member level holds (view, comment, edit), named under that revision; View and Comment hold only read-only actions. setGrant and removeGrant change one person's grant. approval says who approved the rules the Collection runs. The server refuses anyone who is not an Admin. Ask the person you work for before you narrow anyone's access.
 
 Available only in a shared workspace with view or comment or edit access.
 
-- `request`: `{ workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "permissions", after?: string, limit?: integer } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setGrant", grantId: string, grant: { revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setDefaults", defaults: { view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "removeGrant", principalKey: string }`. Required.
+- `request`: `{ workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "permissions", after?: string, limit?: integer } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setGrant", grantId: string, grant: { revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "setDefaults", defaults: { view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex } } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "removeGrant", principalKey: string } | { workspaceId: string, datasetPath: string, expectedDatasetId?: UUID, action: "approval" }`. Required.
 
 Returns what that verb returns, listed under [`dohc dataset`](#dohc-dataset). The relay accepts it from an Admin alone.
 
@@ -2594,6 +2594,31 @@ Discard a prepared migration.
 - `preparationId`: `UUID`. Required.
 
 Returns `{ kind: "migration-discarded" }`.
+
+#### `dohc dataset approval`
+
+Show who approved the rules a Collection runs.
+
+approvedBy is null for a Collection kept on this computer. needsOwnerConfirmation is true when the Admin who approved the rules is no longer one.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+
+Returns `{ kind: "approval", revisionSha256, approvedBy: { role, name, former, approvedAtMs } | null, needsOwnerConfirmation }`.
+
+#### `dohc dataset confirmApproval`
+
+Approve the rules a Collection runs again as its Owner, without changing them.
+
+Set `revisionSha256` to `revisionSha256` from `approval`.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `revisionSha256`: `SHA-256 hex`. Required.
+
+Returns `{ kind: "approval", revisionSha256, approvedBy: { role, name, former, approvedAtMs } | null, needsOwnerConfirmation }`.
 
 #### `dohc dataset invoke`
 

@@ -96,6 +96,8 @@ const DATASET_WRITE_ACTIONS: Readonly<Record<DatasetRequest["action"], boolean>>
   prepareSchemaChange: true,
   approveMigration: true,
   discardMigration: true,
+  approval: false,
+  confirmApproval: true,
   invoke: true,
   cancelInvoke: true,
   sql: false,

@@ -61,6 +61,7 @@ export const USAGE_ACTION_IDS = [
   "dataset.create",
   "dataset.prepare",
   "dataset.approve",
+  "dataset.approval.confirm",
   "dataset.discard",
   "dataset.migration.prepare",
   "dataset.change.ask",
