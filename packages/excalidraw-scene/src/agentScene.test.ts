@@ -341,8 +341,66 @@ describe("planDrawingEdit", () => {
     apply(doc, { add: [{ id: "t", type: "text", x: 0, y: 0, text: "Hi" }] });
     const text = foldScene(doc).elements.find((element) => element.id === "t")!;
     insertElementRevision(doc, { ...text, version: 2, fontSize: 40, lineHeight: 1.5 });
-    apply(doc, { update: [{ id: "t", expectedVersion: 2, text: "Hello" }] });
-    expect(live(doc)).toMatchObject([{ id: "t", width: 120, height: 60 }]);
+    apply(doc, { update: [{ id: "t", expectedVersion: 2, text: "hello" }] });
+    expect(live(doc)).toMatchObject([{ id: "t", width: 90, height: 60 }]);
+  });
+
+  it("wraps a long label inside its shape and grows the shape to fit", () => {
+    const doc = new Y.Doc();
+    const notes = "Notes: keep every RECEIPT and file them by month for the accountant";
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0 },
+        { id: "b", type: "ellipse", x: 400, y: 0, width: 200, height: 100 },
+        { id: "label", type: "text", x: 0, y: 0, text: notes, containerId: "a" },
+        { id: "round", type: "text", x: 0, y: 0, text: "One\nTwo\nThree\nFour", containerId: "b" },
+      ],
+    });
+    const [a, b, label, round] = foldScene(doc).elements;
+    expect(a).toMatchObject({ x: 0, y: 0, width: 160 });
+    expect(a!.height).toBeGreaterThan(80);
+    expect(label).toMatchObject({ originalText: notes });
+    expect(String(label!.text).split("\n").length).toBeGreaterThan(1);
+    expect(String(label!.text).replaceAll("\n", " ")).toBe(notes);
+    expectInside(label!, a!, 5);
+    expect(b).toMatchObject({ x: 400, y: 0, width: 200 });
+    expectInsideEllipse(round!, b!);
+    expect(live(doc).find(({ id }) => id === "label")).toMatchObject({ text: notes });
+  });
+
+  it("rewraps a label when its text or shape changes and keeps its arrow on the shape", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 300, height: 80 },
+        { id: "b", type: "rectangle", x: 600, y: 0, width: 200, height: 80 },
+        { id: "label", type: "text", x: 0, y: 0, text: "Plan", containerId: "a" },
+        { id: "go", type: "arrow", x: 300, y: 40, start: "a", end: "b" },
+      ],
+    });
+    apply(doc, {
+      update: [
+        {
+          id: "label",
+          expectedVersion: 1,
+          text: "Plan the trip:\nflights, hotel, budget\nand who pays for the rental car",
+        },
+      ],
+    });
+    const scene = () => new Map(foldScene(doc).elements.map((element) => [element.id, element]));
+    let elements = scene();
+    expectInside(elements.get("label")!, elements.get("a")!, 5);
+    expect(elements.get("a")).toMatchObject({ x: 0, y: 0, width: 300 });
+    const go = elements.get("go")!;
+    const startY = numberOf(go.y);
+    expect(startY).toBeGreaterThan(0);
+    expect(startY).toBeLessThan(numberOf(elements.get("a")!.height));
+    expect(go).toMatchObject({ startBinding: { elementId: "a" }, endBinding: { elementId: "b" } });
+
+    apply(doc, { update: [{ id: "a", expectedVersion: 2, width: 140 }] });
+    elements = scene();
+    expect(elements.get("a")).toMatchObject({ width: 140 });
+    expectInside(elements.get("label")!, elements.get("a")!, 5);
   });
 
   it("aims an arrow bound at its start toward its height", () => {
@@ -497,3 +555,40 @@ describe("planDrawingEdit", () => {
     }
   });
 });
+
+function numberOf(value: unknown): number {
+  return typeof value === "number" ? value : Number.NaN;
+}
+
+function corners(element: Record<string, unknown>) {
+  const [x, y] = [numberOf(element.x), numberOf(element.y)];
+  const [width, height] = [numberOf(element.width), numberOf(element.height)];
+  return { x, y, width, height, right: x + width, bottom: y + height };
+}
+
+function expectInside(
+  text: Record<string, unknown>,
+  shape: Record<string, unknown>,
+  padding: number,
+) {
+  const [inner, outer] = [corners(text), corners(shape)];
+  expect(inner.x).toBeGreaterThanOrEqual(outer.x + padding);
+  expect(inner.y).toBeGreaterThanOrEqual(outer.y + padding);
+  expect(inner.right).toBeLessThanOrEqual(outer.right - padding);
+  expect(inner.bottom).toBeLessThanOrEqual(outer.bottom - padding);
+}
+
+function expectInsideEllipse(text: Record<string, unknown>, shape: Record<string, unknown>) {
+  const [inner, outer] = [corners(text), corners(shape)];
+  const [cx, cy] = [outer.x + outer.width / 2, outer.y + outer.height / 2];
+  for (const [x, y] of [
+    [inner.x, inner.y],
+    [inner.right, inner.y],
+    [inner.x, inner.bottom],
+    [inner.right, inner.bottom],
+  ] as const) {
+    expect(((x - cx) / (outer.width / 2)) ** 2 + ((y - cy) / (outer.height / 2)) ** 2).toBeLessThan(
+      1,
+    );
+  }
+}

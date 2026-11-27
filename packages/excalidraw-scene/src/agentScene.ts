@@ -31,6 +31,22 @@ export const EMPTY_EXCALIDRAW_DOCUMENT = JSON.stringify(
 const FONT_SIZE = 20;
 const GAP = 4;
 const LINE_HEIGHT = 1.25;
+const LABEL_PADDING = 5;
+const EXCALIFONT_EM_WIDTHS = new Map(
+  (
+    [
+      ["'il", 0.25],
+      [",.:;|!j", 0.33],
+      [' "1()-r', 0.45],
+      ["?[]f", 0.5],
+      ["*+<=>IL^ceknpqsuvy{}", 0.55],
+      ["47/HJVY\\`abghotxz", 0.6],
+      ["35689CKNSXd", 0.65],
+      ["02AFP_mw~$&ERU", 0.74],
+      ["#%@BDGMOQTWZ", 0.93],
+    ] as const
+  ).flatMap(([chars, width]) => [...chars].map((char) => [char, width] as const)),
+);
 const CONTAINERS = new Set(["rectangle", "ellipse", "diamond", "arrow"]);
 const LINEAR = new Set(["arrow", "line", "freedraw"]);
 
@@ -56,7 +72,9 @@ export function summarizeDrawing(
       height: numberOr(element.height),
     };
     if (numberOr(element.angle) !== 0) summary.angle = numberOr(element.angle);
-    for (const key of ["text", "strokeColor", "backgroundColor"] as const) {
+    const text = typeof element.originalText === "string" ? element.originalText : element.text;
+    if (typeof text === "string") summary.text = text;
+    for (const key of ["strokeColor", "backgroundColor"] as const) {
       if (typeof element[key] === "string") summary[key] = element[key];
     }
     for (const key of ["link", "frameId", "containerId"] as const) {
@@ -153,6 +171,21 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
     if (Array.isArray(after.boundElements))
       after.boundElements = after.boundElements.filter((bound) => !gone((bound as JsonObject).id));
     if (stableJson(after) !== stableJson(before)) next.set(id, after);
+  }
+  for (const id of new Set([...current.keys(), ...next.keys()])) {
+    const text = existing(id);
+    if (text?.type !== "text" || typeof text.containerId !== "string") continue;
+    const container = existing(text.containerId);
+    if (!container || !CONTAINERS.has(container.type)) continue;
+    const before = { text: current.get(text.id), container: current.get(container.id) };
+    const retexted = before.text?.originalText !== text.originalText;
+    const resized =
+      before.container?.width !== container.width || before.container?.height !== container.height;
+    if (!retexted && !resized) continue;
+    const label = fitLabel(text, container);
+    next.set(text.id, label);
+    const height = labelledHeight(container, numberOr(label.height));
+    if (height > numberOr(container.height)) next.set(container.id, { ...container, height });
   }
   const placing = new Set(
     (edit.update ?? [])
@@ -412,12 +445,70 @@ function edge(element: ElementSnapshot, toward: readonly [number, number]) {
   return along > 0 ? ([cx + dx / along, cy + dy / along] as const) : ([cx, cy] as const);
 }
 
+function fitLabel(text: ElementSnapshot, container: ElementSnapshot): ElementSnapshot {
+  const fontSize = numberOr(text.fontSize) || FONT_SIZE;
+  const lineHeight = numberOr(text.lineHeight) || LINE_HEIGHT;
+  const width = numberOr(container.width);
+  const room =
+    container.type === "arrow"
+      ? Math.max(0.7 * width, fontSize * 11)
+      : container.type === "ellipse"
+        ? Math.round((width / 2) * Math.SQRT2) - LABEL_PADDING * 2
+        : container.type === "diamond"
+          ? Math.round(width / 2) - LABEL_PADDING * 2
+          : width - LABEL_PADDING * 2;
+  const wrapped = wrapText(String(text.originalText ?? text.text ?? ""), room, fontSize);
+  return { ...text, text: wrapped, ...textSize(wrapped, fontSize, lineHeight) };
+}
+
+function labelledHeight(container: ElementSnapshot, textHeight: number): number {
+  const needed = Math.ceil(textHeight) + LABEL_PADDING * 2;
+  if (container.type === "arrow") return 0;
+  if (container.type === "ellipse") return Math.round((needed / Math.SQRT2) * 2);
+  if (container.type === "diamond") return 2 * needed;
+  return needed;
+}
+
+function wrapText(text: string, room: number, fontSize: number): string {
+  const fits = (line: string) => lineWidth(line, fontSize) <= room;
+  return text
+    .split("\n")
+    .flatMap((paragraph) => {
+      const lines: string[] = [];
+      let line = "";
+      for (const word of paragraph.split(" ")) {
+        const joined = line ? `${line} ${word}` : word;
+        if (fits(joined)) {
+          line = joined;
+          continue;
+        }
+        if (line) lines.push(line);
+        line = "";
+        for (const char of word) {
+          if (line && !fits(line + char)) {
+            lines.push(line);
+            line = "";
+          }
+          line += char;
+        }
+      }
+      return [...lines, line];
+    })
+    .join("\n");
+}
+
 function textSize(text: string, fontSize: number, lineHeight: number) {
   const lines = text.split("\n");
   return {
-    width: Math.max(...lines.map((line) => line.length)) * fontSize * 0.6,
+    width: Math.max(...lines.map((line) => lineWidth(line, fontSize))),
     height: lines.length * fontSize * lineHeight,
   };
+}
+
+function lineWidth(line: string, fontSize: number): number {
+  let width = 0;
+  for (const char of line) width += EXCALIFONT_EM_WIDTHS.get(char) ?? 1;
+  return width * fontSize;
 }
 
 function pointBox(points: readonly (readonly [number, number])[]) {
