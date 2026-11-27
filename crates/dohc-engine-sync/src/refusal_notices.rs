@@ -624,6 +624,129 @@ mod tests {
         }
     }
 
+    fn refuse_again(store: &mut EngineStore, seq: i64, reason: &str) {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_pending_refusals SET reason_message=?1, report_id=NULL \
+                     WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=?2",
+                    params![reason, seq],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn dismissing_an_old_reason_keeps_the_refusal_made_again_for_a_new_one() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        let coordinate = serde_json::to_value(&shown.refusal_coordinates[0]).unwrap();
+        assert!(
+            coordinate["reasonSha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+        refuse_again(&mut store, 0, "ydoc-kept-base-cannot-settle");
+        dismiss_refusal_notice(
+            &mut store,
+            "ws",
+            &shown.notice_id,
+            &shown.refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
+        let remaining = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].reason, "ydoc-kept-base-cannot-settle");
+        assert_ne!(remaining[0].refusal_coordinates, shown.refusal_coordinates);
+    }
+
+    #[test]
+    fn a_grouped_dismissal_deletes_only_the_refusals_whose_reason_it_showed() {
+        use dohc_engine_collab::markdown_write_obligations::{
+            self as obligations, Kind, Obligation,
+        };
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        refuse(&mut store, "ws", "object", "lineage", 1);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(
+                    "INSERT OR IGNORE INTO versioned_workspaces VALUES('ws','main'); \
+                     INSERT OR IGNORE INTO versions(workspace_id,version_id,kind,name,created_at_ms) \
+                     VALUES('ws','main','main','Main',0);",
+                )
+                .map_err(SyncError::persist)?;
+                obligations::record_in(
+                    tx,
+                    &Obligation {
+                        order: 0,
+                        key: dohc_engine_collab::DocKey::new("ws", "main", "object").unwrap(),
+                        lineage_claim_id: "lineage".into(),
+                        operation_id: "session".into(),
+                        kind: Kind::Session,
+                        path: "same.md".into(),
+                        retry_inputs: json!({}),
+                        held_checkpoint_sha256: Some("held".into()),
+                        held_head_sha256: None,
+                        source_sha256: None,
+                        settled_head_sha256: None,
+                    },
+                    1,
+                )
+                .unwrap();
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        assert_eq!(shown.reason, "markdown-write-held");
+        assert_eq!(shown.refusal_coordinates.len(), 3);
+        refuse_again(&mut store, 0, "ydoc-kept-base-cannot-settle");
+        dismiss_refusal_notice(
+            &mut store,
+            "ws",
+            &shown.notice_id,
+            &shown.refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
+        let remaining = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].reason, "ydoc-kept-base-cannot-settle");
+        assert!(matches!(
+            remaining[0].refusal_coordinates.as_slice(),
+            [RefusalCoordinate::Replication { origin_seq: 0, .. }]
+        ));
+    }
+
+    #[test]
+    fn a_refusal_made_again_for_the_same_reason_stays_dismissed_after_reopening() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        refuse(&mut store, "ws", "object", "lineage", 0);
+        let shown = list_refusal_notices(&store, "ws").unwrap().remove(0);
+        refuse_again(&mut store, 0, &shown.reason);
+        dismiss_refusal_notice(
+            &mut store,
+            "ws",
+            &shown.notice_id,
+            &shown.refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
+        drop(store);
+        let store = EngineStore::open(&db, 1).unwrap();
+        assert!(list_refusal_notices(&store, "ws").unwrap().is_empty());
+    }
+
     #[test]
     fn successful_projection_clears_each_retained_update_reason() {
         let scratch = ScratchDir::new().unwrap();
