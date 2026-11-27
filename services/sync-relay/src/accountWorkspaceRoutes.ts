@@ -60,15 +60,15 @@ export async function bearerAccountSession(
 }
 
 /**
- * The workspaces a signed-in account owns, and whether each shows on its
- * phone. Only a Bearer session reaches them. A workspace the account does
- * not own answers exactly as one that does not exist.
+ * The workspaces a signed-in account owns or joined, its role in each, and
+ * whether each shows on its phones. Only a Bearer session reaches them. A
+ * workspace the account is not in answers exactly as one that does not exist.
  */
 export function createAccountWorkspaceRoutes(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
   sockets: Pick<OwnerLiveSockets, "stopPhoneWorkspace">;
-  /** Runs once a workspace stops showing on the phone. */
+  /** Runs once a workspace stops showing on the person's phone. */
   hidden?(userId: string, workspaceId: string): void;
 }) {
   const { storage } = options;
@@ -86,24 +86,24 @@ export function createAccountWorkspaceRoutes(options: {
     }
     if (request.method !== "PATCH") throw relayError("method_not_allowed");
     const userId = await account(request);
-    if (!storage.workspaceIsOwnedBy(route.workspaceId, userId)) throw notFound();
+    if (!storage.workspaceRoleOf(route.workspaceId, userId)) throw notFound();
     const body = await readJsonObject(request);
     const keys = Object.keys(body);
     if (keys.length !== 1 || keys[0] !== "showOnPhone" || typeof body.showOnPhone !== "boolean") {
       throw badRequest("the body must be exactly { showOnPhone: boolean }");
     }
-    // Reading the body waited, so the sign-in and the workspace's owner are checked again.
+    // Reading the body waited, so the sign-in and the person's place in the workspace are checked again.
     if (
       (await account(request)) !== userId ||
       !storage.setShowOnPhone({
-        ownerUserId: userId,
+        userId,
         workspaceId: route.workspaceId,
         showOnPhone: body.showOnPhone,
       })
     ) {
       throw notFound();
     }
-    // Turning it off ends the phone's open pages and apps in the workspace before the answer.
+    // Turning it off ends the person's phone pages and apps in the workspace before the answer.
     if (!body.showOnPhone) {
       options.sockets.stopPhoneWorkspace(userId, route.workspaceId);
       options.hidden?.(userId, route.workspaceId);

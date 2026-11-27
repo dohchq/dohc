@@ -1144,7 +1144,7 @@ describe("an owner's phone", () => {
           f.routes.stopPhoneWorkspace("owner-1", f.binding.workspaceId);
         else {
           f.storage.setShowOnPhone({
-            ownerUserId: "owner-1",
+            userId: "owner-1",
             workspaceId: f.binding.workspaceId,
             showOnPhone: false,
           });
@@ -1326,7 +1326,7 @@ describe("an owner's phone", () => {
       const { browser } = await openBrowser(f);
       f.routes.stopPhoneWorkspace("owner-1", f.binding.workspaceId);
       f.storage.setShowOnPhone({
-        ownerUserId: "owner-1",
+        userId: "owner-1",
         workspaceId: f.binding.workspaceId,
         showOnPhone: false,
       });

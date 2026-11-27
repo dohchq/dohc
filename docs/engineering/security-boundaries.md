@@ -310,6 +310,41 @@ The app's own requests and subresources follow its CSP.
 - On Android, the launch cookie lives in the app's shared cookie jar until the
   launch expires. Each launch has its own host and needs the launch's proof.
 
+## A Member reads a joined workspace on their phone
+
+The phone lists the workspaces its account owns and the ones it joined as a
+Member or an Admin, with its role in each (`GET /sync/account/workspaces`).
+"Show on phone" is each person's own choice. The owner turning it off ends the
+server copy's account reason. A Member or an Admin turning it off hides the
+workspace only on their own phones and never ends the owner's copy, and the
+owner hiding it never hides it from them.
+
+A joined workspace is read-only on the phone. The relay refuses a Member's or an
+Admin's chat writes, read marks, wake reads and retries, conversation contexts
+and page opens exactly as it refuses a workspace that does not exist. Their
+reads, change feed, Collections and apps narrow by their grant on the workspace
+share, authorized as their browser's reads are (`services/sync-relay/src/phoneMember.ts`):
+
+- Files, pages, file Comments and attachments show only where their reach
+  shows the path. `.dohc-access` files never show.
+- Chat shows only the Groups their reach shows. General, direct messages and
+  agent chats never show.
+- The change feed names only objects and threads they reach. A Member's cursor
+  carries a keyed mark of their reach, so any change to it answers `replace`,
+  and the phone drops what it shows before it reads again.
+- Collections run through their own grant, so the dataset host applies their
+  grants, the workspace's defaults and their folder ceiling.
+- Apps list the workspace's official apps and the Member apps both reaches
+  allow, never the owner's link apps. A change to anyone's role, level or rules
+  through Members settings ends every joined person's phone app launches, and
+  each launch checks their reach again on every request.
+
+Their reads run on the owner's server copy. A Member's visits count toward the
+Member's own limit and never the owner's.
+
+See the [Member phone read tests](../../services/sync-relay/src/accountOperationRoutes.test.ts)
+and the [joined workspace list tests](../../services/sync-relay/src/accountWorkspaceRoutes.test.ts).
+
 ## Dataset hosts commit authority
 
 A transactional dataset's checkpoint and committed journal are authoritative.

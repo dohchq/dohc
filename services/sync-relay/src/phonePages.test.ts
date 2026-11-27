@@ -196,7 +196,7 @@ it("refuses a desktop sign-in, another account, and a workspace hidden from the 
   expect(await f.open(binding.currentPath, "owner-1:desktop-1:desktop")).toEqual(notFound);
   expect(await f.open(binding.currentPath, "owner-2:phone-2:phone")).toEqual(notFound);
   f.storage.setShowOnPhone({
-    ownerUserId: "owner-1",
+    userId: "owner-1",
     workspaceId: scope.workspaceId,
     showOnPhone: false,
   });
@@ -381,7 +381,7 @@ it("opens a page for the owner's browser through share-web, whatever Show on pho
   const f = await phone();
   f.ready();
   f.storage.setShowOnPhone({
-    ownerUserId: "owner-1",
+    userId: "owner-1",
     workspaceId: scope.workspaceId,
     showOnPhone: false,
   });

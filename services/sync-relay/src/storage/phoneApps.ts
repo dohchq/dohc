@@ -52,13 +52,10 @@ export interface PhoneAppBinding {
   approvalId: string;
 }
 
-/** Launches to end: every field given must match. */
-export interface PhoneAppLaunchScope {
-  userId: string;
-  sessionId?: string;
-  workspaceId?: string;
-  publicationId?: string;
-}
+/** One person's launches, or with `joined`, those of everyone in the workspace but its owner. */
+export type PhoneAppLaunchScope =
+  | { userId: string; sessionId?: string; workspaceId?: string; publicationId?: string }
+  | { joined: true; workspaceId: string; publicationId?: string };
 
 const db = (storage: SyncRelayStorage) => (storage as StorageContext).db;
 const context = (storage: SyncRelayStorage) => storage as StorageContext;
@@ -231,7 +228,8 @@ export function redeemPhoneAppGrant(
 
 /**
  * An unexpired launch whose approval still stands at the launch's revision,
- * for the account's publication or a Member app in its workspace, while it is
+ * for the account's publication, one of the workspace's official apps or a
+ * Member app in its workspace, while it is
  * active at that revision. One statement and no transaction of its own, so it
  * runs inside a commit.
  */
@@ -248,7 +246,7 @@ export function phoneAppLaunch(
          AND a.authority_revision = l.authority_revision
          AND p.workspace_id = l.workspace_id
          AND p.active = 1 AND p.authority_revision = l.authority_revision
-         AND (p.owner_user_id = l.user_id OR EXISTS (SELECT 1 FROM sync_relay_member_apps m
+         AND (p.owner_user_id = l.user_id OR p.audience = 'workspace' OR EXISTS (SELECT 1 FROM sync_relay_member_apps m
            WHERE m.publication_id = p.publication_id AND m.workspace_id = l.workspace_id))`,
     )
     .get(launchHash, nowMs);
@@ -275,13 +273,14 @@ export function deletePhoneAppLaunches(
   return launchHashes(
     db(storage)
       .prepare(
-        `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE user_id = ?1
+        `DELETE FROM ${PHONE_APP_LAUNCHES} WHERE (?1 IS NULL OR user_id = ?1)
+       AND (?1 IS NOT NULL OR user_id IS NOT (SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?3))
        AND (?2 IS NULL OR session_id = ?2) AND (?3 IS NULL OR workspace_id = ?3) AND (?4 IS NULL OR publication_id = ?4)
        RETURNING token_hash, launch_host`,
       )
       .all(
-        scope.userId,
-        scope.sessionId ?? null,
+        "joined" in scope ? null : scope.userId,
+        ("sessionId" in scope ? scope.sessionId : undefined) ?? null,
         scope.workspaceId ?? null,
         scope.publicationId ?? null,
       ),

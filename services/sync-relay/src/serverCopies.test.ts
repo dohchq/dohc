@@ -112,6 +112,7 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
 
 const phone = (caller = "session-1", signal = new AbortController().signal): CopyVisitor => ({
   reason: "account",
+  userId: OWNER,
   caller,
   signal,
   phone: true,
@@ -119,6 +120,7 @@ const phone = (caller = "session-1", signal = new AbortController().signal): Cop
 // An account visit "Show on phone" does not limit, as an agent's will be.
 const agent = (caller = "agent:connection-1"): CopyVisitor => ({
   reason: "account",
+  userId: OWNER,
   caller,
   signal: new AbortController().signal,
   phone: false,
@@ -151,7 +153,7 @@ describe("an account's visits to the server's copies", () => {
 
   it("refuses a phone's visit to a workspace hidden from the phone, and admits an account visit the phone setting does not limit", async () => {
     const storage = await relay(["budget"]);
-    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "budget", showOnPhone: false });
+    storage.setShowOnPhone({ userId: OWNER, workspaceId: "budget", showOnPhone: false });
     const run = await copies(storage);
     const error = await refusal(
       run.copies.withServerCopy(OWNER, "budget", phone(), async () => undefined),
@@ -195,6 +197,44 @@ describe("an account's visits to the server's copies", () => {
       .prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'")
       .run();
     expect((await refusal(visit)).code).toBe("not_found");
+  });
+});
+
+describe("a Member's visits to the owner's copies", () => {
+  const ben = (caller: string, signal = new AbortController().signal): CopyVisitor => ({
+    reason: "account",
+    userId: "ben",
+    caller,
+    signal,
+    phone: true,
+  });
+
+  it("count toward the Member's own limit and never the owner's, and outlast the owner hiding it", async () => {
+    const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT }, (_, n) => `w-${n}`);
+    const storage = await relay(ids);
+    storage.setShowOnPhone({ userId: OWNER, workspaceId: "w-0", showOnPhone: false });
+    const run = await copies(storage);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const visits = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT }, (_, n) =>
+      run.copies.withServerCopy(OWNER, "w-0", ben(`ben-${n}`), () => held),
+    );
+    await vi.waitFor(() => expect(run.copies.replica("w-0")).toBeDefined());
+    const refused = await refusal(
+      run.copies.withServerCopy(OWNER, "w-1", ben("ben-more"), async () => undefined),
+    );
+    expect(refused.message).toContain("Your account is already reading");
+    for (const workspaceId of ids.slice(1))
+      expect(
+        await run.copies.withServerCopy(
+          OWNER,
+          workspaceId,
+          phone(),
+          async (copy) => copy.workspaceId,
+        ),
+      ).toBe(workspaceId);
+    release();
+    await Promise.all(visits);
   });
 });
 
@@ -257,13 +297,33 @@ describe("the hold a read keeps on its copy", () => {
     expect(run.wanted().has("held")).toBe(false);
   });
 
+  it("keeps the owner's hold when a Member who read the copy ends theirs", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    await read(run, "trip");
+    const member: CopyVisitor = {
+      reason: "account",
+      userId: "ben",
+      caller: "ben-phone",
+      signal: new AbortController().signal,
+      phone: true,
+    };
+    await run.copies.withServerCopy(OWNER, "trip", member, async () => {
+      run.copies.hold("ben", "trip");
+    });
+    run.copies.endHold("trip", "ben");
+    await vi.waitFor(() => expect(run.wanted().get("trip")).toEqual(["account"]));
+    run.copies.endHold("trip", OWNER);
+    await vi.waitFor(() => expect(run.wanted().has("trip")).toBe(false));
+  });
+
   it("ends when the workspace stops showing on the phone", async () => {
     const storage = await relay();
     const run = await copies(storage);
     await read(run, "trip");
-    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: false });
-    run.copies.endHold("trip");
-    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
+    storage.setShowOnPhone({ userId: OWNER, workspaceId: "trip", showOnPhone: false });
+    run.copies.endHold("trip", OWNER);
+    storage.setShowOnPhone({ userId: OWNER, workspaceId: "trip", showOnPhone: true });
     await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
     expect(run.wanted()).toEqual(new Map());
   });
@@ -318,7 +378,7 @@ describe("the copies the phone's unsent writes keep", () => {
         nowMs: n,
       });
     }
-    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "hidden", showOnPhone: false });
+    storage.setShowOnPhone({ userId: OWNER, workspaceId: "hidden", showOnPhone: false });
     let atStart: Array<[string, readonly CopyReason[]]> = [];
     let wanted: ReadonlyMap<string, readonly CopyReason[]> = new Map();
     const started = await startServerCopies({

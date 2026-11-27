@@ -54,7 +54,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
   storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "diary", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "bens", ownerUserId: "ben", createdAtMs: 1 });
-  storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "diary", showOnPhone: false });
+  storage.setShowOnPhone({ userId: "ana", workspaceId: "diary", showOnPhone: false });
   if (options.seedFull)
     seedFullNoticeList(storage, {
       workspaceId: "trip",
@@ -911,7 +911,7 @@ it("holds a caught-up read without polling and answers the next committed change
   parked = parks(1);
   held = read(`scope=phone&cursor=3&wait=${MAX}`);
   await parked;
-  storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+  storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false });
   post("now-hidden");
   expect(await page(await held)).toMatchObject({ notices: [], nextCursor: "4" });
 });
@@ -1088,7 +1088,7 @@ it("reads the page after its last sign-in check, so a scope change during that c
   const held = holdSession(2);
   const reading = read("scope=phone&cursor=0");
   await held.reached;
-  storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+  storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false });
   post("n-2");
   held.release();
   expect(await page(await reading)).toMatchObject({ notices: [], nextCursor: "2" });

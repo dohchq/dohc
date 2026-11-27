@@ -367,7 +367,7 @@ const changes: Array<[string, Change]> = [
     "Show on phone turns off",
     (f) => {
       f.storage.setShowOnPhone({
-        ownerUserId: "owner",
+        userId: "owner",
         workspaceId: "w-owner",
         showOnPhone: false,
       });

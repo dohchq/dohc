@@ -422,9 +422,9 @@ it("lists and launches an app that requests nothing in the workspace, and serves
   // Another account can't see it.
   expect((await r.op("phone:bob", "appReview", { publicationId: app })).status).toBe(404);
   // Nor can the phone while the workspace is hidden from it.
-  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+  r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false });
   expect(await r.descriptor(launchId, app)).toBe(404);
-  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: true });
+  r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true });
   expect(await r.descriptor(launchId, app)).toBe(200);
   // Nor once the operator takes it down.
   r.storage.disableAppPublication({
@@ -609,7 +609,7 @@ it("ends a launch, on the relay and in share-web, at each way its reach ends", a
   ];
   for (const [label, action] of ends) {
     r.revoked.clear();
-    r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: true });
+    r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true });
     const launchId = await r.launch();
     expect(await r.descriptor(launchId), label).toBe(200);
     r.ended.length = 0;
@@ -619,14 +619,14 @@ it("ends a launch, on the relay and in share-web, at each way its reach ends", a
     expect(await r.descriptor(launchId), label).toBe(404);
   }
   // Nothing open, nothing sent.
-  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: true });
+  r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true });
   r.ended.length = 0;
   expect(
     (await r.op("phone:ana", "appRevoke", { publicationId: r.publicationId })).body.result,
   ).toEqual({ revoked: true });
   expect(r.ended).toEqual([]);
   // Withdrawing moves the revision, so the launch's approval no longer covers the app.
-  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: true });
+  r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: true });
   const launchId = await r.launch();
   r.ended.length = 0;
   await r.h(
@@ -706,7 +706,7 @@ it("keeps a launch's reach through its backend work, so revoking while it waits 
   const worker = r.holdWorker();
   const running = r.shareWeb("invoke", { launchId: held, body: invokeBody });
   await worker.reached;
-  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+  r.storage.setShowOnPhone({ userId: "ana", workspaceId: "trip", showOnPhone: false });
   worker.release();
   expect((await running).status).toBe(404);
   expect(r.commits()).toBe(1);
@@ -724,4 +724,63 @@ it("commits nothing once the phone's sign-in ends while the worker runs", async 
   expect((await running).status).toBe(404);
   // The pre-commit check read the session table after the worker returned.
   expect(r.commits()).toBe(0);
+});
+
+it("shows a Member the workspace's official apps, never the owner's link apps, and ends their launches when they leave", async () => {
+  const r = await relay();
+  expect(
+    r.storage.inviteWorkspaceMember({
+      workspaceId: "trip",
+      actorUserId: "ana",
+      workspaceName: "Lisbon",
+      email: "cara@dohc.test",
+      recipientUserId: "cara",
+      newMemberId: () => "member-cara",
+      newGrantId: () => "grant-cara",
+      newShareId: () => "share-trip",
+      nowMs: 2_000,
+    }),
+  ).toMatchObject({ ok: true });
+  expect((await r.op("phone:cara", "apps", {})).body.result).toEqual({
+    apps: [],
+    nextCursor: null,
+  });
+  const linkApp = await r.op("phone:cara", "appReview", { publicationId: r.publicationId });
+  expect(linkApp.status).toBe(404);
+  (r.storage as StorageContext).db
+    .prepare(
+      "UPDATE sync_relay_app_publications SET audience='workspace', grant_id=NULL, grant_generation=NULL WHERE publication_id=?",
+    )
+    .run(r.publicationId);
+  expect((await r.op("phone:cara", "apps", {})).body.result).toEqual({
+    apps: [expect.objectContaining({ publicationId: r.publicationId, approved: false })],
+    nextCursor: null,
+  });
+  expect(
+    (
+      await r.op("phone:cara", "appSource", {
+        publicationId: r.publicationId,
+        path: "docs/app/index.ts",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await r.op("phone:cara", "appApprove", {
+        publicationId: r.publicationId,
+        authorityRevision: 1,
+      })
+    ).status,
+  ).toBe(200);
+  const grant = (
+    await r.op("phone:cara", "appLaunch", { publicationId: r.publicationId, authorityRevision: 1 })
+  ).body.result.grant;
+  const launchId = (await r.redeem(grant))!;
+  expect(await r.descriptor(launchId)).toBe(200);
+  r.ended.length = 0;
+  const removed = await r.h(request("ana", "/sync/trip/members/member-cara/remove", jsonBody({})));
+  expect(removed.status, await removed.clone().text()).toBe(200);
+  expect(r.ended).toEqual([digest(launchId)]);
+  expect(await r.descriptor(launchId)).toBe(404);
+  expect((await r.op("phone:cara", "apps", {})).status).toBe(404);
 });

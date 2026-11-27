@@ -40,9 +40,11 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
     accountFeedThreadPaths: () => ({
       created: false,
       linkedObjectId: null,
+      channelWireId: null,
       lastKnownPath: null,
       named: [],
     }),
+    findChannelCreateKind: () => null,
   };
   const waits = createAccountFeedWaits(storage, new DiscussionActivityHub());
   const poll = async () => {
@@ -56,6 +58,7 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
         since,
         holdMs: 0,
         signal: new AbortController().signal,
+        member: () => null,
         authorize: async () => {},
       });
       if ("replace" in answer) throw new Error("The feed answered replace.");
@@ -69,9 +72,11 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
 
 const moment = (relaySeq: number, objectId: string, path: string): AccountFeedLogRow => ({
   relaySeq,
+  opKind: "moment.append",
   chat: false,
   threadId: null,
-  moment: { objectId, path, previousPath: null },
+  channelWireId: null,
+  moment: { objectId, versionId: "main", path, previousPath: null },
 });
 const range = <Row>(from: number, to: number, row: (position: number) => Row) =>
   Array.from({ length: to - from + 1 }, (_, index) => row(from + index));

@@ -1571,7 +1571,7 @@ describe("the automation replicas", () => {
     engine.receipts(new Map([receipt("lost", 1, "pending")]));
     await pass();
     expect(outcome(raw, "lost")[0], "the copy waits to see its push").toBe("recorded");
-    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    storage.setShowOnPhone({ userId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
     const handle = running.replica(WORKSPACE)!.workspace;
     const before = engine.sent.length;
@@ -1592,7 +1592,7 @@ describe("the automation replicas", () => {
     expect(folders(root)).toEqual([]);
     expect(storage.listAutomationWorkspaces()).toEqual([]);
 
-    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: true });
+    storage.setShowOnPhone({ userId: "owner", workspaceId: WORKSPACE, showOnPhone: true });
     const reads = count(engine, "sync.ordinary.publicationState");
     wanted = new Map([[WORKSPACE, ["account"]]]);
     await pass();
@@ -1615,7 +1615,7 @@ describe("the automation replicas", () => {
     await writeFile(sentinel, "");
     phoneWrite(storage, "unsent");
     engine.receipts(new Map([receipt("unsent", 1, "pending")]));
-    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    storage.setShowOnPhone({ userId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
     engine.failFolderCloses(1);
     await copy.pass();
@@ -1785,7 +1785,7 @@ describe("the automation replicas", () => {
     });
     const engine = fakeEngine();
     const { running, root, pass } = await stepped(storage, () => automation([WORKSPACE, "ledger"]));
-    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    storage.setShowOnPhone({ userId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     phoneWrite(storage, "sent");
     accept(raw, "sent", 1);
     await pass();
@@ -2184,7 +2184,7 @@ describe("the automation replicas", () => {
     ).not.toContain("chats.messages.send");
     expect(outcome(raw, "unsent")[0], "the write stays unsent").not.toBe("refused");
 
-    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    storage.setShowOnPhone({ userId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
     await restarted.pass();
     expect(outcome(raw, "unsent")).toEqual([

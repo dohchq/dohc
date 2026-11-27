@@ -44,9 +44,17 @@ export function accountFeedStanding(
  */
 export interface AccountFeedLogRow {
   relaySeq: number;
+  opKind: string;
   chat: boolean;
   threadId: string | null;
-  moment: { objectId: string; path: string | null; previousPath: string | null } | null;
+  /** The Group a chat row names, when its payload names one. */
+  channelWireId: string | null;
+  moment: {
+    objectId: string;
+    versionId: string;
+    path: string | null;
+    previousPath: string | null;
+  } | null;
 }
 
 /** The workspace's log rows in (after, through], at most `limit`, in log order. */
@@ -57,11 +65,14 @@ export function accountFeedLogRows(
   return storage.readTx(() =>
     storage.db
       .prepare(
-        `SELECT l.relay_seq, l.op_kind GLOB 'chat.*' AS chat,
+        `SELECT l.relay_seq, l.op_kind, l.op_kind GLOB 'chat.*' AS chat,
        CASE WHEN l.op_kind GLOB 'chat.*' AND json_valid(l.payload_json) THEN json_extract(l.payload_json, '$.threadId') END AS thread_id,
-       m.object_id, m.path,
+       CASE WHEN l.op_kind GLOB 'chat.*' AND json_valid(l.payload_json) THEN json_extract(l.payload_json,
+         CASE l.op_kind WHEN 'chat.channel.create' THEN '$.wireId' ELSE '$.channelWireId' END) END AS channel_wire_id,
+       m.object_id, m.version_id, m.path,
        (SELECT p.path FROM sync_relay_object_moments p WHERE p.workspace_id = m.workspace_id AND p.object_id = m.object_id
-          AND p.relay_seq < m.relay_seq AND p.path IS NOT NULL ORDER BY p.relay_seq DESC LIMIT 1) AS previous_path
+          AND p.version_id = m.version_id AND p.relay_seq < m.relay_seq AND p.path IS NOT NULL
+          ORDER BY p.relay_seq DESC LIMIT 1) AS previous_path
      FROM sync_relay_log l INDEXED BY idx_sync_relay_log_page
      LEFT JOIN sync_relay_object_moments m ON m.workspace_id = l.workspace_id AND m.relay_seq = l.relay_seq
        AND m.object_id = CASE WHEN json_valid(l.payload_json) THEN json_extract(l.payload_json, '$.objectId') END
@@ -71,13 +82,19 @@ export function accountFeedLogRows(
       .all(input.workspaceId, input.after, input.through, input.limit)
       .map((row) => ({
         relaySeq: Number(row.relay_seq),
+        opKind: String(row.op_kind),
         chat: Boolean(row.chat),
         threadId:
           typeof row.thread_id === "string" && row.thread_id.length > 0 ? row.thread_id : null,
+        channelWireId:
+          typeof row.channel_wire_id === "string" && row.channel_wire_id.length > 0
+            ? row.channel_wire_id
+            : null,
         moment:
           typeof row.object_id === "string"
             ? {
                 objectId: row.object_id,
+                versionId: String(row.version_id),
                 path: typeof row.path === "string" ? row.path : null,
                 previousPath: typeof row.previous_path === "string" ? row.previous_path : null,
               }
@@ -147,6 +164,8 @@ export function threadPathsInTransaction(
 ): {
   created: boolean;
   linkedObjectId: string | null;
+  /** The Group a thread on no file was created in, as its create names it. */
+  channelWireId: string | null;
   lastKnownPath: string | null;
   named: string[];
 } {
@@ -172,6 +191,7 @@ export function threadPathsInTransaction(
   return {
     created: create !== undefined,
     linkedObjectId: objectId ?? null,
+    channelWireId: text(create?.channelWireId)[0] ?? null,
     lastKnownPath:
       (objectId === undefined ? undefined : objectLastKnownPath(storage, workspaceId, objectId)) ??
       null,
