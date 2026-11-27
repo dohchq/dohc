@@ -29,6 +29,11 @@
         "messageId"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
     }
   },
   {
@@ -64,6 +69,11 @@
         "replacement"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
     }
   },
   {
@@ -82,6 +92,11 @@
         "workspace"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -100,6 +115,11 @@
         "workspace"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -108,6 +128,11 @@
       "type": "object",
       "properties": {},
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -151,6 +176,11 @@
         "idempotencyKey"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -194,6 +224,11 @@
         "idempotencyKey"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -229,6 +264,11 @@
         "channel"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -269,6 +309,11 @@
         "workspace"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -293,6 +338,11 @@
         "path"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -306,16 +356,26 @@
           "maxLength": 256,
           "description": "A workspace id from dohc_list_workspaces."
         },
+        "path": {
+          "description": "The file's path relative to the workspace, as dohc_list_files lists paths.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
         "blobSha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         }
       },
       "required": [
-        "workspace",
-        "blobSha256"
+        "workspace"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -337,6 +397,11 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
@@ -440,6 +505,11 @@
         "files"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
     }
   }
 ]

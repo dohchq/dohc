@@ -2114,6 +2114,116 @@ describe("a personal agent's reads", () => {
     f.fence.changePassword(OWNER);
     await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
   });
+
+  it("reads a current file by its path, also one past the file list's limit, with its kind", async () => {
+    const f = await fixture({ linkCurrentFileLimit: 1 });
+    const agent = await signIn(f);
+    await putBlob(f.h, OWNER, WS_A, "first");
+    await putBlob(f.h, OWNER, WS_A, "PNG");
+    await putBlob(f.h, OWNER, WS_A, "spaced");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/a.md", "first", { originSeq: 0 }),
+      moment("notes/b.png", "PNG", {
+        originSeq: 1,
+        payload: { payloadAfterContentKind: "binary" },
+      }),
+      moment("notes/ lead.md ", "spaced", { originSeq: 2 }),
+    ]);
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: WS_A }));
+    expect(listed).toMatchObject({ truncated: true, files: [{ path: "notes/ lead.md " }] });
+    const spaced = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/ lead.md " });
+    expect(await spaced.text()).toBe("spaced");
+
+    const read = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/b.png" });
+    expect(read.status).toBe(200);
+    expect(read.headers.get("x-dohc-content-kind")).toBe("binary");
+    expect(await read.text()).toBe("PNG");
+    const text = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/a.md" });
+    expect(text.headers.get("x-dohc-content-kind")).toBe("text");
+    expect(await text.text()).toBe("first");
+  });
+
+  it("refuses a path that holds no current file it reads", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await putBlob(f.h, OWNER, WS_A, "hello");
+    await putBlob(f.h, OWNER, WS_A, "KEY=value");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/a.md", "hello", { originSeq: 0 }),
+      moment("config/.env.local", "KEY=value", { originSeq: 1 }),
+    ]);
+    await putBlob(f.h, OWNER, WS_B, "in b");
+    await appendLog(f.h, OWNER, WS_B, [moment("notes/b.md", "in b", { originSeq: 0 })]);
+
+    for (const path of ["config/.env.local", "notes", "notes/", "notes/missing.md", "/notes/a.md"])
+      await expectRefused(await tool(f, agent, "file", { workspaceId: WS_A, path }));
+    await expectRefused(await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/b.md" }));
+    await expectCode(
+      await tool(f, agent, "file", { workspaceId: WS_B, path: "notes/b.md" }),
+      403,
+      "personal_agent_out_of_reach",
+    );
+    for (const body of [
+      { workspaceId: WS_A },
+      { workspaceId: WS_A, path: "" },
+      { workspaceId: WS_A, path: 7 },
+      { workspaceId: WS_A, path: "notes/a.md\u0000" },
+      { workspaceId: WS_A, path: "notes/a.md", sha256: "a".repeat(64) },
+    ])
+      expect((await tool(f, agent, "file", body)).status).toBe(400);
+  });
+
+  it("ends a stream by path at the next chunk once its access ends", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    const content = "z".repeat(200_000);
+    await putBlob(f.h, OWNER, WS_A, content);
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/large.md", content, { originSeq: 0, objectId: "large" }),
+    ]);
+    const open = async () => {
+      const response = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/large.md" });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      expect((await reader.read()).value?.byteLength).toBe(64 * 1024);
+      return reader;
+    };
+
+    const narrowed = await open();
+    await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }]));
+    await expect(narrowed.read()).rejects.toThrow("personal agent access changed during stream");
+
+    await ok(await setReach(f, agent, BOTH_VIEW));
+    const reset = await open();
+    f.fence.changePassword(OWNER);
+    await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("ends a stream by path at the next chunk once the path holds other bytes", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const content = "z".repeat(1_000_000);
+    await putBlob(f.h, OWNER, WS_A, content);
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/large.md", content, { originSeq: 0, objectId: "large" }),
+    ]);
+    const response = await tool(f, agent, "file", { workspaceId: WS_A, path: "notes/large.md" });
+    const replaced = response.body!.getReader();
+    expect((await replaced.read()).value?.byteLength).toBe(64 * 1024);
+    await putBlob(f.h, OWNER, WS_A, "short");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/large.md", "short", {
+        originSeq: 1,
+        objectId: "large",
+        beforePath: "notes/large.md",
+        beforeContent: content,
+      }),
+    ]);
+    const drain = async () => {
+      while (!(await replaced.read()).done);
+    };
+    await expect(drain()).rejects.toMatchObject({ code: "not_found" });
+  });
 });
 
 // The agent's person is a member of OTHER's workspace, which members know as "Community".
@@ -2802,6 +2912,27 @@ describe("a personal agent in a workspace its person joined", () => {
     await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("reads a file by path only where its person reads, and ends the stream once a rule hides its folder", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    await folderRule(f, "hidden", HIDING_RULE);
+    await communityWrite(f, "plans/large.md", "z".repeat(200_000));
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    await expectRefused(
+      await tool(f, agent, "file", { workspaceId: COMMUNITY, path: "hidden/b.md" }),
+    );
+    const response = await tool(f, agent, "file", {
+      workspaceId: COMMUNITY,
+      path: "plans/large.md",
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value?.byteLength).toBe(64 * 1024);
+    await folderRule(f, "plans", HIDING_RULE);
+    await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
+  });
+
   it("answers a held wait without a message whose Group or file was hidden while it held", async () => {
     const f = await fixture();
     joinCommunity(f);
@@ -2933,6 +3064,7 @@ describe("a personal agent in a workspace its person joined", () => {
     for (const [action, fields] of [
       ["files", {}],
       ["blob", { sha256: sha }],
+      ["file", { path: "plans/a.md" }],
       ["groups", {}],
       ["chat", { channelWireId: "wire-team" }],
       ["discussion", { threadId: "thread-plan" }],

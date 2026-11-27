@@ -211,6 +211,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       action === "discussion" ||
       action === "files" ||
       action === "blob" ||
+      action === "file" ||
       action === "collection-writes"
     ) {
       return { route: "personal-agent-tools", action };

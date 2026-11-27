@@ -68,6 +68,7 @@ export type PersonalAgentToolRoute = {
     | "discussion"
     | "files"
     | "blob"
+    | "file"
     | "collection-writes";
 };
 
@@ -597,6 +598,71 @@ export function createPersonalAgentToolRoutes(input: {
       });
     };
     const byteLength = reachedLength(reachIn(authority, workspaceId));
+    return stream(
+      authority,
+      workspaceId,
+      sha256,
+      byteLength,
+      {},
+      signal,
+      (reach) => reachedLength(reach) === byteLength,
+    );
+  }
+
+  function file(
+    authority: PersonalAuthority,
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Response {
+    fields(body, ["workspaceId", "path"], []);
+    const workspaceId = parseWorkspaceId(body.workspaceId);
+    const path = body.path;
+    if (
+      typeof path !== "string" ||
+      !path ||
+      path.length > MAX_SHARE_PATH_CHARS ||
+      /[\u0000-\u001f\u007f]/u.test(path)
+    )
+      throw badRequest("path is invalid");
+    const reads = (reach: PersonalReach) =>
+      pathLevel(workspaceFileReach(reach.selector), path) !== null;
+    const holds = (sha256: string) =>
+      storage.currentFileBlobByteLength({
+        workspaceId,
+        versionId: MAIN_VERSION_ID,
+        selectorPaths: [path],
+        sha256,
+        epochLogFloor: storage.getEpochLogFloor(workspaceId),
+        visible: (candidate) => candidate === path,
+      });
+    if (!reads(reachIn(authority, workspaceId))) throw notFound();
+    const [found] = storage.readCurrentFileState({
+      workspaceId,
+      versionId: MAIN_VERSION_ID,
+      selectorPaths: [path],
+      limit: 1,
+    }).files;
+    if (found?.path !== path) throw notFound();
+    return stream(
+      authority,
+      workspaceId,
+      found.blobSha256,
+      holds(found.blobSha256),
+      { "x-dohc-content-kind": found.contentKind },
+      signal,
+      (reach) => reads(reach) && holds(found.blobSha256) !== null,
+    );
+  }
+
+  function stream(
+    authority: PersonalAuthority,
+    workspaceId: string,
+    sha256: string,
+    byteLength: number | null,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+    reached: (reach: PersonalReach) => boolean,
+  ): Response {
     if (
       byteLength === null ||
       !Number.isSafeInteger(byteLength) ||
@@ -627,6 +693,7 @@ export function createPersonalAgentToolRoutes(input: {
         {
           "content-length": String(byteLength),
           "content-type": "application/octet-stream",
+          ...headers,
         },
         {
           register: (terminate) => {
@@ -640,7 +707,7 @@ export function createPersonalAgentToolRoutes(input: {
           },
           guard: () => {
             const read = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
-            if (!read.ok || reachedLength(read.reach) !== byteLength) throw notFound();
+            if (!read.ok || !reached(read.reach)) throw notFound();
           },
           signal,
         },
@@ -1018,6 +1085,8 @@ export function createPersonalAgentToolRoutes(input: {
         return files(await linkAuthority.freshPersonal(authority), body);
       case "blob":
         return blob(authority, body, request.signal);
+      case "file":
+        return file(authority, body, request.signal);
       default:
         throw notFound();
     }

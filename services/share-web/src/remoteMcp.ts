@@ -817,6 +817,8 @@ function buildServer(
 type LiveDocumentOptions = Parameters<typeof remoteLiveDocument>[0];
 const livePath = () => z.string().max(1024).regex(/\.md$/i);
 const liveEdit = () => ({ find: z.string().min(1).max(8_000), replacement: z.string().max(8_000) });
+const LIVE_READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
+const LIVE_EDIT = { readOnlyHint: false, destructiveHint: true, idempotentHint: false };
 const LIVE_EDIT_DESCRIPTION =
   "Replace text in an existing live Markdown document. Read it first. Supply find as document text without Markdown syntax: use world for **world**. Text must occur once within one formatting run. On outcome unknown, re-read before retrying. Applied means durable host acknowledgement, not Markdown settlement.";
 
@@ -842,6 +844,7 @@ export function registerLiveDocumentTools(
       "dohc_read_document",
       {
         description: readDescription,
+        annotations: LIVE_READ,
         inputSchema: z.object({ workspace: workspaceArg, path: livePath() }),
       },
       async ({ workspace, path }) => run(options(workspace), path),
@@ -850,6 +853,7 @@ export function registerLiveDocumentTools(
       "dohc_edit_document",
       {
         description: LIVE_EDIT_DESCRIPTION,
+        annotations: LIVE_EDIT,
         inputSchema: z.object({ workspace: workspaceArg, path: livePath(), ...liveEdit() }),
       },
       async ({ workspace, path, find, replacement }) =>
