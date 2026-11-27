@@ -500,6 +500,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const selfTestReservations = new Set<string>();
   // End records of self-tests whose runner has exited. stop() waits for them.
   const selfTestEnds = new Set<Promise<void>>();
+  // Sessions whose runner has exited, still being marked free. stop() waits for them.
+  const memoryEnds = new Set<Promise<void>>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
   // notice that Restricted Mode holds a request, and main's dialog on their
@@ -1391,9 +1393,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runReservations.delete(workspace.workspaceId);
       if (memory)
         child.onExit(() => {
-          options.agentMemory
-            ?.finish(workspace.workspaceId, agent.id, memory.sessionId)
-            .catch(reportError);
+          const ended = Promise.resolve(
+            options.agentMemory?.finish(workspace.workspaceId, agent.id, memory.sessionId),
+          )
+            .catch(reportError)
+            .finally(() => memoryEnds.delete(ended));
+          memoryEnds.add(ended);
         });
       child.onExit((code, signal) => {
         void enqueue(workspace.workspaceId, async () => {
@@ -2500,17 +2505,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await Promise.all(quitTerminations);
     await Promise.all([
       ...selfTestEnds,
+      ...memoryEnds,
       ...selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)),
     ]);
     await Promise.all([
       ...runWorkspacesToRelease.map(async (live) => {
         try {
           await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
-          if (live.memory) {
-            await options.agentMemory
-              ?.finish(live.workspace.workspaceId, live.claim.run.agentId, live.memory.sessionId)
-              .catch(reportError);
-          }
           await clearLiveAttribution(live);
         } catch (error) {
           reportError(error);

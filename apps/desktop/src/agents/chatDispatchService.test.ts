@@ -1210,11 +1210,9 @@ describe("chatDispatchService", () => {
       await activate(fixture);
       const first = await answer(fixture, "Plan the trip.", false);
       const [, sessionId] = sessionFlags(first.call);
-      vi.useFakeTimers();
       const stopping = fixture.service.stop();
-      await vi.advanceTimersByTimeAsync(APP_QUIT_KILL_GRACE_MS);
+      first.call.process.emitExit(0);
       await stopping;
-      vi.useRealTimers();
       await expect(
         createAgentMemory(() => join(fixture.stateRoot, "agent-memory.json")).take({
           workspaceId: WORKSPACE_ID,
@@ -1223,6 +1221,28 @@ describe("chatDispatchService", () => {
           triggerMessageId: "next-message",
         }),
       ).resolves.toEqual({ sessionId, resume: true });
+    });
+
+    it("starts a new session when a runner outlives dohc's quit", async () => {
+      const fixture = await memoryFixture();
+      await activate(fixture);
+      const first = await answer(fixture, "Plan the trip.", false);
+      const [, sessionId] = sessionFlags(first.call);
+      vi.useFakeTimers();
+      const stopping = fixture.service.stop();
+      await vi.advanceTimersByTimeAsync(APP_QUIT_KILL_GRACE_MS);
+      await stopping;
+      vi.useRealTimers();
+      const next = await createAgentMemory(() => join(fixture.stateRoot, "agent-memory.json")).take(
+        {
+          workspaceId: WORKSPACE_ID,
+          agentId: "default",
+          memoryId: MEMORY_ID,
+          triggerMessageId: "next-message",
+        },
+      );
+      expect(next).toEqual({ sessionId: expect.any(String), resume: false });
+      expect(next!.sessionId).not.toBe(sessionId);
     });
 
     it("starts fresh, once, when Claude Code no longer has the session", async () => {
