@@ -426,9 +426,12 @@ test("@two-client a member builds, approves, opens, and shares a Personal app on
     const publication = page.getByTestId("app-publication-dialog");
     const publish = publication.getByTestId("app-publication-approve");
     await expect(publish).toBeEnabled({ timeout: 60_000 });
+    await expect(publication.getByText("Publish for workspace members")).toBeVisible();
     await themed("owner-publish", publication);
     await publish.click();
-    await expect(publish).toHaveCount(0, { timeout: 60_000 });
+    await expect(publication.getByTestId("app-publish-members")).toContainText("Published", {
+      timeout: 60_000,
+    });
     await page.keyboard.press("Escape");
     await expect(publication).toHaveCount(0);
 
