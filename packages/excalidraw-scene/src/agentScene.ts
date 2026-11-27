@@ -489,10 +489,10 @@ function wrapText(text: string, room: number, fontSize: number): string {
           line = joined;
           continue;
         }
-        if (line) lines.push(line);
-        line = undefined;
+        if (line?.trim()) lines.push(line);
+        line = line?.trim() === "" ? `${line} ` : undefined;
         for (const char of word) {
-          if (line && !fits(line + char)) {
+          if (line?.trim() && !fits(line + char)) {
             lines.push(line);
             line = undefined;
           }

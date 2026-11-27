@@ -420,6 +420,16 @@ describe("planDrawingEdit", () => {
     });
     const scene = () => new Map(foldScene(doc).elements.map((element) => [element.id, element]));
     expect(scene().get("steps")).toMatchObject({ text: list });
+    apply(doc, {
+      add: [
+        { id: "narrow", type: "rectangle", x: 0, y: 600, width: 90 },
+        { id: "wide", type: "text", x: 0, y: 0, text: "    WWWW\n WWWW", containerId: "narrow" },
+      ],
+    });
+    const wide = String(scene().get("wide")!.text).split("\n");
+    expect(wide[0]).toMatch(/^ {4}W/u);
+    expect(wide.find((line) => line.trim() === "")).toBeUndefined();
+    expect(wide.filter((line) => line.startsWith(" W"))).toHaveLength(1);
     const arrowLabel = scene().get("said")!;
     expect(String(arrowLabel.text)).toContain("\n");
     expect(numberOf(arrowLabel.width)).toBeLessThanOrEqual(220);
