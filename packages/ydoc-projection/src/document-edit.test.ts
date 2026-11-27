@@ -640,21 +640,6 @@ describe("an edit to a note whose body is one sequence", () => {
     );
   });
 
-  test("edits inside inline code as the first format does, or refuses", () => {
-    const markdown = "``a`b``";
-    const edit = { find: "`b", replacement: "`c" };
-    const doc = sequenceNote(markdown);
-    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
-    let update: Uint8Array | null;
-    try {
-      update = documentEditUpdate(state(doc), edit, open);
-    } catch (error) {
-      expect((error as Error).message).toContain("outside the text to replace");
-      return;
-    }
-    expect(markdownOf(landed(doc, update))).toBe(expected);
-  });
-
   test("asks for the link text when an edit changes only a link's address or title", () => {
     for (const [markdown, find, replacement] of [
       ["See [docs](https://example.com) here.", "example.com", "dohc.app"],
@@ -663,7 +648,7 @@ describe("an edit to a note whose body is one sequence", () => {
       const doc = sequenceNote(markdown!);
       expect(() =>
         documentEditUpdate(state(doc), { find: find!, replacement: replacement! }, open),
-      ).toThrow("Include the link text");
+      ).toThrow("for a link, the link text");
     }
     const doc = sequenceNote("See [docs](https://example.com) here.");
     editedNote(doc, {
@@ -694,6 +679,48 @@ describe("an edit to a note whose body is one sequence", () => {
     expect([...kept].map(letter)).toEqual(before);
   });
 
+  const WIDEST = "| a   | b   |\n| --- | --- |\n| c   | d   |\n| ijk | lmn |";
+  const COLUMNS = "| col1  | col2 | col3  |\n| ----- | ---- | ----- |\n| alpha | beta | gamma |";
+  test.each([
+    ["edits inside inline code", "``a`b``", { find: "`b", replacement: "c" }, "a"],
+    [
+      "edits inside inline code beside a backtick",
+      "``a`b``",
+      { find: "`b", replacement: "`c" },
+      "a`",
+    ],
+    [
+      "edits the first letter of a table's widest cell",
+      WIDEST,
+      { find: "i", replacement: "z" },
+      "abcdjklmn",
+    ],
+    ["replaces a table's widest cell", WIDEST, { find: "ijk", replacement: "xyz" }, "abcdlmn"],
+    ["replaces two whole table cells", TABLE, { find: "c   | d", replacement: "x   | y" }, "abef"],
+  ])(
+    "%s as the first format does and keeps the letters around it",
+    (_case, markdown, edit, kept) => {
+      const doc = sequenceNote(markdown);
+      const letter = (text: string) =>
+        tokens(doc).find((token) => token.kind === "letter" && token.text === text)?.id;
+      const before = [...kept].map(letter);
+      expect(before.every((id) => id !== undefined)).toBe(true);
+      const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+      expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+      expect([...kept].map(letter)).toEqual(before);
+    },
+  );
+
+  test("replaces a rule beside raw blocks in a quote and keeps every block", () => {
+    const markdown = "> ---\n>\n> <aside>a</aside>\n>\n> <aside>b</aside>";
+    const edit = { find: "> ---", replacement: "> x" };
+    const doc = sequenceNote(markdown);
+    const before = ids(doc);
+    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
+    expect(markdownOf(editedNote(doc, edit))).toBe(expected);
+    expect(ids(doc)).toEqual(expect.arrayContaining(before));
+  });
+
   test.each([
     [
       "adds a table column",
@@ -702,24 +729,42 @@ describe("an edit to a note whose body is one sequence", () => {
         find: "| a   | b   |\n| --- | --- |",
         replacement: "| a   | b   | z   |\n| --- | --- | --- |",
       },
+      "adding or removing a table column",
     ],
-    ["edits parts of two table cells", TABLE, { find: "c   | d", replacement: "x   | y" }],
+    [
+      "edits parts of three table cells",
+      COLUMNS,
+      { find: "ta | gam", replacement: "TA | GAM" },
+      "editing parts of several table cells",
+    ],
+    [
+      "edits parts of two table cells",
+      "| alpha beta | gamma delta |\n| ---------- | ----------- |\n| one two    | three four  |",
+      { find: "two    | three", replacement: "TWO    | THREE" },
+      "editing parts of several table cells",
+    ],
     [
       "lifts a block out of a list item",
       "- ```\n  code\n  ```",
       { find: "- \n  ```\n  code\n  ```", replacement: "```\ncode\n```" },
+      "moving a block out of a list item",
     ],
-  ])("%s as the first format does, or says what to do instead", (_case, markdown, edit) => {
-    const doc = sequenceNote(markdown);
-    const expected = markdownOf(edited(markdownToYDoc(markdown), edit, closed));
-    let update: Uint8Array | null;
-    try {
-      update = documentEditUpdate(state(doc), edit, open);
-    } catch (error) {
-      expect((error as Error).message).not.toContain("Read the document again");
-      return;
+  ])("refuses an edit that %s and says what to do instead", (_case, markdown, edit, said) => {
+    expect(() => documentEditUpdate(state(sequenceNote(markdown)), edit, open)).toThrow(said);
+  });
+
+  test("keeps a peer's edit to a cell that an edit to parts of several cells would retype", () => {
+    for (const peer of [
+      { find: "beta", replacement: "BEta" },
+      { find: "beta", replacement: "bXeta" },
+    ]) {
+      const doc = sequenceNote(COLUMNS);
+      const agent = () =>
+        documentEditUpdate(state(doc), { find: "ta | gam", replacement: "TA | GAM" }, open);
+      expect(agent).toThrow("editing parts of several table cells");
+      const expected = markdownOf(edited(markdownToYDoc(COLUMNS), peer, closed));
+      expect(markdownOf(editedNote(doc, peer))).toBe(expected);
     }
-    expect(markdownOf(landed(doc, update))).toBe(expected);
   });
 
   test("refuses formatting a note can't hold together, and keeps bold around inline items", () => {

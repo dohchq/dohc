@@ -69,8 +69,9 @@ const OUTSIDE_REFUSAL =
   "paragraphs in one table cell. Nothing changed. Include that text in the text to replace, or " +
   "ask the person to make this change in dohc.";
 const MARKS_REFUSAL =
-  "This edit changes the formatting of text outside the text to replace, such as a link's " +
-  "address or title. Nothing changed. Include the link text in the text to replace.";
+  "This edit changes the formatting of text outside the text to replace, such as bold or code " +
+  "that starts inside it, or a link's address or title. Nothing changed. Include that text in " +
+  "the text to replace: for a link, the link text.";
 const STRUCTURE_REFUSAL =
   "dohc can't yet write this change to how blocks sit inside each other into a live note, such " +
   "as adding or removing a table column, editing parts of several table cells at once, or " +
@@ -412,7 +413,11 @@ function writeSequenceEdit(
   const kept = middleOf(before, wanted, from, to);
   if (!kept)
     throw new Error(
-      middleOf(before, wanted, from, to, sameLetter) ? MARKS_REFUSAL : OUTSIDE_REFUSAL,
+      columnsChanged(layout.root, target)
+        ? STRUCTURE_REFUSAL
+        : middleOf(before, wanted, from, to, sameLetter)
+          ? MARKS_REFUSAL
+          : OUTSIDE_REFUSAL,
     );
   const attempt = (each: Kept) => {
     const transform =
@@ -420,11 +425,15 @@ function writeSequenceEdit(
       stepsTo(layout.root, target, before, wanted, each, true);
     return transform && { transform, kept: each };
   };
-  const found = attempt(kept) ?? attempt(wholeLines(before, wanted, kept));
+  const lines = wholeLines(before, wanted, kept, {
+    p: keepOf(before, from),
+    s: before.length - to,
+  });
+  const found = attempt(kept) ?? (lines && attempt(lines));
   if (!found) throw new Error(STRUCTURE_REFUSAL);
   const how = howToWriteOrWhy(writing, [found.transform]);
   if ("refused" in how)
-    throw new Error(how.refused === "limit" ? limitRefusal(how.limit) : SHAPE_REFUSAL);
+    throw new Error(how.refused === "limit" ? limitRefusal(how.limit) : STRUCTURE_REFUSAL);
   const doc = writing.sequence.doc!;
   if (how.lines.length > 0) {
     doc.transact(() => giveBoundaries(writing, how.lines));
@@ -514,29 +523,44 @@ function edgesOf(layout: Layout, units: Unit[], match: Match): [number, number] 
   let code = 0xe000;
   while (layout.body.includes(String.fromCharCode(code))) code += 1;
   const marker = String.fromCharCode(code);
-  const marked = (unit: Unit, from: number, to: number) => {
-    const text = layout.root.type.schema.text(marker, unit.node.isBlock ? [] : unit.node.marks);
-    const root = layout.root.replace(from, to, new Slice(Fragment.from(text), 0, 0));
-    const markdown = blockMarkdown(root.child(unit.block), unit.block === 0);
+  const { schema } = layout.root.type;
+  const probed = (unit: Unit, from: number, to: number, put: ProseMirrorNode) => {
+    const { start } = layout.chunks[unit.block]!;
+    const root = unlessRangeError(
+      () => layout.root.replace(from, to, new Slice(Fragment.from(put), 0, 0)),
+      null,
+    );
+    const markdown = root ? blockMarkdown(root.child(unit.block), unit.block === 0) : "";
     const at = markdown.indexOf(marker);
-    if (at < 0 || at !== markdown.lastIndexOf(marker)) throw new Error(OUTSIDE_REFUSAL);
-    return layout.chunks[unit.block]!.start + at;
+    const exact =
+      at >= 0 &&
+      at === markdown.lastIndexOf(marker) &&
+      markdown.slice(0, at) === layout.body.slice(start, start + at);
+    return exact ? start + at : -1;
   };
-  const leafBlock = (at: number) => units[at]!.node.isBlock && !units[at]!.node.isTextblock;
-  const inBlock = (at: number, block: number) => units[at]?.block === block;
+  const contentOf = (unit: Unit) => probed(unit, unit.pos + 1, unit.pos + 1, schema.text(marker));
   const startOf = (at: number): number => {
     const unit = units[at]!;
-    if (unit.letter !== undefined) return marked(unit, unit.pos, unit.pos + 1);
-    if (!unit.node.isBlock) return marked(unit, unit.pos, unit.pos);
-    if (unit.node.isTextblock) return marked(unit, unit.pos + 1, unit.pos + 1);
-    if (inBlock(at - 1, unit.block) && !leafBlock(at - 1)) return endOf(at - 1);
-    return layout.chunks[unit.block]!.start;
+    if (unit.node.isTextblock) {
+      const content = contentOf(unit);
+      if (content >= 0) return content;
+      return units[at + 1]?.block === unit.block ? startOf(at + 1) : layout.chunks[unit.block]!.end;
+    }
+    const end = unit.pos + (unit.letter === undefined ? unit.node.nodeSize : 1);
+    const text = schema.text(marker, unit.node.isBlock ? [] : unit.node.marks);
+    const put = unit.node.isBlock ? schema.nodes.paragraph!.create(null, text) : text;
+    const replaced = probed(unit, unit.pos, end, put);
+    const found =
+      replaced >= 0 || unit.node.isBlock ? replaced : probed(unit, unit.pos, unit.pos, text);
+    if (found < 0) throw new Error(OUTSIDE_REFUSAL);
+    return found;
   };
   const endOf = (at: number): number => {
     const unit = units[at]!;
-    if (unit.letter !== undefined) return startOf(at) + 1;
-    if (!leafBlock(at)) return marked(unit, after(unit), after(unit));
-    return inBlock(at + 1, unit.block) ? startOf(at + 1) : layout.chunks[unit.block]!.end;
+    if (!unit.node.isTextblock) return startOf(at) + 1;
+    const content = contentOf(unit);
+    if (content >= 0) return content;
+    return at > base(unit.block) ? endOf(at - 1) : layout.chunks[unit.block]!.start;
   };
   const firstIn = (block: number, test: (at: number) => boolean) => {
     let [low, high] = [base(block), base(block + 1)];
@@ -568,7 +592,7 @@ function middleOf(
   let s = 0;
   while (s < least && alike(before[n - 1 - s]!, wanted[m - 1 - s]!)) s += 1;
   if (s > 0 && /[\uDC00-\uDFFF]/u.test(before[n - s]!.letter ?? "")) s -= 1;
-  const keep = from > 0 && before[from - 1]!.node.isBlock ? from - 1 : from;
+  const keep = keepOf(before, from);
   if (p < keep || s < n - to || m < keep + n - to) return null;
   p = Math.min(p, least - (n - to));
   s = Math.min(s, least - p);
@@ -583,11 +607,26 @@ function middleOf(
   return { p, s };
 }
 
-function wholeLines(before: Unit[], wanted: Unit[], { p, s }: Kept): Kept {
+const keepOf = (before: Unit[], from: number) =>
+  from > 0 && before[from - 1]!.node.isBlock ? from - 1 : from;
+
+function wholeLines(before: Unit[], wanted: Unit[], { p, s }: Kept, least: Kept): Kept | null {
   const [n, m] = [before.length, wanted.length];
   while (p > 0 && !(isLine(before, p) && isLine(wanted, p))) p -= 1;
   while (s > 0 && !(isLine(before, n - s) && isLine(wanted, m - s))) s -= 1;
-  return { p, s };
+  return p >= least.p && s >= least.s ? { p, s } : null;
+}
+
+function columnsChanged(root: ProseMirrorNode, target: ProseMirrorNode): boolean {
+  const columnsOf = (node: ProseMirrorNode) => {
+    const columns: number[] = [];
+    node.descendants((each) => {
+      if (each.type.spec.tableRole === "table") columns.push(each.firstChild?.childCount ?? 0);
+    });
+    return columns;
+  };
+  const [was, now] = [columnsOf(root), columnsOf(target)];
+  return was.length === now.length && was.some((count, at) => count !== now[at]);
 }
 
 const tried = (transform: Transform, step: Step) =>
