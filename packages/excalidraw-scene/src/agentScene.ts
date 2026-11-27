@@ -32,6 +32,7 @@ const FONT_SIZE = 20;
 const GAP = 4;
 const LINE_HEIGHT = 1.25;
 const LABEL_PADDING = 5;
+const EXCALIFONT = 5;
 const EXCALIFONT_EM_WIDTHS = new Map(
   (
     [
@@ -309,7 +310,7 @@ function created(id: string, input: DrawingElementInput, index: string, now: num
     if (!input.text) throw new DrawingEditRefusal("A text element needs text.");
     Object.assign(element, {
       fontSize: FONT_SIZE,
-      fontFamily: 5,
+      fontFamily: EXCALIFONT,
       text: input.text,
       originalText: input.text,
       textAlign: containerId ? "center" : "left",
@@ -317,7 +318,7 @@ function created(id: string, input: DrawingElementInput, index: string, now: num
       containerId: containerId ?? null,
       autoResize: true,
       lineHeight: LINE_HEIGHT,
-      ...textSize(input.text, FONT_SIZE, LINE_HEIGHT),
+      ...textSize(input.text, FONT_SIZE, LINE_HEIGHT, EXCALIFONT),
     });
   } else if (input.text !== undefined) {
     throw new DrawingEditRefusal(
@@ -356,6 +357,7 @@ function changed(element: ElementSnapshot, change: DrawingElementChange): Elemen
         change.text,
         numberOr(element.fontSize) || FONT_SIZE,
         numberOr(element.lineHeight) || LINE_HEIGHT,
+        element.fontFamily,
       ),
     });
   }
@@ -464,8 +466,9 @@ function fitLabel(text: ElementSnapshot, container: ElementSnapshot): ElementSna
         : container.type === "diamond"
           ? Math.round(width / 2) - LABEL_PADDING * 2
           : width - LABEL_PADDING * 2;
-  const wrapped = wrapText(String(text.originalText ?? text.text ?? ""), room, fontSize);
-  return { ...text, text: wrapped, ...textSize(wrapped, fontSize, lineHeight) };
+  const source = String(text.originalText ?? text.text ?? "");
+  const wrapped = wrapText(source, room, fontSize, text.fontFamily);
+  return { ...text, text: wrapped, ...textSize(wrapped, fontSize, lineHeight, text.fontFamily) };
 }
 
 function labelledHeight(container: ElementSnapshot, textHeight: number): number {
@@ -476,8 +479,8 @@ function labelledHeight(container: ElementSnapshot, textHeight: number): number 
   return needed;
 }
 
-function wrapText(text: string, room: number, fontSize: number): string {
-  const fits = (line: string) => lineWidth(line, fontSize) <= room;
+function wrapText(text: string, room: number, fontSize: number, family: unknown): string {
+  const fits = (line: string) => lineWidth(line, fontSize, family) <= room;
   return text
     .split("\n")
     .flatMap((paragraph) => {
@@ -504,15 +507,16 @@ function wrapText(text: string, room: number, fontSize: number): string {
     .join("\n");
 }
 
-function textSize(text: string, fontSize: number, lineHeight: number) {
+function textSize(text: string, fontSize: number, lineHeight: number, family: unknown) {
   const lines = text.split("\n");
   return {
-    width: Math.max(...lines.map((line) => lineWidth(line, fontSize))),
+    width: Math.max(...lines.map((line) => lineWidth(line, fontSize, family))),
     height: lines.length * fontSize * lineHeight,
   };
 }
 
-function lineWidth(line: string, fontSize: number): number {
+function lineWidth(line: string, fontSize: number, family: unknown): number {
+  if ((numberOr(family) || EXCALIFONT) !== EXCALIFONT) return line.length * fontSize * 0.6;
   let width = 0;
   for (const char of line) width += EXCALIFONT_EM_WIDTHS.get(char) ?? 1;
   return width * fontSize;

@@ -345,6 +345,15 @@ describe("planDrawingEdit", () => {
     expect(live(doc)).toMatchObject([{ id: "t", width: 90, height: 60 }]);
   });
 
+  it("sizes text in another font by that font, not Excalifont", () => {
+    const doc = new Y.Doc();
+    apply(doc, { add: [{ id: "t", type: "text", x: 0, y: 0, text: "Hi" }] });
+    const text = foldScene(doc).elements.find((element) => element.id === "t")!;
+    insertElementRevision(doc, { ...text, version: 2, fontFamily: 3 });
+    apply(doc, { update: [{ id: "t", expectedVersion: 2, text: "iiiiiiiiii" }] });
+    expect(live(doc)).toMatchObject([{ id: "t", width: 120 }]);
+  });
+
   it("wraps a long label inside its shape and grows the shape to fit", () => {
     const doc = new Y.Doc();
     const notes = "Notes: keep every RECEIPT and file them by month for the accountant";
