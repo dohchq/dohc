@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createCloudCredentialStore,
   mayUseKeychain,
+  systemKeyCipherFor,
   type CloudCredentials,
+  type SystemCredentialStorage,
   type TokenCipher,
 } from "./cloudCredentialStore";
 import { createTestScratch } from "./testTemp";
@@ -37,6 +39,31 @@ beforeEach(async () => {
 function credentialFile(): string {
   return join(dir, "dohc-cloud.json");
 }
+
+// Stands in for Electron safeStorage. Electron refuses to decrypt while
+// isEncryptionAvailable() is false, and decrypts what it sealed before once it
+// is true again.
+function fakeSafeStorage(backend: string, available = true): SystemCredentialStorage {
+  return {
+    isEncryptionAvailable: () => available,
+    getSelectedStorageBackend: () => backend,
+    encryptString: (plain) => Buffer.from(`sealed:${plain}`),
+    decryptString: (encrypted) => {
+      if (!available) throw new Error("Encryption is not available.");
+      return encrypted.toString("utf8").slice("sealed:".length);
+    },
+  };
+}
+
+function sealedRecord(): string {
+  return JSON.stringify({
+    ...credentials,
+    version: 1,
+    token: `enc:${Buffer.from(`sealed:${credentials.token}`).toString("base64")}`,
+  });
+}
+
+const packagedLinux = { isPackaged: true, platform: "linux" as const, env: {} };
 
 describe("cloud credential store", () => {
   it("keeps server display metadata across restart without exposing the token", async () => {
@@ -110,6 +137,79 @@ describe("cloud credential store", () => {
     expect(mayUseKeychain({ isPackaged: false, platform: "win32", env: test })).toBe(true);
     expect(mayUseKeychain({ isPackaged: false, platform: "linux", env: test })).toBe(true);
   });
+
+  it.each(["basic_text", "unknown"])(
+    "keeps the token plain, not sealed, on Linux with the %s backend",
+    async (backend) => {
+      const cipher = systemKeyCipherFor(fakeSafeStorage(backend), packagedLinux);
+      expect(cipher?.isAvailable()).toBe(false);
+      const store = createCloudCredentialStore({ dir, cipher });
+      await store.save(credentials);
+      expect(JSON.parse(await readFile(credentialFile(), "utf8")).token).toBe(
+        `plain:${credentials.token}`,
+      );
+      expect(await store.load()).toEqual(credentials);
+    },
+  );
+
+  it("seals the token on Linux with a keyring, and on Windows and macOS", async () => {
+    const linuxKeyring = systemKeyCipherFor(fakeSafeStorage("gnome_libsecret"), packagedLinux);
+    expect(linuxKeyring?.isAvailable()).toBe(true);
+    for (const platform of ["win32", "darwin"] as const) {
+      const storage = {
+        ...fakeSafeStorage("basic_text"),
+        getSelectedStorageBackend: () => {
+          throw new Error("Linux only");
+        },
+      };
+      expect(systemKeyCipherFor(storage, { ...packagedLinux, platform })?.isAvailable()).toBe(true);
+    }
+    await createCloudCredentialStore({ dir, cipher: linuxKeyring }).save(credentials);
+    expect(JSON.parse(await readFile(credentialFile(), "utf8")).token).toMatch(/^enc:/);
+  });
+
+  it("keeps an earlier sealed sign-in readable, and stores it plain on the next basic_text save", async () => {
+    await writeFile(credentialFile(), sealedRecord());
+    const store = createCloudCredentialStore({
+      dir,
+      cipher: systemKeyCipherFor(fakeSafeStorage("basic_text"), packagedLinux),
+    });
+    expect(await store.load()).toEqual(credentials);
+    await store.save(credentials);
+    expect(JSON.parse(await readFile(credentialFile(), "utf8")).token).toBe(
+      `plain:${credentials.token}`,
+    );
+  });
+
+  it("reads a sealed sign-in as signed out when its keyring is gone, and a new sign-in works", async () => {
+    await writeFile(credentialFile(), sealedRecord());
+    const store = createCloudCredentialStore({
+      dir,
+      cipher: systemKeyCipherFor(fakeSafeStorage("basic_text", false), packagedLinux),
+    });
+    expect(await store.load()).toBeNull();
+    expect(await store.load()).toBeNull();
+    await store.save(credentials);
+    expect(JSON.parse(await readFile(credentialFile(), "utf8")).token).toBe(
+      `plain:${credentials.token}`,
+    );
+    expect(await store.load()).toEqual(credentials);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "keeps a plain basic_text token owner-only, in a folder it makes owner-only",
+    async () => {
+      const { statSync, chmodSync } = await import("node:fs");
+      chmodSync(dir, 0o755);
+      const store = createCloudCredentialStore({
+        dir,
+        cipher: systemKeyCipherFor(fakeSafeStorage("basic_text"), packagedLinux),
+      });
+      await store.save(credentials);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(statSync(credentialFile()).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it("round-trips the opaque Better Auth user id (the reactor identity)", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });

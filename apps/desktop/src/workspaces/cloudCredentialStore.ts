@@ -45,6 +45,41 @@ export function mayUseKeychain(run: {
   return run.isPackaged || run.platform !== "darwin" || run.env.DOHC_DESKTOP_TEST !== "1";
 }
 
+export interface SystemCredentialStorage {
+  isEncryptionAvailable(): boolean;
+  getSelectedStorageBackend(): string;
+  encryptString(plain: string): Buffer;
+  decryptString(encrypted: Buffer): string;
+}
+
+/**
+ * Whether Electron's credential storage encrypts with a key the system keeps.
+ * On Linux it falls back to a key fixed in its own source (basic_text) when
+ * no keyring answers, and reports unknown before it has chosen one. Neither
+ * keeps a secret, so neither counts.
+ */
+function encryptsWithSystemKey(platform: NodeJS.Platform, linuxBackend: string | null): boolean {
+  return platform !== "linux" || (linuxBackend !== "basic_text" && linuxBackend !== "unknown");
+}
+
+/** A cipher that reads as available only when it seals with a key the system keeps. */
+export function systemKeyCipherFor(
+  storage: SystemCredentialStorage,
+  run: { isPackaged: boolean; platform: NodeJS.Platform; env: NodeJS.ProcessEnv },
+): TokenCipher | undefined {
+  if (!mayUseKeychain(run)) return undefined;
+  return {
+    isAvailable: () =>
+      storage.isEncryptionAvailable() &&
+      encryptsWithSystemKey(
+        run.platform,
+        run.platform === "linux" ? storage.getSelectedStorageBackend() : null,
+      ),
+    encrypt: (plain) => storage.encryptString(plain).toString("base64"),
+    decrypt: (cipherText) => storage.decryptString(Buffer.from(cipherText, "base64")),
+  };
+}
+
 const FILE_NAME = "dohc-cloud.json";
 const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
 const DELETED_FILE_NAME = "dohc-cloud-deleted.json";
@@ -160,6 +195,7 @@ export function createCloudCredentialStore(options: { dir: string; cipher?: Toke
       // on Linux/WSL without a secret service). Mode args are ignored on
       // Windows, so this stays cross-platform safe.
       await mkdir(dir, { recursive: true, mode: 0o700 });
+      await chmod(dir, 0o700);
       // Atomic: write a temp file then rename over the target so a crash or
       // concurrent reader never sees a half-written credential file. The 0600
       // mode is set on the temp file so the rename preserves it.

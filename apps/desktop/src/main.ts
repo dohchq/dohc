@@ -758,7 +758,7 @@ import { agentNotices } from "./notices/agentNotices";
 import { z } from "zod";
 import {
   createCloudCredentialStore,
-  mayUseKeychain,
+  systemKeyCipherFor,
   type TokenCipher,
 } from "./workspaces/cloudCredentialStore";
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
@@ -768,7 +768,7 @@ import { T3CodeError } from "./agentThreads/t3Code";
 import { createAgentThreadChanges } from "./agentThreads/threadChanges";
 import { createT3CodeCodeMaker } from "./agentThreads/t3CodeCli";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
-import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
+import { createT3CodeSignInStore } from "./agentThreads/t3CodeSignInStore";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
@@ -1506,8 +1506,7 @@ const executeAppPreview = createAppPreviewExecution({
 });
 
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
-// handlers register inside whenReady. The session token lives encrypted in
-// the credential store and never crosses IPC.
+// handlers register inside whenReady. The session token never crosses IPC.
 let cachedCloudLogin: CloudLogin | null = null;
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
@@ -1516,17 +1515,7 @@ function cloudLogin(): CloudLogin {
         !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
-        cipher: mayUseKeychain({
-          isPackaged: app.isPackaged,
-          platform: process.platform,
-          env: process.env,
-        })
-          ? {
-              isAvailable: () => safeStorage.isEncryptionAvailable(),
-              encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-              decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-            }
-          : undefined,
+        cipher: systemKeyCipher(),
       }),
     });
   }
@@ -1853,21 +1842,11 @@ let cachedT3Code: T3CodeConnection | null = null;
 let cachedLocalWorkspaceSecrets: LocalWorkspaceSecretStore | null = null;
 let cachedLocalHttpApprovals: LocalHttpApprovalStore | null = null;
 function systemKeyCipher(): TokenCipher | undefined {
-  if (
-    !mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env })
-  ) {
-    return undefined;
-  }
-  return {
-    isAvailable: () =>
-      safeStorage.isEncryptionAvailable() &&
-      encryptsWithSystemKey(
-        process.platform,
-        process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
-      ),
-    encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
-    decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-  };
+  return systemKeyCipherFor(safeStorage, {
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    env: process.env,
+  });
 }
 function localHttpApprovals(): LocalHttpApprovalStore {
   cachedLocalHttpApprovals ??= createLocalHttpApprovalStore({
