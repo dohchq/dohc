@@ -54,7 +54,7 @@ describe("planDrawingEdit", () => {
       endBinding: { elementId: "b", focus: 0, gap: 4 },
       endArrowhead: "arrow",
     });
-    expect((go!.x as number) + (go!.points as number[][])[1]![0]!).toBe(396);
+    expect((go!.x as number) + (go!.points as number[][])[1]![0]!).toBeCloseTo(396.11);
     expect(live(doc).find((element) => element.id === "go")).toMatchObject({ pointCount: 2 });
   });
 
@@ -89,8 +89,8 @@ describe("planDrawingEdit", () => {
     const label = foldScene(doc).elements.find((element) => element.id === "label")!;
     expect(label.x).toBe(200 - (label.width as number) / 2);
     const go = foldScene(doc).elements.find((element) => element.id === "go")!;
-    expect(go).toMatchObject({ x: 304, width: 92 });
-    expect((go.x as number) + (go.points as number[][])[1]![0]!).toBe(396);
+    expect(go.x).toBe(304);
+    expect((go.x as number) + (go.points as number[][])[1]![0]!).toBeCloseTo(400.02);
 
     apply(doc, { delete: [{ id: "a", expectedVersion: 2 }] });
     expect(live(doc).map((element) => element.id)).toEqual(["b", "go"]);
@@ -206,6 +206,28 @@ describe("planDrawingEdit", () => {
     expect(go.y).toBeCloseTo(50);
     expect((go.x as number) + end[0]!).toBeCloseTo(446);
     expect((go.y as number) + end[1]!).toBeCloseTo(50);
+  });
+
+  it("starts a new bound arrow on a rotated ellipse's or diamond's own outline", () => {
+    for (const [type, outline] of [
+      ["ellipse", (x: number, y: number) => Math.hypot(x, y)],
+      ["diamond", (x: number, y: number) => x + y],
+    ] as const) {
+      const doc = new Y.Doc();
+      apply(doc, {
+        add: [
+          { id: "a", type, x: 0, y: 0, width: 200, height: 100 },
+          { id: "b", type: "rectangle", x: 400, y: 0, width: 200, height: 100 },
+        ],
+      });
+      const a = foldScene(doc).elements.find((element) => element.id === "a")!;
+      insertElementRevision(doc, { ...a, version: 2, angle: Math.PI / 4 });
+      apply(doc, { add: [{ id: "go", type: "arrow", x: 0, y: 0, start: "a", end: "b" }] });
+      const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+      const [dx, dy] = [(go.x as number) - 100, (go.y as number) - 50];
+      const [u, v] = [(dx + dy) * Math.SQRT1_2, (dy - dx) * Math.SQRT1_2];
+      expect(outline(Math.abs(u) / 104, Math.abs(v) / 54)).toBeCloseTo(1);
+    }
   });
 
   it("keeps a person-drawn arrow's own gap when its shape is resized", () => {

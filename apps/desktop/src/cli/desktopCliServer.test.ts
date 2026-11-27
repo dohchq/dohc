@@ -34,7 +34,7 @@ import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
 import { createTestScratch } from "../workspaces/testTemp";
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -71,6 +71,7 @@ import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
+import { SECRET_READ_DENIED_REASON } from "@dohc/security-contract/engine-path-floor";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { shareViewWriteScopeOf, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
@@ -193,6 +194,9 @@ function fixture(
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(
       async (absolutePath, text, _author, options) => {
         await mkdir(dirname(absolutePath), { recursive: true });
+        await options?.beforeWrite?.(
+          join(realpathSync(dirname(absolutePath)), basename(absolutePath)),
+        );
         try {
           await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
         } catch (error) {
@@ -1597,7 +1601,7 @@ describe("desktop CLI workspace context", () => {
         join(root, "notes/new.md"),
         "",
         { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local" },
-        { createOnly: true },
+        { createOnly: true, beforeWrite: expect.any(Function) },
       ]);
       await context.documents!.create({
         path: "named.md",
@@ -1651,6 +1655,15 @@ describe("desktop CLI workspace context", () => {
         context.documents!.create({ path: "taken.md", markdown: "x", origin }),
       ).rejects.toThrow("taken.md already exists. Edit it instead.");
       expect(await readFile(join(root, "taken.md"), "utf8")).toBe("Already here.\n");
+      await mkdir(join(root, ".env"));
+      await symlink(join(root, ".env"), join(root, "linked"), "junction");
+      for (const create of [
+        () => context.documents!.create({ path: "linked/new.md", markdown: "x", origin }),
+        () => context.drawings!.create({ path: "linked/plan.excalidraw", elements: [], origin }),
+      ])
+        await expect(create()).rejects.toThrow(new Error(SECRET_READ_DENIED_REASON));
+      await expect(lstat(join(root, ".env", "new.md"))).rejects.toThrow();
+      await expect(lstat(join(root, ".env", "plan.excalidraw"))).rejects.toThrow();
 
       edit.mockRejectedValueOnce(new Error("engine busy"));
       await expect(

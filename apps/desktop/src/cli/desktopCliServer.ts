@@ -20,7 +20,12 @@ import {
   prepareMoveWorkspacePathAs,
   type PathChangeOptions,
 } from "../workspaces/workspaceFileMoves";
-import { join, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
+import {
+  SECRET_READ_DENIED_REASON,
+  classifyEngineFilePathForRead,
+} from "@dohc/security-contract/engine-path-floor";
 import type {
   OwnerAppPublicationRequest,
   OwnerAppPublicationResult,
@@ -608,6 +613,12 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             path,
             await current.writeAuthoredFile(absolute, text, agentWriteAuthor(origin), {
               createOnly: true,
+              beforeWrite: async (resolved) => {
+                const root = await realpath(operation.workspace.rootPath);
+                const real = relative(root, resolved).split(sep).join("/");
+                if (classifyEngineFilePathForRead(real, process.platform).kind === "secret")
+                  throw new Error(SECRET_READ_DENIED_REASON);
+              },
             }),
           );
         } catch (error) {

@@ -1442,9 +1442,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (liveDocumentKindForPath(requested) !== kind) throw new Error(notKind);
     const path = await this.#resolveDocumentPath(workspace, requested, access);
     if (path === null) throw new Error(`No document at ${requested}.`);
-    if (liveDocumentKindForPath(path) !== kind) throw new Error(notKind);
     if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
       throw new Error(SECRET_READ_DENIED_REASON);
+    if (liveDocumentKindForPath(path) !== kind) throw new Error(notKind);
     return path;
   }
 

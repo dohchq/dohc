@@ -3523,6 +3523,8 @@ describe("engine Y.Doc IPC adapter", () => {
       writeFileSync(join(root, ".env.excalidraw"), '{"type":"excalidraw","elements":[]}');
       symlinkSync(join(root, ".env.md"), join(root, "notes.md"));
       symlinkSync(join(root, ".env.excalidraw"), join(root, "plan.excalidraw"));
+      writeFileSync(join(root, ".env"), "TOKEN=1\n");
+      symlinkSync(join(root, ".env"), join(root, "keys.md"));
       try {
         const h = harness(editableSession(), {
           rootPath: root,
@@ -3532,6 +3534,7 @@ describe("engine Y.Doc IPC adapter", () => {
         const apply = vi.fn();
         const refusal = new Error(SECRET_READ_DENIED_REASON);
         await expect(h.ipc.editDocument({ ...append, path: "notes.md" })).rejects.toThrow(refusal);
+        await expect(h.ipc.editDocument({ ...append, path: "keys.md" })).rejects.toThrow(refusal);
         await expect(
           h.ipc.editLiveDocument(
             {
