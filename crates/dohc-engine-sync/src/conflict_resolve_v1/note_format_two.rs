@@ -1,6 +1,6 @@
 use super::*;
-use dohc_engine_collab::CloseProjection;
 use dohc_engine_collab::ydoc::without_final_markdown_newline;
+use dohc_engine_collab::{CloseOutcome, CloseProjection, CollabError};
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,16 +51,22 @@ pub fn convert_note_to_format_two_in_tx(
     leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
-    use FormatTwoConversion::{Converted, DoesNotFit, NotNow, NothingToConvert};
+    use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
     if dohc_engine_collab::new_note_schema_version(ContentKind::Richdoc) != 2 {
         return Ok(NotNow("note-format-two-off"));
     }
-    let Some(marker) = dohc_engine_collab::read_marker_in(tx, key)
-        .map_err(map_local_collab_error)?
-        .filter(|marker| marker.content_kind == ContentKind::Richdoc)
-    else {
-        return Ok(NothingToConvert);
+    let Ready {
+        marker,
+        doc,
+        path,
+        state,
+        text,
+        text_sha256,
+    } = match ready_to_convert(tx, key, leases)? {
+        Ok(ready) => ready,
+        Err(outcome) => return Ok(outcome),
     };
+    let (text, text_sha256) = (&text, &text_sha256);
     let Some(predecessor_claim_id) = marker
         .lineage_claim_id
         .clone()
@@ -68,45 +74,6 @@ pub fn convert_note_to_format_two_in_tx(
     else {
         return Ok(NotNow("ydoc-lineage-unclaimed"));
     };
-    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
-    if doc.note_schema_version() == 2 {
-        return Ok(NothingToConvert);
-    }
-    if leases.is_live(key) || live_document_bound(tx, key)? {
-        return Ok(NotNow("ydoc-session-live"));
-    }
-    if doc.has_pending_dependencies() {
-        return Ok(NotNow("ydoc-incomplete-lineage"));
-    }
-    for (reason, waiting) in WAITS {
-        let waits: bool = tx
-            .query_row(
-                &format!("SELECT EXISTS({waiting})"),
-                params![key.workspace_id, key.version_id, key.object_id],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        if waits {
-            return Ok(NotNow(reason));
-        }
-    }
-    let path: Option<String> = tx
-        .query_row(
-            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let Some(path) = path else {
-        return Ok(NothingToConvert);
-    };
-    let state = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, &path)
-        .map_err(map_local_domain_error)?;
-    let Some(snapshot) = state.snapshot.as_ref() else {
-        return Ok(NothingToConvert);
-    };
-    let (text, text_sha256) = (&snapshot.text, &snapshot.blob_sha256);
     let settled = settled_source(&doc, text).is_some_and(|source| {
         source == *text || without_final_markdown_newline(&source) == Some(text.as_str())
     });
@@ -194,6 +161,82 @@ pub fn convert_note_to_format_two_in_tx(
         pre_effect_moment_order,
     )?;
     Ok(Converted)
+}
+
+struct Ready {
+    marker: dohc_engine_collab::Marker,
+    doc: dohc_engine_collab::Ydoc,
+    path: String,
+    state: ConflictFileState,
+    text: String,
+    text_sha256: String,
+}
+
+fn ready_to_convert(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    leases: &dyn LeaseProbe,
+) -> Result<Result<Ready, FormatTwoConversion>, SyncError> {
+    use FormatTwoConversion::{NotNow, NothingToConvert};
+    let Some(marker) = dohc_engine_collab::read_marker_in(tx, key)
+        .map_err(map_local_collab_error)?
+        .filter(|marker| marker.content_kind == ContentKind::Richdoc)
+        .filter(|marker| {
+            marker.head_update_seq > 0 || marker.lineage_claim_status == LineageClaimStatus::Exact
+        })
+    else {
+        return Ok(Err(NothingToConvert));
+    };
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+    if doc.note_schema_version() == 2 {
+        return Ok(Err(NothingToConvert));
+    }
+    if leases.is_live(key) || live_document_bound(tx, key)? {
+        return Ok(Err(NotNow("ydoc-session-live")));
+    }
+    if doc.has_pending_dependencies() {
+        return Ok(Err(NotNow("ydoc-incomplete-lineage")));
+    }
+    for (reason, waiting) in WAITS {
+        let waits: bool = tx
+            .query_row(
+                &format!("SELECT EXISTS({waiting})"),
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if waits {
+            return Ok(Err(NotNow(reason)));
+        }
+    }
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(path) = path else {
+        return Ok(Err(NothingToConvert));
+    };
+    let state = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, &path)
+        .map_err(map_local_domain_error)?;
+    let Some((text, text_sha256)) = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| (snapshot.text.clone(), snapshot.blob_sha256.clone()))
+    else {
+        return Ok(Err(NothingToConvert));
+    };
+    Ok(Ok(Ready {
+        marker,
+        doc,
+        path,
+        state,
+        text,
+        text_sha256,
+    }))
 }
 
 fn conversion_id(key: &DocKey, claim: &str, state_vector: &str, delete_set: &str) -> String {
@@ -333,11 +376,10 @@ pub struct FormatTwoPass {
     pub resume_after: Option<DocKey>,
 }
 
-/// Proves that a local-only note's file still holds what its pristine seed imported.
-pub type FileProof<'a> = &'a dyn Fn(&EngineStore, &DocKey) -> Option<CloseProjection>;
-
-/// Convert up to `budget` of a workspace's notes after `after` to format 2,
-/// skipping notes `live` holds. `resume_after` is where the next call starts.
+/// Convert up to `budget` of a workspace's main notes after `after` to
+/// format 2, skipping notes `live` holds. `file_proof` names the hash of a
+/// local-only note's file when it still holds what the note's pristine seed
+/// imported. `resume_after` is where the next call starts.
 #[allow(clippy::too_many_arguments)]
 pub fn convert_notes_to_format_two(
     store: &mut EngineStore,
@@ -345,7 +387,7 @@ pub fn convert_notes_to_format_two(
     after: Option<&DocKey>,
     budget: usize,
     live: &dyn LeaseProbe,
-    file_proof: FileProof<'_>,
+    file_proof: &dyn Fn(&EngineStore, &DocKey) -> Option<String>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoPass, SyncError> {
@@ -366,7 +408,7 @@ pub fn convert_notes_to_format_two(
                  d.regime='local-only' AND d.lineage_claim_status='unclaimed' FROM ydoc_docs d \
                  LEFT JOIN snapshots s ON s.workspace_id=d.workspace_id \
                  AND s.version_id=d.version_id AND s.object_id=d.object_id \
-                 WHERE d.workspace_id=?1 AND d.content_kind='richdoc' \
+                 WHERE d.workspace_id=?1 AND d.version_id='main' AND d.content_kind='richdoc' \
                  AND (d.version_id, d.object_id) > (?2, ?3) \
                  ORDER BY d.version_id, d.object_id LIMIT ?4",
             )
@@ -424,13 +466,39 @@ pub fn convert_notes_to_format_two(
 }
 
 fn fails_only_the_note(error: &SyncError) -> bool {
-    match error {
-        SyncError::FaultCrash => false,
-        SyncError::Storage(storage) => matches!(
-            storage,
-            StorageError::StateCorrupt { .. } | StorageError::InvalidInput { .. }
-        ),
-        _ => true,
+    use StorageError as Store;
+    match error.original() {
+        SyncError::Storage(
+            Store::StateCorrupt { .. }
+            | Store::InvalidInput { .. }
+            | Store::BlobIntegrity { .. }
+            | Store::BlobTooLarge { .. },
+        )
+        | SyncError::MarkdownWriteHeld { .. }
+        | SyncError::MarkdownWitnessCheckPending { .. }
+        | SyncError::MarkdownReaderPending { .. }
+        | SyncError::LiveDocumentBindingActive
+        | SyncError::SyncedDeletionRevivalRefused
+        | SyncError::InvalidInput { .. }
+        | SyncError::BaseRefused { .. }
+        | SyncError::InputTooLarge { .. }
+        | SyncError::CoordinateDiverged
+        | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled { .. }
+        | SyncError::ValidationPending { .. }
+        | SyncError::ProjectionTooLarge { .. }
+        | SyncError::MarkdownReaderCapacity
+        | SyncError::BlobInvalid
+        | SyncError::BlobTooLarge { .. } => true,
+        SyncError::Storage(_)
+        | SyncError::SequenceGap
+        | SyncError::UnsupportedOperation
+        | SyncError::ShareBoundaryViolation
+        | SyncError::ShareVersionMismatch { .. }
+        | SyncError::ShareVersionUnusable { .. }
+        | SyncError::FaultCrash
+        | SyncError::Cancelled
+        | SyncError::Shared { .. } => false,
     }
 }
 
@@ -438,37 +506,33 @@ fn drop_local_format_one(
     store: &mut EngineStore,
     key: &DocKey,
     live: &dyn LeaseProbe,
-    file_proof: FileProof<'_>,
+    file_proof: &dyn Fn(&EngineStore, &DocKey) -> Option<String>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
-    if live.is_live(key) {
-        return Ok(FormatTwoConversion::NotNow("ydoc-session-live"));
-    }
-    let Some(persisted) = dohc_engine_collab::load_persisted(store, key)
-        .map_err(map_local_collab_error)?
-        .filter(|persisted| {
-            persisted.marker.head_update_seq > 0 && persisted.doc.note_schema_version() == 1
-        })
-    else {
-        return Ok(FormatTwoConversion::NothingToConvert);
+    use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
+    let ready = match store.write_with(faults, |tx| ready_to_convert(tx, key, live))? {
+        TxnOutcome::Committed(Ok(ready)) => ready,
+        TxnOutcome::Committed(Err(outcome)) => return Ok(outcome),
+        TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
     };
-    let text = persisted
+    if successor_in_format_two(key, "", "", "", &ready.text, &ready.text_sha256).is_none() {
+        return Ok(DoesNotFit);
+    }
+    let projection = ready
         .doc
         .project(ContentKind::Richdoc)
-        .map_err(map_local_collab_error)?
-        .content;
-    let text_sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
-    if successor_in_format_two(key, "", "", "", &text, &text_sha256).is_none() {
-        return Ok(FormatTwoConversion::DoesNotFit);
-    }
-    let proof = file_proof(store, key);
-    match dohc_engine_collab::close_session(store, key, false, proof.as_ref(), faults, now_ms) {
-        Ok(TxnOutcome::Committed(_)) => Ok(FormatTwoConversion::Converted),
-        Ok(TxnOutcome::Crashed { .. }) => Err(SyncError::FaultCrash),
-        Err(dohc_engine_collab::CollabError::UnsettledClose) => {
-            Ok(FormatTwoConversion::NotNow("ydoc-unsettled"))
+        .map_err(map_local_collab_error)?;
+    let witness = CloseProjection {
+        sha256: dohc_engine_storage::hex_sha256(projection.content.as_bytes()),
+        materialized_seed_source_sha256: file_proof(store, key),
+    };
+    match dohc_engine_collab::close_session(store, key, false, Some(&witness), faults, now_ms) {
+        Ok(TxnOutcome::Committed(CloseOutcome::Pruned { .. })) => Ok(Converted),
+        Ok(TxnOutcome::Committed(_)) | Err(CollabError::UnsettledClose) => {
+            Ok(NotNow("ydoc-unsettled"))
         }
+        Ok(TxnOutcome::Crashed { .. }) => Err(SyncError::FaultCrash),
         Err(error) => Err(map_local_collab_error(error)),
     }
 }
