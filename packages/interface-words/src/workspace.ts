@@ -7,9 +7,30 @@ export const workspaceWords = {
   back: "Back",
   // ExplorerHome.tsx
   pages: "Pages",
+  sketch: "Sketch",
   sketches: "Sketches",
+  newSketch: "New sketch",
   otherFiles: "Other files",
   noPages: "No pages yet.",
+  noSketches: "No sketches yet.",
+  showAllSketches: (count: number) => `Show all ${count} sketches`,
+  creatingSketch: "Creating…",
+  sketchCreateFailed: "dohc could not create a sketch.",
+  sketchReadFailed: "dohc could not open this sketch.",
+  sketchInvalid: "This file is not a valid sketch.",
+  sketchSave: "Save",
+  sketchSaving: "Saving…",
+  sketchSaveFailed: "dohc could not save this sketch.",
+  sketchChangedElsewhere: "This sketch was replaced or deleted elsewhere.",
+  sketchSaveConflict: (count: number) =>
+    count === 1
+      ? "Someone else changed 1 element at the same time, so that edit was not kept."
+      : `Someone else changed ${count} elements at the same time, so those edits were not kept.`,
+  sketchAssetsMissing: (count: number) =>
+    count === 1 ? "dohc could not load 1 image." : `dohc could not load ${count} images.`,
+  sketchUnsavedTitle: "Save changes to this sketch?",
+  sketchUnsavedBody: "Your latest edits are only on this phone until you save.",
+  sketchUnavailableJoined: "Sketches cannot be opened in a shared workspace on a phone yet.",
 
   // ChatThreadPanel.tsx and ChatPosts.tsx
   replies: (count: number) => `${count} ${count === 1 ? "reply" : "replies"}`,

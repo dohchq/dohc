@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import canonicalJsonFixture from "../fixtures/canonical-json.json";
 import {
+  applySceneDelta,
   compareUnicodeScalar,
   declareSceneRoots,
   exportPortableScene,
   foldScene,
   insertElementRevision,
+  lostElementRevisions,
   parseRevisionKey,
   putSceneAsset,
   revisionKey,
@@ -381,6 +383,56 @@ describe("portable export", () => {
 
     expect(foldScene(doc).elements).toEqual([element("gone", 2, 1, { isDeleted: true })]);
     expect(JSON.parse(exportPortableScene(doc)).elements).toEqual([]);
+  });
+
+  it("reports written revisions that lost to higher versions or lower nonces", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, element("kept", 2, 10));
+    insertElementRevision(doc, element("higher-version", 3, 99));
+    insertElementRevision(doc, element("lower-nonce", 2, 5));
+
+    const lost = lostElementRevisions(doc, [
+      { id: "kept", version: 2, versionNonce: 10 },
+      { id: "higher-version", version: 2, versionNonce: 1 },
+      { id: "lower-nonce", version: 2, versionNonce: 50 },
+      { id: "missing", version: 1, versionNonce: 1 },
+    ]);
+    expect(lost.map((entry) => entry.id)).toEqual(["higher-version", "lower-nonce", "missing"]);
+    expect(
+      lostElementRevisions(foldScene(doc), [{ id: "kept", version: 2, versionNonce: 10 }]),
+    ).toEqual([]);
+  });
+
+  it("applies scene deltas without writing dominated revisions or touching assets", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, element("a", 3, 5, { x: 100 }));
+    putSceneAsset(doc, {
+      id: "asset-1",
+      mimeType: "image/png",
+      created: 1,
+      ref: "assets/img.png",
+      sha256: SHA256,
+    });
+
+    const staleOnly = applySceneDelta(doc, {
+      elements: [element("a", 2, 1, { x: 200 })],
+    });
+    expect(staleOnly.update).toBeNull();
+    expect(staleOnly.written).toHaveLength(1);
+    expect(lostElementRevisions(doc, staleOnly.written).map((each) => each.id)).toEqual(["a"]);
+
+    const mixed = applySceneDelta(doc, {
+      elements: [element("a", 2, 1, { x: 200 }), element("b", 1, 7, { x: 50 })],
+      appState: { viewBackgroundColor: "#faf9f5" },
+    });
+    expect(mixed.update).not.toBeNull();
+    Y.applyUpdate(doc, mixed.update!);
+    const folded = foldScene(doc);
+    expect(folded.elements.find((each) => each.id === "a")?.x).toBe(100);
+    expect(folded.elements.find((each) => each.id === "b")?.x).toBe(50);
+    expect(folded.appState.viewBackgroundColor).toBe("#faf9f5");
+    expect(folded.assets["asset-1"]?.sha256).toBe(SHA256);
+    expect(lostElementRevisions(folded, mixed.written).map((each) => each.id)).toEqual(["a"]);
   });
 });
 

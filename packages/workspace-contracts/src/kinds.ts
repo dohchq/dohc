@@ -87,7 +87,7 @@ export const FILE_KIND_RECORDS = {
   },
   drawing: {
     displayKind: "drawing",
-    name: "Drawing",
+    name: "Sketch",
     glyphId: "pen-tool",
     displayNameRule: "basename",
     extensions: ["excalidraw"],

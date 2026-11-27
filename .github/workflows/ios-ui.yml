@@ -114,6 +114,7 @@ jobs:
             grep -qF "$pod" ios/Pods/Pods.xcodeproj/project.pbxproj || { echo "::error::The Pods project has no $pod."; exit 1; }
           done
           node scripts/build-editor.mjs
+          node scripts/build-sketch.mjs
           ruby scripts/add-ui-tests.rb
           refs=$(grep -oE '[^ ";]*/uitests/[A-Za-z0-9_]+\.swift' ios/dohc.xcodeproj/project.pbxproj | sort -u)
           for file in $refs; do [[ -f $file ]] || { echo "::error::The UI test target names a missing $file."; exit 1; }; done

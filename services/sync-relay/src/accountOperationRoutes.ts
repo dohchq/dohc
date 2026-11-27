@@ -29,6 +29,11 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import type { PhonePages } from "./phonePages";
+import {
+  isPhoneSketchOperation,
+  runPhoneSketchOperation,
+  SAVE_SKETCH_MAX_BODY_BYTES,
+} from "./phoneSketches";
 import { phoneMember, type PhoneMember } from "./phoneMember";
 import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
@@ -45,6 +50,7 @@ export type AccountOperationRoute = {
 const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;
+const SAVE_SKETCH_BODY_RECEIPT_MS = 30_000;
 
 /**
  * The answer while this server has no copies to read from, as when it is still starting. It is the copies' own refusal
@@ -190,6 +196,7 @@ export function createAccountOperationRoute(options: {
       return found;
     };
     const write = isPhoneWriteOperation(route.operation);
+    const sketch = isPhoneSketchOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
     const context = route.operation === "chatContext";
@@ -200,6 +207,7 @@ export function createAccountOperationRoute(options: {
         app ||
         collection ||
         write ||
+        sketch ||
         mark ||
         retry ||
         context ||
@@ -271,12 +279,18 @@ export function createAccountOperationRoute(options: {
       });
       return jsonResponse({ ok: true, ...answer });
     }
+    const maxBodyBytes =
+      route.operation === "saveSketch"
+        ? SAVE_SKETCH_MAX_BODY_BYTES
+        : ACCOUNT_OPERATION_MAX_BODY_BYTES;
+    const bodyReceiptMs =
+      route.operation === "saveSketch" ? SAVE_SKETCH_BODY_RECEIPT_MS : BODY_RECEIPT_MS;
     let args: unknown;
     try {
       args = await readBoundedJson(
         request,
-        ACCOUNT_OPERATION_MAX_BODY_BYTES,
-        AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
+        maxBodyBytes,
+        AbortSignal.any([request.signal, AbortSignal.timeout(bodyReceiptMs)]),
       );
     } catch (error) {
       throw error instanceof RangeError
@@ -356,6 +370,21 @@ export function createAccountOperationRoute(options: {
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
+    if (isPhoneSketchOperation(route.operation)) {
+      if (caller.userId !== owner || member !== null) throw notFound();
+      const { result, cursor } = await runPhoneSketchOperation(
+        { storage, copies },
+        {
+          owner,
+          workspaceId: route.workspaceId,
+          operation: route.operation,
+          args,
+          visitor,
+          authorize,
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
     if (context) {
       const { result, cursor } = await runAccountChatContext(
         { storage, copies },

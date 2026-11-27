@@ -19,7 +19,7 @@ export type GraphKind =
   | "group";
 export const GRAPH_KINDS: readonly { kind: GraphKind; name: string; shape: GraphShape }[] = [
   { kind: "page", name: "Page", shape: "circle" },
-  { kind: "drawing", name: "Drawing", shape: "diamond" },
+  { kind: "drawing", name: "Sketch", shape: "diamond" },
   { kind: "file", name: "File", shape: "ring" },
   { kind: "chat", name: "Chat", shape: "bubble" },
   { kind: "heading", name: "Heading", shape: "pill" },

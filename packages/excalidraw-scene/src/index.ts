@@ -19,6 +19,8 @@ export interface ElementSnapshot extends JsonObject {
   index?: string | null;
 }
 
+export type ElementRevisionIdentity = Pick<ElementSnapshot, "id" | "version" | "versionNonce">;
+
 export interface SceneAsset extends JsonObject {
   id: string;
   mimeType: string;
@@ -160,6 +162,52 @@ export function foldScene(doc: Y.Doc): FoldedScene {
     if (asset) assets[id] = asset;
   }
   return { elements, appState, assets };
+}
+
+export function lostElementRevisions<T extends ElementRevisionIdentity>(
+  scene: Pick<FoldedScene, "elements"> | Y.Doc,
+  written: readonly T[],
+): T[] {
+  const winners = new Map(
+    (scene instanceof Y.Doc ? foldScene(scene).elements : scene.elements).map((e) => [e.id, e]),
+  );
+  return written.filter(({ id, version, versionNonce }) => {
+    const winner = winners.get(id);
+    return winner?.version !== version || winner.versionNonce !== versionNonce;
+  });
+}
+
+export function applySceneDelta(
+  doc: Y.Doc,
+  input: { elements?: readonly unknown[]; appState?: Readonly<Record<string, unknown>> },
+): { update: Uint8Array | null; written: ElementSnapshot[] } {
+  const current = foldScene(doc);
+  const currentById = new Map(current.elements.map((e) => [e.id, e]));
+  const scratch = new Y.Doc();
+  try {
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+    const before = Y.encodeStateVector(scratch);
+    const written: ElementSnapshot[] = [];
+    let changed = false;
+    for (const raw of input.elements ?? []) {
+      const element = validateElement(raw);
+      written.push(element);
+      const winner = currentById.get(element.id);
+      if (winner && revisionDominates(winner, element.version, element.versionNonce)) continue;
+      if (insertElementRevision(scratch, element)) changed = true;
+    }
+    for (const [key, value] of Object.entries(input.appState ?? {})) {
+      if (value === undefined) continue;
+      validateAppStateProperty(key, value as JsonValue);
+      const existing = current.appState[key];
+      if (existing !== undefined && stableJson(existing) === stableJson(value)) continue;
+      setAppStateProperty(scratch, key, value as JsonValue);
+      changed = true;
+    }
+    return { update: changed ? Y.encodeStateAsUpdate(scratch, before) : null, written };
+  } finally {
+    scratch.destroy();
+  }
 }
 
 export function createIncrementalSceneFold(doc: Y.Doc): IncrementalSceneFold {

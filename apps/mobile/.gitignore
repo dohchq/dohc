@@ -5,4 +5,6 @@
 *.aab
 *.ipa
 src/*.generated.ts
+src/sketches/*.generated.ts
+assets/sketch/
 /modules/*/android/build/

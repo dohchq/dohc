@@ -1,7 +1,21 @@
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const { getDefaultConfig } = require("expo/metro-config");
 
+const sketchManifest = path.join(__dirname, "src/sketches/sketchAssets.generated.ts");
+const sketchHtml = path.join(__dirname, "assets/sketch/sketch.html");
+if (!fs.existsSync(sketchManifest) || !fs.existsSync(sketchHtml)) {
+  execFileSync(process.execPath, [path.join(__dirname, "scripts/build-sketch.mjs")], {
+    stdio: "inherit",
+  });
+}
+
 const config = getDefaultConfig(__dirname);
+for (const ext of ["html", "css", "woff2", "sketchjs"]) {
+  if (!config.resolver.assetExts.includes(ext)) config.resolver.assetExts.push(ext);
+  config.resolver.sourceExts = config.resolver.sourceExts.filter((item) => item !== ext);
+}
 
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   // lib0 (under Yjs) sends React Native to isomorphic-webcrypto, which dohc doesn't

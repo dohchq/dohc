@@ -96,11 +96,11 @@ export const COMMAND_ROWS = {
     keywords: ["path", "create", "document", "page"],
   },
   "new-drawing": {
-    label: "New drawing",
+    label: "New sketch",
     availability: "workspaceWritable",
     group: "Create",
     icon: "pen-tool",
-    keywords: ["sketch", "canvas", "excalidraw", "diagram"],
+    keywords: ["drawing", "sketch", "canvas", "excalidraw", "diagram"],
   },
   "new-folder": {
     label: "New folder",
