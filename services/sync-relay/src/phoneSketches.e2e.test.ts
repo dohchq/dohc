@@ -243,6 +243,7 @@ async function setupE2E() {
   await owner.sync();
 
   let beforeCopySync: (() => Promise<void>) | null = null;
+  let failCopyRpc: string | null = null;
   let lane: Promise<void> = Promise.resolve();
   const row = storage.joinAutomationWorkspace({
     workspaceId: WORKSPACE,
@@ -260,6 +261,19 @@ async function setupE2E() {
       streamIdentity: row.streamIdentity,
     },
   });
+  const baseSendRequest = copy.client.sendRequest.bind(copy.client);
+  const copyClient = Object.assign(Object.create(Object.getPrototypeOf(copy.client)), copy.client, {
+    sendRequest(
+      request: Parameters<typeof baseSendRequest>[0],
+      options?: Parameters<typeof baseSendRequest>[1],
+    ) {
+      if (failCopyRpc && request.method.includes(failCopyRpc)) {
+        failCopyRpc = null;
+        return Promise.reject(new Error(`injected fault on ${request.method}`));
+      }
+      return baseSendRequest(request, options);
+    },
+  }) as typeof copy.client;
   const sync = () => {
     const run = lane.then(async () => {
       if (beforeCopySync) {
@@ -281,7 +295,7 @@ async function setupE2E() {
     pulledHead: 0,
     root: join(root, "server", "workspace"),
     metadataDir: join(root, "server", "metadata"),
-    client: copy.client,
+    client: copyClient,
     workspace: copy.workspace,
     signal: copy.lifetime,
     nextRequestId: copy.nextRequestId,
@@ -345,13 +359,16 @@ async function setupE2E() {
     onNextCopySync(hook: () => Promise<void>) {
       beforeCopySync = hook;
     },
+    failNextCopyRpc(methodFragment: string) {
+      failCopyRpc = methodFragment;
+    },
   };
 }
 
 it.skipIf(engine.missing)(
   "creates a sketch on phone, saves drawn elements idempotently, and syncs them to desktop",
   async () => {
-    const { owner, op } = await setupE2E();
+    const { owner, op, call, failNextCopyRpc } = await setupE2E();
 
     const created = await op("createSketch", {
       path: "Trip Map.excalidraw",
@@ -409,6 +426,27 @@ it.skipIf(engine.missing)(
       }),
     ).toEqual(saved);
 
+    // If settle fails after applying a local update, retrying with the same elements still settles cleanly.
+    const box2 = rect("rect-2", 1, 200, { index: "a1" });
+    failNextCopyRpc("ydoc.settle");
+    expect(
+      (
+        await call("saveSketch", {
+          path: "Trip Map.excalidraw",
+          objectId,
+          requestId: "req-save-2",
+          elements: [box2],
+        })
+      ).status,
+    ).toBe(500);
+    const settledRetry = await op("saveSketch", {
+      path: "Trip Map.excalidraw",
+      objectId,
+      requestId: "req-save-2",
+      elements: [box2],
+    });
+    expect(settledRetry).toMatchObject({ ok: true, lostElementIds: [] });
+
     await owner.sync();
     const provider = await openEngineYdocProviderSession({
       transport: owner.client,
@@ -422,8 +460,9 @@ it.skipIf(engine.missing)(
     });
     try {
       expect(provider.lineage).toBe("existing");
+      expect(provider.unsettled).toBe(false);
       const scene = foldScene(provider.doc);
-      expect(scene.elements).toEqual([box]);
+      expect(scene.elements).toEqual([box, box2]);
       expect(scene.appState).toEqual({ gridSize: null, viewBackgroundColor: "#ffffff" });
     } finally {
       await provider.evict().catch(() => undefined);
@@ -665,7 +704,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "reads a never-opened sketch without mutating relay state, then seeds and saves edits cleanly, while denying Members 404",
   async () => {
-    const { storage, owner, op, call } = await setupE2E();
+    const { storage, owner, op, call, failNextCopyRpc } = await setupE2E();
     const fileId = "raw-img-1";
     const shape = rect("raw-rect", 1, 11);
     const imgEl: ElementSnapshot = {
@@ -749,7 +788,28 @@ it.skipIf(engine.missing)(
     });
     expect(untouched?.text).toBe(originalText);
 
-    // Saving seeds the absent lineage, preserves the embedded image asset, and syncs back to desktop.
+    // Legacy portable sketches with null elements/appState/files open cleanly as empty sketches.
+    await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LegacyNull.excalidraw",
+      text: JSON.stringify({ type: "excalidraw", elements: null, appState: null, files: null }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed legacy null sketch" },
+    });
+    await owner.sync();
+    expect(await op("readSketch", { path: "LegacyNull.excalidraw" })).toMatchObject({
+      ok: true,
+      elements: [],
+      appState: {},
+      files: {},
+      missingAssets: 0,
+    });
+
+    // Even with a transient blob-read failure during first save, seeding preserves the embedded
+    // image intact in storage and a fresh read still sees it with zero missing assets.
+    failNextCopyRpc("readBlob");
     const added = rect("phone-added", 1, 33, { index: "a2" });
     const saved = await op("saveSketch", {
       path: "NeverOpened.excalidraw",
@@ -760,14 +820,18 @@ it.skipIf(engine.missing)(
     expect(saved).toMatchObject({
       ok: true,
       lostElementIds: [],
-      missingAssets: 0,
-      files: { [fileId]: expect.objectContaining({ dataURL: PNG_DATA_URL }) },
+      missingAssets: 1,
     });
     expect((saved.elements as ElementSnapshot[]).map((e) => e.id).sort()).toEqual([
       "phone-added",
       "raw-img-el",
       "raw-rect",
     ]);
+    expect(await op("readSketch", { path: "NeverOpened.excalidraw" })).toMatchObject({
+      ok: true,
+      missingAssets: 0,
+      files: { [fileId]: expect.objectContaining({ dataURL: PNG_DATA_URL }) },
+    });
 
     await owner.sync();
     const after = await openEngineYdocProviderSession({

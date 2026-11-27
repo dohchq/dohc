@@ -4,7 +4,7 @@ import {
   type AccountSession,
   type ResolveAccountSession,
 } from "@dohc/workspace-auth/session";
-import type { EngineTransport } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type EngineTransport } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { AutomationReplica } from "./automationReplicas";
@@ -49,7 +49,7 @@ function op(
   });
 }
 
-async function setup(options: { copies?: boolean } = {}) {
+async function setup(options: { copies?: boolean; conflictOpen?: boolean } = {}) {
   const storage = await testStorage();
   storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspaceIdentity({
@@ -60,7 +60,17 @@ async function setup(options: { copies?: boolean } = {}) {
   const files = new VersionedLoopbackEngine();
   const engine: EngineTransport = {
     onEvent: () => () => undefined,
-    sendRequest: (request) => files.sendRequest(request),
+    sendRequest: (request) => {
+      if (options.conflictOpen && request.method === "ydoc.open") {
+        return Promise.reject(
+          new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "ydoc-conflict-open", retry: "no" },
+            new Error("ydoc-conflict-open"),
+          ),
+        );
+      }
+      return files.sendRequest(request);
+    },
   };
   let requestId = 0;
   const lifetime = new AbortController();
@@ -258,8 +268,13 @@ describe("owner-only sketch ops inside /ops/*", () => {
     expect(oversizedSave.status).toBe(413);
   });
 
-  it("answers 503 server_busy when server copies are unavailable", async () => {
-    const { h } = await setup({ copies: false });
+  it("answers 503 server_busy to owners and 404 to joined Members when server copies are unavailable", async () => {
+    const { storage, h } = await setup({ copies: false });
+    inviteJoined(storage, "ben", "member");
+    inviteJoined(storage, "cara", "admin");
+    const missing = await denialBytes(
+      await h(op("nowhere", "readSketch", { path: "a.excalidraw" })),
+    );
     for (const [operation, args] of [
       ["readSketch", { path: "a.excalidraw" }],
       ["createSketch", { path: "a.excalidraw", requestId: "req-1" }],
@@ -268,6 +283,11 @@ describe("owner-only sketch ops inside /ops/*", () => {
       const response = await h(op("trip", operation, args));
       expect(response.status, operation).toBe(503);
       expect(await json(response)).toMatchObject({ ok: false, code: "server_busy" });
+      for (const user of ["ben", "cara"] as const) {
+        expect(await denialBytes(await h(op("trip", operation, args, signedIn(user))))).toBe(
+          missing,
+        );
+      }
     }
   });
 
@@ -311,5 +331,21 @@ describe("owner-only sketch ops inside /ops/*", () => {
       });
     }
     expect(syncs).toEqual([]);
+  });
+
+  it("falls back to portable read instead of HTTP 500 when ydoc.open reports ydoc-conflict-open", async () => {
+    const { files, h } = await setup({ conflictOpen: true });
+    files.seedTextFile({
+      workspace: "trip",
+      path: "Conflicted.excalidraw",
+      text: JSON.stringify({ type: "excalidraw", version: 2, elements: null, appState: null }),
+      objectId: "object-conflicted",
+    });
+    const response = await h(op("trip", "readSketch", { path: "Conflicted.excalidraw" }));
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({
+      ok: true,
+      result: { ok: true, path: "Conflicted.excalidraw", elements: [], appState: {}, files: {} },
+    });
   });
 });

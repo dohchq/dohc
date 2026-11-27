@@ -5,7 +5,7 @@ import {
   SceneCodecError,
   applySceneDelta,
   assertRestorableElement,
-  exportPortableScene,
+  canonicalPortableScene,
   foldScene,
   lostElementRevisions,
   validateSceneElements,
@@ -38,6 +38,7 @@ export const SAVE_SKETCH_MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_SKETCH_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_HYDRATED_ASSET_BYTES = 24 * 1024 * 1024;
 const MAX_SAVE_ELEMENTS = 10_000;
+const EMPTY_SET: ReadonlySet<string> = new Set();
 const ASSET_MIME_TYPES = new Set([
   "image/svg+xml",
   "image/png",
@@ -169,7 +170,7 @@ function parseSketchRequest(operation: PhoneSketchOperation, args: unknown): Par
   };
 }
 
-function assertAllowedImages(elements: readonly unknown[], existingAssets: ReadonlySet<string>) {
+function validateDeltaInput(elements: readonly unknown[], existingAssets: ReadonlySet<string>) {
   for (const raw of elements) {
     const el = asRecord(raw);
     if (
@@ -180,6 +181,12 @@ function assertAllowedImages(elements: readonly unknown[], existingAssets: Reado
     ) {
       throw badRequest("New image files cannot be added to a sketch from a phone yet.");
     }
+  }
+  try {
+    validateSceneElements(elements);
+  } catch (e) {
+    if (e instanceof SceneCodecError) throw badRequest(e.message);
+    throw e;
   }
 }
 
@@ -225,67 +232,93 @@ async function hydrateSceneAssets(
 type ParsedPortable = {
   readonly result: SketchReadResult;
   readonly assetIds: ReadonlySet<string>;
+  readonly rawFiles: Readonly<Record<string, JsonObject>>;
+  readonly headSha256?: string;
 };
 
-const EMPTY_SET: ReadonlySet<string> = new Set();
+const EMPTY_FILES: Readonly<Record<string, JsonObject>> = {};
 
-function parsePortableSketch(path: string, objectId: string, text: string): ParsedPortable {
+function parsePortableSketch(
+  path: string,
+  objectId: string,
+  text: string,
+  headSha256?: string,
+): ParsedPortable {
   if (text.trim() === "")
     return {
       result: { ok: true, path, objectId, elements: [], appState: {}, files: {}, missingAssets: 0 },
       assetIds: EMPTY_SET,
+      rawFiles: EMPTY_FILES,
+      headSha256,
     };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { result: invalidSketch(path, `${path} is not valid JSON.`), assetIds: EMPTY_SET };
+    return {
+      result: invalidSketch(path, `${path} is not valid JSON.`),
+      assetIds: EMPTY_SET,
+      rawFiles: EMPTY_FILES,
+    };
   }
   const doc = asRecord(parsed);
+  const rawElements = doc?.elements;
+  const rawApp = doc?.appState;
+  const rawFilesObj = doc?.files;
   if (
     !doc ||
     doc.type !== "excalidraw" ||
-    (doc.elements !== undefined && !Array.isArray(doc.elements))
-  )
-    return { result: invalidSketch(path), assetIds: EMPTY_SET };
+    (rawElements !== undefined && rawElements !== null && !Array.isArray(rawElements)) ||
+    (rawApp !== undefined && rawApp !== null && !asRecord(rawApp)) ||
+    (rawFilesObj !== undefined && rawFilesObj !== null && !asRecord(rawFilesObj))
+  ) {
+    return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+  }
   const elements: ElementSnapshot[] = [];
-  for (const raw of (doc.elements as unknown[] | undefined) ?? []) {
+  for (const raw of (rawElements as unknown[] | null | undefined) ?? []) {
     try {
       assertRestorableElement(raw);
     } catch (e) {
       return {
         result: invalidSketch(path, e instanceof Error ? e.message : undefined),
         assetIds: EMPTY_SET,
+        rawFiles: EMPTY_FILES,
       };
     }
-    if (raw.isDeleted !== true && typeof raw.id === "string" && raw.id.length > 0)
-      elements.push(raw as ElementSnapshot);
+    if (typeof raw.id !== "string" || raw.id.length === 0)
+      return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+    const version =
+      raw.version === undefined || raw.version === null || raw.version === 0 ? 1 : raw.version;
+    const versionNonce =
+      raw.versionNonce === undefined || raw.versionNonce === null ? 0 : raw.versionNonce;
+    const isDeleted = raw.isDeleted === undefined || raw.isDeleted === null ? false : raw.isDeleted;
+    if (!isNonNegInt(version) || !isNonNegInt(versionNonce) || typeof isDeleted !== "boolean")
+      return { result: invalidSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
+    if (!isDeleted) elements.push({ ...raw, version, versionNonce, isDeleted } as ElementSnapshot);
   }
-  const rawApp = asRecord(doc.appState);
+  const appRecord = asRecord(rawApp);
   const appState: JsonObject = {};
   for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
-    if (rawApp?.[key] !== undefined) appState[key] = rawApp[key] as JsonObject[string];
+    if (appRecord?.[key] !== undefined) appState[key] = appRecord[key] as JsonObject[string];
   }
-  const rawFiles = asRecord(doc.files) ?? {};
-  const assetIds = new Set(Object.keys(rawFiles));
+  const filesRecord = asRecord(rawFilesObj) ?? {};
+  const assetIds = new Set(Object.keys(filesRecord));
+  const rawFiles: Record<string, JsonObject> = {};
   const files: Record<string, HydratedSketchFile> = {};
   let missingAssets = 0;
   let totalBytes = 0;
-  for (const [id, entry] of Object.entries(rawFiles)) {
+  for (const [id, entry] of Object.entries(filesRecord)) {
     const f = asRecord(entry);
     if (
       !f ||
       typeof f.mimeType !== "string" ||
-      !ASSET_MIME_TYPES.has(f.mimeType) ||
       typeof f.dataURL !== "string" ||
-      !f.dataURL.startsWith("data:") ||
-      totalBytes + f.dataURL.length > MAX_HYDRATED_ASSET_BYTES
+      !f.dataURL.startsWith("data:")
     ) {
       missingAssets += 1;
       continue;
     }
-    totalBytes += f.dataURL.length;
-    files[id] = {
+    const normalized: HydratedSketchFile = {
       id: typeof f.id === "string" && f.id.length > 0 ? f.id : id,
       mimeType: f.mimeType,
       dataURL: f.dataURL,
@@ -293,17 +326,35 @@ function parsePortableSketch(path: string, objectId: string, text: string): Pars
       ...(isNonNegInt(f.lastRetrieved) ? { lastRetrieved: f.lastRetrieved } : {}),
       ...(isNonNegInt(f.version) ? { version: f.version } : {}),
     };
+    rawFiles[id] = normalized as unknown as JsonObject;
+    if (
+      !ASSET_MIME_TYPES.has(f.mimeType) ||
+      totalBytes + f.dataURL.length > MAX_HYDRATED_ASSET_BYTES
+    ) {
+      missingAssets += 1;
+      continue;
+    }
+    totalBytes += f.dataURL.length;
+    files[id] = normalized;
   }
   return {
     result: { ok: true, path, objectId, elements, appState, files, missingAssets },
     assetIds,
+    rawFiles,
+    headSha256,
   };
 }
 
 const isFileExistsError = (e: unknown) =>
   (e instanceof VersionedTextStoreError && e.code === "target-path-exists") ||
-  (e instanceof DaemonRefusalError && e.wireCode === "CONFLICT") ||
-  (e instanceof Error && /already exists|target-path-exists|file-exists/iu.test(e.message));
+  (e instanceof DaemonRefusalError &&
+    (e.wireCode === "CONFLICT" ||
+      (e.wireCode === "INVALID_PARAMS" && e.message === "target-path-exists")));
+const isConflictOpenError = (e: unknown) =>
+  (e instanceof DaemonRefusalError &&
+    e.wireCode === "INVALID_PARAMS" &&
+    e.message === "ydoc-conflict-open") ||
+  (e instanceof Error && e.message === "ydoc-conflict-open");
 const isInvalidSceneOpenError = (e: unknown) =>
   (e instanceof DaemonRefusalError &&
     e.wireCode === "INVALID_PARAMS" &&
@@ -320,25 +371,30 @@ async function resolveObjectId(
   return found?.status === "found" ? found.objectId : null;
 }
 
+type SceneSession = Awaited<ReturnType<typeof openEngineYdocProviderSession>>;
+type OpenSceneResult =
+  | { readonly kind: "open"; readonly provider: SceneSession }
+  | { readonly kind: "conflict" | "invalid" };
+
 async function openScene(
   replica: AutomationReplica,
   input: { versionId: string; path: string; expectedObjectId: string; seedAbsentLineage: boolean },
-) {
+): Promise<OpenSceneResult> {
   try {
-    return await openEngineYdocProviderSession({
+    const provider = await openEngineYdocProviderSession({
       transport: replica.client as EngineTransport,
       workspace: replica.workspace,
       ...input,
       contentKind: "scene",
       onRemoteUpdate: () => undefined,
     });
+    return { kind: "open", provider };
   } catch (e) {
-    if (isInvalidSceneOpenError(e)) return null;
+    if (isConflictOpenError(e)) return { kind: "conflict" };
+    if (isInvalidSceneOpenError(e)) return { kind: "invalid" };
     throw e;
   }
 }
-
-type SceneSession = NonNullable<Awaited<ReturnType<typeof openScene>>>;
 
 async function closeSession(provider: SceneSession, close: boolean): Promise<void> {
   if (!close) {
@@ -389,7 +445,7 @@ async function readPortableFile(
     maxBytes: MAX_SKETCH_FILE_BYTES,
   });
   if (!file || file.contentKind !== "text")
-    return { result: missingSketch(path), assetIds: EMPTY_SET };
+    return { result: missingSketch(path), assetIds: EMPTY_SET, rawFiles: EMPTY_FILES };
   if (file.text === null || file.byteLength > MAX_SKETCH_FILE_BYTES) {
     return {
       result: {
@@ -398,9 +454,10 @@ async function readPortableFile(
         reason: "This sketch is too large to open on a phone.",
       },
       assetIds: EMPTY_SET,
+      rawFiles: EMPTY_FILES,
     };
   }
-  return parsePortableSketch(path, objectId, file.text);
+  return parsePortableSketch(path, objectId, file.text, file.sha256);
 }
 
 async function readSketchInCopy(
@@ -413,19 +470,21 @@ async function readSketchInCopy(
   const version = await files.getActiveVersion({ workspaceId });
   const objectId = version ? await resolveObjectId(files, workspaceId, path, signal) : null;
   if (!version || !objectId) return missingSketch(path);
-  const provider = await openScene(replica, {
+  const opened = await openScene(replica, {
     versionId: version.id,
     path,
     expectedObjectId: objectId,
     seedAbsentLineage: false,
   });
-  if (!provider) return invalidSketch(path);
-  try {
-    if (provider.head === "absent") return missingSketch(path);
-    if (provider.lineage === "existing")
-      return (await foldHydratedScene(files, workspaceId, path, objectId, provider)).payload;
-  } finally {
-    await closeSession(provider, false);
+  if (opened.kind === "open") {
+    try {
+      if (opened.provider.head === "absent") return missingSketch(path);
+      if (opened.provider.lineage === "existing")
+        return (await foldHydratedScene(files, workspaceId, path, objectId, opened.provider))
+          .payload;
+    } finally {
+      await closeSession(opened.provider, false);
+    }
   }
   return (await readPortableFile(files, workspaceId, version.id, path, objectId)).result;
 }
@@ -443,52 +502,6 @@ const EMPTY_SKETCH_DOCUMENT = JSON.stringify(
   2,
 );
 
-const compareScalar = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-
-async function buildCanonicalPortableScene(
-  files: VersionedLiveAdapter,
-  workspaceId: string,
-  provider: SceneSession,
-): Promise<string> {
-  const exported = JSON.parse(exportPortableScene(provider.doc)) as {
-    elements: ElementSnapshot[];
-    appState: JsonObject;
-  };
-  const hydrated = await hydrateSceneAssets(files, workspaceId, provider.artifactAssets ?? []);
-  const referenced = [
-    ...new Set(
-      exported.elements
-        .filter((e) => e.type === "image" && typeof e.fileId === "string")
-        .map((e) => e.fileId as string),
-    ),
-  ].sort(compareScalar);
-  const portableFiles: Record<string, Record<string, unknown>> = {};
-  for (const id of referenced) {
-    const file = hydrated.files[id];
-    if (!file) continue;
-    portableFiles[id] = {
-      created: file.created,
-      dataURL: file.dataURL,
-      id: file.id,
-      ...(file.lastRetrieved === undefined ? {} : { lastRetrieved: file.lastRetrieved }),
-      mimeType: file.mimeType,
-      ...(file.version === undefined ? {} : { version: file.version }),
-    };
-  }
-  return JSON.stringify(
-    {
-      type: "excalidraw",
-      version: 2,
-      source: "https://excalidraw.com",
-      elements: exported.elements,
-      appState: exported.appState,
-      files: portableFiles,
-    },
-    null,
-    2,
-  );
-}
-
 async function ensureClaimedSceneLineage(
   files: VersionedLiveAdapter,
   replica: AutomationReplica,
@@ -498,42 +511,38 @@ async function ensureClaimedSceneLineage(
     path: string;
     objectId: string;
     requestId: string;
+    portable?: ParsedPortable;
   },
-) {
+): Promise<OpenSceneResult> {
   const openOpts = {
     versionId: input.versionId,
     path: input.path,
     expectedObjectId: input.objectId,
   };
-  const first = await openScene(replica, { ...openOpts, seedAbsentLineage: true });
-  if (!first || first.head === "absent" || first.lineageClaimId) return first;
-  let released = false;
-  try {
-    const canonical = await buildCanonicalPortableScene(files, input.workspaceId, first);
+  if (input.portable?.result.ok) {
+    const canonical = canonicalPortableScene(
+      input.portable.result.elements,
+      input.portable.result.appState,
+      input.portable.rawFiles,
+    );
     const canonicalSha = createHash("sha256").update(canonical, "utf8").digest("hex");
-    if (first.headSha256 && first.headSha256 !== canonicalSha) {
-      await closeSession(first, false);
-      released = true;
+    if (input.portable.headSha256 && input.portable.headSha256 !== canonicalSha) {
       await files.writeTextFile({
         workspaceId: input.workspaceId,
         versionId: input.versionId,
         path: input.path,
         text: canonical,
-        expectedSha256: first.headSha256,
+        expectedSha256: input.portable.headSha256,
         publish: true,
         requestId: `phone-sketch-seed:${input.requestId}`,
         metadata: { origin: "api", summary: `Updated ${posix.basename(input.path)}` },
       });
-      const seeded = await openScene(replica, { ...openOpts, seedAbsentLineage: true });
-      if (!seeded) return null;
-      await closeSession(seeded, true);
-    } else {
-      await closeSession(first, true);
-      released = true;
     }
-  } finally {
-    if (!released) await closeSession(first, false);
   }
+  const seeded = await openScene(replica, { ...openOpts, seedAbsentLineage: true });
+  if (seeded.kind !== "open" || seeded.provider.head === "absent" || seeded.provider.lineageClaimId)
+    return seeded;
+  await closeSession(seeded.provider, true);
   return await openScene(replica, { ...openOpts, seedAbsentLineage: false });
 }
 
@@ -575,7 +584,8 @@ async function createSketchInCopy(
       expectedObjectId: objectId,
       seedAbsentLineage: true,
     });
-    if (seeded) await closeSession(seeded, !seeded.lineageClaimId);
+    if (seeded.kind === "open")
+      await closeSession(seeded.provider, !seeded.provider.lineageClaimId);
   }
   await replica.sync(signal);
   await authorize();
@@ -595,17 +605,11 @@ async function applyDeltaInSession(
 ): Promise<ElementSnapshot[]> {
   let released = false;
   try {
-    const existingAssets = new Set(Object.keys(foldScene(provider.doc).assets));
-    assertAllowedImages(elements, existingAssets);
-    let delta: ReturnType<typeof applySceneDelta>;
-    try {
-      delta = applySceneDelta(provider.doc, elements);
-    } catch (e) {
-      if (e instanceof SceneCodecError) throw badRequest(e.message);
-      throw e;
-    }
+    validateDeltaInput(elements, new Set(Object.keys(foldScene(provider.doc).assets)));
+    const delta = applySceneDelta(provider.doc, elements);
+    const wasUnsettled = provider.unsettled;
+    if (wasUnsettled) await provider.settleNow({ summary });
     if (delta.update !== null) {
-      if (provider.unsettled) await provider.settleNow({ summary });
       try {
         await provider.applyLocalUpdate(delta.update, {
           idempotencyKey: `phone-sketch-save:${requestId}`,
@@ -618,19 +622,19 @@ async function applyDeltaInSession(
         await closeSession(provider, false);
         released = true;
         const reopened = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
-        if (reopened) {
+        if (reopened.kind === "open") {
           try {
-            if (reopened.unsettled) await reopened.settleNow({ summary });
+            if (reopened.provider.unsettled) await reopened.provider.settleNow({ summary });
           } catch (err) {
-            await closeSession(reopened, false);
+            await closeSession(reopened.provider, false);
             throw err;
           }
-          await closeSession(reopened, true);
+          await closeSession(reopened.provider, true);
         }
       }
     }
     if (!released) {
-      await closeSession(provider, delta.update !== null);
+      await closeSession(provider, delta.update !== null || wasUnsettled);
       released = true;
     }
     return delta.written;
@@ -670,30 +674,31 @@ async function saveSketchInCopy(
   };
   const summary = `Updated ${posix.basename(input.path)}`;
   const initial = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
-  if (!initial) return invalidSketch(input.path);
+  if (initial.kind !== "open") return invalidSketch(input.path);
 
   let written: ElementSnapshot[] = [];
-  if (initial.head === "absent") {
-    await closeSession(initial, false);
+  if (initial.provider.head === "absent") {
+    await closeSession(initial.provider, false);
     return missingSketch(input.path);
   }
-  if (initial.lineage === "existing" && initial.lineageClaimId) {
+  if (initial.provider.lineage === "existing" && initial.provider.lineageClaimId) {
     written = await applyDeltaInSession(
       replica,
-      initial,
+      initial.provider,
       openOpts,
       input.elements,
       input.requestId,
       summary,
     );
   } else {
-    const existingLineage = initial.lineage === "existing";
-    const initialAssets = existingLineage
-      ? new Set(Object.keys(foldScene(initial.doc).assets))
-      : null;
-    await closeSession(initial, false);
-    if (!existingLineage) {
-      const portable = await readPortableFile(
+    const existingAssets =
+      initial.provider.lineage === "existing"
+        ? new Set(Object.keys(foldScene(initial.provider.doc).assets))
+        : null;
+    await closeSession(initial.provider, false);
+    let portable: ParsedPortable | undefined;
+    if (!existingAssets) {
+      portable = await readPortableFile(
         files,
         workspaceId,
         version.id,
@@ -705,37 +710,26 @@ async function saveSketchInCopy(
           ? missingSketch(input.path)
           : invalidSketch(input.path, portable.result.reason);
       }
-      assertAllowedImages(input.elements, portable.assetIds);
-      try {
-        validateSceneElements(input.elements);
-      } catch (e) {
-        if (e instanceof SceneCodecError) throw badRequest(e.message);
-        throw e;
-      }
+      validateDeltaInput(input.elements, portable.assetIds);
       if (input.elements.length === 0) return { ...portable.result, lostElementIds: [] };
     } else {
-      assertAllowedImages(input.elements, initialAssets!);
-      try {
-        validateSceneElements(input.elements);
-      } catch (e) {
-        if (e instanceof SceneCodecError) throw badRequest(e.message);
-        throw e;
-      }
+      validateDeltaInput(input.elements, existingAssets);
     }
-    const provider = await ensureClaimedSceneLineage(files, replica, {
+    const seeded = await ensureClaimedSceneLineage(files, replica, {
       workspaceId,
       ...openOpts,
       objectId: input.objectId,
       requestId: input.requestId,
+      portable,
     });
-    if (!provider) return invalidSketch(input.path);
-    if (provider.head === "absent") {
-      await closeSession(provider, false);
+    if (seeded.kind !== "open") return invalidSketch(input.path);
+    if (seeded.provider.head === "absent") {
+      await closeSession(seeded.provider, false);
       return missingSketch(input.path);
     }
     written = await applyDeltaInSession(
       replica,
-      provider,
+      seeded.provider,
       openOpts,
       input.elements,
       input.requestId,
@@ -763,8 +757,8 @@ async function saveSketchInCopy(
     (c) => c.targetVersionId === version.id && c.path === input.path,
   );
   const post = await openScene(replica, { ...openOpts, seedAbsentLineage: false });
-  if (!post) {
-    if (!fileConflict) return invalidSketch(input.path);
+  if (post.kind !== "open") {
+    if (post.kind !== "conflict" && !fileConflict) return invalidSketch(input.path);
     const fallback = (
       await readPortableFile(files, workspaceId, version.id, input.path, postObjectId)
     ).result;
@@ -780,13 +774,13 @@ async function saveSketchInCopy(
     };
   }
   try {
-    if (post.head === "absent") return missingSketch(input.path);
+    if (post.provider.head === "absent") return missingSketch(input.path);
     const { scene, payload } = await foldHydratedScene(
       files,
       workspaceId,
       input.path,
       input.objectId,
-      post,
+      post.provider,
     );
     const lost = fileConflict ? written : lostElementRevisions(scene, written);
     const winners = new Map(scene.elements.map((e) => [e.id, e]));
@@ -796,7 +790,7 @@ async function saveSketchInCopy(
       ...(lost.length > 0 ? { lostVersions: buildLostVersions(lost, winners) } : {}),
     };
   } finally {
-    await closeSession(post, false);
+    await closeSession(post.provider, false);
   }
 }
 

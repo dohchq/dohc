@@ -25,7 +25,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ReactNode,
 } from "react";
 import {
   ActivityIndicator,
@@ -123,7 +122,8 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const { data, apps, collections } = useAccount();
   const signIn = useSignIn();
   const canOpenSketch = data !== null && !data.joined;
-  const canCreateSketch = writesIn(data) && rows !== null && state.problem === null;
+  const canCreateSketch =
+    writesIn(data) && rows !== null && !state.fromCache && state.problem === null;
   useEffect(() => () => createAbort.current?.abort(), []);
   const toggle = useCallback((set: typeof setExpanded, key: string) => {
     void Haptics.selectionAsync();
@@ -247,19 +247,8 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
-  const fileSection = (
-    id: string,
-    title: string,
-    list: FirstFiles | undefined,
-    extra?: {
-      shown?: readonly HomeRow[];
-      openable?: boolean;
-      forceShow?: boolean;
-      footer?: ReactNode;
-    },
-  ) => {
-    if (!extra?.forceShow && !list?.count) return null;
-    const items = extra?.shown ?? list?.shown ?? [];
+  const fileSection = (id: string, title: string, list: FirstFiles | undefined) => {
+    if (!list?.count) return null;
     return (
       <>
         <SectionHeader
@@ -269,14 +258,9 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           first={false}
           onToggle={() => toggle(setCollapsed, id)}
         />
-        {collapsed.has(id) ? null : (
-          <>
-            {items.map((row) => (
-              <Row key={row.key} row={row} onPress={press} openable={extra?.openable} />
-            ))}
-            {extra?.footer}
-          </>
-        )}
+        {collapsed.has(id)
+          ? null
+          : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
       </>
     );
   };
@@ -349,54 +333,63 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           <Row key={row.key} row={row} onPress={press} onPressIn={pressInRow} />
         ))
       )}
-      {fileSection("sketches", workspaceWords.sketches, rows?.sketches, {
-        shown: shownSketches,
-        openable: canOpenSketch,
-        forceShow: canCreateSketch,
-        footer: (
-          <>
-            {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
-              <Pressable
-                onPress={() => setShowAllSketches(true)}
-                android_ripple={ripple(theme)}
-                style={({ pressed }) => [
-                  styles.row,
-                  styles.app,
-                  pressed ? { backgroundColor: theme.panel2 } : null,
-                ]}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
-                  {workspaceWords.showAllSketches(rows.sketches.count)}
-                </Text>
-              </Pressable>
-            ) : null}
-            {canCreateSketch ? (
-              <Pressable
-                disabled={creatingSketch}
-                onPress={() => void startNewSketch()}
-                android_ripple={ripple(theme)}
-                style={({ pressed }) => [
-                  styles.row,
-                  styles.app,
-                  pressed ? { backgroundColor: theme.panel2 } : null,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={workspaceWords.newSketch}
-              >
-                {creatingSketch ? (
-                  <ActivityIndicator size="small" />
-                ) : (
-                  <Plus size={18} color={theme.accent} strokeWidth={2} />
-                )}
-                <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
-                  {creatingSketch ? workspaceWords.creatingSketch : workspaceWords.newSketch}
-                </Text>
-              </Pressable>
-            ) : null}
-          </>
-        ),
-      })}
+      {canCreateSketch || (rows?.sketches.count ?? 0) > 0 ? (
+        <>
+          <SectionHeader
+            title={workspaceWords.sketches}
+            collapsed={collapsed.has("sketches")}
+            unread={false}
+            first={false}
+            onToggle={() => toggle(setCollapsed, "sketches")}
+          />
+          {collapsed.has("sketches") ? null : (
+            <>
+              {shownSketches.map((row) => (
+                <Row key={row.key} row={row} onPress={press} openable={canOpenSketch} />
+              ))}
+              {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
+                <Pressable
+                  onPress={() => setShowAllSketches(true)}
+                  android_ripple={ripple(theme)}
+                  style={({ pressed }) => [
+                    styles.row,
+                    styles.app,
+                    pressed ? { backgroundColor: theme.panel2 } : null,
+                  ]}
+                  accessibilityRole="button"
+                >
+                  <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
+                    {workspaceWords.showAllSketches(rows.sketches.count)}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {canCreateSketch ? (
+                <Pressable
+                  disabled={creatingSketch}
+                  onPress={() => void startNewSketch()}
+                  android_ripple={ripple(theme)}
+                  style={({ pressed }) => [
+                    styles.row,
+                    styles.app,
+                    pressed ? { backgroundColor: theme.panel2 } : null,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={workspaceWords.newSketch}
+                >
+                  {creatingSketch ? (
+                    <ActivityIndicator size="small" />
+                  ) : (
+                    <Plus size={18} color={theme.accent} strokeWidth={2} />
+                  )}
+                  <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
+                    {creatingSketch ? workspaceWords.creatingSketch : workspaceWords.newSketch}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </>
+          )}
+        </>
+      ) : null}
       {collectionsState.collections?.length ? (
         <SectionHeader
           title={collectionWords.collections}

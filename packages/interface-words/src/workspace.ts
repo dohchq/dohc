@@ -7,7 +7,6 @@ export const workspaceWords = {
   back: "Back",
   // ExplorerHome.tsx
   pages: "Pages",
-  sketch: "Sketch",
   sketches: "Sketches",
   newSketch: "New sketch",
   otherFiles: "Other files",

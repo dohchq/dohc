@@ -99,4 +99,22 @@ describe("sketch static native asset loader", () => {
     expect(text).not.toContain("data:font");
     expect(text).not.toContain("data:application");
   });
+
+  it("sets an absolute EXCALIDRAW_ASSET_PATH under file:// so fonts load without location.origin", () => {
+    const htmlPath = resolve(import.meta.dirname, "../../assets/sketch/index.html");
+    const builderPath = resolve(import.meta.dirname, "../../scripts/build-sketch.mjs");
+    expect(readFileSync(builderPath, "utf8")).toContain(
+      'window.EXCALIDRAW_ASSET_PATH=new URL("./",location.href).href;',
+    );
+    if (existsSync(htmlPath)) {
+      expect(readFileSync(htmlPath, "utf8")).toContain(
+        'window.EXCALIDRAW_ASSET_PATH=new URL("./",location.href).href;',
+      );
+    }
+    const base = new URL("./", "file:///var/cache/sketch-v1/sketch.html").href;
+    expect(base).toBe("file:///var/cache/sketch-v1/");
+    expect(new URL("fonts/Assistant/Assistant-Regular.woff2", base).href).toBe(
+      "file:///var/cache/sketch-v1/fonts/Assistant/Assistant-Regular.woff2",
+    );
+  });
 });

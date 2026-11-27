@@ -35,18 +35,27 @@ type ReadState =
   | { kind: "refused"; refusal: Exclude<SketchReadResult["kind"], "sketch"> }
   | { kind: "failed"; cause: string };
 
+const CLEAN_EDIT = {
+  dirty: false,
+  saving: false,
+  error: null as { text: string; retryable: boolean } | null,
+  conflicts: 0,
+  missingAssets: 0,
+};
+
 export function ServerSketch() {
+  const theme = useTheme();
   const { data } = useAccount();
   const { path = "" } = useLocalSearchParams<{ path?: string }>();
   if (!data)
     return (
-      <View style={pageStyles.screen}>
+      <View style={[pageStyles.screen, { backgroundColor: theme.bg }]}>
         <NoWorkspace />
       </View>
     );
   if (data.joined) {
     return (
-      <View style={pageStyles.screen}>
+      <View style={[pageStyles.screen, { backgroundColor: theme.bg }]}>
         <Stack.Screen options={{ title: sketchTitle(path) }} />
         <ScreenFailure text={workspaceWords.sketchUnavailableJoined} />
       </View>
@@ -71,13 +80,7 @@ function SketchScreen({ path }: { path: string }) {
   const [readState, setReadState] = useState<ReadState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [webPhase, setWebPhase] = useState<"idle" | "started" | "painted">("idle");
-  const [edit, setEdit] = useState({
-    dirty: false,
-    saving: false,
-    error: null as string | null,
-    conflicts: 0,
-    missingAssets: 0,
-  });
+  const [edit, setEdit] = useState(CLEAN_EDIT);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
 
   const sceneRef = useRef<SketchScene | null>(null);
@@ -131,7 +134,7 @@ function SketchScreen({ path }: { path: string }) {
     loadedIntoWeb.current = false;
     saveAttemptRef.current = null;
     setWebPhase("idle");
-    setEdit({ dirty: false, saving: false, error: null, conflicts: 0, missingAssets: 0 });
+    setEdit(CLEAN_EDIT);
     readSketch(signIn.client, data.workspaceId, path, controller.signal).then(
       (answer) => {
         if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
@@ -165,7 +168,7 @@ function SketchScreen({ path }: { path: string }) {
           files: scene.files,
           readOnly: !editable,
           theme: scheme,
-          ...(preserved && preserved.length > 0 ? { preserved } : {}),
+          ...(preserved?.length ? { preserved } : {}),
         })}); true;`,
       ),
     [editable, scheme],
@@ -195,7 +198,7 @@ function SketchScreen({ path }: { path: string }) {
   );
 
   const performSave = useCallback(async (): Promise<boolean> => {
-    if (!data || !editable || edit.saving || !sceneRef.current) return false;
+    if (!data || !editable || edit.saving || !sceneRef.current || !web.current) return false;
     setEdit((prev) => ({ ...prev, saving: true, error: null, conflicts: 0 }));
     const controller = new AbortController();
     saveAbortRef.current = controller;
@@ -216,8 +219,8 @@ function SketchScreen({ path }: { path: string }) {
         controller.signal,
       );
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return false;
+      saveAttemptRef.current = null;
       if (answer.kind === "saved") {
-        saveAttemptRef.current = null;
         sceneRef.current = answer;
         const preserved = preserveLostElements(elements, answer);
         const hasConflicts = answer.lostElementIds.length > 0;
@@ -232,14 +235,16 @@ function SketchScreen({ path }: { path: string }) {
         void data.refresh(views.files);
         return !hasConflicts;
       }
-      saveAttemptRef.current = null;
       setEdit((prev) => ({
         ...prev,
         saving: false,
-        error:
-          answer.kind === "invalid"
-            ? workspaceWords.sketchInvalid
-            : workspaceWords.sketchChangedElsewhere,
+        error: {
+          text:
+            answer.kind === "invalid"
+              ? workspaceWords.sketchInvalid
+              : workspaceWords.sketchChangedElsewhere,
+          retryable: false,
+        },
       }));
       return false;
     } catch (err: unknown) {
@@ -248,7 +253,10 @@ function SketchScreen({ path }: { path: string }) {
       setEdit((prev) => ({
         ...prev,
         saving: false,
-        error: problem !== null ? problemText(problem) : workspaceWords.sketchSaveFailed,
+        error: {
+          text: problem !== null ? problemText(problem) : workspaceWords.sketchSaveFailed,
+          retryable: true,
+        },
       }));
       return false;
     } finally {
@@ -264,7 +272,43 @@ function SketchScreen({ path }: { path: string }) {
     setEdit((prev) => ({ ...prev, dirty: false, conflicts: 0, error: null }));
   }, [sendScene]);
 
-  usePreventRemove(editable && edit.dirty && !leaving, ({ repeat }) => {
+  const retry = () => setAttempt((n) => n + 1);
+  const webFailed = () => {
+    cancelCollect("webview-error");
+    saveAbortRef.current?.abort();
+    saveAttemptRef.current = null;
+    setWebPhase("idle");
+    setEdit(CLEAN_EDIT);
+    setAssetError("failed");
+  };
+
+  const failure = gap ? (
+    <NoWorkspace />
+  ) : assetError ? (
+    <ScreenFailure
+      text={workspaceWords.sketchReadFailed}
+      cause={assetError === "noSpace" ? documentWords.notEnoughStorage : undefined}
+      onRetry={retry}
+    />
+  ) : readState.kind === "refused" ? (
+    <ScreenFailure
+      text={
+        readState.refusal === "too-large"
+          ? documentWords.tooLargeToOpen
+          : readState.refusal === "invalid"
+            ? workspaceWords.sketchInvalid
+            : documentWords.noLongerAvailable
+      }
+    />
+  ) : readState.kind === "failed" ? (
+    <ScreenFailure text={workspaceWords.sketchReadFailed} cause={readState.cause} onRetry={retry} />
+  ) : null;
+
+  const webShown = failure === null && uri !== null && readState.kind === "ready";
+  const webReady = webShown && webPhase === "painted";
+  const canSave = editable && webReady && (edit.dirty || edit.saving);
+
+  usePreventRemove(editable && webReady && edit.dirty && !leaving, ({ repeat }) => {
     const leave = () => setLeaving(() => repeat);
     Alert.alert(workspaceWords.sketchUnsavedTitle, workspaceWords.sketchUnsavedBody, [
       { text: confirmWords.cancel, style: "cancel" },
@@ -301,43 +345,16 @@ function SketchScreen({ path }: { path: string }) {
     }
   };
 
-  const retry = () => setAttempt((n) => n + 1);
-  const webFailed = () => {
-    cancelCollect("webview-error");
-    setAssetError("failed");
-  };
-  const failure = gap ? (
-    <NoWorkspace />
-  ) : assetError ? (
-    <ScreenFailure
-      text={workspaceWords.sketchReadFailed}
-      cause={assetError === "noSpace" ? documentWords.notEnoughStorage : undefined}
-      onRetry={retry}
-    />
-  ) : readState.kind === "refused" ? (
-    <ScreenFailure
-      text={
-        readState.refusal === "too-large"
-          ? documentWords.tooLargeToOpen
-          : readState.refusal === "invalid"
-            ? workspaceWords.sketchInvalid
-            : documentWords.noLongerAvailable
-      }
-    />
-  ) : readState.kind === "failed" ? (
-    <ScreenFailure text={workspaceWords.sketchReadFailed} cause={readState.cause} onRetry={retry} />
-  ) : null;
-
-  const canSave = editable && readState.kind === "ready" && (edit.dirty || edit.saving);
-  const webShown = failure === null && uri !== null && readState.kind === "ready";
   const strips = [
     edit.error
       ? {
           key: "err",
           icon: "failed" as const,
-          text: `${workspaceWords.sketchSaveFailed} ${edit.error}`,
-          action: documentWords.tryAgain,
-          onAction: () => void performSave(),
+          text: `${workspaceWords.sketchSaveFailed} ${edit.error.text}`,
+          action: edit.error.retryable ? documentWords.tryAgain : documentWords.dismiss,
+          onAction: edit.error.retryable
+            ? () => void performSave()
+            : () => setEdit((p) => ({ ...p, error: null })),
         }
       : null,
     edit.conflicts > 0

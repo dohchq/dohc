@@ -177,9 +177,18 @@ export function createAccountOperationRoute(options: {
     const app = options.phoneApps !== undefined && isPhoneAppOperation(route.operation);
     const collection =
       options.phoneCollections !== undefined && isPhoneCollectionOperation(route.operation);
+    const sketch = isPhoneSketchOperation(route.operation);
     // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
-    // and its live host; every other operation needs a copy.
-    if (!feed && !wakeFeed && !app && !collection && !page && options.copies() === undefined)
+    // and its live host; every other operation needs a copy. Sketch ops check owner reach first so Members always get 404.
+    if (
+      !feed &&
+      !wakeFeed &&
+      !app &&
+      !collection &&
+      !page &&
+      !sketch &&
+      options.copies() === undefined
+    )
       throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone. Signing in is the browser's only gate.
     const joinedReads = feed || app || collection || isAccountOperation(route.operation);
@@ -196,7 +205,6 @@ export function createAccountOperationRoute(options: {
       return found;
     };
     const write = isPhoneWriteOperation(route.operation);
-    const sketch = isPhoneSketchOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
     const context = route.operation === "chatContext";
@@ -218,6 +226,7 @@ export function createAccountOperationRoute(options: {
       owner === null
     )
       throw notFound();
+    if (sketch && options.copies() === undefined) throw copiesUnavailable();
     if (caller.userId !== owner)
       await options.refreshAccountEmail?.(caller.userId, readSignal ?? request.signal);
     const member = memberOf(caller.userId);
@@ -371,7 +380,6 @@ export function createAccountOperationRoute(options: {
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
     if (isPhoneSketchOperation(route.operation)) {
-      if (caller.userId !== owner || member !== null) throw notFound();
       const { result, cursor } = await runPhoneSketchOperation(
         { storage, copies },
         {

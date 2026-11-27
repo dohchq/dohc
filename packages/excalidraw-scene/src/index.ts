@@ -423,6 +423,47 @@ function mergeElements(
   return merged;
 }
 
+export function canonicalPortableScene(
+  elements: readonly ElementSnapshot[],
+  appState: JsonObject,
+  files: Readonly<Record<string, JsonObject>>,
+): string {
+  const live = elements.filter((e) => !e.isDeleted).sort(compareElementOrder);
+  const liveIds = new Set(live.map((e) => e.id));
+  const assetIds = new Set(Object.keys(files));
+  const exportedElements = live.map((e) =>
+    JSON.parse(stableJson(repairElementReferences(clearElementForExport(e), liveIds, assetIds))),
+  );
+  const exportedApp: JsonObject = {};
+  for (const key of Object.keys(appState).sort(compareUnicodeScalar)) {
+    if (EXPORTABLE_APP_STATE.has(key) && appState[key] !== undefined)
+      exportedApp[key] = appState[key];
+  }
+  const referenced = [
+    ...new Set(
+      exportedElements
+        .filter((e) => e.type === "image" && typeof e.fileId === "string")
+        .map((e) => e.fileId as string),
+    ),
+  ].sort(compareUnicodeScalar);
+  const exportedFiles: Record<string, unknown> = {};
+  for (const id of referenced) {
+    if (files[id]) exportedFiles[id] = JSON.parse(stableJson(files[id]));
+  }
+  return JSON.stringify(
+    {
+      type: "excalidraw",
+      version: 2,
+      source: "https://excalidraw.com",
+      elements: exportedElements,
+      appState: exportedApp,
+      files: exportedFiles,
+    },
+    null,
+    2,
+  );
+}
+
 export function exportPortableScene(doc: Y.Doc): string {
   const scene = foldScene(doc);
   const liveElements = scene.elements.filter((element) => !element.isDeleted);
