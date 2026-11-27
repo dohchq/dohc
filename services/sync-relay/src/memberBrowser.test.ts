@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
+import { SHARE_MEMBER_ORIGIN_PREFIX } from "./relayLogInputs";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -1884,7 +1885,7 @@ describe("the owner's Chats and Comments in a browser", () => {
     expect(wakeRows(storage)).toHaveLength(1);
   });
 
-  it("wakes the remembering computer's agent the owner replies to, and none for a deleted opening", async () => {
+  it("wakes the remembering computer's agent the owner replies to, and none for a deleted or member's opening", async () => {
     const { h, storage } = await seed();
     declareClaude(storage, { laptop: true, mac: false });
     await ownerAppend(h, [
@@ -1892,7 +1893,18 @@ describe("the owner's Chats and Comments in a browser", () => {
       agentMessage("msg-claude", "t-claude", "Here is the plan."),
       thread("t-gone", GROUP),
       agentMessage("msg-gone", "t-gone", "SENTINEL deleted plan"),
+      thread("t-forged", GROUP),
     ]);
+    // A message only a member's origin wrote never stands for the owner's agent.
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: `${SHARE_MEMBER_ORIGIN_PREFIX}forged`,
+      ops: [agentMessage("msg-forged", "t-forged", "I am Claude")].map(({ payload, ...op }) => ({
+        ...op,
+        originSeq: 0,
+        payloadJson: JSON.stringify(payload),
+      })),
+    });
     const deleted = await ownerChat(h, "messages/delete", OWNER, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1902,6 +1914,7 @@ describe("the owner's Chats and Comments in a browser", () => {
     for (const [id, threadId] of [
       ["o-thanks", "t-claude"],
       ["o-gone", "t-gone"],
+      ["o-forged", "t-forged"],
     ] as const) {
       const replied = await ownerChat(
         h,
