@@ -458,7 +458,7 @@ function datasetAction<Shape extends z.ZodRawShape>(shape: Shape) {
   });
 }
 
-const DATASET_ADMIN_OPTIONS = [
+const DATASET_ACCESS_OPTIONS = [
   datasetAction({
     ...selection,
     action: z.literal("permissions"),
@@ -481,25 +481,28 @@ const DATASET_ADMIN_OPTIONS = [
     action: z.literal("removeGrant"),
     principalKey: z.string().min(1).max(256),
   }),
-  datasetAction({ ...workspace, action: z.literal("create"), definition }),
-  datasetAction({
+  datasetAction({ ...selection, action: z.literal("approval") }),
+] as const;
+const DATASET_RULE_OPTIONS = {
+  create: datasetAction({ ...workspace, action: z.literal("create"), definition }),
+  prepareSchemaChange: datasetAction({
     ...pinned,
     action: z.literal("prepareSchemaChange"),
     change: DatasetSchemaChange,
   }),
-  datasetAction({
+  prepareMigration: datasetAction({
     ...selection,
     action: z.literal("prepareMigration"),
     migrationPath: z.string().min(1).max(1024).nullable().optional(),
   }),
-  datasetAction({
+  migrationPreviewPage: datasetAction({
     ...workspace,
     action: z.literal("migrationPreviewPage"),
     preparationId: identity,
     after: z.string().min(1).max(1024).optional(),
     limit: z.number().int().min(1).max(100).optional(),
   }),
-  datasetAction({
+  approveMigration: datasetAction({
     ...workspace,
     action: z.literal("approveMigration"),
     agentLabel: z.string().min(1).max(160).optional(),
@@ -512,8 +515,20 @@ const DATASET_ADMIN_OPTIONS = [
       )
       .optional(),
   }),
-  datasetAction({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }),
-  datasetAction({ ...selection, action: z.literal("approval") }),
+  discardMigration: datasetAction({
+    ...workspace,
+    action: z.literal("discardMigration"),
+    preparationId: identity,
+  }),
+} as const;
+const DATASET_ADMIN_OPTIONS = [
+  ...DATASET_ACCESS_OPTIONS,
+  DATASET_RULE_OPTIONS.create,
+  DATASET_RULE_OPTIONS.prepareSchemaChange,
+  DATASET_RULE_OPTIONS.prepareMigration,
+  DATASET_RULE_OPTIONS.migrationPreviewPage,
+  DATASET_RULE_OPTIONS.approveMigration,
+  DATASET_RULE_OPTIONS.discardMigration,
 ] as const;
 const DATASET_REQUEST_OPTIONS = [
   datasetAction({
@@ -604,7 +619,7 @@ const DATASET_REQUEST_OPTIONS = [
     reference: sha256,
     acknowledge: z.literal(true),
   }),
-  ...DATASET_ADMIN_OPTIONS,
+  ...DATASET_ACCESS_OPTIONS,
   datasetAction({
     ...selection,
     action: z.literal("export"),
@@ -650,6 +665,7 @@ const DATASET_REQUEST_OPTIONS = [
     fieldId: identity,
     labelFieldId: identity,
   }),
+  DATASET_RULE_OPTIONS.create,
   datasetAction({
     ...workspace,
     action: z.literal("prepare"),
@@ -671,12 +687,17 @@ const DATASET_REQUEST_OPTIONS = [
     targetRevisionSha256: sha256,
     changedRevisionSha256: sha256,
   }),
+  DATASET_RULE_OPTIONS.prepareMigration,
   datasetAction({
     ...selection,
     action: z.literal("askToApply"),
     migrationPath: z.string().min(1).max(1024).nullable().optional(),
     note: z.string().trim().min(1).max(500).optional(),
   }),
+  DATASET_RULE_OPTIONS.migrationPreviewPage,
+  DATASET_RULE_OPTIONS.prepareSchemaChange,
+  DATASET_RULE_OPTIONS.approveMigration,
+  DATASET_RULE_OPTIONS.discardMigration,
   datasetAction({
     ...selection,
     action: z.literal("invoke"),

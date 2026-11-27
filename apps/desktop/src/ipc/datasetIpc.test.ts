@@ -2082,6 +2082,12 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
   expect(sent.get("guests/schema.sql")).toBe(schemaSql);
   expect(sent.get("guests/operations.js")).toBe(operationSource);
   expect(sent.has("guests/dataset.json")).toBe(true);
+  expect(writeSharedSources).toHaveBeenCalledWith(
+    f.workspace,
+    expect.any(Object),
+    true,
+    expect.any(AbortSignal),
+  );
   expect(f.createSources).not.toHaveBeenCalled();
   expect(withMainVersionLock).not.toHaveBeenCalled();
   expect(localHost).not.toHaveBeenCalled();
@@ -2107,6 +2113,10 @@ it("creates an Admin's Collection on the joined workspace's server from the rule
       { depth: 1 },
     ),
   ).rejects.toThrow("Automations cannot approve");
+  await expect(f.handler("agent", create, { depth: 1 })).rejects.toThrow(
+    "Automations cannot approve",
+  );
+  expect(writeSharedSources).toHaveBeenCalledTimes(2);
 
   const unwired = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
   unwired.workspace.shareView = { shareId: "s" };

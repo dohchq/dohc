@@ -2990,10 +2990,10 @@ describe("who approved a Collection's rules", () => {
     needsOwnerConfirmation = false,
     revisionSha256 = dataset.revisionSha256,
   ) => ({ kind: "approval", revisionSha256, approvedBy, needsOwnerConfirmation });
-  const renderPage = (owner: boolean, onError = vi.fn(), onSettled = vi.fn()) =>
+  const renderPage = (owner: boolean | "admin", onError = vi.fn(), onSettled = vi.fn()) =>
     render(
       <ConnectedTransactionalCollection
-        role={owner ? "owner" : "member"}
+        role={owner === "admin" ? "admin" : owner ? "owner" : "member"}
         workspaceId="workspace-a"
         datasetPath="data/dataset.json"
         tableId={id(2)}
@@ -3046,6 +3046,15 @@ describe("who approved a Collection's rules", () => {
     expect(backend.dataset).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: "approval" }),
     );
+  });
+
+  it("names the approver to an Admin, and leaves confirming to the Owner", async () => {
+    answer(approval(formerAda, true));
+    renderPage("admin");
+    expect((await screen.findByTestId("collection-approved-by")).textContent).toBe(
+      "Approved by Ada · former Admin",
+    );
+    expect(screen.queryByTestId("collection-confirm-approval")).toBeNull();
   });
 
   it("stops naming who approved them when reading that again fails", async () => {

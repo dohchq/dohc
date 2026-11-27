@@ -15,6 +15,8 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 export async function writeSharedCollectionRules(input: {
   workspaceId: string;
   files: Record<string, string>;
+  /** Refuse a file already there with other text, as a new Collection does. */
+  exclusive: boolean;
   shareViewFiles: Pick<ShareViewFiles, "read" | "change">;
   withLease<T>(work: (lease: Parameters<ShareViewFiles["change"]>[0]) => Promise<T>): Promise<T>;
   push(): Promise<void>;
@@ -26,6 +28,7 @@ export async function writeSharedCollectionRules(input: {
     ([a], [b]) => Number(a.endsWith("dataset.json")) - Number(b.endsWith("dataset.json")),
   );
   await input.withLease(async (lease) => {
+    const writes = [];
     for (const [path, text] of entries) {
       input.signal.throwIfAborted();
       const current = await input.shareViewFiles
@@ -35,6 +38,12 @@ export async function writeSharedCollectionRules(input: {
           throw error;
         });
       if (current?.kind === "text" && !current.truncated && current.text === text) continue;
+      if (current && input.exclusive)
+        throw new Error(`A file is already at ${path}. Choose another name for the Collection.`);
+      writes.push({ path, text, current });
+    }
+    for (const { path, text, current } of writes) {
+      input.signal.throwIfAborted();
       const outcome = await input.shareViewFiles.change(
         lease,
         target,

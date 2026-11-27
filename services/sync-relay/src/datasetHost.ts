@@ -1131,7 +1131,37 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         ? { ...owner(auth, auth.workspaceId), agent: auth.agent }
         : owner(auth, auth.workspaceId);
     if (!auth.grantId || auth.agent) throw notFound();
-    return launched(auth, named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId));
+    const authority = launched(
+      auth,
+      named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId),
+    );
+    return request.datasetId === undefined || !adminOf(auth)
+      ? authority
+      : adminReads(authority, auth.workspaceId, request.datasetId);
+  }
+  function adminOf(auth: Extract<AppBackendAuth, { kind: "named" }>) {
+    return (
+      !auth.launch &&
+      workspaceRoleOf(storage, auth.workspaceId, auth.userId)?.role === "admin" &&
+      auth.grantId === workspaceMemberGrantId(storage, auth.workspaceId, auth.userId)
+    );
+  }
+  function adminReads(
+    authority: DatasetAuthority,
+    workspaceId: string,
+    datasetId: string,
+  ): DatasetAuthority {
+    const reads = storage.db
+      .prepare(
+        "SELECT json_extract(o.value,'$.operationId') AS id FROM dohc_dataset_catalog c, json_each(c.revision_json,'$.definition.operations') o WHERE c.workspace_id=? AND c.dataset_id=? AND json_extract(o.value,'$.readOnly')=1",
+      )
+      .all(workspaceId, datasetId)
+      .map((row) => String(row.id));
+    return {
+      ...authority,
+      authorityToken: hash(JSON.stringify([authority.authorityToken, "admin"])),
+      defaultOperationIds: [...new Set([...(authority.defaultOperationIds ?? []), ...reads])],
+    };
   }
   function publication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     current();
@@ -1756,6 +1786,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             auth.workspaceId,
             verified.principalKey,
             verified.authorityToken,
+            adminOf(auth),
           ]),
         );
         // Stream metadata only: no record counts, source, or other principals' grants enter the response.

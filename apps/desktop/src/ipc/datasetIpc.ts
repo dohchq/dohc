@@ -192,6 +192,7 @@ export function createDatasetHandler<
   writeSharedSources?(
     workspace: W,
     files: Record<string, string>,
+    exclusive: boolean,
     signal: AbortSignal,
   ): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
@@ -505,16 +506,22 @@ export function createDatasetHandler<
             current();
           }
           const authorityWorkspaceId = shared?.workspaceId ?? input.workspaceId;
-          const writeSources = (files: Record<string, string>) => {
+          const writeSources = (files: Record<string, string>, exclusive = false) => {
             if (!shared)
               return dependencies.createSources(operation.workspace, files, operation.signal);
             if (!dependencies.writeSharedSources) throw datasetOwnerOnlyError();
-            return dependencies.writeSharedSources(operation.workspace, files, operation.signal);
+            return dependencies.writeSharedSources(
+              operation.workspace,
+              files,
+              exclusive,
+              operation.signal,
+            );
           };
           if (
             agent &&
             agent.depth > 0 &&
-            ["approve", "approveMigration", "confirmApproval"].includes(input.action)
+            (["approve", "approveMigration", "confirmApproval"].includes(input.action) ||
+              (shared && input.action === "create"))
           )
             throw new Error("Automations cannot approve Collection rules.");
           const approvalAgent = agent
@@ -1498,7 +1505,7 @@ export function createDatasetHandler<
               schemaSql,
               operationSource,
             });
-            await onMainLocked(() => writeSources(generated.files));
+            await onMainLocked(() => writeSources(generated.files, true));
             current();
             const approved = await shared.data.activate({
               revision,

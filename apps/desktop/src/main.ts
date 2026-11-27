@@ -11539,6 +11539,7 @@ function registerIpcHandlers(): void {
     writeSharedSources: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       files: Record<string, string>,
+      exclusive: boolean,
       signal: AbortSignal,
     ) => {
       const resolved = resolveRegisteredShareViewFilesTarget(workspace, {
@@ -11552,6 +11553,7 @@ function registerIpcHandlers(): void {
       await writeSharedCollectionRules({
         workspaceId: workspace.workspaceId,
         files,
+        exclusive,
         shareViewFiles,
         withLease: (work) => withStaleSensitiveWorkspaceOperation(workspace.rootPath, work),
         push: async () => {

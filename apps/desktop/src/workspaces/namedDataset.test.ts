@@ -156,7 +156,7 @@ it("reads who approved a Collection's rules on the owner's workspace, and says w
   ).rejects.toThrow("Only an Admin of a joined workspace manages Collection access.");
 });
 
-it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them", async () => {
+it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them or they're no longer an Admin", async () => {
   const deps = { ...input(), relayJson: vi.fn(async (..._: unknown[]): Promise<unknown> => ({})) };
   const joined = {
     ...marker,
@@ -172,6 +172,14 @@ it("sends an Admin's Collection rules to the owner's workspace, and says when th
   );
   await expect(governed.data.approvedArtifacts!(datasetId)).rejects.toThrow(
     "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.",
+  );
+  deps.relayJson.mockRejectedValueOnce(
+    markDatasetServerNotFound(new Error("Only the owner or an admin can do this."), 403, {
+      code: "members_forbidden",
+    }),
+  );
+  await expect(governed.data.approvedArtifacts!(datasetId)).rejects.toThrow(
+    "You're no longer an Admin of this workspace, so you can't change its Collections' rules.",
   );
   expect(deps.relayJson).toHaveBeenCalledWith(
     deps.credentials,

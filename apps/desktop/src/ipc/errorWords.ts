@@ -816,6 +816,11 @@ export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
 export function isDatasetServerNotFound(error: unknown): boolean {
   return parse(error).code === DATASET_SERVER_NOT_FOUND;
 }
+/** Main's code for the server's refusal of a Collection rules request from someone who isn't the Owner or an Admin. */
+export const DATASET_SERVER_NOT_ADMIN = "dataset_not_admin";
+export function isDatasetServerNotAdmin(error: unknown): boolean {
+  return parse(error).code === DATASET_SERVER_NOT_ADMIN;
+}
 /** Main's code for an owner's action on a Collection asked from a shared view, which only its owner can take. */
 export const DATASET_OWNER_ONLY = "dataset_owner_only";
 export function datasetOwnerOnlyError(): Error {
@@ -826,15 +831,17 @@ export function datasetOwnerOnlyError(): Error {
 export function isDatasetOwnerOnly(error: unknown): boolean {
   return parse(error).code === DATASET_OWNER_ONLY;
 }
-/** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
+/** Gives a Collection route's 404 "not found" and its 403 role refusal their codes, so callers can name the cause. Their words stay. */
 export function markDatasetServerNotFound(
   failure: Error,
   status: number,
   body: { code?: unknown } | null | undefined,
 ): Error {
-  return status === 404 && body?.code === "not_found"
-    ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND })
-    : failure;
+  if (status === 404 && body?.code === "not_found")
+    return Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND });
+  if (status === 403 && body?.code === "members_forbidden")
+    return Object.assign(failure, { code: DATASET_SERVER_NOT_ADMIN });
+  return failure;
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */

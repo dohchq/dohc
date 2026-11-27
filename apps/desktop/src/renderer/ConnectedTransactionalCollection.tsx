@@ -426,7 +426,7 @@ function ScopedCollection({
     key: `${datasetPath}\0${datasetId}`,
     manual: true,
     load: async (): Promise<DatasetApproval | null> => {
-      if (!owner || !datasetId) return null;
+      if (!governs || !datasetId) return null;
       const result = await bridge()
         .dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "approval" })
         .catch(() => null);
@@ -450,7 +450,7 @@ function ScopedCollection({
     refreshedFor.current = approvalRead.revisionSha256;
     void refresh();
   }, [approvalRead, dataset, refresh]);
-  const toConfirm = shownApproval?.needsOwnerConfirmation ? shownApproval : null;
+  const toConfirm = owner && shownApproval?.needsOwnerConfirmation ? shownApproval : null;
   const [confirming, setConfirming] = useState(false);
   const confirmApproval = async (confirmed: DatasetApproval) => {
     setConfirming(true);

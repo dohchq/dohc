@@ -1640,6 +1640,14 @@ test("@two-client an admin changes the owner's Collection rules, and the owner c
     }
     await kai.getByTestId("new-collection-create").click();
     await expect(kai.getByTestId("new-collection-dialog")).toBeHidden({ timeout: 60_000 });
+    await expect(async () => {
+      const volunteers = await openCollection(kai, "Volunteers");
+      await expect(volunteers.getByTestId("collection-approved-by")).toHaveText(
+        "Approved by e2e-members-kai · Admin",
+        { timeout: 5_000 },
+      );
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await themed(kai, "admin-created", async () => openCollection(kai, "Volunteers"));
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await admin.close();
     admin = null;

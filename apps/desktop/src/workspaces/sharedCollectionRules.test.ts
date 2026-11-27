@@ -45,10 +45,11 @@ function fixture(stored: Record<string, string>) {
         paths.map((path) => [path, { state: "accepted", contentHash: sha256(files.get(path)!) }]),
       ),
   );
-  const write = (next: Record<string, string>) =>
+  const write = (next: Record<string, string>, exclusive = false) =>
     writeSharedCollectionRules({
       workspaceId: "joined",
       files: next,
+      exclusive,
       shareViewFiles: shareViewFiles as never,
       withLease: (work) => work({} as never),
       push,
@@ -75,6 +76,24 @@ it("saves changed rule files in place, creates new ones, and sends dataset.json 
     "people/0002.sql",
     "people/dataset.json",
   ]);
+});
+
+it("creates a new Collection's files only where nothing else is, and leaves the copy unchanged otherwise", async () => {
+  const f = fixture({ "registrations/schema.sql": "SCHEMA", "registrations/dataset.json": "old" });
+  const created = {
+    "registrations/schema.sql": "SCHEMA",
+    "registrations/operations.js": "OPS",
+    "registrations/dataset.json": "new",
+  };
+  await expect(f.write(created, true)).rejects.toThrow(
+    "A file is already at registrations/dataset.json. Choose another name for the Collection.",
+  );
+  expect(f.changes).toEqual([]);
+  expect(f.files.get("registrations/dataset.json")).toBe("old");
+  expect(f.push).not.toHaveBeenCalled();
+  f.files.set("registrations/dataset.json", "new");
+  await f.write(created, true);
+  expect(f.changes).toEqual([{ kind: "create", path: "registrations/operations.js" }]);
 });
 
 it("asks the server again once while a rule file waits, then says it couldn't send", async () => {

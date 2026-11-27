@@ -1521,8 +1521,8 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
   ).not.toContainEqual(expect.objectContaining({ operationId: id(6) }));
 });
 
-async function adminRulesFixture() {
-  const f = await memberFixture();
+async function adminRulesFixture(dataGrant = true) {
+  const f = await memberFixture(dataGrant);
   const renamed = (n: number) => {
     const next = structuredClone(definition);
     next.tables[0]!.fields[1]!.name = `Name ${n}`;
@@ -1564,6 +1564,55 @@ async function adminRulesFixture() {
     ).toEqual({ ok: true });
   return { ...f, renamed, prepare, approve, demote };
 }
+
+it("lets an active Admin read every Collection without a grant until their next request after they're demoted, and never write", async () => {
+  const f = await adminRulesFixture(false);
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+  f.admin();
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  expect(f.host.describe(ana, scope).operations.map((operation) => operation.operationId)).toEqual([
+    id(6),
+  ]);
+  expect((await f.read()).result).toBe("edit");
+  await expect(
+    f.invoke(ana, id(7), { id: "x", name: "y" }, undefined, "admin-edit"),
+  ).rejects.toMatchObject(refused);
+  await expect(f.invoke(ana, id(6), {}, f.app(), "admin-app-read")).rejects.toMatchObject(refused);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare(
+        `INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES('ana-edit','s','user','ana',NULL,'edit',1,'active',1,NULL,NULL)`,
+      )
+      .run(),
+  );
+  await expect(
+    f.invoke({ ...ana, grantId: "ana-edit" }, id(6), {}, undefined, "edit-share-read"),
+  ).rejects.toMatchObject(refused);
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  f.demote();
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+});
+
+it("tells someone who isn't an Admin that the server refused their rules request, and an Admin that it doesn't have the Collection", async () => {
+  const f = await adminRulesFixture();
+  const route = createDatasetRoutes(f.host, f.storage, { nowMs: () => 10 });
+  const approval = (datasetId: string) =>
+    route(
+      new Request("https://relay.test/approval"),
+      { route: "dataset", workspaceId: "w", datasetId, action: "approval" },
+      { kind: "named", workspaceId: "w", userId: "ana" },
+    ).catch((error: { code: string }) => error.code);
+  expect(await approval(id(1))).toBe("members_forbidden");
+  f.admin();
+  expect(((await approval(id(1))) as Response).status).toBe(200);
+  expect(await approval(id(40))).toBe("not_found");
+  f.demote();
+  expect(await approval(id(40))).toBe("members_forbidden");
+});
 
 it("lets an Admin create a Collection and approve its rules as themselves, never a Member", async () => {
   const f = await adminRulesFixture();
