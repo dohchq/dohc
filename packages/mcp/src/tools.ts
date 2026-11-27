@@ -1227,6 +1227,24 @@ export async function listWorkspaces(ctx: ToolContext) {
   return { workspaces };
 }
 
+export async function servedWorkspace(ctx: ToolContext) {
+  const entry = await findWorkspaceEntry(ctx);
+  const rootPath = entry?.rootPath ?? ctx.root;
+  const subjectName = entry?.shareView?.subjectName;
+  return {
+    workspaceId: entry?.workspaceId ?? null,
+    name:
+      typeof subjectName === "string" && subjectName
+        ? subjectName
+        : rootPath
+            .replace(/[\\/]+$/, "")
+            .split(/[\\/]/)
+            .pop() || "Workspace",
+    rootPath,
+    shareAccess: ctx.shareAccess ?? "owner",
+  };
+}
+
 function removedShareStatus(workspace: RegistryWorkspace | null) {
   const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
     shareId,

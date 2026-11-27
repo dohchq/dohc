@@ -156,6 +156,12 @@ Pass `{ request: { action, ... } }` to `dohc_publish_app`:
 3. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId` and `appQuery` (`?app=<publicationId>`).
 4. Append `appQuery` before the `#` fragment of the share link URL. Keep the share link secret out of workspace files and dohc requests.
 
+A share link URL is a bearer credential at its stated access level: anyone holding it can use it. An app for members returns no `appQuery`. Rotating a link stays in the desktop. `agentLabel` values are what the agent declares, shown as provenance.
+
+## Personal apps in a workspace you joined
+
+In a workspace you joined, only Personal apps work. `personalFolder` returns your Personal app folder on this computer. `prepareLocal`, `listLocal`, and `checkLocal` take one of its subfolders as `appRoot`, and `approve`, `cancel`, `launchLocal`, and `withdraw` work as they do in a workspace you own. A Personal app never syncs and runs only the Collection actions your own access allows.
+
 ## Publishing to workspace members (`dohc_publish_app`)
 
 1. **Prepare**: `{ action: "prepare", workspaceId, appRoot, audience: "workspace" }` -> returns `approvalId`, `candidateDigest`. Omit `shareId` and `grantId`.

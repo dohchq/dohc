@@ -9,7 +9,7 @@ dohc keeps files, Markdown documents, structured Collections, automations, chat,
 
 ## Before your first call
 
-1. Get the workspace ID once with `dohc_list_workspaces` (or read `.dohc/manifest.json`). Never guess `"local"`.
+1. Through MCP, `dohc_dataset`, `dohc_collection_access`, and `dohc_publish_app` fill in `workspaceId` for the workspace the server serves. The CLI needs it: read it from the `dohc://workspace/info` resource or `dohc_list_workspaces`. Never guess `"local"`.
 2. Keep the dohc desktop app open for writes, Collections, apps, chat, and Versions.
 3. For Markdown files (`.md`), use `dohc_create_document`, `dohc_read_document`, and `dohc_edit_document`. `dohc_write_file` refuses Markdown documents because live documents own their text.
 
@@ -25,9 +25,9 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 | Create, read, and edit Markdown documents | `dohc_create_document`, `dohc_read_document`, `dohc_edit_document` | `dohc document create\|read\|edit` |
 | Work with document Collections (`collection.yaml`) | `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields` | `dohc document set-fields` |
 | Create, approve, migrate, and invoke transactional Collections (`dataset.json`) | `dohc_dataset` | `dohc dataset <verb> '<JSON>'` |
-| Scaffold, stage, check, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_test_app`, `dohc_publish_app` | `dohc app <verb> '<JSON>'` |
+| Scaffold, stage, verify, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_publish_app` (`verifyFrontend` runs the app) | `dohc app <verb> '<JSON>'` |
 | Import CSV/JSON and query SQLite | `dohc_import_data`, `dohc_query_database` | (MCP only) |
-| Check and toggle Collection automations (`automations.yaml`) | `dohc_list_automations`, `dohc_switch_automation` | `dohc automation list\|switch` |
+| Check and change Collection automations (`automations.yaml`) | `dohc_list_automations`, then edit `automations.yaml` with `dohc_write_file`. In a workspace shared with you at Edit, `dohc_switch_automation` turns one on or off | `dohc automation list\|switch` |
 | Post or reply in Groups and file comments | `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat` | `dohc chat groups\|post\|reply` |
 | Try changes safely in a Version | `dohc_create_version`, `dohc_compare_version`, `dohc_merge_version` | `dohc version create\|compare\|merge` |
 
