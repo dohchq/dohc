@@ -765,29 +765,27 @@ const channelReads = (fetch: ReturnType<typeof server>) =>
       new URL(String(input), "https://share.test").pathname === "/api/named-chat/channels",
   ).length;
 
-it("shows a Group added while the workspace is open, even when it had none", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
+it("shows a Group added just after the workspace opened, as soon as it reaches the relay, even when it had none", async () => {
   const options: { groups: Array<{ wire: string; name: string }> } = { groups: [] };
   const fetch = server(options);
   await render();
   await settle(
     () =>
-      text().includes("Leave at nine.") &&
       groupPanel().textContent?.includes("No Groups in this workspace yet.") === true &&
-      following("log").length === 1,
+      following("chat").length === 1,
   );
+  expect(following("chat")[0]!.url.searchParams.get("since")).toBe("7");
   options.groups = [{ wire: "wire-plans", name: "plans" }];
-  // A files update soon after the Groups arrived reads them no sooner.
   await act(async () =>
-    following("log")[0]!.answer({ ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0 }),
-  );
-  await settle(() => following("log").length === 1);
-  // The first files update a hold after the last read of the Groups reads them again.
-  vi.setSystemTime(Date.now() + 30_000);
-  await act(async () =>
-    following("log")[0]!.answer({ ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0 }),
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
   );
   await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(channelReads(fetch)).toBe(2);
+  await settle(() => following("chat").length === 1);
+  await act(async () =>
+    following("chat")[0]!.answer({ shareId: "share", messages: [], nextCursor: 8, hasMore: false }),
+  );
+  await settle(() => following("chat").length === 1);
   expect(channelReads(fetch)).toBe(2);
 });
 
@@ -2833,6 +2831,8 @@ describe("the owner's page", () => {
       wakes: [[wake("waiting")], [wake("claimed")], [wake("unclaimed")]],
     });
     const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
+    await settle(() => groupPanel().textContent!.includes("@claude plan it"));
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => line() === "Claude is waiting for a computer");
     expect(
       groupPanel().querySelector(".chat-wake")?.closest(".chat-message")?.textContent,
@@ -2871,9 +2871,30 @@ describe("the owner's page", () => {
         .find((node) => node.textContent?.startsWith("plans"))!
         .click(),
     );
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => line() === "Claude didn't start");
     await act(async () => vi.advanceTimersByTime(30_000));
     expect(wakeReads()).toHaveLength(3);
+  });
+
+  it("reads a post's wakes 2 seconds after it, so a computer that is on shows it starting, never waiting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await ownerPost({
+      user: "lee",
+      history: { "wire-plans": [chat(3, "Plans start here")] },
+      wakes: [[wake("claimed")], [wake("unclaimed")]],
+    });
+    const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
+    await settle(() => groupPanel().textContent!.includes("@claude plan it"));
+    await act(async () => vi.advanceTimersByTime(1_999));
+    expect(wakeReads()).toEqual([]);
+    expect(line()).toBeUndefined();
+    await act(async () => vi.advanceTimersByTime(1));
+    await settle(() => line() === "Claude is starting on a computer");
+    await act(async () => vi.advanceTimersByTime(1_999));
+    expect(wakeReads()).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTime(1));
+    await settle(() => line() === "Claude didn't start");
   });
 
   it("stops reading a post's wakes once the owner deletes it", async () => {
@@ -2883,6 +2904,8 @@ describe("the owner's page", () => {
       [...groupPanel().querySelectorAll(".chat-message")].find((node) =>
         node.textContent?.includes("@claude plan it"),
       );
+    await settle(() => post() !== undefined);
+    await act(async () => vi.advanceTimersByTime(2_000));
     await settle(() => post()?.querySelector(".chat-wake") != null);
     await act(async () =>
       post()!.querySelector<HTMLButtonElement>('button[aria-label="Delete message"]')!.click(),

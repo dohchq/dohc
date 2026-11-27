@@ -189,12 +189,15 @@ type Waiter = {
  * One follow per tab for every Group. The open Group's view follows through
  * `client`, served from the same request; `onMessages` hears how many messages
  * from other people each Group received, so the page can count them.
+ * The relay answers a follow as soon as the workspace's log moves, so `onMoved`
+ * hears each page that moved it without a message: something else changed, such as a new Group.
  */
 export function createGroupFollow(options: {
   shareId: string;
   userId: string;
   follow?: typeof followMemberGroups;
   onMessages(counts: ReadonlyMap<string, number>): void;
+  onMoved(): void;
   onEnded(reason: Ended): void;
   // Where an earlier follow stopped. A follow that starts there needs no open Group to start it.
   since?: number | null;
@@ -208,6 +211,8 @@ export function createGroupFollow(options: {
     waiters = new Set<Waiter>();
   let cursor: number | null = options.since ?? null,
     floor = options.since ?? 0,
+    // The furthest the follow has read. A follow started again earlier moves nothing until it passes this.
+    reached = options.since ?? 0,
     loop: AbortController | null = null,
     // The follow ended for good.
     over = false,
@@ -255,6 +260,8 @@ export function createGroupFollow(options: {
         counts.set(channelWireId, (counts.get(channelWireId) ?? 0) + 1);
       }
     }
+    const moved = page.nextCursor > reached && page.messages.length === 0;
+    reached = Math.max(reached, page.nextCursor);
     cursor = page.nextCursor;
     deletes = [
       ...deletes,
@@ -262,6 +269,7 @@ export function createGroupFollow(options: {
     ].slice(-BUFFERED_PER_GROUP);
     if (counts.size) options.onMessages(counts);
     settle();
+    if (moved) options.onMoved();
   };
 
   const run = () => {
@@ -346,7 +354,7 @@ export function createGroupFollow(options: {
   };
   return {
     cursor: () => cursor,
-    // Starts the follow from `since`, if it has one. Otherwise the first open Group starts it.
+    // Starts the follow from `since`, if it has one. Otherwise the first Group opened starts it.
     start() {
       closed = false;
       // Only a started follow listens, so an instance React discards never reads.

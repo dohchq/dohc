@@ -43,6 +43,7 @@ const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
 const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
 const EMPTY = "No messages in this channel yet.";
+const WAKE_READ_FIRST_MS = 2_000;
 const WAKE_READ_MS = 10_000;
 
 /** A wake's line, in the phone's words, without naming a computer. Held and queued show none, as on the phone. */
@@ -65,9 +66,10 @@ type PostWakes = {
 const watched = new Map<string, PostWakes>();
 
 /**
- * Where the agents stand that the reader's own posts from this page woke, for a client that reads them: read after
- * each post, then every 10 seconds while the tab shows and any is waiting or starting. A failed read keeps the last
- * lines, and the next read tries again. The lines last while the page does, kept by conversation.
+ * Where the agents stand that the reader's own posts from this page woke, for a client that reads them: read 2 seconds
+ * after each post, when a computer that is on has claimed its wake, then 2, 4, 8, and every 10 seconds while the tab
+ * shows and any is waiting or starting. A failed read keeps the last lines, and the next read tries again. The lines
+ * last while the page does, kept by conversation.
  */
 function usePostWakes(
   read: ChatChannelClient["wakes"],
@@ -89,7 +91,15 @@ function usePostWakes(
     if (posts.length === 0) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined,
-      reading = false;
+      reading = false,
+      waits = 0;
+    const later = () => {
+      timer = setTimeout(
+        () => void tick(),
+        Math.min(WAKE_READ_FIRST_MS * 2 ** Math.max(0, waits - 1), WAKE_READ_MS),
+      );
+      waits += 1;
+    };
     const tick = async () => {
       timer = undefined;
       if (reading || document.visibilityState === "hidden") return;
@@ -109,7 +119,7 @@ function usePostWakes(
       if (controller.signal.aborted) return;
       known.current = next;
       setWakes(next);
-      if (watching().length > 0) timer = setTimeout(() => void tick(), WAKE_READ_MS);
+      if (watching().length > 0) later();
     };
     const visible = () => {
       if (document.visibilityState !== "visible") return;
@@ -117,7 +127,7 @@ function usePostWakes(
       void tick();
     };
     document.addEventListener("visibilitychange", visible);
-    void tick();
+    later();
     return () => {
       controller.abort();
       clearTimeout(timer);

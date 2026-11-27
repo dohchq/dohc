@@ -1018,6 +1018,34 @@ describe("reading wakes", () => {
     await consumer.stop();
   });
 
+  it("reads at once when the relay is reachable again, and backs off from the start after", async () => {
+    const w = await setup();
+    vi.useFakeTimers();
+    for (let index = 0; index < 4; index += 1)
+      w.relay.answer(async () => {
+        throw new ChatWakeBusyError();
+      });
+    const intents: ChatWakeIntents = {
+      list: async () => [],
+      save: async () => undefined,
+      remove: async () => undefined,
+    };
+    const { consumer } = w.consumer({ sleep: timerSleep, intents });
+    consumer.start();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(w.relay.calls.waits).toHaveLength(3);
+    consumer.reachable();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(w.relay.calls.waits).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(w.relay.calls.waits).toHaveLength(4);
+    const parked = w.relay.nextPark();
+    await vi.advanceTimersByTimeAsync(1);
+    await parked;
+    expect(w.relay.calls.waits).toHaveLength(5);
+    await consumer.stop();
+  });
+
   it("backs off rather than asking again when a read answers early with no change", async () => {
     const w = await setup();
     w.relay.answer(async (since) => ({ cursor: since, wakes: [] }));

@@ -24,7 +24,7 @@ export type MemberListing = "loading" | "failed" | MemberGroups;
  * The membership's share and Groups, which Chats and Comments both use, read once `place` is set:
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
  * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
- * Given an age, it reads only when the last read is older. A refresh that fails keeps the Groups shown, and the next one tries again.
+ * A refresh that fails keeps the Groups shown, and the next one tries again.
  * `reads` counts the reads that arrived, including one that brought the same Groups.
  */
 export function useMemberListing(
@@ -39,7 +39,7 @@ export function useMemberListing(
   onEndedRef.current = onEnded;
   // When the Groups last arrived, or null before they do.
   const readAt = useRef<number | null>(null),
-    request = useRef<((olderThanMs: number) => void) | null>(null);
+    request = useRef<(() => void) | null>(null);
   useEffect(() => {
     setFound("loading");
     readAt.current = null;
@@ -87,12 +87,12 @@ export function useMemberListing(
           if (!controller.signal.aborted && number !== asked) read();
         });
     };
-    request.current = (olderThanMs) => {
+    request.current = () => {
       if (pending) {
-        if (olderThanMs === 0) asked += 1;
+        asked += 1;
         return;
       }
-      if (readAt.current === null || Date.now() - readAt.current < olderThanMs) return;
+      if (readAt.current === null) return;
       asked += 1;
       read();
     };
@@ -102,7 +102,7 @@ export function useMemberListing(
       request.current = null;
     };
   }, [place, accountId, attempt]);
-  const refresh = useCallback((olderThanMs = 0) => request.current?.(olderThanMs), []);
+  const refresh = useCallback(() => request.current?.(), []);
   return {
     found,
     reads,
@@ -115,13 +115,15 @@ export function useMemberListing(
  * The workspace's Groups beside its files. One follow serves every Group; the
  * open one shows its messages, and the others count what arrives. `shown`
  * says whether the person can see the panel, so a phone's hidden tab counts too.
- * The follow carries every Group the member reaches, so a message in a Group the list lacks calls `onUnlisted`.
+ * The follow wakes whenever the workspace's log moves. A move with no message, or a message in a Group the list
+ * lacks, calls `onChanged`: the Groups may have changed.
  */
 export function MemberChats({
   found,
   reads,
   onRetry,
-  onUnlisted,
+  onChanged,
+  since,
   shown,
   onEnded,
   onUnread,
@@ -131,7 +133,10 @@ export function MemberChats({
   // Counts the reads of the Groups that arrived, so a follow that came back 404 starts again after one.
   reads: number;
   onRetry(): void;
-  onUnlisted(): void;
+  onChanged(): void;
+  // Where the workspace's log was when its files were read. The follow starts there, so a Group added after
+  // the first read of the Groups appears even when no Group is open.
+  since: number;
   shown: boolean;
   onEnded(reason: Ended): void;
   onUnread(count: number): void;
@@ -142,8 +147,9 @@ export function MemberChats({
     [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
-  const onUnlistedRef = useRef(onUnlisted);
-  onUnlistedRef.current = onUnlisted;
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+  const firstSince = useRef(since);
   const seen = useRef({ open, shown });
   seen.current = { open, shown };
   const listed = useRef<HTMLButtonElement | null>(null),
@@ -181,11 +187,12 @@ export function MemberChats({
         ? createGroupFollow({
             shareId,
             userId,
-            since: lastHub.current?.cursor(),
+            since: lastHub.current?.cursor() ?? firstSince.current,
             onEnded: followGone,
+            onMoved: () => onChangedRef.current(),
             onMessages: (counts) => {
               if ([...counts.keys()].some((wireId) => !listedIds.current.has(wireId)))
-                onUnlistedRef.current();
+                onChangedRef.current();
               setUnread((current) => {
                 const next = new Map(current);
                 for (const [wireId, count] of counts) {
