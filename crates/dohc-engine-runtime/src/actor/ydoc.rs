@@ -2,7 +2,7 @@ use super::ActorHandle;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
 use super::journal::{journal_moment_outbound_in_tx, journal_owner_save_outbound_in_tx};
 use super::materialization::{
-    MaterializationReplayScope, SelfWriteRecorder, replay_materializations_in_order,
+    MaterializationReplayScope, SelfWriteRecorder, StoppedReplay, replay_materializations_in_order,
     replay_pending_materializations,
 };
 use super::search::search_domain;
@@ -2818,6 +2818,37 @@ pub struct YdocAppend {
     pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
+/// Why a settle stops at the owed write `stopped` did not land. A conflicted
+/// write makes the document's file changed on disk, as the head's own would.
+/// A locked file says so, and one that may pass otherwise is retried; any
+/// other needs someone to act, so a retry loop can't help.
+fn owed_write_refusal(
+    store: &EngineStore,
+    owed: &[String],
+    stopped: &StoppedReplay,
+) -> Result<RuntimeError, RuntimeError> {
+    let job = &owed[owed.len() - stopped.unlanded];
+    let status = store.load_materialization_job(job)?.map(|job| job.status);
+    Ok(match status {
+        Some(JobStatus::Conflict) => dohc_engine_domain::DomainError::ConflictStaleTarget.into(),
+        Some(JobStatus::Pending) if stopped.summary.file_locked > 0 => {
+            MaterializeError::FileLocked.into()
+        }
+        Some(JobStatus::Pending) if stopped.summary.failed_in_passing() => {
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "settlement-materialization-pending",
+            }
+            .into()
+        }
+        Some(JobStatus::Pending) if stopped.summary.blocked > 0 => {
+            MaterializeError::SymlinkTarget.into()
+        }
+        _ => RuntimeError::ActiveVersionMaterializationIncomplete {
+            failed_jobs: stopped.unlanded + 1,
+        },
+    })
+}
+
 /// Whether every update in this lineage is in the version head, and no write
 /// of that head to its path is outstanding, so an open has nothing to settle.
 /// This reads the store only: it does not look at the file on disk, which the
@@ -3637,29 +3668,7 @@ fn ydoc_settle_attempt_on_store(
                     &earlier,
                 )?;
                 if let Some(stopped) = stopped {
-                    // A conflicted write makes the document's file changed on
-                    // disk, as the head's own would. One that may pass, such
-                    // as on a locked file, is retried; any other needs someone
-                    // to act, so a retry loop can't help.
-                    let job = &earlier[earlier.len() - stopped.unlanded];
-                    let status = store.load_materialization_job(job)?.map(|job| job.status);
-                    return Err(match status {
-                        Some(JobStatus::Conflict) => {
-                            dohc_engine_domain::DomainError::ConflictStaleTarget.into()
-                        }
-                        Some(JobStatus::Pending) if stopped.summary.failed_in_passing() => {
-                            dohc_engine_sync::SyncError::RetryableState {
-                                reason: "settlement-materialization-pending",
-                            }
-                            .into()
-                        }
-                        Some(JobStatus::Pending) if stopped.summary.blocked > 0 => {
-                            MaterializeError::SymlinkTarget.into()
-                        }
-                        _ => RuntimeError::ActiveVersionMaterializationIncomplete {
-                            failed_jobs: stopped.unlanded + 1,
-                        },
-                    });
+                    return Err(owed_write_refusal(store, &earlier, &stopped)?);
                 }
             }
             // Suppression before the replace, exactly like the fresh path —
@@ -6213,6 +6222,32 @@ mod pending_write_order_tests {
         assert_eq!(read(), "base");
         assert_eq!(replay(&mut store).failed, 0);
         assert_eq!(read(), "second edit");
+    }
+
+    #[test]
+    fn a_settle_stopped_by_an_owed_write_on_a_locked_file_says_the_file_is_in_use() {
+        let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+        let first = writes[0].clone();
+        super::super::history_operations::turns::tests::fail_materializations(
+            scratch.path(),
+            Arc::new(move |job| {
+                (job.job_id == first).then_some(dohc_engine_files::MaterializeError::FileLocked)
+            }),
+        );
+        let stopped = replay_materializations_in_order(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            &writes,
+        )
+        .expect("replay")
+        .expect("the locked write stops the replay");
+        assert!(matches!(
+            owed_write_refusal(&store, &writes, &stopped).expect("refusal"),
+            RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
+        ));
     }
 
     /// A pulled write takes its sender's time, so a note's later write can

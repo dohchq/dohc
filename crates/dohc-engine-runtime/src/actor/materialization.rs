@@ -539,6 +539,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) store_busy: usize,
+    pub(super) file_locked: usize,
     pub(super) selected_seen: usize,
     /// Jobs a symlink or reparse point kept from their target.
     pub(super) blocked: usize,
@@ -1081,6 +1082,7 @@ fn replay_materializations(
             completed: 0,
             failed: 0,
             store_busy: 0,
+            file_locked: 0,
             selected_seen: 0,
             blocked: 0,
             hard_errors: Vec::new(),
@@ -1150,6 +1152,7 @@ fn replay_materializations(
             completed: 0,
             failed: 0,
             store_busy: 0,
+            file_locked: 0,
             selected_seen: 0,
             blocked: 0,
             hard_errors: Vec::new(),
@@ -1667,7 +1670,9 @@ fn replay_materializations(
                         dohc_engine_files::MaterializeError::Storage(StorageError::FileLocked) => {
                             summary.store_busy += 1;
                         }
-                        dohc_engine_files::MaterializeError::FileLocked => {}
+                        dohc_engine_files::MaterializeError::FileLocked => {
+                            summary.file_locked += 1;
+                        }
                         _ => {
                             if matches!(
                                 error,

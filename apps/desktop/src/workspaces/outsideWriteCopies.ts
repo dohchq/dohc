@@ -110,17 +110,15 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
     throw await OutsideWriteCopyError.from(path, cause, workspace.rootPath);
   };
   const directory = () => localStateFolder(workspace, "outside-write-copies", guard);
-  async function checked(path: string) {
-    return (
-      await assertResolvedWorkspacePath({
-        rootPath: workspace.rootPath,
-        absolutePath: join(workspace.rootPath, path),
-        spelled: path,
-        label: "Kept copy path",
-        access: "entry",
-      })
-    ).resolvedAbsolute;
-  }
+  const resolved = (path: string) =>
+    assertResolvedWorkspacePath({
+      rootPath: workspace.rootPath,
+      absolutePath: join(workspace.rootPath, path),
+      spelled: path,
+      label: "Kept copy path",
+      access: "entry",
+    });
+  const checked = async (path: string) => (await resolved(path)).resolvedAbsolute;
   let loaded: Promise<{ rows: z.infer<typeof CopyRecord>[]; errors: CopyRecordError[] }> | null =
     null;
   async function records() {
@@ -150,14 +148,19 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
     if (result.errors.length) loaded = null;
     return result;
   }
-  async function readSource(path: string): Promise<CopySource | null> {
-    const absolute = await checked(path);
+  async function readSource(path: string): Promise<{ plain: boolean; source: CopySource | null }> {
+    const { relative, resolvedAbsolute: absolute } = await resolved(path);
     const entry = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (!entry?.isFile() || entry.isSymbolicLink()) return null;
-    return { absolute, entry, sha256: await digest(absolute) };
+    const unlinked =
+      process.platform === "linux"
+        ? relative === path
+        : relative.toLowerCase() === path.toLowerCase();
+    const plain = unlinked && (entry === null || entry.isFile());
+    if (!entry?.isFile() || entry.isSymbolicLink()) return { plain, source: null };
+    return { plain, source: { absolute, entry, sha256: await digest(absolute) } };
   }
   async function list(onReadError: (error: unknown) => void): Promise<[string, string, string][]> {
     const rows: [string, string, string][] = [];
@@ -310,17 +313,21 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
       incoming: Uint8Array | null,
       admitCopy: (path: string) => void,
       isRecorded: (path: string, sha256: string) => Promise<boolean>,
-    ): Promise<boolean> {
+    ): Promise<{ kept: boolean; engine: { diskSha256: string | null } | null }> {
       return enqueue(async () => {
-        const source = await readSource(path).catch((cause) => copyFailure(path, cause));
-        if (source === null) return false;
+        const { plain, source } = await readSource(path).catch((cause) => copyFailure(path, cause));
+        if (source === null) return { kept: false, engine: plain ? { diskSha256: null } : null };
+        const diskSha256 = source.sha256;
         // History failures stop the write without suggesting a folder-access fix.
         if (
-          (incoming !== null && hash(incoming) === source.sha256) ||
-          (await isRecorded(path, source.sha256))
+          (incoming !== null && hash(incoming) === diskSha256) ||
+          (await isRecorded(path, diskSha256))
         )
-          return false;
-        return keepCopy(path, source, admitCopy).catch((cause) => copyFailure(path, cause));
+          return { kept: false, engine: plain ? { diskSha256 } : null };
+        return {
+          kept: await keepCopy(path, source, admitCopy).catch((cause) => copyFailure(path, cause)),
+          engine: null,
+        };
       });
     },
   };

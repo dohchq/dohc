@@ -3082,6 +3082,79 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     }
   });
 
+  it("keeps the newer text a settle writes between a pulled page's check and its write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    const head = (text: string) =>
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        objectId: "note-object",
+        path: "n.md",
+        text,
+        origin: "sync",
+      });
+    head("A\n");
+    await writeFile(join(root, "n.md"), "A\n");
+    head("B\n");
+    let settled = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, undefined, undefined, async (request) => {
+        if (settled || request.method !== "files.resolve") return;
+        settled = true;
+        head("C\n");
+        await writeFile(join(root, "n.md"), "C\n");
+      }),
+    });
+    try {
+      await engine.runRelaySync((page) =>
+        page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]),
+      );
+      expect(settled).toBe(true);
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("C\n");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each(["an empty folder it replaces", "a folder link in the workspace"])(
+    "pulls a text file over %s",
+    async (shape) => {
+      const root = await createTestScratch("dohc-engine-capture-");
+      await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+      const folder = shape === "an empty folder it replaces";
+      const path = folder ? "d" : "docs/new.md";
+      await mkdir(join(root, folder ? "d/sub" : "real-docs"), { recursive: true });
+      if (!folder)
+        await symlink(
+          join(root, "real-docs"),
+          join(root, "docs"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      const loopback = new VersionedLoopbackEngine();
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        objectId: "note-object",
+        path,
+        text: "pulled\n",
+        origin: "sync",
+      });
+      const engine = liveCapture(root, loopback);
+      try {
+        await engine.runRelaySync((page) =>
+          page([{ versionId: "main", path, operation: "write", contentKind: "text" }]),
+        );
+        expect(await readFile(join(root, folder ? "d" : "real-docs/new.md"), "utf8")).toBe(
+          "pulled\n",
+        );
+      } finally {
+        await engine.stop();
+      }
+    },
+  );
+
   it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

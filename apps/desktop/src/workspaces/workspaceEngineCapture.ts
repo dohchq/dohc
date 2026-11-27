@@ -4785,6 +4785,7 @@ export function createWorkspaceEngineCapture(
     policy: WorkspaceEnginePolicySnapshot,
     // Keep a copy promises a copy, even of bytes History recorded earlier.
     copy: "unrecorded" | "always" = "unrecorded",
+    engineHeads?: { path: string; diskSha256: string | null }[],
   ): Promise<void> {
     let context:
       | Promise<{ engine: Awaited<ReturnType<typeof engineStore>>; versionId: string }>
@@ -4928,7 +4929,7 @@ export function createWorkspaceEngineCapture(
       let keptProtected = false;
       try {
         if (operation.kind === "write-binary" || !operation.protected) {
-          copied = await outsideCopies.beforeWrite(
+          const checked = await outsideCopies.beforeWrite(
             operation.path,
             operation.kind === "delete"
               ? null
@@ -4938,6 +4939,11 @@ export function createWorkspaceEngineCapture(
             (path) => assertEngineWritablePath(path, policy),
             async (path, sha256) => copy === "unrecorded" && isRecorded(operation, path, sha256),
           );
+          copied = checked.kept;
+          if (engineHeads && operation.kind === "write" && checked.engine) {
+            engineHeads.push({ path: operation.path, diskSha256: checked.engine.diskSha256 });
+            continue;
+          }
         } else {
           const kept = await keepProtectedChange(operation);
           if (kept === "skip") {
@@ -11015,7 +11021,16 @@ export function createWorkspaceEngineCapture(
             if (!snapshot) continue;
             materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
-          await materialize(materializations, policy);
+          const heads: { path: string; diskSha256: string | null }[] = [];
+          await materialize(materializations, policy, "unrecorded", heads);
+          if (heads.length) {
+            await engine.materializeHeads(heads).catch((error: unknown) => {
+              const target = heads.length === 1 ? heads[0]!.path : `${heads.length} files`;
+              throw new Error(`Could not update ${target} on disk: ${errorMessage(error)}`, {
+                cause: error,
+              });
+            });
+          }
           if (locked !== undefined) options.onProtectedFilesLocked?.(locked);
           // The daemon watcher must manifest the pulled disk state before the
           // caller can make its next edit. Otherwise a fast local edit can

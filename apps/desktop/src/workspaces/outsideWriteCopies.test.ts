@@ -476,7 +476,7 @@ describe("materialization keeps outside bytes before replacement", () => {
       await Promise.all([listing, replacing]);
     }
     expect(await listing).toEqual([other]);
-    expect(await replacing).toBe(true);
+    expect((await replacing).kept).toBe(true);
     const rows = await copies.list();
     expect(rows).toHaveLength(2);
     expect(rows).toContainEqual(other);
@@ -493,9 +493,21 @@ describe("materialization keeps outside bytes before replacement", () => {
     }
     const isRecorded = vi.fn();
     const admit = vi.fn();
-    expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toBe(false);
+    expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toEqual({
+      kept: false,
+      engine: null,
+    });
     expect(isRecorded).not.toHaveBeenCalled();
     expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("lets the engine write a file whose folder differs only in case", async () => {
+    const { rootPath, copies } = await setup();
+    await mkdir(join(rootPath, "docs"));
+    expect(await copies.beforeWrite("Docs/n.md", null, vi.fn(), vi.fn())).toEqual({
+      kept: false,
+      engine: { diskSha256: null },
+    });
   });
 
   it.each([

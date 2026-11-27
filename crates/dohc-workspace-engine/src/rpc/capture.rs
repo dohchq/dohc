@@ -104,6 +104,19 @@ struct FilesReplaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MaterializeHeadsParams {
+    files: Vec<ApprovedFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovedFile {
+    path: String,
+    disk_sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureDuplicateParams {
     hold_id: String,
     from_path: String,
@@ -398,6 +411,52 @@ impl EngineService {
         .map_err(|_| WireError::new(ErrorCode::Internal, "workspace operation failed"))?
         .map_err(|err| map_runtime(dohc_engine_runtime::RuntimeError::Materialize(err)))?;
         Ok(json!({ "replaced": true }))
+    }
+
+    /// `files.materializeHeads`: bring text files to their heads where the
+    /// disk still holds what the caller approved, in one actor turn.
+    pub(super) async fn files_materialize_heads(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: MaterializeHeadsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "files.materializeHeads needs the workspace's owning handle",
+            ));
+        }
+        let mut approved = HashMap::new();
+        for file in params.files {
+            let path = dohc_engine_domain::validate_addressable_plaintext_path(&file.path)
+                .map_err(|error| map_runtime(error.into()))?;
+            approved.insert(
+                path,
+                file.disk_sha256.map_or(
+                    dohc_engine_storage::Preimage::Absent,
+                    dohc_engine_storage::Preimage::Present,
+                ),
+            );
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let _gate = tokio::select! {
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("files.materializeHeads (queued)")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        open.actor
+            .materialize_approved_heads(
+                open.workspace_id.clone(),
+                open.root.clone(),
+                approved,
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "materialized": true }))
     }
 
     pub(super) async fn capture_duplicate_file(

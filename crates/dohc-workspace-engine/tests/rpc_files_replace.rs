@@ -255,3 +255,42 @@ async fn files_replace_refuses_a_link_at_the_file_or_a_folder_above_it() {
             .is_symlink()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_materialize_heads_refuses_a_path_outside_the_files_or_without_a_head() {
+    let (scratch, transport, handle) = fixture("heads-refusals").await;
+    write_file(scratch.path(), ".env", b"TOKEN=mine\n");
+    write_file(scratch.path(), "kept.md", b"kept\n");
+    let sha = |bytes: &[u8]| dohc_engine_storage::hex_sha256(bytes);
+    for (id, (path, disk)) in [
+        ("../outside.md", None),
+        ("/outside.md", None),
+        (".dohc/settings.json", None),
+        ("new.md", None),
+        (".env", Some(sha(b"TOKEN=mine\n"))),
+        ("kept.md", Some(sha(b"kept\n"))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        call_error(
+            &transport,
+            &handle,
+            10 + id as u64,
+            "files.materializeHeads",
+            json!({ "files": [{ "path": path, "diskSha256": disk }] }),
+        )
+        .await;
+    }
+    assert!(!scratch.path().join("new.md").exists());
+    assert!(!scratch.path().join(".dohc/settings.json").exists());
+    assert!(!scratch.path().parent().unwrap().join("outside.md").exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join(".env")).unwrap(),
+        b"TOKEN=mine\n"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("kept.md")).unwrap(),
+        b"kept\n"
+    );
+}

@@ -1966,6 +1966,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
+  /** Writes each text file's head where the disk still holds `diskSha256`, or no file for null. */
+  async materializeHeads(files: { path: string; diskSha256: string | null }[]): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.filesMaterializeHeads, { files });
+  }
+
   async close(): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.close, {});
   }

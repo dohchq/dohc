@@ -1944,4 +1944,80 @@ async fn a_hosted_pull_no_live_host_configures_is_refused_before_it_reads_or_cha
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
 }
 
+/// An editor open on a hosted copy sees an edit that parked behind it only
+/// through a resync. The pass that pulls the edit asks for that resync once
+/// its cursor commits, after its files landed, never before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hosted_pass_asks_open_editors_to_resync_once_its_cursor_commits() {
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.richdoc_append_paragraph("hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = hex_sha256(&base);
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.ydoc("owner", 1, "doc-b", "b.md", &base, &lineage);
+    relay.share("doc-b", "b.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(hosted_service());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let session = host
+        .call(
+            "ydoc.open",
+            json!({"versionId": "main", "path": "b.md", "contentKind": "richdoc",
+                "seedFromArtifact": false}),
+        )
+        .await["sessionId"]
+        .clone();
+    let mut events = service.events().subscribe();
+    let mut asked = || {
+        let mut seen = false;
+        while let Ok(event) = events.try_recv() {
+            seen |= event.name == "ydoc.remoteUpdate"
+                && event.payload["sessionId"] == session
+                && event.payload["resyncRequired"] == true;
+        }
+        seen
+    };
+
+    let edit = ydoc.richdoc_append_paragraph("parked");
+    relay
+        .relay()
+        .ydoc("owner", 2, "doc-b", "b.md", &edit, &lineage);
+    let pass = host.pull().await;
+    assert_eq!(pass["hasMore"], false, "{pass}");
+    assert!(pass["pendingCursor"].is_object(), "{pass}");
+    let queued: i64 = Connection::open(engine_db_path(&scratch).expect("db path"))
+        .expect("open db")
+        .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+            row.get(0)
+        })
+        .expect("queued");
+    assert_eq!(queued, 1, "the edit parks behind the open editor");
+    assert!(!asked(), "no resync before the pass writes its files");
+    let cursor = json!({"workspaceId": WORKSPACE, "pendingCursor": pass["pendingCursor"]});
+    assert_eq!(
+        host.call("sync.materializePendingCursor", cursor.clone())
+            .await,
+        json!({"materialized": true})
+    );
+    assert!(!asked(), "no resync before the cursor commits");
+    assert_eq!(
+        host.call("sync.commitCursor", cursor).await["committed"],
+        true
+    );
+    assert!(asked(), "the committed pass asks the editor to resync");
+}
+
 use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
