@@ -66,7 +66,6 @@ pub fn convert_note_to_format_two_in_tx(
         Ok(ready) => ready,
         Err(outcome) => return Ok(outcome),
     };
-    let (text, text_sha256) = (&text, &text_sha256);
     let Some(predecessor_claim_id) = marker
         .lineage_claim_id
         .clone()
@@ -74,8 +73,8 @@ pub fn convert_note_to_format_two_in_tx(
     else {
         return Ok(NotNow("ydoc-lineage-unclaimed"));
     };
-    let settled = settled_source(&doc, text).is_some_and(|source| {
-        source == *text || without_final_markdown_newline(&source) == Some(text.as_str())
+    let settled = settled_source(&doc, &text).is_some_and(|source| {
+        source == text || without_final_markdown_newline(&source) == Some(text.as_str())
     });
     if marker.path.as_deref().is_some_and(|stored| stored != path) || !settled {
         return Ok(NotNow("ydoc-unsettled"));
@@ -95,8 +94,8 @@ pub fn convert_note_to_format_two_in_tx(
         &predecessor_claim_id,
         &predecessor_state_vector_sha256,
         &conflict_id,
-        text,
-        text_sha256,
+        &text,
+        &text_sha256,
     ) else {
         return Ok(DoesNotFit);
     };
@@ -173,12 +172,12 @@ struct Ready {
 }
 
 fn ready_to_convert(
-    tx: &Transaction<'_>,
+    conn: &rusqlite::Connection,
     key: &DocKey,
     leases: &dyn LeaseProbe,
 ) -> Result<Result<Ready, FormatTwoConversion>, SyncError> {
     use FormatTwoConversion::{NotNow, NothingToConvert};
-    let Some(marker) = dohc_engine_collab::read_marker_in(tx, key)
+    let Some(marker) = dohc_engine_collab::read_marker_in(conn, key)
         .map_err(map_local_collab_error)?
         .filter(|marker| marker.content_kind == ContentKind::Richdoc)
         .filter(|marker| {
@@ -187,18 +186,18 @@ fn ready_to_convert(
     else {
         return Ok(Err(NothingToConvert));
     };
-    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+    let doc = dohc_engine_collab::load_doc_in(conn, key).map_err(map_local_collab_error)?;
     if doc.note_schema_version() == 2 {
         return Ok(Err(NothingToConvert));
     }
-    if leases.is_live(key) || live_document_bound(tx, key)? {
+    if leases.is_live(key) || live_document_bound(conn, key)? {
         return Ok(Err(NotNow("ydoc-session-live")));
     }
     if doc.has_pending_dependencies() {
         return Ok(Err(NotNow("ydoc-incomplete-lineage")));
     }
     for (reason, waiting) in WAITS {
-        let waits: bool = tx
+        let waits: bool = conn
             .query_row(
                 &format!("SELECT EXISTS({waiting})"),
                 params![key.workspace_id, key.version_id, key.object_id],
@@ -209,7 +208,7 @@ fn ready_to_convert(
             return Ok(Err(NotNow(reason)));
         }
     }
-    let path: Option<String> = tx
+    let path: Option<String> = conn
         .query_row(
             "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id],
@@ -220,7 +219,7 @@ fn ready_to_convert(
     let Some(path) = path else {
         return Ok(Err(NothingToConvert));
     };
-    let state = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, &path)
+    let state = select_snapshot_by_path_in_tx(conn, &key.workspace_id, &key.version_id, &path)
         .map_err(map_local_domain_error)?;
     let Some((text, text_sha256)) = state
         .snapshot
@@ -397,7 +396,11 @@ pub fn convert_notes_to_format_two(
         pass.off = true;
         return Ok(pass);
     }
-    let budget = budget.max(1);
+    if budget == 0 {
+        return Err(SyncError::InvalidInput {
+            reason: "note-format-two-budget-zero",
+        });
+    }
     let (version, object) = after.map_or(("", ""), |key| {
         (key.version_id.as_str(), key.object_id.as_str())
     });
@@ -468,6 +471,9 @@ pub fn convert_notes_to_format_two(
 pub(crate) fn fails_only_the_note(error: &SyncError) -> bool {
     use StorageError as Store;
     match error.original() {
+        SyncError::Storage(Store::StateCorrupt {
+            source: Some(source),
+        }) if sqlite_engine_failed(&**source) => false,
         SyncError::Storage(
             Store::StateCorrupt { .. }
             | Store::InvalidInput { .. }
@@ -502,6 +508,24 @@ pub(crate) fn fails_only_the_note(error: &SyncError) -> bool {
     }
 }
 
+fn sqlite_engine_failed(source: &(dyn std::error::Error + 'static)) -> bool {
+    use rusqlite::ErrorCode as Code;
+    std::iter::successors(Some(source), |error| error.source())
+        .filter_map(|error| error.downcast_ref::<rusqlite::Error>()?.sqlite_error_code())
+        .any(|code| {
+            matches!(
+                code,
+                Code::DatabaseCorrupt
+                    | Code::NotADatabase
+                    | Code::SystemIoFailure
+                    | Code::OutOfMemory
+                    | Code::CannotOpen
+                    | Code::PermissionDenied
+                    | Code::ReadOnly
+            )
+        })
+}
+
 fn drop_local_format_one(
     store: &mut EngineStore,
     key: &DocKey,
@@ -511,20 +535,18 @@ fn drop_local_format_one(
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
     use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
-    let ready = match store.write_with(faults, |tx| ready_to_convert(tx, key, live))? {
-        TxnOutcome::Committed(Ok(ready)) => ready,
-        TxnOutcome::Committed(Err(outcome)) => return Ok(outcome),
-        TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+    let ready = match store.read_with(|conn| ready_to_convert(conn, key, live))? {
+        Ok(ready) => ready,
+        Err(outcome) => return Ok(outcome),
     };
     if successor_in_format_two(key, "", "", "", &ready.text, &ready.text_sha256).is_none() {
         return Ok(DoesNotFit);
     }
-    let projection = ready
-        .doc
-        .project(ContentKind::Richdoc)
-        .map_err(map_local_collab_error)?;
+    let Some(projection) = settled_source(&ready.doc, &ready.text) else {
+        return Ok(NotNow("ydoc-unsettled"));
+    };
     let witness = CloseProjection {
-        sha256: dohc_engine_storage::hex_sha256(projection.content.as_bytes()),
+        sha256: dohc_engine_storage::hex_sha256(projection.as_bytes()),
         materialized_seed_source_sha256: file_proof(store, key),
     };
     match dohc_engine_collab::close_session(store, key, false, Some(&witness), faults, now_ms) {

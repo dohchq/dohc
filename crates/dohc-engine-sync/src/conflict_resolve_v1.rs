@@ -3927,8 +3927,8 @@ fn prepare_local_lineage_in_tx(
     }
 }
 
-fn live_document_bound(tx: &Transaction<'_>, key: &DocKey) -> Result<bool, SyncError> {
-    tx.query_row(
+fn live_document_bound(conn: &rusqlite::Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
          OR EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
          OR EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
