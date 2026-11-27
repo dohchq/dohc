@@ -480,7 +480,7 @@ pub(crate) fn held_before_routing(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if journaled {
+    if journaled && !crate::kept_replay::kept_candidate(conn, op, true)? {
         return Ok(None);
     }
     if let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id))
@@ -1380,9 +1380,12 @@ pub fn commit_hosted_cursor(
                 }
                 hold => hold,
             };
+            let retry =
+                crate::kept_replay::hosted_retry_in_tx(tx, workspace_id, object_id, read.cursor)?;
+            has_more |= retry.is_some();
             let state = match &hold {
                 Some(_) => "held",
-                None if read.complete => "ready",
+                None if read.complete && retry.is_none() => "ready",
                 None => "backfilling",
             };
             // A held document retains nothing, so its own read starts before
@@ -1408,7 +1411,9 @@ pub fn commit_hosted_cursor(
                     reason: STOPPED_BEFORE_READ,
                 });
             }
-            let position = released.map_or(read.cursor, |first| read.cursor.min(first - 1));
+            let position = released
+                .map_or(read.cursor, |first| read.cursor.min(first - 1))
+                .min(retry.unwrap_or(read.cursor));
             let (binding, continuation, binding_stale) = hold
                 .as_ref()
                 .map_or(Ok((None, None, false)), HostedHold::released)?;

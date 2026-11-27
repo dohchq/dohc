@@ -100,21 +100,47 @@ pub(crate) fn held_behind_its_base(
 pub(crate) fn mark_replayed_in_tx(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
-    hosted: bool,
 ) -> Result<(), SyncError> {
     for sql in [
         "DELETE FROM replication_pending_refusals AS k WHERE \
            k.reason_message='ydoc-note-uses-a-newer-body-format' AND",
-        if hosted {
-            "DELETE FROM replication_refused_ydoc_blobs AS k WHERE"
-        } else {
-            "UPDATE replication_refused_ydoc_blobs AS k SET replayed=1 WHERE"
-        },
+        "UPDATE replication_refused_ydoc_blobs AS k SET replayed=1 WHERE",
     ] {
         tx.execute(&format!("{sql} {AT}"), at(envelope))
             .map_err(SyncError::persist)?;
     }
     Ok(())
+}
+
+pub(crate) fn hosted_retry_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    object: &str,
+    cursor: i64,
+) -> Result<Option<i64>, SyncError> {
+    let document =
+        format!("{KEPT_ROWS} WHERE k.workspace_id=?1 AND json_extract({CLAIM_OF},'$[2]')=?2");
+    let retry = tx
+        .query_row(
+            &format!(
+                "SELECT MIN(k.relay_seq)-1 {document} AND k.relay_seq<=?3 AND {CANDIDATE} \
+                 AND EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs b \
+                   WHERE b.workspace_id=k.workspace_id AND b.replayed=1 \
+                   AND b.update_sha256=json_extract({CLAIM_OF},'$[3]'))"
+            ),
+            rusqlite::params![workspace, object, cursor],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    tx.execute(
+        &format!(
+            "DELETE FROM replication_refused_ydoc_blobs WHERE rowid IN \
+             (SELECT k.rowid {document} AND k.replayed=1)"
+        ),
+        [workspace, object],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(retry)
 }
 
 pub(crate) fn refuse_claim_in_tx(
