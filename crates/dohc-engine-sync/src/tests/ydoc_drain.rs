@@ -1701,6 +1701,7 @@ fn assert_durable_update_refusals_after_dismissal(engine: &mut EngineStore) {
             let crate::RefusalCoordinate::Replication {
                 origin_id,
                 origin_seq,
+                ..
             } = coordinate
             else {
                 panic!("expected a replication refusal coordinate");
