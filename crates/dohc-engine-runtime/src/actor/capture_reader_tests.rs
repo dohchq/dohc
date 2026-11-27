@@ -64,6 +64,13 @@ fn fixture(joined: bool) -> (ScratchDir, EngineStore, DocKey) {
 }
 
 fn fixture_with_source(joined: bool, source: &str) -> (ScratchDir, EngineStore, DocKey) {
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Before\n\n- parent\n  - child\n")
+        .unwrap();
+    fixture_of(joined, source, &doc)
+}
+
+fn fixture_of(joined: bool, source: &str, doc: &Ydoc) -> (ScratchDir, EngineStore, DocKey) {
     let scratch = ScratchDir::new().unwrap();
     let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
     VersionedTextStore::new(&mut store)
@@ -74,9 +81,6 @@ fn fixture_with_source(joined: bool, source: &str) -> (ScratchDir, EngineStore, 
         .unwrap()
         .snapshot;
     let key = DocKey::new("w", "main", snapshot.object_id).unwrap();
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Before\n\n- parent\n  - child\n")
-        .unwrap();
     let base = doc.encode_full_state();
     if joined {
         dohc_engine_collab::claim_base_at_relay(
@@ -335,6 +339,28 @@ async fn refuse_stale_preparation(change_file: bool) {
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_refuses_file_staleness() {
     refuse_stale_preparation(true).await;
+}
+
+#[test]
+fn a_format_two_note_gets_no_fold_preparation() {
+    let source = "Before\n\n- parent\n  - child\n";
+    let format_one = Ydoc::wire();
+    format_one
+        .rewrite_content_to_markdown(ContentKind::Richdoc, source)
+        .unwrap();
+    let format_two = dohc_engine_collab::ydoc::format_two_note_for_test(source);
+    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+        for (doc, format, prepared) in [(format_one, 1, true), (format_two, 2, false)] {
+            assert_eq!(doc.note_schema_version(), format);
+            let (_scratch, store, key) = fixture_of(false, source, &doc);
+            let preparation = store
+                .read_with(|conn| {
+                    reader_resolver::prepare_fold(conn, &key, "note.md", "Changed\n\n- parent\n")
+                })
+                .unwrap();
+            assert_eq!(preparation.is_some(), prepared, "format {format}");
+        }
+    });
 }
 
 #[tokio::test]

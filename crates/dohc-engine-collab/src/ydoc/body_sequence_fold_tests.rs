@@ -63,7 +63,7 @@ fn each_shared_fold_reads_as_its_document_after() {
             }
         }
     });
-    assert_eq!(folds.len(), 27);
+    assert_eq!(folds.len(), 30);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
 }
 

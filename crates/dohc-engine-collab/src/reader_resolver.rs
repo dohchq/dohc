@@ -84,7 +84,7 @@ pub fn prepare_fold(
         return Ok(None);
     };
     let doc = crate::load_doc_in(conn, key)?;
-    if doc.has_reader_source() || doc.has_pending_dependencies() {
+    if doc.note_schema_version() == 2 || doc.has_reader_source() || doc.has_pending_dependencies() {
         return Ok(None);
     }
     Ok(Some(FoldPreparation {

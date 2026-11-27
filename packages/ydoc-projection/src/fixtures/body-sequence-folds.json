@@ -4616,6 +4616,222 @@
     }
   },
   {
+    "name": "a line added under a rule",
+    "before": "AQwBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AgcBCHNlcXVlbmNlAwVibG9jaygAAQEEdHlwZQF3CXBhcmFncmFwaCgAAQEEcGF0aAF1AIQBAQFBhwEEAwVibG9jaygAAQUEdHlwZQF3Dmhvcml6b250YWxSdWxlKAABBQRwYXRoAXUAhwEFAwVibG9jaygAAQgEdHlwZQF3CXBhcmFncmFwaCgAAQgEcGF0aAF1AIQBCAFCAA==",
+    "target": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A"
+            }
+          ]
+        },
+        {
+          "type": "horizontalRule"
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "New"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "B"
+            }
+          ]
+        }
+      ]
+    },
+    "file": "A\n\n---\n\nNew\n\nB\n",
+    "after": {
+      "document": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A"
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "New"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "B"
+              }
+            ]
+          }
+        ]
+      },
+      "markdown": "A\n\n---\n\nNew\n\nB\n"
+    }
+  },
+  {
+    "name": "a line added over a rule",
+    "before": "AQwBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AgcBCHNlcXVlbmNlAwVibG9jaygAAQEEdHlwZQF3CXBhcmFncmFwaCgAAQEEcGF0aAF1AIQBAQFBhwEEAwVibG9jaygAAQUEdHlwZQF3Dmhvcml6b250YWxSdWxlKAABBQRwYXRoAXUAhwEFAwVibG9jaygAAQgEdHlwZQF3CXBhcmFncmFwaCgAAQgEcGF0aAF1AIQBCAFCAA==",
+    "target": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "New"
+            }
+          ]
+        },
+        {
+          "type": "horizontalRule"
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "B"
+            }
+          ]
+        }
+      ]
+    },
+    "file": "A\n\nNew\n\n---\n\nB\n",
+    "after": {
+      "document": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "New"
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "B"
+              }
+            ]
+          }
+        ]
+      },
+      "markdown": "A\n\nNew\n\n---\n\nB\n"
+    }
+  },
+  {
+    "name": "a line's start edited under a rule",
+    "before": "AQwBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AgcBCHNlcXVlbmNlAwVibG9jaygAAQEEdHlwZQF3CXBhcmFncmFwaCgAAQEEcGF0aAF1AIQBAQFBhwEEAwVibG9jaygAAQUEdHlwZQF3Dmhvcml6b250YWxSdWxlKAABBQRwYXRoAXUAhwEFAwVibG9jaygAAQgEdHlwZQF3CXBhcmFncmFwaCgAAQgEcGF0aAF1AIQBCAFCAA==",
+    "target": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A"
+            }
+          ]
+        },
+        {
+          "type": "horizontalRule"
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "XB"
+            }
+          ]
+        }
+      ]
+    },
+    "file": "A\n\n---\n\nXB\n",
+    "after": {
+      "document": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A"
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "XB"
+              }
+            ]
+          }
+        ]
+      },
+      "markdown": "A\n\n---\n\nXB\n"
+    }
+  },
+  {
     "name": "a whole file replaced",
     "before": "AQoBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AgcBCHNlcXVlbmNlAwVibG9jaygAAQEFbGV2ZWwBfQEoAAEBBHR5cGUBdwdoZWFkaW5nKAABAQRwYXRoAXUAhAEBAUGHAQUDBWJsb2NrKAABBgR0eXBlAXcJcGFyYWdyYXBoKAABBgRwYXRoAXUAhAEGAUIA",
     "target": {
