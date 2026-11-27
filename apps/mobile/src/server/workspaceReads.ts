@@ -578,7 +578,8 @@ const parts = (cursor: string) => {
 
 /**
  * The cursor that misses neither's changes. Two cursors past one restore take each position's lower value; across a
- * restore, the one from before it, which the server answers with `replace`.
+ * restore, the one from before it, which the server answers with `replace`. Two cursors from different reaches combine
+ * to one with no mark, which the server also answers with `replace`.
  */
 export function earlierCursor(a: string, b: string): string {
   return pick(a, b, Math.min);
@@ -589,9 +590,13 @@ export function laterCursor(a: string, b: string): string {
   return pick(a, b, Math.max);
 }
 
+/** The mark of what the account reached when the server wrote the cursor, or "" for the owner's. */
+export const reachOf = (cursor: string) => parts(cursor)[3];
+
 function pick(a: string, b: string, choose: (x: number, y: number) => number): string {
-  const [floorA, logA, journalA, reach] = parts(a);
-  const [floorB, logB, journalB] = parts(b);
+  const [floorA, logA, journalA, reachA] = parts(a);
+  const [floorB, logB, journalB, reachB] = parts(b);
   if (floorA !== floorB) return choose(floorA, floorB) === floorA ? a : b;
+  const reach = reachA === reachB ? reachA : "";
   return `${floorA}.${choose(logA, logB)}.${choose(journalA, journalB)}${reach}`;
 }

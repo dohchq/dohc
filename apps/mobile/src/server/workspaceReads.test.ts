@@ -484,5 +484,7 @@ describe("a joined workspace's cursor", () => {
     expect(earlierCursor(`0.5.2.${reach}`, `0.4.3.${reach}`)).toBe(`0.4.2.${reach}`);
     expect(laterCursor(`0.5.2.${reach}`, `0.4.3.${reach}`)).toBe(`0.5.3.${reach}`);
     expect(laterCursor("0.5.2", "0.4.3")).toBe("0.5.3");
+    expect(earlierCursor(`0.5.2.${reach}`, "0.4.3.fedcba9876543210")).toBe("0.4.2");
+    expect(earlierCursor(`0.5.2.${reach}`, "0.4.3")).toBe("0.4.2");
   });
 });

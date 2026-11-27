@@ -4170,4 +4170,23 @@ describe("a Member's phone reads in a workspace they joined", () => {
       "shared/notes.md",
     );
   });
+
+  it("answers a read during which the Member's reach changed as one to try again, not a missing workspace", async () => {
+    const { storage, h, holdSyncs } = await joined();
+    const release = holdSyncs();
+    const reading = h(op("trip", "listFiles", {}, asBen));
+    await vi.waitFor(() => expect(storage.listAutomationWorkspaces().length).toBeGreaterThan(0));
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: { kind: "create", folder: "docs", rule: RULE },
+        nowMs: 7,
+      }),
+    ).toMatchObject({ ok: true });
+    release();
+    const answer = await reading;
+    expect(answer.status).toBe(503);
+    expect(await json(answer)).toMatchObject({ code: "server_busy" });
+  });
 });

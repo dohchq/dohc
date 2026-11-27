@@ -9,4 +9,4 @@ export const phoneWrites = process.env.EXPO_PUBLIC_DOHC_PHONE_WRITES === "1";
 
 /** Whether the open workspace takes chat writes and live page edits: never one the account joined rather than owns. */
 export const writesIn = (data: { readonly joined: boolean } | null) =>
-  phoneWrites && data?.joined !== true;
+  phoneWrites && data !== null && !data.joined;

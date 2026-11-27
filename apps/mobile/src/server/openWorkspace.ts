@@ -1,5 +1,5 @@
 import type { SignIn } from "./account";
-import type { AccountWorkspace } from "./api";
+import type { WorkspaceRole } from "./api";
 import {
   cacheScope,
   createWorkspaceData,
@@ -7,7 +7,7 @@ import {
   type WorkspaceData,
 } from "./workspaceData";
 import type { ChatMessage } from "./workspaceReads";
-import { isJoined, type WorkspaceListStore } from "./workspaceList";
+import type { WorkspaceListStore } from "./workspaceList";
 
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
@@ -50,13 +50,12 @@ export function createOpenWorkspace(options: {
     choosing: saved !== null,
   };
   let unsubscribe: (() => void) | null = null;
-  const roles = new Map<string, AccountWorkspace["role"]>();
 
-  function open(workspaceId: string, joined: boolean): WorkspaceData {
+  function open(workspaceId: string, role: WorkspaceRole): WorkspaceData {
     const data = createWorkspaceData({
       signIn,
       workspaceId,
-      joined,
+      role,
       cache,
       onGone: () => {
         onGone?.(workspaceId);
@@ -71,16 +70,20 @@ export function createOpenWorkspace(options: {
     return data;
   }
 
-  const joinedNow = (workspaceId: string) => {
+  const roleNow = (workspaceId: string): WorkspaceRole => {
     const listed = list.state();
-    return listed.status === "ready" && isJoined(listed.workspaces, workspaceId);
+    return (
+      (listed.status === "ready"
+        ? listed.workspaces.find((entry) => entry.workspaceId === workspaceId)?.role
+        : undefined) ?? "owner"
+    );
   };
 
   /** Opens `workspaceId`, or none, in a new store, and stops the last one. */
   function show(workspaceId: string | null) {
     if (state.data) beforeSwitch?.(workspaceId);
     state.data?.stop();
-    const data = workspaceId === null ? null : open(workspaceId, joinedNow(workspaceId));
+    const data = workspaceId === null ? null : open(workspaceId, roleNow(workspaceId));
     if (active) data?.resume();
     state = { currentWorkspaceId: workspaceId, data, choosing: false };
     for (const listener of listeners) listener();
@@ -94,18 +97,8 @@ export function createOpenWorkspace(options: {
   }
 
   function update() {
-    if (stopped) return;
+    if (stopped || state.choosing) return;
     const listed = list.state();
-    const changed = new Set<string>();
-    if (listed.status === "ready") {
-      for (const entry of listed.workspaces) {
-        const before = roles.get(entry.workspaceId);
-        if (before !== undefined && before !== entry.role) changed.add(entry.workspaceId);
-        roles.set(entry.workspaceId, entry.role);
-      }
-    }
-    for (const workspaceId of changed) cache.drop(cacheScope(signIn, workspaceId));
-    if (state.choosing) return;
     const openable =
       listed.status === "ready"
         ? listed.workspaces
@@ -113,7 +106,10 @@ export function createOpenWorkspace(options: {
             .map((entry) => entry.workspaceId)
         : [];
     const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
-    if (current !== state.currentWorkspaceId || (current !== null && changed.has(current)))
+    if (
+      current !== state.currentWorkspaceId ||
+      (current !== null && state.data !== null && state.data.role !== roleNow(current))
+    )
       show(current);
   }
 
@@ -140,7 +136,7 @@ export function createOpenWorkspace(options: {
     },
     setShowOnPhone(workspaceId, showOnPhone) {
       list.setShowOnPhone(workspaceId, showOnPhone);
-      if (!showOnPhone) cache.drop(cacheScope(signIn, workspaceId));
+      if (!showOnPhone) cache.drop(cacheScope(signIn, workspaceId, roleNow(workspaceId)));
     },
     resume() {
       active = true;

@@ -83,7 +83,8 @@ function setup(...lists: Answer[]) {
     switched,
     gone,
     list,
-    scope: (workspaceId: string) => cacheScope(signIn, workspaceId),
+    scope: (workspaceId: string, role?: AccountWorkspace["role"]) =>
+      cacheScope(signIn, workspaceId, role),
   };
 }
 
@@ -230,33 +231,40 @@ describe("hiding a workspace on this phone", () => {
 });
 
 describe("a workspace the account joined", () => {
-  it("opens read-only after the account's own, and opens afresh, without its saved reads, when the role changes", async () => {
-    const joined: AccountWorkspace = { ...B, workspaceId: "ws-a", role: "member" };
+  async function readJoined(context: ReturnType<typeof setup>) {
+    await vi.waitFor(() => expect(context.open.state().currentWorkspaceId).toBe("ws-a"));
+    const data = context.open.state().data!;
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(1));
+    return data;
+  }
+
+  it("opens after the account's own, read-only, and afresh without its saved reads when the role changes", async () => {
     const context = setup(listed(B, { ...A, role: "member" }), listed({ ...A, role: "owner" }));
     context.server.on("GET", feedPath("ws-a"), held);
     context.server.on("GET", feedPath("ws-b"), held);
     await vi.waitFor(() => expect(context.open.state().currentWorkspaceId).toBe("ws-b"));
     expect(context.open.state().data!.joined).toBe(false);
-    context.open.choose(joined.workspaceId);
-    const a = await readA(context);
+    context.open.choose("ws-a");
+    const a = await readJoined(context);
     expect(a.joined).toBe(true);
 
     context.list.reload();
     await vi.waitFor(() => expect(context.open.state().data).not.toBe(a));
-    expect(context.open.state()).toMatchObject({ currentWorkspaceId: "ws-a" });
-    expect(context.open.state().data!.joined).toBe(false);
-    expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
+    const now = context.open.state().data!;
+    expect(now).toMatchObject({ workspaceId: "ws-a", joined: false });
+    expect(now.state(views.files).value).toBeNull();
   });
-});
 
-describe("a joined workspace whose role changes", () => {
-  it("drops what the phone saved of it, and opens it afresh, when an Admin becomes a Member", async () => {
+  it("shows none of an Admin's saved reads once they are a Member", async () => {
     const context = setup(listed({ ...A, role: "admin" }), listed({ ...A, role: "member" }));
     context.server.on("GET", feedPath("ws-a"), held);
-    const a = await readA(context);
+    const a = await readJoined(context);
     context.list.reload();
     await vi.waitFor(() => expect(context.open.state().data).not.toBe(a));
-    expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
-    expect(context.open.state().data!.joined).toBe(true);
+    const now = context.open.state().data!;
+    expect(now).toMatchObject({ role: "member", joined: true });
+    expect(now.state(views.files).value).toBeNull();
+    expect(context.cache.entries(context.scope("ws-a", "member"))).toEqual([]);
   });
 });

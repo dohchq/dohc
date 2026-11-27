@@ -646,6 +646,54 @@ describe("the change feed", () => {
     await vi.waitFor(() => expect(data.state(views.files).failures).toBe(2));
   });
 
+  it("shows nothing it saved under two reaches, and reads afresh", async () => {
+    const server = testServer();
+    const cache = createReadCache();
+    const scope = cacheScope(signInTo(server), "ws-a", "member");
+    cache.set(scope, {
+      view: views.files,
+      value: files(["a.md", "object-a"]).files,
+      cursor: "0.5.2.0123456789abcdef",
+      stale: false,
+    });
+    cache.set(scope, {
+      view: views.chats,
+      value: [],
+      cursor: "0.4.2.fedcba9876543210",
+      stale: false,
+    });
+    server.on("POST", "/sync/ws-a/ops/listFiles", held);
+    const data = createWorkspaceData({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      role: "member",
+      cache,
+    });
+    expect(data.state(views.files).value).toBeNull();
+    expect(cache.entries(scope)).toEqual([]);
+    data.stop();
+  });
+
+  it("opens the workspace afresh on replace", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));
+    const answer = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => answer.promise);
+    let reopened = 0;
+    const data = createWorkspaceData({
+      signIn: signInTo(server),
+      workspaceId: "ws-a",
+      cache: createReadCache(),
+      reopen: () => void reopened++,
+    });
+    data.resume();
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+    answer.resolve(feed({ cursor: "1.0.0", replace: true }));
+    await vi.waitFor(() => expect(reopened).toBe(1));
+    data.stop();
+  });
+
   it("drops a closed view's read that a change overtakes, and reads it again when it opens", async () => {
     const server = testServer();
     const cache = createReadCache();
@@ -870,7 +918,7 @@ describe("a workspace's read marks", () => {
     const data = createWorkspaceData({
       signIn: signInTo(server),
       workspaceId: "ws-a",
-      joined: true,
+      role: "member",
       cache: createReadCache(),
     });
     await data.markRead("thread-1", "message-1");
