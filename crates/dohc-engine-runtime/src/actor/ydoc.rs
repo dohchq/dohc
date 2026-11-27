@@ -1415,7 +1415,7 @@ impl ActorHandle {
         after: Option<String>,
         budget: usize,
         here: dohc_engine_collab::LeaseRegistry,
-        elsewhere: HashSet<String>,
+        elsewhere: std::sync::Arc<HashSet<String>>,
         now_ms: i64,
     ) -> Result<dohc_engine_sync::FormatTwoPass, RuntimeError> {
         self.run(move |store, cache| {
@@ -4737,7 +4737,6 @@ pub(crate) fn materialized_seed_proof(
     Ok(on_disk.then_some(seed_source))
 }
 
-/// The relay's live notes, by object id.
 struct OpenElsewhere<'a>(&'a HashSet<String>);
 
 impl dohc_engine_sync::LeaseProbe for OpenElsewhere<'_> {
@@ -4746,8 +4745,6 @@ impl dohc_engine_sync::LeaseProbe for OpenElsewhere<'_> {
     }
 }
 
-/// One step of the Convert notes operation over the writer store. A writer
-/// cache entry for a lineage the step replaced or pruned is forgotten.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_notes_on_store(
     store: &mut EngineStore,

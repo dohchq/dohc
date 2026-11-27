@@ -50,6 +50,7 @@ impl EngineService {
         )
         .await?;
         let here = self.leases.scoped(&open.root);
+        let relay_live = Arc::new(params.relay_live);
         let mut after = params.after;
         let (mut off, mut converted, mut unchanged) = (false, 0, 0);
         let (mut skipped, mut does_not_fit, mut failed) = (Vec::new(), Vec::new(), Vec::new());
@@ -70,7 +71,7 @@ impl EngineService {
                     after.clone(),
                     1,
                     here.clone(),
-                    params.relay_live.clone(),
+                    Arc::clone(&relay_live),
                     now_ms()?,
                 ),
             )
