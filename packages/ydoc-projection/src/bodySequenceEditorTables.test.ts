@@ -266,7 +266,7 @@ describe("table changes the editor writes", () => {
   it.each([
     ["rows of 3, 2, 2 and 1 cells, where the paste would throw", [3, 2, 2, 1], "b2"],
     ["rows of 1, 1 and 2 cells, where the paste would land in the wrong rows", [1, 1, 2], "a1"],
-  ])("pastes no cells into a table with %s", (_name, widths, at) => {
+  ])("pastes no cells into a table with %s, and says so", (_name, widths, at) => {
     const ids = widths.map((width, row) =>
       Array.from({ length: width }, (_, col) => `${"abcd"[row]!}${String(col + 1)}`),
     );
@@ -278,7 +278,9 @@ describe("table changes the editor writes", () => {
     const rows = ids.flatMap((cells, row) =>
       cells.map((id): Row => [["TB", `R${String(row)}`, id], id]),
     );
-    const a = person(noteIn(frames, rows), 10, "bare", [unevenTableGuard(), tableEditing()]);
+    const told: BodySequenceUnwritten[] = [];
+    const guard = unevenTableGuard((why) => told.push(why));
+    const a = person(noteIn(frames, rows), 10, "bare", [guard, tableEditing()]);
     const { tableRow, tableCell, paragraph } = schema.nodes;
     const cell = (text: string) =>
       tableRow!.create(null, tableCell!.create(null, paragraph!.create(null, schema.text(text))));
@@ -290,9 +292,11 @@ describe("table changes the editor writes", () => {
         handle(a.view, new Event("paste") as ClipboardEvent, slice),
       );
     expect(paste(cells)).toBe(true);
+    expect(told).toEqual(["unwritable"]);
     expect(a.sent).toEqual([]);
     expect(a.lines()).toEqual(lines);
     expect(paste(new Slice(Fragment.from(schema.text("typed")), 0, 0))).toBeFalsy();
+    expect(told).toEqual(["unwritable"]);
   });
 
   it("writes a letter typed in an uneven table and refuses the repair the table plugin adds to it", () => {

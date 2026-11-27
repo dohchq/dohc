@@ -37,7 +37,10 @@ export const BodySequence = Extension.create<Partial<BodySequenceOptions>>({
     const { sequence, containers } = this.options;
     if (!sequence || !containers)
       throw new Error("BodySequence needs the note's sequence and containers.");
-    return [bodySequencePlugin({ ...this.options, sequence, containers }), unevenTableGuard()];
+    return [
+      bodySequencePlugin({ ...this.options, sequence, containers }),
+      unevenTableGuard(this.options.unwritten),
+    ];
   },
   addCommands() {
     const fromHistory =
