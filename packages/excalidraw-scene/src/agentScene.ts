@@ -154,10 +154,14 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
       after.boundElements = after.boundElements.filter((bound) => !gone((bound as JsonObject).id));
     if (stableJson(after) !== stableJson(before)) next.set(id, after);
   }
-  const updating = new Set((edit.update ?? []).map(({ id }) => id));
+  const placing = new Set(
+    (edit.update ?? [])
+      .filter((change) => change.x !== undefined || change.y !== undefined || change.points)
+      .map(({ id }) => id),
+  );
   for (const id of current.keys()) {
     const arrow = existing(id);
-    if (updating.has(id) || arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
+    if (placing.has(id) || arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
     const shift = (key: "startBinding" | "endBinding") => {
       const target = (arrow[key] as JsonObject | null | undefined)?.elementId;
       const before = typeof target === "string" ? current.get(target) : undefined;

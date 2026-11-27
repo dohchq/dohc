@@ -120,6 +120,26 @@ describe("planDrawingEdit", () => {
     ]);
   });
 
+  it("still moves an arrow the edit only restyles", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 200, height: 100 },
+        { id: "b", type: "rectangle", x: 400, y: 0, width: 200, height: 100 },
+        { id: "go", type: "arrow", x: 200, y: 50, start: "a", end: "b" },
+      ],
+    });
+    apply(doc, {
+      update: [
+        { id: "b", expectedVersion: 1, y: 300 },
+        { id: "go", expectedVersion: 1, strokeColor: "#e03131" },
+      ],
+    });
+    const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+    expect(go).toMatchObject({ strokeColor: "#e03131" });
+    expect((go.y as number) + (go.points as number[][])[1]![1]!).toBeGreaterThan(250);
+  });
+
   it("centers a label on an arrow that points back", () => {
     const doc = new Y.Doc();
     apply(doc, {
