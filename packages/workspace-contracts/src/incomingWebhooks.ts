@@ -140,7 +140,6 @@ export type IncomingWebhookCreatedResult = z.infer<typeof IncomingWebhookCreated
 export const AgentIncomingWebhookCreateInput = z
   .object({ name: IncomingWebhookName, collection: IncomingWebhookCollectionPath })
   .strict();
-export type AgentIncomingWebhookCreateInput = z.infer<typeof AgentIncomingWebhookCreateInput>;
 export const AgentIncomingWebhookCreated = IncomingWebhookCreatedResult.pick({
   webhook: true,
   endpointUrl: true,

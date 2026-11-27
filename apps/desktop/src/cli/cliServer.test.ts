@@ -91,6 +91,7 @@ import {
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
 import {
   AUTOMATION_SERVER_INSTALL_ID,
+  AUTOMATION_SERVER_OFF,
   type ScheduleHostResult,
 } from "@dohc/workspace-contracts/relay";
 import { cliMessageId, cliThreadId } from "@dohc/workspace-operations/chats";
@@ -2427,6 +2428,13 @@ describe("CLI socket server", () => {
       lastSeenMs: 1,
       thisComputer: true,
     };
+    const server = {
+      installId: AUTOMATION_SERVER_INSTALL_ID,
+      kind: "server" as const,
+      label: "This server",
+      lastSeenMs: 1,
+      thisComputer: false,
+    };
     const relayHost = (
       generation: number,
       hostInstallId: string,
@@ -2436,7 +2444,7 @@ describe("CLI socket server", () => {
       generation,
       hostInstallId,
       handoverFrom,
-      computers: [laptop],
+      computers: [laptop, server],
     });
     let host: ScheduleHostResult;
     let chosen: ScheduleHostResult;
@@ -2525,6 +2533,15 @@ describe("CLI socket server", () => {
       );
       host = { kind: "note", message: "Sign in to choose where automations run." };
       expect(await useServer()).toMatchObject(refused("Sign in to choose where automations run."));
+      const serverOff: ScheduleHostResult = {
+        kind: "relay",
+        generation: 3,
+        hostInstallId: AUTOMATION_SERVER_INSTALL_ID,
+        handoverFrom: null,
+        computers: [laptop],
+      };
+      host = serverOff;
+      expect(await useServer()).toMatchObject(refused(AUTOMATION_SERVER_OFF));
       expect(agentSetup.useServer).not.toHaveBeenCalled();
     });
 
@@ -2583,6 +2600,17 @@ describe("CLI socket server", () => {
       agentWriteRunId = "run-settings-active";
       for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
       agentWriteRunId = null;
+
+      const ownWorkspaces = serverOptions.listWorkspaces;
+      const ownDepth = serverOptions.agentRunDepth;
+      serverOptions.listWorkspaces = () => [
+        registryWorkspace,
+        { workspaceId: "ws-other", rootPath: join(stateDir, "other") },
+      ];
+      serverOptions.agentRunDepth = (workspaceId) => (workspaceId === "ws-other" ? 1 : 0);
+      for (const write of writes) expect(await write()).toMatchObject(refused(RUN_REFUSAL));
+      serverOptions.listWorkspaces = ownWorkspaces;
+      serverOptions.agentRunDepth = ownDepth;
       unreached();
 
       context.readOnly = true;

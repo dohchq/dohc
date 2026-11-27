@@ -93,10 +93,13 @@ describe("parseCliArguments", () => {
       verb: "automationUseServer",
       generation: 3,
     });
-    for (const generation of [[], ["--generation", "-1"], ["--generation", "1.5"]])
-      expect(() => parseCliArguments(["automation", "use-server", ...generation], {})).toThrow(
-        "automation use-server requires --generation <n> from dohc automation host",
-      );
+    expect(() => parseCliArguments(["automation", "use-server"], {})).toThrow(
+      "automation use-server requires --generation <n> from dohc automation host",
+    );
+    for (const generation of ["-1", "1.5", "", " "])
+      expect(() =>
+        parseCliArguments(["automation", "use-server", "--generation", generation], {}),
+      ).toThrow("--generation requires a whole number");
     expect(parseCliArguments(["webhook", "list"], {})).toMatchObject({ verb: "webhookList" });
     expect(
       parseCliArguments(["webhook", "create", "Waitlist", "--collection", "forms/waitlist"], {}),

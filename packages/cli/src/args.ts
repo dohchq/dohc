@@ -1645,10 +1645,10 @@ const AUTOMATION_VERBS = {
   },
   "use-server": declaredWrite("automationUseServer", (input) => {
     noExtraArgs(input.operands, "automation use-server");
-    const generation = Number(lastValue(input, "--generation"));
-    if (!Number.isSafeInteger(generation) || generation < 0)
+    const generation = lastValue(input, "--generation");
+    if (generation === undefined)
       fail("automation use-server requires --generation <n> from dohc automation host");
-    return { generation };
+    return { generation: integerFlag(generation, "--generation", { allowZero: true }) };
   }),
   switch: {
     capabilityId: "automation.switch",

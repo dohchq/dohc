@@ -22,6 +22,7 @@ import { DATASET_ADMIN_ACTIONS } from "@dohc/cli/dataset";
 import type { AgentNotice } from "../notices/agentNotices";
 import {
   AUTOMATION_SERVER_INSTALL_ID,
+  AUTOMATION_SERVER_OFF,
   type ScheduleHostResult,
 } from "@dohc/workspace-contracts/relay";
 import type {
@@ -915,8 +916,12 @@ function ownerSetupRefusal(context: CliWorkspaceContext, options: CliServerOptio
     return "Only the owner's own agents can do this. Run it from your own workspace's folder.";
   if (
     context.run !== undefined ||
-    options.agentWriteRunId(context.workspaceId) !== null ||
-    options.agentRunDepth(context.workspaceId) > 0
+    options
+      .listWorkspaces()
+      .some(
+        ({ workspaceId }) =>
+          options.agentWriteRunId(workspaceId) !== null || options.agentRunDepth(workspaceId) > 0,
+      )
   )
     return "Agent runs can't set up incoming webhooks or the automation host. Finish the active agent run first.";
   return options.agentSetup ? null : "Workspace setup is unavailable here.";
@@ -3446,6 +3451,8 @@ const DECLARED_WRITERS: {
               ? before.message
               : "Automations move to the server only in a synced workspace. Turn on sync first.",
         };
+      if (!before.computers.some((computer) => computer.kind === "server"))
+        return { ok: false as const, reason: AUTOMATION_SERVER_OFF };
       if (before.generation !== generation)
         return {
           ok: false as const,
