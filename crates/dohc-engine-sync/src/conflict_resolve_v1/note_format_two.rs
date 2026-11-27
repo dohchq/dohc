@@ -9,6 +9,8 @@ pub enum FormatTwoConversion {
     DoesNotFit,
 }
 
+pub(crate) const CONVERSION_ID_PREFIX: &str = "note-format-two-";
+
 const WAITS: [(&str, &str); 5] = [
     (
         "ydoc-deferred-updates-pending",
@@ -209,7 +211,7 @@ fn conversion_id(key: &DocKey, claim: &str, state_vector: &str, delete_set: &str
         delete_set,
     ]);
     format!(
-        "note-format-two-{}",
+        "{CONVERSION_ID_PREFIX}{}",
         dohc_engine_storage::hex_sha256(cut.to_string().as_bytes())
     )
 }
@@ -235,7 +237,7 @@ fn holds_in_format_two(successor: &SuccessorBase, text: &str) -> bool {
 pub(super) enum Received {
     NotAConversion,
     Conversion,
-    AlreadyHere,
+    NothingToInstall,
 }
 
 pub(super) fn received(
@@ -283,16 +285,14 @@ pub(super) fn received(
     let Some(marker) =
         dohc_engine_collab::read_marker_in(tx, &key).map_err(map_local_collab_error)?
     else {
-        return Err(SyncError::RetryableState {
-            reason: "ydoc-lineage-missing",
-        });
+        return Ok(Received::NothingToInstall);
     };
     let here = marker.lineage_claim_status == LineageClaimStatus::Exact
         && marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
         && marker.lineage_parent_claim_id.as_deref()
             == Some(transition.predecessor_claim_id.as_str());
     Ok(if here {
-        Received::AlreadyHere
+        Received::NothingToInstall
     } else {
         Received::Conversion
     })

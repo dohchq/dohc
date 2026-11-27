@@ -7,6 +7,7 @@ use dohc_engine_domain::WaitingVersion;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::conflict_resolve_v1::CONVERSION_ID_PREFIX;
 use crate::{BlobKind, RelayError, ReplicationEnvelope, SyncError, SyncIdentity};
 
 const MAX_PENDING_OPS: i64 = 10_000;
@@ -24,9 +25,9 @@ const UNAPPLIED: &str =
       OR d.origin_seq>COALESCE((SELECT a.acked_seq FROM replication_peers a
         WHERE a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id),-1))";
 
-/// The objects and lowercased paths a file op touches. An op with none, or
-/// one that carries a conflict's effect, has no scope: it waits for all
-/// earlier work of its origin, and all later work waits for it.
+/// The objects and lowercased paths a file op or a note's conversion to
+/// format 2 touches. Any other op, or one with no object, has no scope: it
+/// waits for all earlier work of its origin, and all later work waits for it.
 #[derive(Default)]
 struct Scope {
     objects: BTreeSet<String>,
@@ -34,23 +35,28 @@ struct Scope {
 }
 
 fn scope(op: &ReplicationEnvelope) -> Option<Scope> {
-    scope_of(&op.op_kind, &op.payload)
+    scope_of(&op.op_kind, |field| op.payload.pointer(field))
 }
 
 /// A retained op's kind and the payload fields [`scope_of`] reads, in
 /// [`SCOPE_PAYLOAD`] order, so a check need not decode whole envelopes.
 const SCOPE_JSON: &str = "json_extract(d.envelope_json,'$.opKind','$.payload.conflictId',
     '$.payload.objectId','$.payload.beforeObjectId','$.payload.path',
-    '$.payload.payloadBeforePath','$.payload.payloadAfterPath','$.payload.beforePath')";
-const SCOPE_PAYLOAD: [&str; 7] = [
-    "conflictId",
-    "objectId",
-    "beforeObjectId",
-    "path",
-    "payloadBeforePath",
-    "payloadAfterPath",
-    "beforePath",
+    '$.payload.payloadBeforePath','$.payload.payloadAfterPath','$.payload.beforePath',
+    '$.payload.transition.current.objectId','$.payload.paths[0]')";
+const SCOPE_PAYLOAD: [&str; 9] = [
+    "/conflictId",
+    "/objectId",
+    "/beforeObjectId",
+    "/path",
+    "/payloadBeforePath",
+    "/payloadAfterPath",
+    "/beforePath",
+    NOTE_OBJECT,
+    NOTE_PATH,
 ];
+const NOTE_OBJECT: &str = "/transition/current/objectId";
+const NOTE_PATH: &str = "/paths/0";
 
 fn retained_scope(fields: &str) -> Result<Option<Scope>, SyncError> {
     let fields: Vec<serde_json::Value> =
@@ -59,36 +65,53 @@ fn retained_scope(fields: &str) -> Result<Option<Scope>, SyncError> {
         .first()
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let payload = SCOPE_PAYLOAD
-        .iter()
+    let payload: BTreeMap<&str, &serde_json::Value> = SCOPE_PAYLOAD
+        .into_iter()
         .zip(fields.iter().skip(1))
-        .map(|(name, value)| ((*name).to_owned(), value.clone()))
         .collect();
-    Ok(scope_of(op_kind, &serde_json::Value::Object(payload)))
+    Ok(scope_of(op_kind, |field| payload.get(field).copied()))
 }
 
-fn scope_of(op_kind: &str, payload: &serde_json::Value) -> Option<Scope> {
-    if !matches!(op_kind, "moment.append" | "ydoc.update") || !payload["conflictId"].is_null() {
-        return None;
-    }
-    let text = |name: &str| payload[name].as_str().map(str::to_owned);
-    let objects: BTreeSet<String> = ["objectId", "beforeObjectId"]
-        .into_iter()
+fn scope_of<'a>(
+    op_kind: &str,
+    field: impl Fn(&str) -> Option<&'a serde_json::Value>,
+) -> Option<Scope> {
+    let conflict = field("/conflictId").filter(|id| !id.is_null());
+    let (objects, paths): (&[&str], &[&str]) = match (op_kind, conflict) {
+        ("moment.append" | "ydoc.update", None) => (
+            &["/objectId", "/beforeObjectId"],
+            &[
+                "/path",
+                "/payloadBeforePath",
+                "/payloadAfterPath",
+                "/beforePath",
+            ],
+        ),
+        ("conflict.resolve", Some(id))
+            if id
+                .as_str()
+                .is_some_and(|id| id.starts_with(CONVERSION_ID_PREFIX)) =>
+        {
+            (&[NOTE_OBJECT], &[NOTE_PATH])
+        }
+        _ => return None,
+    };
+    let text = |name: &str| field(name).and_then(serde_json::Value::as_str);
+    let objects: BTreeSet<String> = objects
+        .iter()
+        .copied()
         .filter_map(text)
+        .map(str::to_owned)
         .collect();
     if objects.is_empty() {
         return None;
     }
-    let paths = [
-        "path",
-        "payloadBeforePath",
-        "payloadAfterPath",
-        "beforePath",
-    ]
-    .into_iter()
-    .filter_map(text)
-    .map(|path| path.to_lowercase())
-    .collect();
+    let paths = paths
+        .iter()
+        .copied()
+        .filter_map(text)
+        .map(str::to_lowercase)
+        .collect();
     Some(Scope { objects, paths })
 }
 
@@ -120,11 +143,12 @@ impl Scope {
 /// origin alone for an op with no scope.
 pub(crate) fn hold_key(op: &ReplicationEnvelope) -> String {
     match scope(op) {
-        Some(_) => format!(
-            "{}\u{1f}{}",
-            op.origin_id,
-            op.payload["objectId"].as_str().unwrap_or_default()
-        ),
+        Some(_) => {
+            let object = ["/objectId", NOTE_OBJECT]
+                .into_iter()
+                .find_map(|field| op.payload.pointer(field)?.as_str());
+            format!("{}\u{1f}{}", op.origin_id, object.unwrap_or_default())
+        }
         None => op.origin_id.clone(),
     }
 }

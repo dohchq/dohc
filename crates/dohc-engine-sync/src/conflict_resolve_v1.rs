@@ -28,6 +28,7 @@ use crate::{
 
 mod note_format_two;
 
+pub(crate) use note_format_two::CONVERSION_ID_PREFIX;
 pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
 
 const FORMAT_VERSION: i64 = 1;
@@ -1412,7 +1413,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     let conversion = match note_format_two::received(tx, payload)? {
         note_format_two::Received::NotAConversion => false,
         note_format_two::Received::Conversion => true,
-        note_format_two::Received::AlreadyHere => {
+        note_format_two::Received::NothingToInstall => {
             return Ok(ConflictApplyResult {
                 conflict_id: payload.conflict_id.clone(),
                 inserted: None,
