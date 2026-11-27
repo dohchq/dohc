@@ -372,6 +372,98 @@ it("keeps public submission separate from discovery and rejects forged cross-wor
   expect(f.host.list(otherOwner, { workspaceId: "other" }).datasets).toEqual([]);
 });
 
+it("reads a share link's app manifest once per call and its warm rules never, however often the call checks them", async () => {
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("friend");
+  await f.invoke(link, id(5), { name: "first" }, publicationId, "first");
+  const manifest = f.storage.db
+    .prepare("SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?")
+    .get(publicationId)!.manifest_sha256;
+  const rules = f.storage.db
+    .prepare("SELECT revision_json FROM dohc_dataset_catalog")
+    .get()!.revision_json;
+  const parse = JSON.parse;
+  let ruleParses = 0;
+  vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+    if (text === rules && String(new Error().stack).includes("dataset-host")) ruleParses++;
+    return parse(text, reviver);
+  });
+  const blobs = vi.spyOn(f.storage, "getBlob");
+  await f.invoke({ ...link }, id(5), { name: "second" }, publicationId, "second");
+  expect(blobs.mock.calls.filter(([, sha256]) => sha256 === manifest)).toHaveLength(1);
+  expect(ruleParses).toBe(0);
+});
+
+it("refuses a share link's running submit once its link is paused, its app's manifest record changes, or its app is taken down", async () => {
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("friend");
+  await f.invoke(link, id(5), { name: "warm" }, publicationId, "warm");
+  const original = f.storage.findLinkSessionByCapabilityHash.bind(f.storage);
+  let change: (() => void) | undefined;
+  const dispatched = () => {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = Infinity;
+    const stack = String(new Error().stack);
+    Error.stackTraceLimit = limit;
+    return stack.includes("supervisor.mjs");
+  };
+  vi.spyOn(f.storage, "findLinkSessionByCapabilityHash").mockImplementation((...args) => {
+    if (change && dispatched()) {
+      setImmediate(change);
+      change = undefined;
+    }
+    return original(...args);
+  });
+  const submit = async (name: string, next: () => void) => {
+    change = next;
+    await expect(f.invoke({ ...link }, id(5), { name }, publicationId, name)).rejects.toThrow();
+    expect(change).toBeUndefined();
+  };
+  const pause = (pausedAtMs: number | null) =>
+    f.storage.setShareLinkWritesPaused({
+      shareId: "s",
+      workspaceId: "w",
+      actorUserId: "owner",
+      pausedAtMs,
+    });
+  await submit("paused", () => pause(20));
+  pause(null);
+  const manifest = f.storage.db
+    .prepare("SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?")
+    .get(publicationId)!.manifest_sha256;
+  const setManifest = (sha256: unknown) =>
+    f.storage.db
+      .prepare("UPDATE sync_relay_app_publications SET manifest_sha256=? WHERE publication_id=?")
+      .run(sha256 as string, publicationId);
+  const other = f.publishWith([
+    resolveAppDatasetCapability(
+      {
+        kind: "dataset",
+        datasetId: id(1),
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+        operationIds: [id(5), id(6)],
+      },
+      revision,
+    ),
+  ]);
+  const swapped = f.storage.db
+    .prepare("SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?")
+    .get(other)!.manifest_sha256;
+  await submit("tampered", () => setManifest(swapped));
+  setManifest(manifest);
+  await f.invoke({ ...link }, id(5), { name: "restored" }, publicationId, "restored");
+  await submit("taken-down", () =>
+    disableAppPublication(f.storage, { publicationId, reason: "Abuse", nowMs: 30 }),
+  );
+  const names = (await f.invoke(owner, id(6))).result as Array<{ name: string }>;
+  expect(names.map((row) => row.name).sort()).toEqual(["restored", "warm"]);
+});
+
 it("allows only explicitly granted helper operations with view-only source access", async () => {
   const f = await fixture();
   await f.activate();

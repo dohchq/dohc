@@ -112,8 +112,7 @@ export function resolveCompatibleDatasetRevision(
           "SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?",
         )
         .get(key.workspaceId, key.datasetId);
-  const approved =
-    current ?? (row ? parseDatasetRevision(JSON.parse(String(row.revision_json))) : undefined);
+  const approved = current ?? (row ? storedRevision(String(row.revision_json)) : undefined);
   if (!approved)
     throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
   if (
@@ -126,7 +125,7 @@ export function resolveCompatibleDatasetRevision(
       "SELECT revision_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>=? ORDER BY revision",
     )
     .all(key.workspaceId, key.datasetId, reference.revision);
-  const history = saved.map((row) => parseDatasetRevision(JSON.parse(String(row.revision_json))));
+  const history = saved.map((row) => storedRevision(String(row.revision_json)));
   const previous = history[0];
   const executable = db
     .prepare("SELECT source FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?")
@@ -396,7 +395,13 @@ function remember<K, V>(cache: Map<K, V>, key: K, value: V, limit = 64): V {
   cache.set(key, value);
   return value;
 }
-function frozen<T>(value: T): T {
+const parsedRevisions = new Map<string, DatasetRevision>();
+function storedRevision(json: string): DatasetRevision {
+  const hit = parsedRevisions.get(json);
+  parsedRevisions.delete(json);
+  return remember(parsedRevisions, json, hit ?? frozen(parseDatasetRevision(JSON.parse(json))), 16);
+}
+export function frozen<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const child of Object.values(value)) frozen(child);
@@ -502,17 +507,6 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       generatedVerdicts,
       approved.revisionSha256,
       hasGeneratedDatasetRevision(approved),
-    );
-  }
-  const parsedRevisions = new Map<string, DatasetRevision>();
-  function parsedRevision(json: string): DatasetRevision {
-    const hit = parsedRevisions.get(json);
-    parsedRevisions.delete(json);
-    return remember(
-      parsedRevisions,
-      json,
-      hit ?? frozen(parseDatasetRevision(JSON.parse(json))),
-      16,
     );
   }
   const grantedOperations = new WeakMap<DatasetRevision, Map<string, DatasetOperation[]>>();
@@ -687,7 +681,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       )
       .get(key.workspaceId, key.datasetId);
     if (!row) denied();
-    return parsedRevision(String(row.revision_json));
+    return storedRevision(String(row.revision_json));
   }
   // Recovery installs a dataset's catalog row before it claims the dataset,
   // which then accepts no work. Lists and descriptions leave it out until then.

@@ -1013,7 +1013,7 @@ function currentLinkAppPublication(
     principalId: enrollment.principal?.principalId ?? null,
     expiresAtMs: session.expiresAtMs,
   };
-  return { result, workspaceId: authorized.share.workspaceId, candidate, manifestHash };
+  return { result, workspaceId: authorized.share.workspaceId, candidate, manifestHash, enrollment };
 }
 
 export interface ListLinkAppPublicationsInput extends Omit<
@@ -1100,8 +1100,12 @@ export function listLinkAppPublications(
 }
 
 /** Call within the caller's read or write transaction. */
-export function requireLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput) {
-  return currentLinkAppPublication(storage, input);
+export function requireLinkAppPublication(
+  storage: StorageContext,
+  input: LinkAppPublicationInput,
+  verified?: { candidate: AppPublicationCandidate; manifestHash: string },
+) {
+  return currentLinkAppPublication(storage, input, verified);
 }
 
 /** Retain only verified immutable content; every invocation still rechecks current authority. */

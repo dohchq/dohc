@@ -12,6 +12,7 @@ import {
   resolveCompatibleDatasetRevision,
   createDatasetHost,
   DatasetHostError,
+  frozen,
   type DatasetAuthority,
   type DatasetAccess,
   type DatasetHostOptions,
@@ -58,7 +59,7 @@ import {
   workspaceRoleOf,
 } from "./storage/workspaceMembers";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
-import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
+import { linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import {
   effectiveShareSelector,
@@ -972,6 +973,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       .get(workspaceId, datasetId);
     return head ? Number(head.revision) : 0;
   }
+  const verifiedCapabilities = new WeakMap<DatasetRevision, Map<string, AppDatasetCapability>>();
   function capability(
     candidate: AppPublicationCandidate,
     workspaceId: string,
@@ -992,7 +994,15 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       if (error instanceof DatasetHostError && error.code === "not_authorized") throw notFound();
       throw error;
     }
-    return verifyAppDatasetCapability(requested, revision, generatedRevision);
+    let verified = verifiedCapabilities.get(revision);
+    if (!verified) verifiedCapabilities.set(revision, (verified = new Map()));
+    const key = JSON.stringify(requested);
+    const hit = verified.get(key);
+    if (hit) return hit;
+    const result = frozen(verifyAppDatasetCapability(requested, revision, generatedRevision));
+    if (verified.size >= 64) verified.delete(verified.keys().next().value!);
+    verified.set(key, result);
+    return result;
   }
   function requireDatasetActiveForApproval(workspaceId: string, datasetId: string): void {
     const head = storage.db
@@ -1043,23 +1053,26 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     } = capability(candidate, workspaceId, datasetId);
     return { datasetId, appId, binding };
   }
+  type VerifiedManifest = { candidate: AppPublicationCandidate; manifestHash: string };
+  const verifiedManifests = new WeakMap<AppBackendAuth, Map<string, VerifiedManifest>>();
   function loadAppPublication(auth: AppBackendAuth, publicationId: string, reviewing = false) {
     if (auth.kind === "link") {
-      const published = requireLinkAppPublication(storage, {
-        ...auth,
-        publicationId,
-        limits,
-        publicEditRelease,
-        nowMs: nowMs(),
-      });
+      let manifests = verifiedManifests.get(auth);
+      if (!manifests) verifiedManifests.set(auth, (manifests = new Map()));
+      const published = requireLinkAppPublication(
+        storage,
+        { ...auth, publicationId, limits, publicEditRelease, nowMs: nowMs() },
+        manifests.get(publicationId),
+      );
+      const { candidate, manifestHash } = published;
+      manifests.set(publicationId, { candidate, manifestHash });
       return {
         workspaceId: published.workspaceId,
         candidate: published.candidate,
         authorityRevision: published.result.descriptor.authorityRevision,
         local: false,
         resolveAuthority(datasetId?: string): DatasetAuthority {
-          const enrollment = readLinkEnrollment(storage, auth, nowMs());
-          if (!enrollment || linkWriteRefusal(enrollment)) throw notFound();
+          if (linkWriteRefusal(published.enrollment)) throw notFound();
           return {
             caller: {
               kind: "link",
