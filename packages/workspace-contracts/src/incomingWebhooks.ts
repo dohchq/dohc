@@ -186,6 +186,8 @@ export function extractAllowedIncomingWebhookHeaders(
   return result;
 }
 
+const TITLE_KEYS = ["title", "subject", "summary", "event", "name", "email"];
+
 function titleFromPayload(
   webhookName: string,
   contentType: IncomingWebhookAllowedContentType,
@@ -198,7 +200,7 @@ function titleFromPayload(
       const parsed: unknown = JSON.parse(bodyText);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         const record = parsed as Record<string, unknown>;
-        for (const key of ["title", "subject", "summary", "event", "name"]) {
+        for (const key of TITLE_KEYS) {
           if (typeof record[key] === "string" && record[key].trim().length > 0) {
             return sanitizeInboxSingleLine(`${webhookName}: ${record[key]}`);
           }
@@ -210,7 +212,7 @@ function titleFromPayload(
   } else if (contentType === "application/x-www-form-urlencoded") {
     try {
       const params = new URLSearchParams(bodyText);
-      for (const key of ["title", "subject", "summary", "event", "name"]) {
+      for (const key of TITLE_KEYS) {
         const value = params.get(key);
         if (value && value.trim().length > 0) {
           return sanitizeInboxSingleLine(`${webhookName}: ${value}`);

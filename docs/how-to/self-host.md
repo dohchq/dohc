@@ -490,6 +490,25 @@ Individual workspace failures appear in the sync-relay logs with their workspace
 An unavailable automation host fails this check even when sync and sharing remain available.
 If it fails, inspect the sync-relay logs and verify disk space and the relay's public HTTPS route.
 
+### Collect a website form
+
+An incoming webhook can take a form on any website. Each response becomes a record in a private Collection.
+Create the webhook in **Settings > Webhooks**, then use its address as the form's `action`:
+
+```html
+<form method="post" action="https://WEBHOOK_ADDRESS">
+  <input name="email" type="email" required />
+  <button type="submit">Join</button>
+</form>
+```
+
+The record's title is the webhook name followed by the first of `title`, `subject`, `summary`, `event`, `name`, or `email` that has a value.
+The record keeps the whole response as text.
+Without a script, the browser shows the webhook's JSON answer after submitting.
+A script on the page can send the same fields with `fetch` and read the answer: `202` when dohc accepted the response, `429` past a limit.
+Anyone who reads the page can post to the address. Each webhook takes 500 deliveries a day.
+Rotate the address in **Settings > Webhooks** to stop it.
+
 ### Turn server automations off
 
 Turning off automations deletes their server copies at startup, with each copy's claims and run history.

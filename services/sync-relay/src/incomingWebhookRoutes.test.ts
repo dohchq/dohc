@@ -258,6 +258,45 @@ describe("incoming webhooks relay routes and drain", () => {
     );
   });
 
+  it("lets a form on another website read each delivery answer, but not the owner's routes", async () => {
+    const { handler } = await setup();
+    const created = await handler(
+      request("owner", "/sync/ws-1/webhooks", {
+        ...jsonBody({ name: "Waitlist", collectionPath: "Inbox" }),
+        method: "POST",
+      }),
+    );
+    expect(created.headers.get("access-control-allow-origin")).toBeNull();
+    const { token } = (await created.json()) as { token: string };
+    const formPost = (hookToken: string, init: RequestInit = {}) =>
+      handler(
+        publicHookRequest(hookToken, {
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            origin: "https://dohc.computer",
+          },
+          body: "email=ada%40example.com",
+          ...init,
+        }),
+      );
+
+    const accepted = await formPost(token);
+    expect(accepted.status).toBe(202);
+    expect(accepted.headers.get("access-control-allow-origin")).toBe("*");
+    const unknown = await formPost("a".repeat(43));
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get("access-control-allow-origin")).toBe("*");
+    const unsupported = await formPost(token, {
+      headers: { "content-type": "text/html", origin: "https://dohc.computer" },
+    });
+    expect(unsupported.status).toBe(415);
+    expect(unsupported.headers.get("access-control-allow-origin")).toBe("*");
+
+    const listed = await handler(request("owner", "/sync/ws-1/webhooks"));
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
   it("enforces public ingress defenses: method, loop depth, opaque 404 before rate limit, content-type, streaming 256 KiB cap, allowlisted headers, idempotency, and per-endpoint burst", async () => {
     const { storage, handler } = await setup();
 
