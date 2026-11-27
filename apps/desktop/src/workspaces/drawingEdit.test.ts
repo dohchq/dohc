@@ -128,6 +128,29 @@ describe("editDrawing", () => {
   });
 });
 
+describe("editDrawing on a drawing the engine cannot open", () => {
+  it("explains what a native drawing needs, and leaves later refusals alone", async () => {
+    const refusal = new Error("invalid-input");
+    const unopened = {
+      editLiveDocument: async () => {
+        throw refusal;
+      },
+    } as unknown as LiveDocumentSessions;
+    const edit = { update: [{ id: "a", expectedVersion: 1, x: 5 }] };
+    await expect(editDrawing(unopened, { ...target, edit })).rejects.toThrow(
+      "plan.excalidraw is not saved in Excalidraw's own format",
+    );
+    const { live } = sessions(new Y.Doc(), {
+      afterApply: () => {
+        throw refusal;
+      },
+    });
+    await expect(
+      editDrawing(live, { ...target, edit: { add: [{ type: "rectangle", x: 0, y: 0 }] } }),
+    ).rejects.toBe(refusal);
+  });
+});
+
 describe("createDrawing", () => {
   it("writes the empty scene, then adds elements; refuses bad elements before writing", async () => {
     const doc = new Y.Doc();

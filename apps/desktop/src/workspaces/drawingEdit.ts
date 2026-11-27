@@ -28,9 +28,11 @@ export async function editDrawing(
   sessions: LiveDocumentSessions,
   input: { workspaceId: string; path: string; edit: DrawingEdit; origin: LiveDocumentEditOrigin },
 ): Promise<DrawingWrite> {
-  const { result } = await sessions.editLiveDocument(
+  let opened = false;
+  const edited = sessions.editLiveDocument(
     { workspaceId: input.workspaceId, path: input.path, kind: "scene" },
     async (provider, path, session): Promise<DrawingWrite> => {
+      opened = true;
       const settleNow = provider.settleNow;
       if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
       const decided: { plan?: PlannedDrawingEdit | { reason: string } } = {};
@@ -76,6 +78,14 @@ export async function editDrawing(
       return { ok: true, path, elements, ...(warning ? { warning } : {}) };
     },
   );
+  const { result } = await edited.catch((error: unknown) => {
+    throw !opened && error instanceof Error && error.message === "invalid-input"
+      ? new Error(
+          `${input.path} is not saved in Excalidraw's own format, so dohc could not open it to edit. Open and save it in Excalidraw, or give each element an id and a type, each text element its text, and each embedded file its id, mimeType, dataURL, and created time.`,
+          { cause: error },
+        )
+      : error;
+  });
   return result;
 }
 

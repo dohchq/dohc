@@ -399,13 +399,17 @@ function center(element: ElementSnapshot) {
 function edge(element: ElementSnapshot, toward: readonly [number, number]) {
   const [cx, cy] = center(element);
   const [dx, dy] = [toward[0] - cx, toward[1] - cy];
-  const reach = Math.min(
-    dx === 0 ? Infinity : (numberOr(element.width) / 2 + GAP) / Math.abs(dx),
-    dy === 0 ? Infinity : (numberOr(element.height) / 2 + GAP) / Math.abs(dy),
-  );
-  return Number.isFinite(reach)
-    ? ([cx + dx * reach, cy + dy * reach] as const)
-    : ([cx, cy] as const);
+  const [cos, sin] = [Math.cos(numberOr(element.angle)), Math.sin(numberOr(element.angle))];
+  const [u, v] = [dx * cos + dy * sin, dy * cos - dx * sin];
+  const x = Math.abs(u) / (numberOr(element.width) / 2 + GAP);
+  const y = Math.abs(v) / (numberOr(element.height) / 2 + GAP);
+  const along =
+    element.type === "ellipse"
+      ? Math.hypot(x, y)
+      : element.type === "diamond"
+        ? x + y
+        : Math.max(x, y);
+  return along > 0 ? ([cx + dx / along, cy + dy / along] as const) : ([cx, cy] as const);
 }
 
 function textSize(text: string, fontSize: number, lineHeight: number) {

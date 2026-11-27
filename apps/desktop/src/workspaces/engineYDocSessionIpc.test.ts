@@ -8,7 +8,8 @@ import {
 } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceFolderTimeoutError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { SECRET_READ_DENIED_REASON } from "@dohc/security-contract/engine-path-floor";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3514,6 +3515,41 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(
         h.ipc.readDocument({ workspaceId: "workspace-1", path: "plan.excalidraw", kind: "scene" }),
       ).rejects.toThrow("This file is protected");
+    });
+
+    it("refuses a document or drawing edit whose link resolves to a secret file", async () => {
+      const root = mkdtempSync(join(tmpdir(), "dohc-secret-link-"));
+      writeFileSync(join(root, ".env.md"), "TOKEN=1\n");
+      writeFileSync(join(root, ".env.excalidraw"), '{"type":"excalidraw","elements":[]}');
+      symlinkSync(join(root, ".env.md"), join(root, "notes.md"));
+      symlinkSync(join(root, ".env.excalidraw"), join(root, "plan.excalidraw"));
+      writeFileSync(join(root, ".env"), "TOKEN=1\n");
+      symlinkSync(join(root, ".env"), join(root, "keys.md"));
+      try {
+        const h = harness(editableSession(), {
+          rootPath: root,
+          resolveDocumentPath: (workspace, path, access) =>
+            resolveWorkspaceDocument(workspace.rootPath, path, access),
+        });
+        const apply = vi.fn();
+        const refusal = new Error(SECRET_READ_DENIED_REASON);
+        await expect(h.ipc.editDocument({ ...append, path: "notes.md" })).rejects.toThrow(refusal);
+        await expect(h.ipc.editDocument({ ...append, path: "keys.md" })).rejects.toThrow(refusal);
+        await expect(
+          h.ipc.editLiveDocument(
+            {
+              workspaceId: "workspace-1",
+              path: "plan.excalidraw",
+              kind: "scene",
+            },
+            apply,
+          ),
+        ).rejects.toThrow(refusal);
+        expect(apply).not.toHaveBeenCalled();
+        expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
 
     it("reads the held document's state, or nothing when no editor holds it", async () => {
