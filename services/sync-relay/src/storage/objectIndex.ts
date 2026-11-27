@@ -265,22 +265,26 @@ export function findThreadCreateLane(
   return undefined;
 }
 
-/** The thread's earliest admitted append still in the log, or null. A deleted message's appends are tombstones. */
-function firstLiveAppendInThread(
+/**
+ * The thread's earliest admitted append still in the log, or of one message
+ * when `messageId` is given, or null. A deleted message's appends are tombstones.
+ */
+function earliestAppend(
   storage: StorageContext,
   workspaceId: string,
   threadId: string,
-): { relaySeq: number; messageId: unknown } | null {
-  const row = storage.db
+  messageId?: string,
+): Record<string, unknown> | undefined {
+  return storage.db
     .prepare(
-      `SELECT relay_seq, json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
+      `SELECT relay_seq, origin_id, payload_json FROM sync_relay_log INDEXED BY idx_push_message_identity
      WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ?
-       AND op_kind = 'chat.message.append' AND json_valid(payload_json)
+       ${messageId === undefined ? "" : "AND json_extract(payload_json, '$.messageId') = ?"}
+       AND op_kind = 'chat.message.append' AND json_valid(payload_json) AND relay_admission IS NULL
        AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
      ORDER BY relay_seq LIMIT 1`,
     )
-    .get(workspaceId, threadId);
-  return row ? { relaySeq: Number(row.relay_seq), messageId: row.message_id } : null;
+    .get(workspaceId, threadId, ...(messageId === undefined ? [] : [messageId]));
 }
 
 /**
@@ -294,10 +298,11 @@ export function findThreadFirstMessageId(
   workspaceId: string,
   threadId: string,
 ): string | undefined {
-  const live = firstLiveAppendInThread(storage, workspaceId, threadId);
+  const live = earliestAppend(storage, workspaceId, threadId);
   const deleted = firstDeletedInThread(storage, workspaceId, threadId);
-  if (deleted && (!live || deleted.relaySeq < live.relaySeq)) return deleted.messageId;
-  return typeof live?.messageId === "string" ? live.messageId : undefined;
+  if (deleted && (!live || deleted.relaySeq < Number(live.relay_seq))) return deleted.messageId;
+  const messageId = live && asRecord(JSON.parse(String(live.payload_json)))?.messageId;
+  return typeof messageId === "string" ? messageId : undefined;
 }
 
 /**
@@ -312,15 +317,7 @@ export function ownerComputerMessage(
   threadId: string,
   messageId: string,
 ): Pick<ChatMessage, "author" | "authorUserId" | "authorAgentId"> | null {
-  const row = storage.db
-    .prepare(
-      `SELECT origin_id, payload_json FROM sync_relay_log INDEXED BY idx_push_message_identity
-     WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
-       AND op_kind = 'chat.message.append' AND json_valid(payload_json) AND relay_admission IS NULL
-       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
-     ORDER BY relay_seq LIMIT 1`,
-    )
-    .get(workspaceId, threadId, messageId);
+  const row = earliestAppend(storage, workspaceId, threadId, messageId);
   if (
     !row ||
     !isOwnerLogOrigin(String(row.origin_id)) ||

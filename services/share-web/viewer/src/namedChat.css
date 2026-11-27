@@ -39,6 +39,7 @@
 .chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
 .chat-body > * { margin: 0 0 6px; }
 .chat-body > :last-child { margin-bottom: 0; }
+.chat-wake { margin: 4px 0 0; color: var(--viewer-muted); font-size: 12px; }
 .chat-body :is(h1, h2, h3, h4, h5, h6) { margin: 8px 0 4px; font-size: 14px; font-weight: 600; line-height: 1.5; }
 .chat-body pre { max-width: 100%; padding: 8px 10px; }
 .chat-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }

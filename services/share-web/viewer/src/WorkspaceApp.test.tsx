@@ -195,6 +195,10 @@ function server(
     // The account's workspaces, and how many reads of them fail first.
     workspaces?: unknown;
     workspacesFail?: number;
+    // The page's chat key, where it is not a grant's, as the owner's `owner:<workspace>`.
+    shareId?: string;
+    // Each wake read's answer, in turn. The last one repeats.
+    wakes?: unknown[][];
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
@@ -327,7 +331,7 @@ function server(
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     const listing = () => ({
-      shareId: "share",
+      shareId: options.shareId ?? "share",
       userId: user(),
       maxPostBytes: 9000,
       maxBodyBytes: 8000,
@@ -345,6 +349,17 @@ function server(
       return hold("groups", url, signal, listing());
     }
     if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
+    if (url.pathname === "/api/named-chat/wakes") {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      posts.push({ wakes: body });
+      const answers = options.wakes ?? [[]];
+      return jsonResponse({
+        shareId: body.shareId,
+        channelWireId: body.channelWireId,
+        messageId: body.messageId,
+        wakes: answers.length > 1 ? answers.shift() : answers[0],
+      });
+    }
     if (url.pathname === "/api/named-chat/messages/delete") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       posts.push({ deleted: body });
@@ -353,7 +368,7 @@ function server(
         return jsonResponse({ ok: false, error: "not found" }, 404);
       }
       return jsonResponse({
-        shareId: "share",
+        shareId: options.shareId ?? "share",
         deleted: { messageId: body.messageId, threadId: body.threadId, deletedAtMs: 50_000 },
       });
     }
@@ -377,7 +392,7 @@ function server(
       const threadId = typeof body.threadId === "string" ? body.threadId : undefined,
         parentMessageId = typeof body.parentMessageId === "string" ? body.parentMessageId : null;
       return jsonResponse({
-        shareId: "share",
+        shareId: options.shareId ?? "share",
         ...place,
         message: chat(39 + posts.length, String(body.body), "sam", {
           threadId,
@@ -397,7 +412,7 @@ function server(
     if (url.pathname === "/api/named-chat/messages" && path !== null) {
       if (url.searchParams.has("since")) return hold("comments", url, signal);
       return jsonResponse({
-        shareId: "share",
+        shareId: options.shareId ?? "share",
         path,
         nextCursor: 30,
         olderCursor: null,
@@ -415,14 +430,14 @@ function server(
       // A Group with an older page names its cursor, and that page has none.
       if (url.searchParams.has("before"))
         return jsonResponse({
-          shareId: "share",
+          shareId: options.shareId ?? "share",
           channelWireId: wire,
           nextCursor: 20,
           olderCursor: null,
           messages: older ?? [],
         });
       return jsonResponse({
-        shareId: "share",
+        shareId: options.shareId ?? "share",
         channelWireId: wire,
         nextCursor: 20,
         olderCursor: older ? 2 : null,
@@ -702,6 +717,19 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   expect(groupPanel().querySelector("h2")?.textContent).toBe("food");
   // One follow serves every Group, whichever is open.
   await settle(() => following("chat").length === 1);
+});
+
+it("never reads where a member's post woke an agent", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  setControlValue(composer(), "@claude plan it");
+  await click("Send");
+  await settle(() => groupPanel().textContent!.includes("@claude plan it"));
+  await settle(() => posts.length === 1);
+  for (let tick = 0; tick < 5; tick += 1) await act(async () => Promise.resolve());
+  expect(posts.filter((post) => "wakes" in post)).toEqual([]);
+  expect(groupPanel().querySelector(".chat-wake")).toBeNull();
 });
 
 it("stops counting a Group's new messages once a rule hides that Group", async () => {
@@ -2781,6 +2809,59 @@ describe("the owner's page", () => {
       .map(([input]) => new URL(String(input), "https://share.test"))
       .filter((url) => url.pathname === "/api/named-chat/channels");
     expect(listings.map((url) => url.search)).toEqual(["?workspaceId=ws-1"]);
+  });
+
+  const wakeReads = () => posts.filter((post) => "wakes" in post).map((post) => post.wakes);
+  const wake = (state: string) => ({ wakeId: "w-1", state, agentName: "Claude" });
+  async function ownerPost(options: Parameters<typeof server>[0]) {
+    server({ level: "edit", session: OWNER_SESSION, shareId: "owner:ws-1", ...options });
+    vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code: "paused" });
+    await render(OWNER);
+    await settle(() => groupPanel().textContent!.includes("Plans start here"));
+    setControlValue(
+      groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!,
+      "@claude plan it",
+    );
+    await click("Send");
+  }
+
+  it("shows the owner where the agent their post woke stands, until it starts or fails", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await ownerPost({ wakes: [[wake("waiting")], [wake("claimed")], [wake("unclaimed")]] });
+    const line = () => groupPanel().querySelector(".chat-wake")?.textContent;
+    await settle(() => line() === "Claude is waiting for a computer");
+    expect(
+      groupPanel().querySelector(".chat-wake")?.closest(".chat-message")?.textContent,
+    ).toContain("@claude plan it");
+    const sent = posts.find((post) => post.body === "@claude plan it")!;
+    expect(wakeReads()).toEqual([
+      {
+        shareId: "owner:ws-1",
+        channelWireId: "wire-plans",
+        threadId: expect.any(String),
+        messageId: expect.any(String),
+      },
+    ]);
+    expect(sent).toMatchObject({ shareId: "owner:ws-1" });
+    await act(async () => vi.advanceTimersByTime(10_000));
+    await settle(() => line() === "Claude is starting on a computer");
+    await act(async () => vi.advanceTimersByTime(10_000));
+    await settle(() => line() === "Claude didn't start");
+    await act(async () => vi.advanceTimersByTime(30_000));
+    expect(wakeReads()).toHaveLength(3);
+  });
+
+  it("tells the owner a post would start too many agents, with no Try again", async () => {
+    await ownerPost({ postFails: { status: 400, code: "too_many_wakes" } });
+    await settle(() =>
+      groupPanel().textContent!.includes(
+        "dohc could not send this message. It would start too many agents on your computers. Mention fewer agents.",
+      ),
+    );
+    expect(
+      [...groupPanel().querySelectorAll("button")].some((node) => node.textContent === "Try again"),
+    ).toBe(false);
+    expect(wakeReads()).toEqual([]);
   });
 
   it("tells the owner to open a page on a computer first, in the band alone", async () => {

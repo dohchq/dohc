@@ -6,6 +6,7 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
+import { MAX_WAKE_CANDIDATES } from "./chatWakes";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "./relayLogInputs";
 import type { SyncRelayHandler } from "./server";
@@ -1972,6 +1973,200 @@ describe("the owner's Chats and Comments in a browser", () => {
     );
     expect(read.status).toBe(200);
     expect((await read.text()).toLowerCase()).not.toContain("wake");
+  });
+
+  it("wakes nothing for an admin member's mention of the owner's agent", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    const ana = await member(h, storage, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    const posted = await chat(
+      h,
+      "messages",
+      "ana",
+      jsonBody({
+        shareId: ana.shareId,
+        channelWireId: GROUP,
+        lane: "posts",
+        id: "a-1",
+        body: "@claude book a table",
+        authorKind: "human",
+      }),
+    );
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    expect(wakeRows(storage)).toEqual([]);
+  });
+
+  it("wakes the agent's computer when the owner replies under its message in a Group's chat", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    await ownerAppend(h, [
+      laneThread("t-chat", GROUP),
+      agentMessage("msg-claude", "t-chat", "Here is the plan."),
+    ]);
+    const replied = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({
+        channelWireId: GROUP,
+        id: "o-chat",
+        threadId: "t-chat",
+        parentMessageId: "msg-claude",
+        body: "thanks",
+      }),
+    );
+    expect(replied.status, await replied.clone().text()).toBe(200);
+    expect(wakeRows(storage)).toMatchObject([
+      {
+        thread_id: "t-chat",
+        target: "implicit:laptop:claude",
+        candidates: [{ installId: "laptop", agentId: "claude" }],
+      },
+    ]);
+  });
+
+  it("refuses the owner's post that would wake too many agents, and keeps nothing", async () => {
+    const { h, storage } = await seed();
+    const agents = ["claude", "codex", "nova"];
+    for (let index = 0; index <= MAX_WAKE_CANDIDATES / agents.length; index += 1)
+      storage.replaceChatRunners({
+        accountId: OWNER,
+        workspaceId: WORKSPACE,
+        installId: `pc-${index}`,
+        computerLabel: `PC ${index}`,
+        runners: agents.map((agent) => ({
+          agentId: agent,
+          handle: agent,
+          displayName: agent,
+          enabled: true,
+        })),
+        nowMs: RELAY_NOW,
+      });
+    const refused = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude @codex @nova plan it" }),
+    );
+    expect(refused.status).toBe(400);
+    expect(await json(refused)).toMatchObject({ code: "too_many_wakes" });
+    expect(wakeRows(storage)).toEqual([]);
+    expect((await ownerLog(h)).some((op) => op.originId === OWNER_ORIGIN)).toBe(false);
+  });
+
+  it("answers a retry of the first message in a Group's chat with the same message", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await setLevel(h, "edit");
+    const owners = () =>
+      ownerChat(h, "messages", OWNER, ownerPost({ channelWireId: GROUP, lane: "chat" }));
+    const anas = () =>
+      chat(
+        h,
+        "messages",
+        "ana",
+        jsonBody({
+          shareId: ana.shareId,
+          channelWireId: GROUP,
+          lane: "chat",
+          id: "a-1",
+          body: "hello",
+          authorKind: "human",
+        }),
+      );
+    for (const send of [owners, anas]) {
+      const first = await send();
+      expect(first.status, await first.clone().text()).toBe(200);
+      const again = await send();
+      expect(again.status, await again.clone().text()).toBe(200);
+      expect((await json(again)).message).toEqual((await json(first)).message);
+    }
+  });
+
+  it("reads the wake status of the owner's post for the owner only, by its Group", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    await ownerAppend(h, [channel("wire-other", "other"), thread("t-other", "wire-other")]);
+    const posted = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude book a table" }),
+    );
+    const { messageId, threadId } = (
+      (await json(posted)) as {
+        message: { messageId: string; threadId: string };
+      }
+    ).message;
+    const message = { messageId, threadId };
+    const ask = { shareId: OWNER_CHAT, channelWireId: GROUP, ...message };
+    const read = async (fields = ask, userId = OWNER) =>
+      ownerChat(h, "wakes", userId, jsonBody(fields));
+    const waiting = await read();
+    expect(waiting.status, await waiting.clone().text()).toBe(200);
+    const wakeId = String((wakeRows(storage)[0] as Record<string, unknown>).wake_id);
+    expect(await json(waiting)).toEqual({
+      shareId: OWNER_CHAT,
+      channelWireId: GROUP,
+      messageId: message.messageId,
+      wakes: [{ wakeId, state: "waiting", agentName: "Claude" }],
+    });
+    storage.claimChatWake({ accountId: OWNER, wakeId, installId: "laptop", nowMs: RELAY_NOW });
+    expect(await json(await read())).toMatchObject({ wakes: [{ wakeId, state: "claimed" }] });
+    // Another Group, a thread outside the Group, or another account reads nothing.
+    const refusal = await (await chat(h, "messages?shareId=missing", OWNER)).text();
+    for (const response of [
+      await read({ ...ask, channelWireId: "wire-other" }),
+      await read({ ...ask, threadId: "t-other" }),
+      await read(ask, "ana"),
+    ]) {
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(refusal);
+    }
+  });
+
+  it("never answers a member's wake read, through their grant or the owner's scheme", async () => {
+    const { h, storage } = await seed();
+    declareClaude(storage, { laptop: true, mac: false });
+    const posted = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts", body: "@claude book a table" }),
+    );
+    const { messageId, threadId } = (
+      (await json(posted)) as {
+        message: { messageId: string; threadId: string };
+      }
+    ).message;
+    const message = { messageId, threadId };
+    const ana = await member(h, storage, "ana");
+    await setLevel(h, "edit");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    for (const response of [
+      await chat(
+        h,
+        "wakes",
+        "ana",
+        jsonBody({ shareId: ana.shareId, channelWireId: GROUP, ...message }),
+      ),
+      await ownerChat(
+        h,
+        "wakes",
+        "ana",
+        jsonBody({ shareId: OWNER_CHAT, channelWireId: GROUP, ...message }),
+      ),
+    ]) {
+      expect(response.status).toBe(404);
+      expect((await response.text()).toLowerCase()).not.toContain("wake");
+    }
   });
 
   it("refuses a post as an agent, and a read or post in General, a direct message or an agent chat", async () => {

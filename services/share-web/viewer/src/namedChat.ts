@@ -359,6 +359,48 @@ export async function postNamedChatMessage(
   return chatMessage(value.message);
 }
 
+/** Where one agent a post wakes stands, for the owner's page. */
+export interface ChatWake {
+  wakeId: string;
+  state: "held" | "waiting" | "claimed" | "queued" | "unclaimed" | "unconfirmed";
+  agentName: string | null;
+}
+
+const WAKE_STATES = new Set(["held", "waiting", "claimed", "queued", "unclaimed", "unconfirmed"]);
+
+/** The wakes of the owner's own post. Only the owner's page asks; the relay refuses anyone else. */
+export async function readNamedChatWakes(
+  place: NamedChatPlace,
+  message: Pick<NamedChatMessage, "messageId" | "threadId">,
+  signal: AbortSignal,
+): Promise<ChatWake[]> {
+  const value = await chatRequest("/api/named-chat/wakes", signal, {
+    ...coordinates(place),
+    threadId: message.threadId,
+    messageId: message.messageId,
+  });
+  if (
+    !answers(value, place) ||
+    value.messageId !== message.messageId ||
+    !Array.isArray(value.wakes)
+  )
+    throw invalid();
+  return value.wakes.map((wake: unknown): ChatWake => {
+    if (
+      !record(wake) ||
+      typeof wake.wakeId !== "string" ||
+      !WAKE_STATES.has(String(wake.state)) ||
+      (wake.agentName !== null && typeof wake.agentName !== "string")
+    )
+      throw invalid();
+    return {
+      wakeId: wake.wakeId,
+      state: wake.state as ChatWake["state"],
+      agentName: wake.agentName,
+    };
+  });
+}
+
 /** The body the relay stores, or null when it would refuse it. */
 export function normalizeChatBody(text: string, channel: NamedChatPlace): string | null {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd();

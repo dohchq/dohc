@@ -1,7 +1,8 @@
 import { MAX_NAMED_CHAT_FOLLOW_REQUESTS } from "@dohc/security-contract/share-discussion";
-import { readBoundedJson } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import { asRecord } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import {
   badRequest,
@@ -328,10 +329,13 @@ export function createNamedRecipientChat(options: {
     const url = new URL(request.url);
     const channels = url.pathname === "/sync/named-chat/channels";
     const deleting = url.pathname === "/sync/named-chat/messages/delete";
+    // Only the owner's page reads the wakes of the owner's own posts.
+    const waking = url.pathname === "/sync/named-chat/wakes";
     if (
-      (!channels && !deleting && url.pathname !== "/sync/named-chat/messages") ||
+      (!channels && !deleting && !waking && url.pathname !== "/sync/named-chat/messages") ||
       (request.method !== "GET" && (channels || request.method !== "POST")) ||
-      (deleting && request.method !== "POST") ||
+      ((deleting || waking) && request.method !== "POST") ||
+      (waking && !OWNER_SCHEME.test(request.headers.get("authorization") ?? "")) ||
       request.signal.aborted ||
       request.headers.get("origin") !== options.publicOrigin ||
       !verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)
@@ -395,19 +399,21 @@ export function createNamedRecipientChat(options: {
           const allowed = new Set(
             deleting
               ? ["shareId", "threadId", "messageId"]
-              : [
-                  "shareId",
-                  "channelWireId",
-                  "path",
-                  "id",
-                  "threadId",
-                  "lane",
-                  "parentMessageId",
-                  "body",
-                  "authorKind",
-                  "authorDisplayName",
-                  "authorUserId",
-                ],
+              : waking
+                ? ["shareId", "channelWireId", "path", "threadId", "messageId"]
+                : [
+                    "shareId",
+                    "channelWireId",
+                    "path",
+                    "id",
+                    "threadId",
+                    "lane",
+                    "parentMessageId",
+                    "body",
+                    "authorKind",
+                    "authorDisplayName",
+                    "authorUserId",
+                  ],
           );
           if (Object.keys(input).some((key) => !allowed.has(key)))
             throw relayError("share_op_rejected");
@@ -632,6 +638,30 @@ export function createNamedRecipientChat(options: {
           throw notFound();
         if (!chat) group = channelWireId;
         const place = file ? { path: file.filePath } : { channelWireId };
+        if (waking) {
+          if (!owned || (channelWireId === null && !file)) throw notFound();
+          const threadId = parseString(input.threadId, "threadId", 256),
+            messageId = parseString(input.messageId, "messageId", 256);
+          if (
+            file
+              ? commentFileOf(storage, share.workspaceId, threadId)?.objectId !== file.objectId
+              : storage.findThreadCreateChannelWireId(share.workspaceId, threadId) !== channelWireId
+          )
+            throw notFound();
+          const wakes = storage.phoneChatWakes({
+            accountId: actor.userId,
+            workspaceId: share.workspaceId,
+            messages: new Map([[messageId, threadId]]),
+            nowMs: options.nowMs(),
+          });
+          recheck();
+          return json({
+            shareId,
+            ...place,
+            messageId,
+            wakes: wakes.map(({ wakeId, state, agentName }) => ({ wakeId, state, agentName })),
+          });
+        }
         if (posting) {
           if (channelWireId === null && !file) throw notFound();
           action("append");
@@ -678,16 +708,24 @@ export function createNamedRecipientChat(options: {
               throw badRequest("invalid lane");
             lane = asked;
           }
+          const stored = storage.fetchChatMessage({
+            workspaceId: share.workspaceId,
+            originId: storedOrigin,
+            messageId,
+          });
+          // A retry keeps the thread its first send chose, and makes it again only if that send made it.
+          const storedThread = stored && asRecord(JSON.parse(stored.payloadJson))?.threadId;
+          const ownThread = `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
           const chatThread =
             lane === "chat"
-              ? storage.findChannelChatThread(share.workspaceId, channelWireId!)
+              ? typeof storedThread === "string"
+                ? storedThread
+                : storage.findChannelChatThread(share.workspaceId, channelWireId!)
               : null;
-          const createThread = !replying && chatThread === null;
+          const createThread =
+            !replying && (stored ? storedThread === ownThread : chatThread === null);
           const threadId =
-            chatThread ??
-            (createThread
-              ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
-              : parseString(input.threadId, "threadId", 256));
+            chatThread ?? (createThread ? ownThread : parseString(input.threadId, "threadId", 256));
           if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
           // A reply on a file joins one of that file's threads, and a reply in a Group one of that Group's.
           if (
@@ -715,28 +753,34 @@ export function createNamedRecipientChat(options: {
           )
             throw badRequest("invalid parent");
           let wakes: BrowserPostWakes | undefined;
-          if (
-            owned &&
-            !storage.fetchChatMessage({
-              workspaceId: share.workspaceId,
-              originId: storedOrigin,
-              messageId,
-            })
-          ) {
+          if (owned && !stored) {
             const nowMs = options.nowMs();
-            const post = { accountId: actor.userId, workspaceId: share.workspaceId, threadId };
             const write = replying
               ? { kind: "reply" as const, body, threadId, parentMessageId }
               : { kind: "start" as const, body, lane: threadLane, channelId: channelWireId ?? "" };
             try {
               const { targets } = await resolveWakeTargets(
-                browserWakeSources(storage, { ...post, lane: threadLane, nowMs }),
+                browserWakeSources(storage, {
+                  accountId: actor.userId,
+                  workspaceId: share.workspaceId,
+                  threadId,
+                  lane: threadLane,
+                  nowMs,
+                }),
                 actor.userId,
                 write,
               );
-              wakes = { ...post, targets, nowMs };
+              if (targets.length > 0) wakes = { accountId: actor.userId, threadId, targets, nowMs };
             } catch (error) {
-              throw error instanceof TooManyWakeCandidates ? badRequest(error.message) : error;
+              if (!(error instanceof TooManyWakeCandidates)) throw error;
+              return jsonResponse(
+                {
+                  ok: false,
+                  error: "a message would wake too many agents",
+                  code: "too_many_wakes",
+                },
+                400,
+              );
             }
           }
 
@@ -810,9 +854,9 @@ export function createNamedRecipientChat(options: {
           });
           if (!row) throw notFound();
           recheck();
-          const stored = JSON.parse(row.payloadJson) as unknown;
+          const payload = JSON.parse(row.payloadJson) as unknown;
           const message = messageFromOp(
-            { relaySeq: row.relaySeq, opKind: row.opKind, payload: stored },
+            { relaySeq: row.relaySeq, opKind: row.opKind, payload },
             row.originId,
           );
           return json({
@@ -822,7 +866,7 @@ export function createNamedRecipientChat(options: {
               message &&
               threaded(
                 message,
-                stored,
+                payload,
                 threadLane,
                 message !== null &&
                   storage.findThreadFirstMessageId(share.workspaceId, message.threadId) ===
