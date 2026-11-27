@@ -234,14 +234,14 @@ describe("relation options", () => {
       readRelationOptions({
         options: [
           { value: "c-1", label: "Acme" },
-          { value: 2, label: "Globex" },
+          { value: 1.5, label: "Globex" },
         ],
         nextCursor: { id: 2, value: 2 },
       }),
     ).toEqual({
       options: [
         { value: "c-1", label: "Acme" },
-        { value: 2, label: "Globex" },
+        { value: 1.5, label: "Globex" },
       ],
       next: { id: 2, value: 2 },
       searchUnsupported: false,

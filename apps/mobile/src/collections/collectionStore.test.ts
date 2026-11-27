@@ -1399,6 +1399,33 @@ describe("search, sort, and relation labels", () => {
     expect(collections.view()).toMatchObject({ search: "", sort: null });
   });
 
+  it("refreshes the active search/sort query after create or edit without prepending non-matching records", async () => {
+    const { server, collections } = setup();
+    server.on("POST", `${OPS}/collectionRecords`, records(["anna"], null));
+    await collections.open(D);
+    server.on("POST", `${OPS}/collectionRecords`, records(["anna"], null));
+    await collections.setQuery({ search: "Anna" });
+    server.on("POST", `${OPS}/collectionCreate`, ok({ saved: { id: "bob", version: 1 } }));
+    server.on("POST", `${OPS}/collectionRecords`, records(["bob"], null), records(["anna"], null));
+    expect(await collections.create({ "f-name": "Bob" })).toBe(true);
+    expect(collections.view()?.opened?.record.id).toBe("bob");
+    while (collections.view()?.reading) await new Promise((done) => setTimeout(done, 0));
+    expect(collections.view()?.rows.map((r) => r.id)).toEqual(["anna"]);
+    expect(server.calls.at(-1)?.body).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      search: "Anna",
+    });
+
+    server.on("POST", `${OPS}/collectionEdit`, ok({ saved: { version: 2, priorValue: "Bob" } }));
+    server.on("POST", `${OPS}/collectionRecords`, records(["anna", "bob"], null));
+    collections.change(collections.edit("f-name")!, "Anna Bob");
+    const key = recordKey(D, "t-people", "bob");
+    while (collections.changes().get(key)?.state.kind === "saving" || collections.view()?.reading)
+      await new Promise((done) => setTimeout(done, 0));
+    expect(collections.view()?.rows.map((r) => r.id)).toEqual(["anna", "bob"]);
+  });
+
   it("merges relation labels on edits including retries and loads relation options", async () => {
     const { server, collections } = setup();
     server.on(

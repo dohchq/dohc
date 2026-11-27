@@ -100,7 +100,12 @@ export function RelationPicker(props: RelationPickerProps) {
       : many
         ? [...selected, value]
         : [value];
-    onChange(updated, { ...known.current });
+    const pickedLabels: Record<string, string> = {};
+    for (const item of updated) {
+      const k = JSON.stringify(item);
+      if (Object.hasOwn(known.current, k)) pickedLabels[k] = known.current[k]!;
+    }
+    onChange(updated, pickedLabels);
   };
 
   return (
@@ -130,47 +135,54 @@ export function RelationPicker(props: RelationPickerProps) {
           </Pressable>
         ) : null}
       </View>
-      {selected.length > 0 ? (
-        <View style={styles.selected}>
-          {selected.map((item) => {
-            const key = JSON.stringify(item);
-            const label = known.current[key] ?? String(item);
-            return (
-              <Pressable
-                key={key}
-                onPress={() => toggle(item)}
-                hitSlop={slopTo(36)}
-                android_ripple={ripple(theme)}
-                style={[styles.chip, { backgroundColor: theme.panel2, borderColor: theme.line }]}
-                accessibilityRole="button"
-                accessibilityLabel={`${collectionWords.remove} ${label}`}
-              >
-                <Text style={[styles.chipText, { color: theme.ink }]} numberOfLines={1}>
-                  {label}
-                </Text>
-                <X size={15} color={theme.muted} strokeWidth={2} />
-              </Pressable>
-            );
-          })}
-        </View>
-      ) : null}
-      {limitError ? (
-        <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert">
-          {limitError}
-        </Text>
-      ) : null}
-      {problem ? (
-        <View style={styles.pad}>
-          <ProblemLine
-            text={`${collectionWords.findFailed(name)} ${problemText(problem)}`}
-            onRetry={() => void fetchPage(search.trim(), null)}
-          />
-        </View>
-      ) : null}
       <FlatList
         data={options}
         keyExtractor={(item) => JSON.stringify(item.value)}
         keyboardShouldPersistTaps="handled"
+        ListHeaderComponent={
+          <>
+            {selected.length > 0 ? (
+              <View style={styles.selected}>
+                {selected.map((item) => {
+                  const key = JSON.stringify(item);
+                  const label = known.current[key] ?? String(item);
+                  return (
+                    <Pressable
+                      key={key}
+                      onPress={() => toggle(item)}
+                      hitSlop={slopTo(36)}
+                      android_ripple={ripple(theme)}
+                      style={[
+                        styles.chip,
+                        { backgroundColor: theme.panel2, borderColor: theme.line },
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${collectionWords.remove} ${label}`}
+                    >
+                      <Text style={[styles.chipText, { color: theme.ink }]} numberOfLines={1}>
+                        {label}
+                      </Text>
+                      <X size={15} color={theme.muted} strokeWidth={2} />
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+            {limitError ? (
+              <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert">
+                {limitError}
+              </Text>
+            ) : null}
+            {problem ? (
+              <View style={styles.pad}>
+                <ProblemLine
+                  text={`${collectionWords.findFailed(name)} ${problemText(problem)}`}
+                  onRetry={() => void fetchPage(search.trim(), null)}
+                />
+              </View>
+            ) : null}
+          </>
+        }
         renderItem={({ item }) => {
           const on = pickedKeys.has(JSON.stringify(item.value));
           return (

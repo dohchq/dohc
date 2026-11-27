@@ -2086,3 +2086,274 @@ it("forwards search and sort to generated reads and falls back cleanly on custom
     }),
   ).toEqual(ok({ options: [], nextCursor: null, searchUnsupported: true }));
 });
+
+it("handles decimal relation keys, truncates long target labels, and blocks mid-flight source/target read narrowing or write revocation", async () => {
+  const DS = id(700),
+    CATS = id(701),
+    CAT_ID = id(702),
+    CAT_CODE = id(703),
+    CAT_NAME = id(704),
+    ENTRIES = id(705),
+    ENT_ID = id(706),
+    ENT_CAT = id(707),
+    CAT_READ = id(710),
+    CAT_CREATE = id(711),
+    ENT_READ = id(712),
+    ENT_CREATE = id(713),
+    ENT_EDIT = id(714);
+  const def: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: DS,
+    name: "Catalog",
+    schemaPath: "cat/schema.sql",
+    operationsPath: "cat/operations.js",
+    tables: [
+      {
+        tableId: CATS,
+        name: "Categories",
+        sqlName: "categories",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: CAT_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: CAT_CODE,
+            name: "Code",
+            sqlColumn: "code",
+            type: "number",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: CAT_NAME,
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+      {
+        tableId: ENTRIES,
+        name: "Entries",
+        sqlName: "entries",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ENT_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ENT_CAT,
+            name: "Category",
+            sqlColumn: "cat_code",
+            type: "relation",
+            required: false,
+            unique: false,
+            relation: { datasetId: DS, tableId: CATS, fieldId: CAT_CODE, many: false },
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: CAT_READ,
+        name: "readCats",
+        label: "Read",
+        tableId: CATS,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [CAT_ID, CAT_CODE, CAT_NAME],
+      },
+      {
+        operationId: CAT_CREATE,
+        name: "createCat",
+        label: "Create",
+        tableId: CATS,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [CAT_ID, CAT_CODE, CAT_NAME],
+      },
+      {
+        operationId: ENT_READ,
+        name: "readEnts",
+        label: "Read",
+        tableId: ENTRIES,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ENT_ID, ENT_CAT],
+      },
+      {
+        operationId: ENT_CREATE,
+        name: "createEnt",
+        label: "Create",
+        tableId: ENTRIES,
+        kind: "create",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ENT_ID, ENT_CAT],
+      },
+      {
+        operationId: ENT_EDIT,
+        name: "editEnt",
+        label: "Edit",
+        tableId: ENTRIES,
+        kind: "edit",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ENT_CAT],
+        reversible: true,
+      },
+    ],
+  };
+  const sql = `CREATE TABLE categories(id TEXT PRIMARY KEY NOT NULL,code REAL NOT NULL UNIQUE,name TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE entries(id TEXT PRIMARY KEY NOT NULL,cat_code REAL REFERENCES categories(code),"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+  const src = generateDatasetOperations(def);
+  const rev = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: sql,
+    operationSource: src,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: rev,
+    schemaSql: sql,
+    operationSource: src,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(f.storage, "cat-dataset", null, {
+    path: "cat/dataset.json",
+    text: JSON.stringify({ datasetId: DS }),
+  });
+  const huge = "L".repeat(2500);
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: CAT_CREATE,
+    input: { values: { [CAT_ID]: "c1", [CAT_CODE]: 1.5, [CAT_NAME]: huge } },
+    idempotencyKey: id(720),
+  });
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: DS,
+    revision: 1,
+    revisionSha256: rev.revisionSha256,
+    operationId: ENT_CREATE,
+    input: { values: { [ENT_ID]: "e1", [ENT_CAT]: 1.5 } },
+    idempotencyKey: id(721),
+  });
+
+  // Decimal relation key 1.5 resolves and long labels truncate to <= 500 chars.
+  const page = await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES });
+  expect(
+    (page.body.result as { relations: Record<string, Record<string, string>> }).relations,
+  ).toEqual({
+    [ENT_CAT]: { "1.5": "L".repeat(500) },
+  });
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DS, tableId: ENTRIES, fieldId: ENT_CAT }),
+  ).toEqual(ok({ options: [{ value: 1.5, label: "L".repeat(500) }], nextCursor: null }));
+
+  // Narrowing target read projection mid-read omits old label on collectionRecords and returns 404 on options.
+  let narrowed = false;
+  let calls = 0;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !narrowed
+      ? desc
+      : {
+          ...desc,
+          operations: desc.operations.map((o) =>
+            o.operationId === CAT_READ ? { ...o, fieldIds: [CAT_ID, CAT_CODE] } : o,
+          ),
+        },
+  );
+  f.during(() => {
+    if (++calls === 4) narrowed = true;
+  });
+  const narrowedPage = await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES });
+  f.during(() => undefined);
+  expect((narrowedPage.body.result as { relations: unknown }).relations).toEqual({});
+  narrowed = false;
+  calls = 0;
+  f.during(() => {
+    if (++calls === 2) narrowed = true;
+  });
+  expect(
+    await f.op("collectionRelationOptions", { datasetId: DS, tableId: ENTRIES, fieldId: ENT_CAT }),
+  ).toEqual(notFound);
+  f.during(() => undefined);
+  narrowed = false;
+
+  // Revoking source read mid-read returns no-read with zero rows.
+  let noRead = false;
+  calls = 0;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !noRead
+      ? desc
+      : { ...desc, operations: desc.operations.filter((o) => o.operationId !== ENT_READ) },
+  );
+  f.during(() => {
+    if (++calls === 2) noRead = true;
+  });
+  expect(await f.op("collectionRecords", { datasetId: DS, tableId: ENTRIES })).toEqual(
+    ok({ status: "refused", reason: "no-read" }),
+  );
+  f.during(() => undefined);
+  noRead = false;
+
+  // Losing target read mid-commit aborts a relation edit without mutating the record.
+  let noTarget = false;
+  f.describing((desc) =>
+    desc.datasetId !== DS || !noTarget
+      ? desc
+      : { ...desc, operations: desc.operations.filter((o) => o.operationId !== CAT_READ) },
+  );
+  f.during(() => {
+    noTarget = true;
+  });
+  expect(
+    await f.op("collectionEdit", {
+      datasetId: DS,
+      tableId: ENTRIES,
+      recordId: "e1",
+      fieldId: ENT_CAT,
+      value: null,
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: rev.revisionSha256,
+      idempotencyKey: id(722),
+    }),
+  ).toEqual(notFound);
+  f.during(() => undefined);
+  noTarget = false;
+  const after = await f.op("collectionRecords", {
+    datasetId: DS,
+    tableId: ENTRIES,
+    recordId: "e1",
+  });
+  expect(
+    (after.body.result as { rows: Array<{ version: number; values: Record<string, unknown> }> })
+      .rows[0],
+  ).toMatchObject({
+    version: 1,
+    values: { [ENT_CAT]: 1.5 },
+  });
+});

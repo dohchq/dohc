@@ -277,6 +277,7 @@ export function createWorkspaceCollections(
             }
           : opened,
     });
+    if (now.tableId === tableId && (now.search || now.sort)) void read("refresh", false);
   };
   // An answer lands only while its change is still the record's, so one Discard dropped, or a store cleared, never
   // comes back.
@@ -358,16 +359,18 @@ export function createWorkspaceCollections(
         current.record,
         now.rows.find((row) => row.id === answer.id),
       );
+      const queried = Boolean(now.search || now.sort);
       const opens = screen !== null && recordReads.isLatest(screen);
       update(datasetId, {
-        rows: [record, ...now.rows.filter((row) => row.id !== record.id)],
+        rows: queried ? now.rows : [record, ...now.rows.filter((row) => row.id !== record.id)],
         files: { ...now.files, ...current.files },
         relations: mergeRelations(now.relations, current.relations),
         ...(opens
           ? { opened: { tableId, record, files: current.files, relations: current.relations } }
           : {}),
       });
-      reread(now.reading);
+      if (queried) void read("refresh", false);
+      else reread(now.reading);
       return opens;
     } catch (error) {
       const problem = shownProblem(error);

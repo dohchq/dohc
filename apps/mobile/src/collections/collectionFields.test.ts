@@ -223,6 +223,15 @@ describe("a field's editor", () => {
     ).toBe(collectionWords.tooManyRelations);
   });
 
+  it("preserves decimal relation keys through drafts and values", () => {
+    const single = { type: "relation" as const, options: [], relation: { many: false } };
+    const many = { type: "relation" as const, options: [], relation: { many: true } };
+    expect(draftOf(single, 1.5)).toEqual([1.5]);
+    expect(valueOf(single, [1.5])).toEqual({ value: 1.5 });
+    expect(draftOf(many, [1.5, 2.25])).toEqual([1.5, 2.25]);
+    expect(valueOf(many, [1.5, 2.25])).toEqual({ value: [1.5, 2.25] });
+  });
+
   it("identifies searchable and sortable fields accurately", () => {
     expect(supportsSearch([{ type: "number" }, { type: "checkbox" }])).toBe(false);
     expect(supportsSearch([{ type: "select" }])).toBe(true);

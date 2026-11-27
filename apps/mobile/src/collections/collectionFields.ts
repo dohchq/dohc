@@ -45,9 +45,9 @@ function date(value: string): string {
       });
 }
 
-const isRecordKey = (value: unknown): value is RecordId =>
+const isRelationKey = (value: unknown): value is RecordId =>
   (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
-  (typeof value === "number" && Number.isSafeInteger(value));
+  (typeof value === "number" && Number.isFinite(value));
 
 /** One field's value. `files` names attached files by ID; `relationLabels` maps JSON-encoded keys to labels. */
 export function shownValue(
@@ -184,9 +184,9 @@ export function draftOf(
     case "relation":
       return field.relation?.many
         ? Array.isArray(value)
-          ? value.filter(isRecordKey)
+          ? value.filter(isRelationKey)
           : []
-        : isRecordKey(value)
+        : isRelationKey(value)
           ? [value]
           : [];
     default:
@@ -210,7 +210,7 @@ export function valueOf(
     return { value: field.type === "multi-select" ? chosen : (chosen[0] ?? null) };
   }
   if (field.type === "relation") {
-    const chosen = Array.isArray(draft) ? draft.filter(isRecordKey) : [];
+    const chosen = Array.isArray(draft) ? draft.filter(isRelationKey) : [];
     return { value: field.relation?.many ? chosen : (chosen[0] ?? null) };
   }
   if (typeof draft !== "string") return { value: null };

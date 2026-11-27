@@ -362,12 +362,15 @@ export function readPage(result: unknown, table: CollectionTable): RecordPage | 
     : null;
 }
 
+const relationKey = (value: unknown): value is RecordId =>
+  text(value, 1024) || (typeof value === "number" && Number.isFinite(value));
+
 export function readRelationOptions(result: unknown): RelationOptionsPage | null {
   if (!isFields(result) || !Array.isArray(result.options) || result.options.length > PAGE)
     return null;
   const seen = new Set<string>();
   const options = each(result.options, (item): RelationOption | null => {
-    if (!isFields(item) || !recordId(item.value) || !text(item.label, 2000)) return null;
+    if (!isFields(item) || !relationKey(item.value) || !text(item.label, 2000)) return null;
     const key = JSON.stringify(item.value);
     if (seen.has(key)) return null;
     seen.add(key);

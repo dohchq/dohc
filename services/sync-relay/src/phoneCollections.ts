@@ -33,6 +33,7 @@ import type { StorageContext } from "./storage/context";
 
 export const PHONE_COLLECTION_PAGE = 50;
 const RELATION_LABEL_LIMIT = 100;
+const RELATION_LABEL_MAX = 500;
 const RELATION_KEY_FALLBACK_MAX = 25;
 
 const OPERATIONS = new Set([
@@ -63,6 +64,9 @@ const RULES_DISALLOW =
 const isRecordId = (value: unknown): value is string | number =>
   (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
   (typeof value === "number" && Number.isSafeInteger(value));
+const isRelationKey = (value: unknown): value is string | number =>
+  (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
+  (typeof value === "number" && Number.isFinite(value));
 const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 
@@ -76,6 +80,15 @@ type RelationTarget = {
   readOperationId: string;
   labelFieldId: string | null;
 };
+
+const sameTarget = (a: RelationTarget | null, b: RelationTarget): boolean =>
+  a !== null &&
+  a.datasetId === b.datasetId &&
+  a.revision === b.revision &&
+  a.revisionSha256 === b.revisionSha256 &&
+  a.fieldId === b.fieldId &&
+  a.readOperationId === b.readOperationId &&
+  a.labelFieldId === b.labelFieldId;
 
 const initialValue = (field: DescribedField): AppBackendJson =>
   field.type === "button"
@@ -105,9 +118,15 @@ function relationOption(row: unknown, fieldId: string, labelFieldId: string | nu
   const values = (row as Record<string, unknown>).values;
   if (!values || typeof values !== "object" || Array.isArray(values)) return null;
   const key = (values as Record<string, unknown>)[fieldId];
-  if (!isRecordId(key)) return null;
+  if (!isRelationKey(key)) return null;
   const raw = labelFieldId ? (values as Record<string, unknown>)[labelFieldId] : undefined;
-  return { value: key, label: typeof raw === "string" && raw.trim() ? raw : String(key) };
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  const label = trimmed
+    ? trimmed.length > RELATION_LABEL_MAX
+      ? trimmed.slice(0, RELATION_LABEL_MAX)
+      : trimmed
+    : String(key);
+  return { value: key, label };
 }
 
 function searchTerm(value: unknown): string | undefined {
@@ -231,13 +250,14 @@ export function createPhoneCollections(options: {
     );
     const keyField = table?.fields.find((f) => f.fieldId === relation.fieldId);
     if (!table || !read || !keyField || keyField.type === "button") return null;
-    const label = table.fields.find(
+    const textFields = table.fields.filter(
       (f) =>
         f.type === "text" &&
         !("generated" in f && f.generated) &&
         f.fieldId !== relation.fieldId &&
         read.fieldIds.includes(f.fieldId),
     );
+    const label = textFields.find((f) => f.fieldId !== table.primaryKeyFieldId) ?? textFields[0];
     return {
       datasetId: target.datasetId,
       revision: target.revision,
@@ -470,6 +490,7 @@ export function createPhoneCollections(options: {
       stamp: ReturnType<typeof stamped>,
       operationId: string,
       operationInput: AppBackendJson,
+      extraGuard?: () => void,
     ): Promise<{ receipt: Record<string, AppBackendJson> | null } | { answer: object }> => {
       let result: AppBackendJson;
       try {
@@ -479,6 +500,7 @@ export function createPhoneCollections(options: {
           guarded(() => {
             stillHolds();
             if (!visible(workspaceId, datasetId)) throw notFound();
+            extraGuard?.();
           }),
           {
             workspaceId,
@@ -559,7 +581,30 @@ export function createPhoneCollections(options: {
         values[fieldId] =
           supplied && Object.hasOwn(supplied, fieldId) ? supplied[fieldId]! : initialValue(field);
       }
-      const done = await commit(datasetId, stamp, creation.create.operationId, { values });
+      const suppliedRelFields = supplied
+        ? Object.keys(supplied).filter((fid) =>
+            table.fields.some((item) => item.fieldId === fid && item.type === "relation"),
+          )
+        : [];
+      const done = await commit(
+        datasetId,
+        stamp,
+        creation.create.operationId,
+        { values },
+        suppliedRelFields.length
+          ? () => {
+              const latest = createSpec(
+                host,
+                auth,
+                workspaceId,
+                describe(host, auth, workspaceId, datasetId),
+                tableId,
+              );
+              if (!latest || suppliedRelFields.some((fid) => !latest.allowedFieldIds.has(fid)))
+                throw notFound();
+            }
+          : undefined,
+      );
       if ("answer" in done) return done.answer;
       const { receipt } = done;
       if (!receipt || !isRecordId(receipt.id) || !isCount(receipt.version))
@@ -618,11 +663,29 @@ export function createPhoneCollections(options: {
       if (!field) throw notFound();
       const edit = editOperation(host, auth, workspaceId, description, tableId, field);
       if (!edit) return refusedHere;
-      const done = await commit(datasetId, stamp, edit.operationId, {
-        id: recordId,
-        expectedVersion,
-        values: { [fieldId]: value as AppBackendJson },
-      });
+      const done = await commit(
+        datasetId,
+        stamp,
+        edit.operationId,
+        {
+          id: recordId,
+          expectedVersion,
+          values: { [fieldId]: value as AppBackendJson },
+        },
+        field.type === "relation"
+          ? () => {
+              const latest = describe(host, auth, workspaceId, datasetId);
+              const latestField = latest.tables
+                .find((t) => t.tableId === tableId)
+                ?.fields.find((item) => item.fieldId === fieldId);
+              if (
+                !latestField ||
+                !editOperation(host, auth, workspaceId, latest, tableId, latestField)
+              )
+                throw notFound();
+            }
+          : undefined,
+      );
       if ("answer" in done) return done.answer;
       const { receipt } = done;
       const prior = receipt?.priorValues;
@@ -681,14 +744,7 @@ export function createPhoneCollections(options: {
       const target = pickTarget(description);
       if (!target) throw notFound();
       const verify = async () => {
-        const fresh = pickTarget(await answers(datasetId));
-        if (
-          !fresh ||
-          fresh.datasetId !== target.datasetId ||
-          fresh.fieldId !== target.fieldId ||
-          fresh.readOperationId !== target.readOperationId
-        )
-          throw notFound();
+        if (!sameTarget(pickTarget(await answers(datasetId)), target)) throw notFound();
       };
       let raw: AppBackendJson;
       try {
@@ -792,7 +848,8 @@ export function createPhoneCollections(options: {
         isAppBackendRuntimeError(error) &&
         error.refusal.code === "invalid_input"
       ) {
-        await answers(datasetId);
+        const fresh = await answers(datasetId);
+        if (!readOperation(fresh, tableId)) return { status: "refused", reason: "no-read" };
         return { status: "refused", reason: "unsupported-query" };
       }
       throw error;
@@ -820,9 +877,9 @@ export function createPhoneCollections(options: {
         const raw = values[field.fieldId];
         const keys = field.relation.many
           ? Array.isArray(raw)
-            ? raw.filter(isRecordId)
+            ? raw.filter(isRelationKey)
             : []
-          : isRecordId(raw)
+          : isRelationKey(raw)
             ? [raw]
             : [];
         if (!keys.length) continue;
@@ -839,6 +896,7 @@ export function createPhoneCollections(options: {
     }
     const resolved: Array<{
       relation: DescribedRelation;
+      target: RelationTarget;
       fieldIds: string[];
       labels: Record<string, string>;
     }> = [];
@@ -888,17 +946,27 @@ export function createPhoneCollections(options: {
         }
       }
       if (Object.keys(labels).length > 0)
-        resolved.push({ relation: group.relation, fieldIds: group.fieldIds, labels });
+        resolved.push({ relation: group.relation, target, fieldIds: group.fieldIds, labels });
     }
     const fresh = await answers(datasetId);
     const freshTable = fresh.tables.find((t) => t.tableId === tableId);
     const freshRead = readOperation(fresh, tableId);
+    if (!freshTable) throw notFound();
+    if (!freshRead) return { status: "refused", reason: "no-read" };
+    if (
+      fresh.revision !== description.revision ||
+      fresh.revisionSha256 !== description.revisionSha256 ||
+      freshRead.operationId !== read.operationId ||
+      !read.fieldIds.every((fid) => freshRead.fieldIds.includes(fid))
+    )
+      throw notFound();
     const relations: Record<string, Record<string, string>> = {};
     for (const group of resolved) {
-      if (!relationTarget(host, auth, workspaceId, fresh, group.relation)) continue;
+      if (!sameTarget(relationTarget(host, auth, workspaceId, fresh, group.relation), group.target))
+        continue;
       for (const fieldId of group.fieldIds) {
-        if (!freshRead?.fieldIds.includes(fieldId)) continue;
-        const f = freshTable?.fields.find((item) => item.fieldId === fieldId);
+        if (!freshRead.fieldIds.includes(fieldId)) continue;
+        const f = freshTable.fields.find((item) => item.fieldId === fieldId);
         if (
           f?.type === "relation" &&
           f.relation &&

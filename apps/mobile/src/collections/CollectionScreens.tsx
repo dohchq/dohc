@@ -3,8 +3,6 @@ import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { Stack, useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import {
-  ArrowDown,
-  ArrowUp,
   ArrowUpDown,
   ChevronRight,
   Plus,
@@ -45,7 +43,7 @@ import type {
 import { phoneWrites } from "../server/phoneWrites";
 import type { ReadProblem } from "../server/workspaceData";
 import { useTheme } from "../theme";
-import { ripple, slopTo, TOUCH } from "../touch";
+import { ripple, TOUCH } from "../touch";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
 import {
@@ -210,7 +208,11 @@ function Records({
                       android_ripple={ripple(theme, true)}
                       style={styles.headerButton}
                       accessibilityRole="button"
-                      accessibilityLabel={collectionWords.sort}
+                      accessibilityLabel={
+                        sortField && view?.sort
+                          ? collectionWords.sortedBy(sortField.name, view.sort.direction === "asc")
+                          : collectionWords.sort
+                      }
                     >
                       <ArrowUpDown
                         size={22}
@@ -266,7 +268,6 @@ function Records({
       </>
     );
 
-  const SortArrow = view.sort?.direction === "desc" ? ArrowDown : ArrowUp;
   const header = (
     <>
       {description.tables.length > 1 ? (
@@ -331,43 +332,6 @@ function Records({
               <X size={18} color={theme.subtle} strokeWidth={2} />
             </Pressable>
           ) : null}
-        </View>
-      ) : null}
-      {view.sort && sortField ? (
-        <View style={styles.sortRow}>
-          <Pressable
-            onPress={() =>
-              void collections.setQuery({
-                sort: {
-                  fieldId: view.sort!.fieldId,
-                  direction: view.sort!.direction === "asc" ? "desc" : "asc",
-                },
-              })
-            }
-            hitSlop={slopTo(36)}
-            android_ripple={ripple(theme)}
-            style={[styles.sortPill, { backgroundColor: theme.panel2, borderColor: theme.line }]}
-            accessibilityRole="button"
-            accessibilityLabel={collectionWords.sortedBy(
-              sortField.name,
-              view.sort.direction === "asc",
-            )}
-          >
-            <Text style={[styles.sortText, { color: theme.ink }]} numberOfLines={1}>
-              {sortField.name}
-            </Text>
-            <SortArrow size={15} color={theme.ink} strokeWidth={2} />
-          </Pressable>
-          <Pressable
-            onPress={() => void collections.setQuery({ sort: null })}
-            hitSlop={slopTo(36)}
-            android_ripple={ripple(theme, true)}
-            style={styles.sortClear}
-            accessibilityRole="button"
-            accessibilityLabel={collectionWords.defaultOrder}
-          >
-            <X size={16} color={theme.muted} strokeWidth={2} />
-          </Pressable>
         </View>
       ) : null}
       {view.problem ? (
@@ -821,24 +785,6 @@ const styles = StyleSheet.create({
     minHeight: TOUCH,
   },
   searchInput: { flex: 1, fontSize: 17, paddingVertical: 8 },
-  sortRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingBottom: 6,
-  },
-  sortPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    minHeight: 36,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  sortText: { fontSize: 14, flexShrink: 1 },
-  sortClear: { minHeight: 36, minWidth: 36, alignItems: "center", justifyContent: "center" },
   unsupported: { alignItems: "center", gap: 8, paddingHorizontal: 16 },
   problem: { paddingHorizontal: 16 },
   row: {
