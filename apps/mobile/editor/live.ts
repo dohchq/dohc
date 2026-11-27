@@ -6,12 +6,14 @@ import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import { post } from "./bridge";
 import { opensFormat, refuseFormat } from "./format";
 import { createLiveAdapter, type LiveProvider } from "./liveAdapter";
+import type { EditorToolbar } from "./toolbar";
 
 export function followLive(input: {
   /** The read text's body, which the live one replaces. */
   readonly body: HTMLElement;
   readonly readOnly: { destroy(): void };
   readonly label: string;
+  readonly toolbar?: EditorToolbar;
   endEditing(): void;
 }) {
   let shown: LiveProvider | null = null;
@@ -23,6 +25,7 @@ export function followLive(input: {
   function refuse() {
     refused = true;
     input.endEditing();
+    input.toolbar?.detach();
     editor?.destroy();
     editor = null;
     refuseFormat();
@@ -44,8 +47,8 @@ export function followLive(input: {
     }
     const takesEdits = () => !refused && shown === made && made.state().status === "live";
     let sequence = readsBodySequence(made.doc);
-    const mount = () =>
-      mountLiveBodyEditor(next, {
+    const mount = () => {
+      const mounted = mountLiveBodyEditor(next, {
         doc: made.doc,
         label: input.label,
         canEdit: takesEdits,
@@ -56,6 +59,9 @@ export function followLive(input: {
         },
         unwritten: (why) => why !== "guarded" && post("unwritten", { why }),
       });
+      input.toolbar?.attach(mounted, takesEdits);
+      return mounted;
+    };
     editor?.destroy();
     editor = mount();
     made.doc.on("update", () => {
@@ -66,7 +72,11 @@ export function followLive(input: {
       editor?.destroy();
       editor = mount();
     });
-    made.subscribe(() => shown === made && editor?.refresh());
+    made.subscribe(() => {
+      if (shown !== made) return;
+      editor?.refresh();
+      input.toolbar?.refresh();
+    });
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(made.doc) });
     // Swapped once the live editor has drawn, so the read text never leaves an empty frame.
