@@ -2923,6 +2923,33 @@ describe.each(["mcp"] as const)("who stopped or resumed live editing, through %s
   });
 });
 
+it("reads a drawing from the caller's folder and answers with the caller's path", async () => {
+  const f = fixture(await createTestScratch("drawing-read-cli-"));
+  await mkdir(join(f.workspace.rootPath, "nested"), { recursive: true });
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const cli = await executeCli({
+    argv: ["drawing", "read", "plan.excalidraw", "--json"],
+    cwd: join(f.workspace.rootPath, "nested"),
+    env: {},
+    request: async (request) => {
+      const response = cliTransportResponseSchema.parse(
+        JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+        ),
+      );
+      if (!response.ok) throw new Error(response.error);
+      return response.result;
+    },
+  });
+  expect(cli.exitCode).toBe(0);
+  expect(f.dependencies.reads.drawingRead).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ path: "nested/plan.excalidraw" }),
+  );
+  expect(JSON.parse(cli.stdout)).toMatchObject({ path: "plan.excalidraw" });
+});
+
 it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {
   const f = fixture(await createTestScratch("links-share-cli-"));
   f.setCapture(null);

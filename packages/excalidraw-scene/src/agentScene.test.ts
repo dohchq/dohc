@@ -76,7 +76,7 @@ describe("planDrawingEdit", () => {
     expect(Y.encodeStateVector(doc)).toEqual(before);
   });
 
-  it("moves a container's text with it and deletes the text with the container", () => {
+  it("moves a container's text and arrows with it and deletes the text with the container", () => {
     const doc = new Y.Doc();
     apply(doc, {
       add: [
@@ -87,9 +87,18 @@ describe("planDrawingEdit", () => {
       ],
     });
     const moved = apply(doc, { update: [{ id: "a", expectedVersion: 1, x: 100 }] });
-    expect(moved.map(({ id }) => id).sort()).toEqual(["a", "label"]);
+    expect(moved.map(({ id }) => id).sort()).toEqual(["a", "go", "label"]);
     const label = foldScene(doc).elements.find((element) => element.id === "label")!;
     expect(label.x).toBe(200 - (label.width as number) / 2);
+    expect(foldScene(doc).elements.find((element) => element.id === "go")).toMatchObject({
+      x: 300,
+      y: 50,
+      width: 60,
+      points: [
+        [0, 0],
+        [60, 0],
+      ],
+    });
 
     apply(doc, { delete: [{ id: "a", expectedVersion: 2 }] });
     expect(live(doc).map((element) => element.id)).toEqual(["b", "go"]);
@@ -114,6 +123,41 @@ describe("planDrawingEdit", () => {
     expect(live(owner).map(({ id, x }) => [id, x])).toEqual([
       ["a", -50],
       ["b", 999],
+    ]);
+  });
+
+  it("deletes a shape and its label in either order, and refuses a second label or a missing frame", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0 },
+        { id: "label", type: "text", x: 0, y: 0, text: "Hi", containerId: "a" },
+      ],
+    });
+    expect(
+      planDrawingEdit(
+        doc,
+        { add: [{ type: "text", x: 0, y: 0, text: "Two", containerId: "a" }] },
+        0,
+      ),
+    ).toEqual({ reason: expect.stringContaining("a already has label label") });
+    expect(
+      planDrawingEdit(doc, { update: [{ id: "a", expectedVersion: 1, frameId: "label" }] }, 0),
+    ).toEqual({
+      reason: "label is not a frame.",
+    });
+    apply(doc, {
+      delete: [
+        { id: "a", expectedVersion: 1 },
+        { id: "label", expectedVersion: 1 },
+      ],
+    });
+    expect(live(doc)).toEqual([]);
+  });
+
+  it("reads an element without a version as version 1, as the engine imports it", () => {
+    expect(summarizeDrawing([{ id: "a", type: "rectangle", x: 0, y: 0 }], false)).toMatchObject([
+      { id: "a", version: 1 },
     ]);
   });
 

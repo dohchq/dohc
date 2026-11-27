@@ -24,12 +24,6 @@ import {
 
 type DrawingWrite = z.output<typeof DrawingWriteResult>;
 
-/**
- * Applies an agent's edit through the session that holds the drawing, so an
- * open canvas shows it at once. The edit is planned against the canonical
- * scene as its turn comes, so an element someone changed since the agent read
- * it refuses the whole edit before anything changes.
- */
 export async function editDrawing(
   sessions: LiveDocumentSessions,
   input: { workspaceId: string; path: string; edit: DrawingEdit; origin: LiveDocumentEditOrigin },
@@ -85,11 +79,6 @@ export async function editDrawing(
   return result;
 }
 
-/**
- * Writes a new drawing from the empty scene, never an empty file, which no
- * session can open, then adds the elements through its live session. Elements
- * that would be refused are refused before the file exists.
- */
 export async function createDrawing(
   sessions: LiveDocumentSessions,
   input: {

@@ -1289,11 +1289,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return { path, ...result };
   }
 
-  /**
-   * Runs `apply` against the live session that holds a document: the editor's
-   * when one is open, otherwise one opened for this edit alone, which an
-   * editor that opens meanwhile waits for. Edits to one document take turns.
-   */
   async editLiveDocument<T>(
     input: LiveSessionEditTarget,
     apply: LiveSessionEdit<T>,

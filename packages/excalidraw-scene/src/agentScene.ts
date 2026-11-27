@@ -48,7 +48,7 @@ export function summarizeDrawing(
     const summary: DrawingElementSummary = {
       id: element.id,
       type: element.type,
-      version: numberOr(element.version),
+      version: numberOr(element.version) || 1,
       x: numberOr(element.x),
       y: numberOr(element.y),
       width: numberOr(element.width),
@@ -102,11 +102,17 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
   const scene = foldScene(doc).elements;
   const current = new Map(scene.map((element) => [element.id, element]));
   const next = new Map<string, ElementSnapshot>();
-  const latest = (element: ElementSnapshot) => next.get(element.id) ?? element;
-  const live = (id: string): ElementSnapshot => {
+  const existing = (id: string) => {
     const element = next.get(id) ?? current.get(id);
-    if (!element || element.isDeleted) throw new DrawingEditRefusal(`No element ${id}.`);
+    return element && !element.isDeleted ? element : undefined;
+  };
+  const live = (id: string): ElementSnapshot => {
+    const element = existing(id);
+    if (!element) throw new DrawingEditRefusal(`No element ${id}.`);
     return element;
+  };
+  const frame = (id: string | null | undefined) => {
+    if (id && live(id).type !== "frame") throw new DrawingEditRefusal(`${id} is not a frame.`);
   };
   const named = new Set<string>();
   for (const change of [...(edit.update ?? []), ...(edit.delete ?? [])]) {
@@ -127,29 +133,61 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
     next.set(id, created(id, input, lastIndex, now));
     return { id, input };
   });
-  for (const change of edit.update ?? []) next.set(change.id, changed(live(change.id), change));
-  for (const { id } of edit.delete ?? []) {
-    next.set(id, { ...live(id), isDeleted: true });
-    for (const element of current.values()) {
-      const before = latest(element);
-      if (before.isDeleted) continue;
-      const after: ElementSnapshot = { ...before };
-      if (after.containerId === id) after.isDeleted = true;
-      if (after.frameId === id) after.frameId = null;
-      for (const key of ["startBinding", "endBinding"] as const) {
-        if ((after[key] as JsonObject | null | undefined)?.elementId === id) after[key] = null;
-      }
-      if (Array.isArray(after.boundElements))
-        after.boundElements = after.boundElements.filter(
-          (bound) => (bound as JsonObject).id !== id,
-        );
-      if (stableJson(after) !== stableJson(before)) next.set(element.id, after);
-    }
+  for (const change of edit.update ?? []) {
+    frame(change.frameId);
+    next.set(change.id, changed(live(change.id), change));
   }
-  for (const { id, input } of added) link(next, live, id, input);
-  for (const element of [...current.values(), ...next.values()]) {
-    const text = latest(element);
-    if (text.type !== "text" || typeof text.containerId !== "string" || text.isDeleted) continue;
+  const deleting = new Set((edit.delete ?? []).map(({ id }) => id));
+  const gone = (id: unknown) => typeof id === "string" && deleting.has(id);
+  for (const id of deleting) next.set(id, { ...live(id), isDeleted: true });
+  for (const id of current.keys()) {
+    const before = existing(id);
+    if (!before) continue;
+    const after: ElementSnapshot = { ...before };
+    if (gone(after.containerId)) after.isDeleted = true;
+    if (gone(after.frameId)) after.frameId = null;
+    for (const key of ["startBinding", "endBinding"] as const) {
+      if (gone((after[key] as JsonObject | null | undefined)?.elementId)) after[key] = null;
+    }
+    if (Array.isArray(after.boundElements))
+      after.boundElements = after.boundElements.filter((bound) => !gone((bound as JsonObject).id));
+    if (stableJson(after) !== stableJson(before)) next.set(id, after);
+  }
+  for (const id of current.keys()) {
+    const arrow = existing(id);
+    if (arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
+    const shift = (key: "startBinding" | "endBinding") => {
+      const target = (arrow[key] as JsonObject | null | undefined)?.elementId;
+      const before = typeof target === "string" ? current.get(target) : undefined;
+      const after = typeof target === "string" ? existing(target) : undefined;
+      if (!before || !after) return [0, 0] as const;
+      return [
+        numberOr(after.x) - numberOr(before.x),
+        numberOr(after.y) - numberOr(before.y),
+      ] as const;
+    };
+    const [sx, sy] = shift("startBinding");
+    const [ex, ey] = shift("endBinding");
+    if (sx === 0 && sy === 0 && ex === 0 && ey === 0) continue;
+    const last = arrow.points.length - 1;
+    const points = (arrow.points as [number, number][]).map(([x, y], index): [number, number] =>
+      index === 0 ? [x, y] : index === last ? [x - sx + ex, y - sy + ey] : [x - sx, y - sy],
+    );
+    next.set(id, {
+      ...arrow,
+      x: numberOr(arrow.x) + sx,
+      y: numberOr(arrow.y) + sy,
+      points,
+      ...pointBox(points),
+    });
+  }
+  for (const { id, input } of added) {
+    frame(input.frameId);
+    link(next, live, existing, id, input);
+  }
+  for (const id of new Set([...current.keys(), ...next.keys()])) {
+    const text = existing(id);
+    if (text?.type !== "text" || typeof text.containerId !== "string") continue;
     const container = live(text.containerId);
     if (!next.has(text.id) && !next.has(container.id)) continue;
     next.set(text.id, {
@@ -262,6 +300,7 @@ function changed(element: ElementSnapshot, change: DrawingElementChange): Elemen
 function link(
   next: Map<string, ElementSnapshot>,
   live: (id: string) => ElementSnapshot,
+  existing: (id: string) => ElementSnapshot | undefined,
   id: string,
   input: DrawingElementInput,
 ): void {
@@ -271,8 +310,17 @@ function link(
     next.set(targetId, { ...target, boundElements: [...bound, { id, type }] });
   };
   if (input.containerId) {
-    if (input.type !== "text" || !CONTAINERS.has(live(input.containerId).type))
+    const container = live(input.containerId);
+    if (input.type !== "text" || !CONTAINERS.has(container.type))
       throw new DrawingEditRefusal(`${id} cannot sit inside ${input.containerId}.`);
+    const label = (Array.isArray(container.boundElements) ? container.boundElements : []).find(
+      (bound) =>
+        (bound as JsonObject).type === "text" && existing(String((bound as JsonObject).id)),
+    ) as JsonObject | undefined;
+    if (label)
+      throw new DrawingEditRefusal(
+        `${input.containerId} already has label ${String(label.id)}: update its text instead.`,
+      );
     bind(input.containerId, "text");
   }
   for (const [key, targetId] of [
@@ -287,8 +335,6 @@ function link(
     next.set(id, { ...next.get(id)!, [key]: { elementId: targetId, focus: 0, gap: 4 } });
     bind(targetId, "arrow");
   }
-  if (input.frameId && live(input.frameId).type !== "frame")
-    throw new DrawingEditRefusal(`${input.frameId} is not a frame.`);
 }
 
 function textSize(text: string) {

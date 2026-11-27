@@ -5376,8 +5376,10 @@ async function dispatchDeclaredRead(
   if (request.verb === "outsideChanges")
     return (await callerPaths(workspace, cwd)).result(await read(workspace, input));
   if (request.verb === "drawingRead") {
-    const path = (await callerPaths(workspace, cwd)).rebase(request.args.path, "read");
-    return read(workspace, { ...input, path });
+    const paths = await callerPaths(workspace, cwd);
+    return paths.result(
+      await read(workspace, { ...input, path: paths.rebase(request.args.path, "read") }),
+    );
   }
   return read(workspace, input);
 }
