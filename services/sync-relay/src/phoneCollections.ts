@@ -217,7 +217,9 @@ export function createPhoneCollections(options: {
   async function run(input: {
     caller: AccountSession;
     /** A Member's or an Admin's reach, or null for the owner. */
-    member: PhoneMember | null;
+    member: Pick<PhoneMember, "grantId"> | null;
+    /** What still lets the caller in. The phone's sign-in fence, place in the workspace and Show on phone by default. */
+    holds?(): void;
     workspaceId: string;
     operation: string;
     args: unknown;
@@ -227,6 +229,7 @@ export function createPhoneCollections(options: {
     const { caller, workspaceId, operation, authorize } = input;
     const userId = caller.userId;
     const host = options.host;
+    const stillHolds = input.holds ?? (() => holds(userId, workspaceId));
     // The host checks the guard at admission and again inside the read or the commit.
     const guarded = (check: () => void): AppBackendAuth => ({
       kind: "named",
@@ -235,7 +238,7 @@ export function createPhoneCollections(options: {
       ...(input.member ? { grantId: input.member.grantId } : {}),
       launch: { authorizeOperation: check, recheck: authorize },
     });
-    const auth = guarded(() => holds(userId, workspaceId));
+    const auth = guarded(stillHolds);
     if (operation === "collections") {
       const { cursor: after } = args(input.args, [], ["cursor"]);
       if (after !== undefined) id(after);
@@ -300,7 +303,7 @@ export function createPhoneCollections(options: {
     // Nothing awaits between these checks and the answer.
     const answers = async (datasetId: string) => {
       await authorize();
-      holds(userId, workspaceId);
+      stillHolds();
       describe(host, auth, workspaceId, datasetId);
     };
     // A write's key and rules stamp. The key is the phone's own, kept for a retry; the owner's keys are shared with the
@@ -330,7 +333,7 @@ export function createPhoneCollections(options: {
         // values, which the route read as JSON.
         ({ result } = await host.invoke(
           guarded(() => {
-            holds(userId, workspaceId);
+            stillHolds();
             if (!visible(workspaceId, datasetId)) throw notFound();
           }),
           {

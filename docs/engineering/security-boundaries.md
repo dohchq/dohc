@@ -53,6 +53,22 @@ again, so signing the browser out ends its access. A history read already
 waiting for changes does not check the session again, so it can return the
 changes made during its wait. A member's browser behaves the same way.
 
+## A person invited by name edits a Collection's records in a browser
+
+`/sync/live/named-collections` takes a `browser` session's cookie only from
+share-web, with its origin and the relay exchange key. It refuses a request that
+also sends `Authorization`, and a phone or desktop session. The request names
+one invitation. The relay accepts it only when that grant is the caller's own,
+made to them by name, and not one they joined through a link. The relay checks
+the grant again inside each read and write, and after the write.
+The Collection authority is the dataset host's for that grant: the owner's data
+grant for it plus the workspace's defaults. A link, a redeemed link, or a form
+gains nothing here. The route answers only four operations: listing
+Collections, describing one, reading records, and changing one field of one
+record. It reads and changes records only through the operations the
+Collection's rules declare. Creating, deleting, and custom actions stay on the
+desktop and phone.
+
 ## Agents act with their link's access
 
 An agent connection holds no authority beyond its link grant. The relay keeps

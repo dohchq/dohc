@@ -13,6 +13,7 @@ import { createNamedAppMaterialResolver, createPhoneAppMaterialResolver } from "
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-contract";
+import { createNamedCollectionsClient, NAMED_COLLECTIONS_API } from "./namedCollections";
 import { createNamedRecipientChatClient } from "./namedRecipientChat";
 import { createPushClient } from "./pushClient";
 import { createNamedRecipientDocumentsClient } from "./namedRecipientDocuments";
@@ -1176,6 +1177,15 @@ export function createShareWebApplication({
         fetchRelay,
       })
     : undefined;
+  const namedCollections = namedBrowserSessionLimits
+    ? createNamedCollectionsClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
   const memberLive = namedBrowserSessionLimits
     ? createMemberLiveClient({
         relayUrl,
@@ -2119,6 +2129,13 @@ export function createShareWebApplication({
         return jsonResponse({ ok: false, code: "live_hosting_unsupported" }, { status: 409 });
       if (!memberLive) return refused();
       const result = await memberLive(request);
+      return response(result.body, { status: result.status, headers: result.headers });
+    }
+
+    if (pathname === NAMED_COLLECTIONS_API) {
+      mark(pathname);
+      if (!namedCollections) return refused();
+      const result = await namedCollections(request);
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
