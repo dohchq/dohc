@@ -116,6 +116,7 @@ function fold(name: string, before: Y.Doc, file: string, held = true) {
 const list = (items: string[]) => items.map((item) => `- ${item}\n`).join("");
 const items = Array.from({ length: 100 }, (_, at) => `item ${String(at)}`);
 const CODE_FENCE = "```";
+const RULED = "A\n\n---\n\nB\n";
 
 function folds() {
   return [
@@ -235,6 +236,9 @@ function folds() {
         file!,
       ),
     ),
+    fold("a line added under a rule", formatTwo(RULED), "A\n\n---\n\nNew\n\nB\n"),
+    fold("a line added over a rule", formatTwo(RULED), "A\n\nNew\n\n---\n\nB\n"),
+    fold("a line's start edited under a rule", formatTwo(RULED), "A\n\n---\n\nXB\n"),
     fold("a whole file replaced", formatTwo("# A\n\nB\n"), "- x\n- y\n\n> z\n"),
     fold(
       "code inside a link, which format 2 holds as code alone",
