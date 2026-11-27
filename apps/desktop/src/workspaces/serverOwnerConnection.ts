@@ -24,7 +24,6 @@ const LIVE_DOCUMENTS_BYTES = 1_048_576 + KEPT_EDITS_PAGE_BYTES;
 // A page of saves holds at least one, of up to 20 MiB, as base64.
 const JOURNAL_PAGE_BYTES = 28 * 1024 * 1024;
 
-/** Why the owner's computer couldn't list the server's live documents, when the cause won't clear by itself soon. */
 export class OwnerLiveDiscoveryError extends Error {
   constructor(
     readonly reason: "live-hosting-unavailable" | "server-unreachable",
@@ -515,7 +514,6 @@ export function createServerOwnerConnection(options: {
           requestSignal.throwIfAborted();
           if (!response.ok || !response.body) {
             await response.body?.cancel();
-            // A server without live editing, or one that doesn't let this account host the workspace, answers 404.
             if (response.status === 404)
               throw new OwnerLiveDiscoveryError("live-hosting-unavailable");
             throw new Error("Owner live document discovery failed.");

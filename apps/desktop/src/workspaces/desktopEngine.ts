@@ -705,12 +705,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         .filter((row) => !row.saveOnly)
         .map((row) => row.path),
     );
-  // `why` is for the log alone: what made a pass retry, which the owner's words don't name.
   const setOwnerDeliveryStatus = (
     workspaceId: string,
     status: OwnerLiveDeliveryStatus | undefined,
     reason?: OwnerLiveDeliveryReason,
-    why?: string,
+    logCause?: string,
   ) => {
     if (
       ownerDeliveryStatus.get(workspaceId) === status &&
@@ -719,7 +718,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       return;
     if (status === "retrying")
       console.warn(
-        `[desktop] owner live editing of workspace ${workspaceId} is retrying: ${reason ?? why ?? "unknown"}`,
+        `[desktop] owner live editing of workspace ${workspaceId} is retrying: ${reason ?? logCause ?? "unknown"}`,
       );
     if (status) ownerDeliveryStatus.set(workspaceId, status);
     else ownerDeliveryStatus.delete(workspaceId);

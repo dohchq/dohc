@@ -31,20 +31,16 @@ export function linkRefusal(code: LinkRefusalCode): Response {
  */
 export type SessionHostBlock = "held" | "stopped";
 
-/** Where a note stands in going live, as its record and its host say, while it is not live for the people it is shared with. */
+/** Where a note stands in going live, as its record and its host say, while it is not live. */
 export type LiveNoteStanding = "starting" | "off";
 
-/** A host's refusals that only the note's owner can clear. */
-const OWNER_CLEARS = new Set([
+const OWNER_CLEARED_REASONS = new Set([
   "session-host-refused",
   "live-document-without-lineage",
   "live-edit-unadmitted",
 ]);
 
-/**
- * Where a note stands, from its record's state and, for a note starting or live, its owner's readiness. A note whose
- * record says live is still starting until its host serves it. No record, or a note its host serves, gives no answer.
- */
+/** Where a note stands, from its record's state and its owner's readiness. No record, or a note its host serves, gives no answer. */
 export function liveNoteStanding(
   state: LiveNoteState | undefined,
   readiness?: () => { status: ServiceHostDocumentState["status"]; reason?: string },
@@ -52,7 +48,7 @@ export function liveNoteStanding(
   if (state === "off" || state === "stopping") return "off";
   if (state === undefined) return undefined;
   const ready = readiness?.();
-  if (ready?.reason !== undefined && OWNER_CLEARS.has(ready.reason)) return "off";
+  if (ready?.reason !== undefined && OWNER_CLEARED_REASONS.has(ready.reason)) return "off";
   return state === "starting" ||
     ready?.status === "preparing" ||
     ready?.reason === "live-start-failing"
@@ -65,7 +61,6 @@ export function sessionHostRefusal(block: SessionHostBlock): Response {
   return linkRefusal(block === "held" ? "link_live_stopped" : "link_live_unavailable");
 }
 
-/** What a link holder is told about a note that isn't open for editing, or nothing when it may open. */
 export function liveNoteRefusal(
   note: LiveNoteStanding | undefined,
   block: SessionHostBlock | undefined,

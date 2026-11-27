@@ -43,7 +43,6 @@ class LiveDocumentRefusal extends Error {
   }
 }
 
-// A link agent gets the code a personal agent gets for a note still starting, and the link's own code for any other refusal.
 async function refusalError(response: Response, signal: AbortSignal): Promise<Error> {
   try {
     const code = parseLinkRefusal(await readBoundedJson(response, 4096, signal), response.status);

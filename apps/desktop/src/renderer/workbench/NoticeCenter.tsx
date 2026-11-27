@@ -913,7 +913,6 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
-  // Neither clears by itself soon, and the owner can't fix either in dohc. Try again checks once more.
   if (reason === "live-hosting-unavailable") {
     return {
       title: "Live editing unavailable",
@@ -949,7 +948,6 @@ function liveDeliveryCopy(
 // A retry dohc is still fixing by itself toasts and adds a row only once its
 // ring has shown in the title bar this long.
 const QUIET_RETRY_MS = 15_000;
-// A server that can't be reached, or doesn't host live editing, can be a moment's answer: a restart, a network change.
 function quietLiveRetry(reason: SyncStatusResult["ownerLiveDeliveryReason"]): boolean {
   return reason === "server-unreachable" || reason === "live-hosting-unavailable";
 }
@@ -1725,10 +1723,9 @@ export function NoticeCenter(props: {
   // failure, so the same failure in another workspace is still news. While
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
-  // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
-  // shows, and so does one the server may recover from, however its cause
-  // changes meanwhile. A named reason stays until someone acts, so it shows
-  // at once.
+  // A retry with no reason, or a quiet one, waits QUIET_RETRY_MS, counted
+  // from when its ring shows; another named reason stays until someone acts,
+  // so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
