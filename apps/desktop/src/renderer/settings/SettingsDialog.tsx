@@ -997,7 +997,10 @@ export function SettingsDialog(props: {
               pinned={pinnedAppsFor(userSettings, props.workspaceId)}
               sendToPhones={userSettings.apps.sendToPhones}
               onSendToPhonesChange={(sendToPhones) =>
-                void saveUserSettings({ ...userSettings, apps: { sendToPhones } })
+                void saveUserSettings({
+                  ...userSettings,
+                  apps: { ...userSettings.apps, sendToPhones },
+                })
               }
               {...(props.onSetAppPinned ? { onSetPinned: props.onSetAppPinned } : {})}
               {...(props.onOpenApp ? { onOpenApp: props.onOpenApp } : {})}

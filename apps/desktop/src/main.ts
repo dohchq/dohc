@@ -170,7 +170,6 @@ import {
   createOwnerAppPublicationHandler,
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
-import { prepareOwnerAppPublication, readLocalAppSource } from "./workspaces/ownerAppPublication";
 import { createPhoneAppSender } from "./workspaces/phoneAppSender";
 import {
   createLocalOwnerAppPublicationHandler,
@@ -3092,6 +3091,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     await appViews?.closeWorkspace(binding.workspaceId);
     forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
+    phoneAppSender?.close(binding.workspaceId);
     const physicalWorkspace = {
       ...workspaceAtDisposal,
       rootPath: binding.canonicalRootPath,
@@ -4029,6 +4029,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   onObservationResync: async (workspace) => {
     await onObservationResync(workspace);
     folderAppDetection.invalidate(workspace);
+    phoneAppSender?.schedule(workspace.workspaceId);
   },
   observationFor: (workspace, callbacks) => {
     const daemon = desktopEngine.daemon;
@@ -12116,70 +12117,47 @@ function registerIpcHandlers(): void {
   });
   ownerAppPublicationForCli = (input, agent) =>
     cliOwnerPublication(input.workspaceId, input, agent);
+  const sendsToPhones = async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones;
+  const atServerHead = (workspaceId: string) => {
+    const status = activity.getStatus(workspaceId);
+    return status.pendingChangeCount === 0 && !status.syncFailure && !!status.lastSyncedAtMs;
+  };
   phoneAppSender = createPhoneAppSender<PhoneAppWorkspace>({
-    withWorkspace: async (workspaceId, work) => {
+    ...ownerPublicationDependencies,
+    resolveDatasetRevision,
+    open: async (workspaceId, work) => {
+      await warmCredentialCache();
       const entry = findWorkspace(workspaceId);
-      if (!entry?.remote || shareViewIsPresent(entry.shareView)) return;
-      await workspaceAuthorities.withOperation(workspaceId, async (operation) =>
-        work(
-          operation.workspace,
-          operation.signal,
-          (await remoteForWorkspace(operation.workspace)).credentials,
-        ),
+      const credentials = cachedCredentials;
+      if (
+        !(await sendsToPhones()) ||
+        !entry?.remote ||
+        shareViewIsPresent(entry.shareView) ||
+        !credentials ||
+        !workspaceRemoteMatchesCredentials(entry.remote, credentials)
+      )
+        return;
+      await workspaceAuthorities.withOperation(workspaceId, (operation) =>
+        work(operation.workspace, operation.signal, credentials),
       );
     },
     admitted: async (workspace) => {
-      if (!(await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones) return false;
+      if (!(await sendsToPhones())) return false;
       const active = await withEngineAdapter(workspace, (adapter) =>
         adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
       );
       return (active?.id ?? "main") === "main";
     },
-    sync: async (workspace, signal) => {
+    sync: async (workspace) => {
       await ownerPublicationDependencies.flushCapture(workspace);
-      await activity.catchUpCloudSync(workspace.workspaceId, signal);
-      const status = activity.getStatus(workspace.workspaceId);
-      return status.pendingChangeCount === 0 && !status.syncFailure && !!status.lastSyncedAtMs;
-    },
-    apps: (workspace) => ownedSiteCatalog.list(workspace),
-    exists: async (workspace, appRoot) => {
-      const query = { workspaceId: workspace.workspaceId, versionId: "main", under: appRoot };
-      const files = await withEngineAdapter(workspace, (adapter) =>
-        adapter.listTextFileMetadata(query),
+      const drained = await activity.pushRecorded(workspace.workspaceId).then(
+        () => true,
+        () => false,
       );
-      if (!files) throw new Error("dohc could not read this workspace's files. Restart dohc.");
-      return files.length > 0;
+      return drained && atServerHead(workspace.workspaceId);
     },
-    readSource: async (workspace, appRoot, signal, onSelected) => {
-      const assertCurrent = () => signal.throwIfAborted();
-      const source = await withEngineAdapter(workspace, (adapter) =>
-        readLocalAppSource(
-          { workspaceId: workspace.workspaceId, appRoot, versionId: "main" },
-          { adapter, signal, assertCurrent, deferredWrites: [], onSelected },
-        ),
-      );
-      if (!source) throw new Error("dohc could not read this app. Restart dohc and try again.");
-      return source.sourceRevision;
-    },
-    prepare: async (workspace, appRoot, signal) => {
-      const { deferredWrites } = await ownerPublicationDependencies.flushCapture(workspace);
-      const prepared = await withEngineAdapter(workspace, (adapter) =>
-        prepareOwnerAppPublication({ workspaceId: workspace.workspaceId, appRoot }, null, {
-          adapter,
-          signal,
-          assertCurrent: () => signal.throwIfAborted(),
-          compile: ownerPublicationDependencies.compile,
-          resolveDatasetRevision: async (binding) =>
-            (await resolveDatasetArtifacts(workspace, binding, signal)).revision,
-          deferredWrites,
-        }),
-      );
-      if (!prepared)
-        throw new Error("dohc could not capture this app. Restart dohc and try again.");
-      return prepared;
-    },
-    relayJson: ownerPublicationDependencies.relayJson,
-    upload: ownerPublicationDependencies.upload,
+    synced: (workspace) => atServerHead(workspace.workspaceId),
     changed: (workspaceId) => notifyRenderer({ workspaceId }),
   });
   registerOperations(operationBoundary, phoneAppOperations, {
