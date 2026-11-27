@@ -219,3 +219,64 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
         Err(SyncError::CoordinateDiverged)
     ));
 }
+
+fn pruned_marker_matches(store: &mut EngineStore, setup: &str) -> bool {
+    let key = DocKey::new("ws", "main", "note").unwrap();
+    let outcome = store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(setup).map_err(SyncError::persist)?;
+            let unheld_digest = "0".repeat(64);
+            crate::current_ydoc_content_matches_in_tx(tx, &key, "note.md", &unheld_digest)
+        })
+        .unwrap();
+    outcome == TxnOutcome::Committed(true)
+}
+
+#[test]
+fn restore_guard_treats_a_pruned_local_only_marker_as_no_live_state() {
+    let (_scratch, _path, mut store) = open_store();
+    let mut files = VersionedTextStore::new(&mut store);
+    files
+        .ensure_main_version("ws", "main", 0, &NoFaults)
+        .unwrap();
+    files
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "note".into(),
+                moment_id: "moment".into(),
+                path: "note.md".into(),
+                text: "# Plan\n".into(),
+                metadata_origin: "local-file".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(pruned_marker_matches(
+        &mut store,
+        "INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,path) \
+         VALUES ('ws','main','note','richdoc','local-only','unclaimed',1,'note.md')",
+    ));
+    assert!(!pruned_marker_matches(
+        &mut store,
+        "UPDATE ydoc_docs SET settle_prior_update_seq=-1"
+    ));
+    assert!(pruned_marker_matches(
+        &mut store,
+        "UPDATE ydoc_docs SET settle_prior_update_seq=NULL"
+    ));
+    let base = store.put_binary_blob(b"base").unwrap();
+    assert!(!pruned_marker_matches(
+        &mut store,
+        &format!(
+            "INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,next_sequence,created_at_ms) \
+             VALUES ('outbox','ws','main','note','{base}','note.md','[\"note.md\"]',0,'{base}','{base}',4,'active',0,1,1)"
+        ),
+    ));
+}
