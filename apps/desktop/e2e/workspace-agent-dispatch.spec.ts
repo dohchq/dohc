@@ -197,7 +197,7 @@ test("the agent dispatches a fresh successful run for each human message", async
 
     const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
     await expect(agentReplies).toHaveCount(1);
-    await expect(agentReplies.first().getByTestId("chats-lane-agent-badge")).toHaveText("agent");
+    await expect(agentReplies.first().getByTestId("chats-lane-agent-badge")).toHaveText("Agent");
 
     // A second committed human message is a second ledger trigger. The same
     // report arriving again, in the same conversation, proves the first
@@ -206,7 +206,7 @@ test("the agent dispatches a fresh successful run for each human message", async
     await composer.press("Enter");
     await expect(agentReplies).toHaveCount(2);
     await expect(page.getByTestId("chats-lane-message")).toHaveCount(4);
-    await expect(agentReplies.nth(1).getByTestId("chats-lane-agent-badge")).toHaveText("agent");
+    await expect(agentReplies.nth(1).getByTestId("chats-lane-agent-badge")).toHaveText("Agent");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -233,15 +233,15 @@ test("a person's reaction and their agent's same reaction stand side by side", a
       .getByTestId("chats-lane-message")
       .filter({ hasText: "audit the projections" })
       .locator('[data-testid$="-reaction-pill"][data-emoji="👍"]');
-    await expect(thumbs).toHaveAttribute("aria-label", "👍 1 — Nova");
+    await expect(thumbs).toHaveAttribute("aria-label", "👍 1, Nova");
     await expect(thumbs).toHaveAttribute("aria-pressed", "false");
 
     await thumbs.click();
     await expect(thumbs).toHaveAttribute("aria-pressed", "true");
-    await expect(thumbs).toHaveAttribute("aria-label", /^👍 2 — /u);
+    await expect(thumbs).toHaveAttribute("aria-label", /^👍 2, /u);
 
     await thumbs.click();
-    await expect(thumbs).toHaveAttribute("aria-label", "👍 1 — Nova");
+    await expect(thumbs).toHaveAttribute("aria-label", "👍 1, Nova");
     await expect(thumbs).toHaveAttribute("aria-pressed", "false");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -533,7 +533,7 @@ test("an agent's question with choices is a poll; picking one answers it and the
       .getByTestId("chats-lane-message")
       .filter({ hasText: "Which day do we ship?" });
     await expect(question).toHaveCount(1);
-    await expect(question.getByTestId("chats-lane-agent-badge")).toHaveText("agent");
+    await expect(question.getByTestId("chats-lane-agent-badge")).toHaveText("Agent");
     await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Unanswered");
     const options = question.getByTestId("chats-lane-poll-option");
     await expect(options).toHaveText(["Friday", "Monday"]);
@@ -627,7 +627,7 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    const words = "Nova didn't reply. Its run ended with an error.";
+    const words = "Nova did not reply. Its run ended with an error.";
     const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line.getByRole("status")).toHaveText([words]);
@@ -642,7 +642,7 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("notice-center-toggle").click();
     // An agent DM's conversation has no title, so the title names no thread.
     const center = page.getByTestId("notice-center");
-    await expect(center.getByText("Nova didn't reply", { exact: true })).toBeVisible();
+    await expect(center.getByText("Nova did not reply", { exact: true })).toBeVisible();
     await expect(center.getByText("Its run ended with an error.", { exact: true })).toBeVisible();
     const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
@@ -698,7 +698,7 @@ test("a runner that exits silently says why under the message and posts a notice
     await setDispatchPaused(page, false);
 
     const toasts = page.getByTestId("notice-toasts");
-    await expect(toasts).toContainText("Nova didn't reply in \"");
+    await expect(toasts).toContainText('Nova did not reply in "');
     await waitForVisibleAnimations(page);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
