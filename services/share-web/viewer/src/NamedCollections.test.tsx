@@ -8,7 +8,11 @@ import { jsonResponse, settle, setControlValue } from "./testing";
 const ITEM = "item-field",
   AMOUNT = "amount-field";
 type Edit = { idempotencyKey: string; value: unknown; expectedVersion: number };
-let root: Root, host: HTMLElement, edits: Edit[], answers: Array<() => Response>;
+let root: Root,
+  host: HTMLElement,
+  edits: Edit[],
+  answers: Array<() => Response | Promise<Response>>,
+  version: number;
 
 function described(reversible: boolean) {
   return {
@@ -44,7 +48,7 @@ async function open(reversible = false) {
           ok: true,
           result: {
             status: "ready",
-            rows: [{ id: "hotel", version: 4, values: { [ITEM]: "Hotel", [AMOUNT]: 960 } }],
+            rows: [{ id: "hotel", version, values: { [ITEM]: "Hotel", [AMOUNT]: 960 } }],
             nextCursor: null,
             files: {},
           },
@@ -79,6 +83,7 @@ async function change(value: string) {
 beforeEach(() => {
   edits = [];
   answers = [];
+  version = 4;
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -128,6 +133,9 @@ it("offers Undo only where the Collection's rules let a change be undone", async
   );
   await change("1010");
   await settle(() => button("Undo") !== undefined);
+  version = 9;
+  act(() => button("Refresh")!.click());
+  await settle(() => host.querySelector("table") !== null);
   act(() => button("Undo")!.click());
   await settle(() => button("Edit Amount: 960") !== undefined);
   expect(edits.map(({ value, expectedVersion }) => [value, expectedVersion])).toEqual([
@@ -135,4 +143,36 @@ it("offers Undo only where the Collection's rules let a change be undone", async
     [960, 5],
   ]);
   expect(edits[1]!.idempotencyKey).not.toBe(edits[0]!.idempotencyKey);
+});
+
+it("checks a change against the row as it was when editing began, even after Refresh", async () => {
+  await open();
+  answers.push(() =>
+    jsonResponse({
+      ok: true,
+      result: { refused: { code: "stale_record", message: "This record changed." } },
+    }),
+  );
+  act(() => button("Edit Amount: 960")!.click());
+  setControlValue(host.querySelector("input")!, "1010");
+  version = 7;
+  act(() => button("Refresh")!.click());
+  await settle(() => host.querySelector("form") !== null);
+  act(() => host.querySelector("form")!.requestSubmit());
+  await settle(() => host.textContent!.includes("This row changed since it loaded."));
+  expect(edits.map(({ value, expectedVersion }) => [value, expectedVersion])).toEqual([[1010, 4]]);
+  expect(host.querySelector("input")!.value).toBe("1010");
+});
+
+it("holds the value being saved until dohc answers", async () => {
+  await open();
+  let answer!: (response: Response) => void;
+  answers.push(() => new Promise((resolve) => (answer = resolve)));
+  await change("1010");
+  await settle(() => edits.length === 1);
+  setControlValue(host.querySelector("input")!, "1070");
+  expect(host.querySelector("input")!.value).toBe("1010");
+  act(() => answer(jsonResponse({ ok: true, result: { saved: { version: 5 } } })));
+  await settle(() => button("Edit Amount: 1010") !== undefined);
+  expect(edits.map(({ value }) => value)).toEqual([1010]);
 });

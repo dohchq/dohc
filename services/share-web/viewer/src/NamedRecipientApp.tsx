@@ -50,8 +50,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     [synced, setSynced] = useState<Selection | null>(null);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
-  const [collection, setCollection] = useState<Collection | null>(null),
-    [listed, setListed] = useState(0);
+  const [collection, setCollection] = useState<Collection | null>(null);
   const tableDirty = useRef(false);
   const chosen = selection ?? collection;
   const request = useRef<AbortController | null>(null),
@@ -107,7 +106,6 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
   const refresh = () => {
     clearSelection();
     setFiles(null);
-    setListed((n) => n + 1);
     const controller = start();
     void load(controller)
       .catch((cause: unknown) => {
@@ -319,7 +317,6 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
               {files && (
                 <CollectionList
                   grantId={files.grantId}
-                  reload={listed}
                   selected={collection?.datasetId ?? null}
                   disabled={busy}
                   onOpen={openCollection}

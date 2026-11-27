@@ -22,15 +22,15 @@ type Answer = {
   refused?: { code: string; message: string };
   rulesChanged?: true;
 };
-type Attempt = { value: unknown; expectedVersion: number; revision: number; key: string };
-type Saved = { rowId: string; field: Field; undo?: { value: unknown } };
+type Saved = { rowId: string; field: Field; version: number; undo?: { value: unknown } };
 type Editing = {
   rowId: string;
   fieldId: string;
+  version: number;
   draft: string | boolean;
   saving?: boolean;
   notice?: "uncertain" | "stale" | "gone" | string;
-  attempt?: Attempt;
+  attempt?: { value: unknown };
 };
 const EDITORS = new Set(["text", "url", "number", "checkbox", "date", "select"]);
 const NOTICES: Record<string, string> = {
@@ -75,7 +75,6 @@ function fromDraft(field: Field, draft: string | boolean): unknown {
 /** The Collections an invitation reaches, as a group of the page's list. */
 export function CollectionList(props: {
   grantId: string;
-  reload: number;
   selected: string | null;
   disabled: boolean;
   onOpen(collection: Collection): void;
@@ -91,7 +90,7 @@ export function CollectionList(props: {
       () => !controller.signal.aborted && setFailed(true),
     );
     return () => controller.abort();
-  }, [props.grantId, props.reload, attempt]);
+  }, [props.grantId, attempt]);
   if (failed)
     return (
       <p role="alert">
@@ -199,38 +198,28 @@ export function CollectionTable(props: {
     setEditing(null);
   };
   const save = async (edit: Editing, field: Field, value = fromDraft(field, edit.draft)) => {
-    const row = rows?.find((row) => row.id === edit.rowId);
-    if (!row || !described || !table) return;
+    if (!described || !table) return;
     if (field.type === "number" && typeof value === "number" && !Number.isFinite(value))
       return setEditing({ ...edit, notice: "Enter a number" });
-    const same =
-      edit.attempt &&
-      JSON.stringify(edit.attempt.value) === JSON.stringify(value) &&
-      edit.attempt.expectedVersion === row.version &&
-      edit.attempt.revision === described.revision;
-    const attempt: Attempt = same
-      ? edit.attempt!
-      : {
-          value,
-          expectedVersion: row.version,
-          revision: described.revision,
-          key: crypto.randomUUID(),
-        };
+    const attempt =
+      edit.attempt && JSON.stringify(edit.attempt.value) === JSON.stringify(value)
+        ? edit.attempt
+        : {
+            datasetId: collection.datasetId,
+            tableId: table.tableId,
+            recordId: edit.rowId,
+            fieldId: field.fieldId,
+            value,
+            expectedVersion: edit.version,
+            revision: described.revision,
+            revisionSha256: described.revisionSha256,
+            idempotencyKey: crypto.randomUUID(),
+          };
     const sending: Editing = { ...edit, saving: true, attempt };
     setEditing(sending);
     let answer: Answer;
     try {
-      answer = (await call(grantId, "collectionEdit", {
-        datasetId: collection.datasetId,
-        tableId: table.tableId,
-        recordId: row.id,
-        fieldId: field.fieldId,
-        value: attempt.value,
-        expectedVersion: attempt.expectedVersion,
-        revision: attempt.revision,
-        revisionSha256: described.revisionSha256,
-        idempotencyKey: attempt.key,
-      })) as Answer;
+      answer = (await call(grantId, "collectionEdit", attempt)) as Answer;
     } catch {
       return setEditing({ ...sending, saving: false, notice: "uncertain" });
     }
@@ -239,19 +228,20 @@ export function CollectionTable(props: {
       setRows(
         (rows) =>
           rows?.map((each) =>
-            each.id === row.id
+            each.id === edit.rowId
               ? { ...each, version, values: { ...each.values, [field.fieldId]: attempt.value } }
               : each,
           ) ?? null,
       );
       setSaved({
-        rowId: row.id,
+        rowId: edit.rowId,
         field,
+        version,
         ...(field.reversible && answer.saved.priorValue !== undefined
           ? { undo: { value: priorValue ?? null } }
           : {}),
       });
-      refocus.current = `${row.id}:${field.fieldId}`;
+      refocus.current = `${edit.rowId}:${field.fieldId}`;
       return setEditing(null);
     }
     if (answer.rulesChanged) {
@@ -281,7 +271,7 @@ export function CollectionTable(props: {
       const current = (page.rows as Row[] | undefined)?.[0];
       if (!current) return setEditing({ ...edit, notice: "gone" });
       setRows((rows) => rows?.map((row) => (row.id === current.id ? current : row)) ?? null);
-      setEditing({ ...edit, attempt: undefined, notice: undefined });
+      setEditing({ ...edit, version: current.version, attempt: undefined, notice: undefined });
     } catch {
       setEditing({ ...edit, notice: "dohc could not load the current row. Try again." });
     }
@@ -304,11 +294,12 @@ export function CollectionTable(props: {
       </section>
     );
   const editor = (field: Field, row: Row, edit: Editing) => {
-    const set = (draft: string | boolean) => setEditing({ ...edit, draft, notice: undefined });
+    const set = (draft: string | boolean) =>
+      !edit.saving && setEditing({ ...edit, draft, notice: undefined });
     const keys = (event: KeyboardEvent<HTMLFormElement>) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        close();
+        if (!edit.saving) close();
       } else if (
         event.key === "Enter" &&
         (event.target instanceof HTMLSelectElement ||
@@ -359,7 +350,12 @@ export function CollectionTable(props: {
         <button type="submit" className="handoff-button" disabled={edit.saving}>
           {edit.saving ? "Saving…" : edit.notice === "uncertain" ? "Try again" : "Save"}
         </button>
-        <button type="button" className="handoff-button secondary" onClick={close}>
+        <button
+          type="button"
+          className="handoff-button secondary"
+          disabled={edit.saving}
+          onClick={close}
+        >
           Cancel
         </button>
         {notice && (
@@ -404,10 +400,10 @@ export function CollectionTable(props: {
             <button
               className="named-link"
               onClick={() => {
-                const { rowId, field, undo } = saved;
+                const { rowId, field, version, undo } = saved;
                 setSaved(null);
                 void save(
-                  { rowId, fieldId: field.fieldId, draft: toDraft(field, undo!.value) },
+                  { rowId, fieldId: field.fieldId, version, draft: toDraft(field, undo!.value) },
                   field,
                   undo!.value,
                 );
@@ -457,6 +453,7 @@ export function CollectionTable(props: {
                               setEditing({
                                 rowId: row.id,
                                 fieldId: field.fieldId,
+                                version: row.version,
                                 draft: toDraft(field, row.values[field.fieldId]),
                               });
                             }}
