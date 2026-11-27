@@ -129,7 +129,10 @@ function harness(input: { files: string[]; revisions: Record<string, string>; de
     prepared(selection.appRoot, state.revisions[selection.appRoot]!),
   );
   const adapter = {
-    listTextFileMetadata: async () => state.files.map((path) => ({ path })),
+    listTextFileMetadata: async ({ under }: { under?: string }) =>
+      state.files
+        .filter((path) => under === undefined || path.startsWith(`${under}/`))
+        .map((path) => ({ path })),
   } as unknown as VersionedLiveAdapter;
   const upload = vi.fn(async () => {});
   const changed = vi.fn();
@@ -370,6 +373,16 @@ describe("createPhoneAppSender", () => {
         body: { expectedAuthorityRevision: 3 },
       },
     ]);
+  });
+
+  it("tries a withdrawal again later when the workspace is behind the server at that moment", async () => {
+    vi.useFakeTimers();
+    const test = harness({ files: [], revisions: {} });
+    test.owner.set("apps/books", row("books-1", "r0"));
+    test.state.synced = false;
+    await test.sender.run("ws");
+    expect(test.posts).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it("keeps the owner version of a folder that is still on main but no longer sent", async () => {

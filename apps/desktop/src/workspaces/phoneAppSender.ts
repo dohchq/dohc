@@ -294,8 +294,12 @@ export function createPhoneAppSender<Workspace extends { workspaceId: string }>(
     const gone = (folder: readonly string[], appRoot: string) =>
       !folder.some((path) => path.startsWith(`${appRoot}/`));
     for (const [appRoot, { current, pending }] of published) {
-      if (!gone(paths, appRoot) || !gone(await mainPaths(), appRoot) || !deps.synced(workspace))
-        continue;
+      if (!gone(paths, appRoot)) continue;
+      const left = await engine((adapter) =>
+        adapter.listTextFileMetadata({ workspaceId, versionId: "main", under: appRoot }),
+      );
+      if (left.length) continue;
+      if (!deps.synced(workspace)) return later(workspaceId);
       for (const row of [pending, current])
         if (row)
           await post(`${base}/${row.publicationId}/withdraw`, {
