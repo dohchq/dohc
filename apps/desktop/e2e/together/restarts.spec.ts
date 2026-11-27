@@ -93,18 +93,25 @@ test("the relay is killed and started again while two people type", async ({ sta
   await expect(editor(two.page)).toContainText("ONEAFTER", { timeout: 60_000 });
 
   // No word that a page showed is missing: not from the two pages, a new reader's page, or the stored file.
-  const reader = await openReader(stack.browser, note);
-  await expect(reader.locator("body")).toContainText("TWOAFTER", { timeout: 60_000 });
-  await expect.poll(() => stack.storedFile(note), { timeout: 60_000 }).toContain("TWOAFTER");
+  const once = Object.fromEntries(words.map((word) => [word, 1]));
+  const counts = (text: string) =>
+    Object.fromEntries(words.map((word) => [word, text.split(word).length - 1]));
   const [first, second] = [await one.sees(), await two.sees()];
-  const places: Record<string, string> = {
-    "the first person's page": first.lines.join("\n"),
-    "the second person's page": second.lines.join("\n"),
-    "a new reader's page": await reader.locator("body").innerText(),
-    "the stored file": await stack.storedFile(note),
-  };
-  for (const [place, text] of Object.entries(places))
-    for (const word of words) expect(text.split(word).length - 1, `${word} in ${place}`).toBe(1);
+  expect(counts(first.lines.join("\n")), "the first person's page").toEqual(once);
+  expect(counts(second.lines.join("\n")), "the second person's page").toEqual(once);
+  const reader = await openReader(stack.browser, note);
+  await expect
+    .poll(async () => counts(await reader.locator("body").innerText()), {
+      message: "a new reader's page",
+      timeout: 60_000,
+    })
+    .toEqual(once);
+  await expect
+    .poll(async () => counts(await stack.storedFile(note)), {
+      message: "the stored file",
+      timeout: 60_000,
+    })
+    .toEqual(once);
   expect(second.lines).toEqual(first.lines);
   expect([first.stopped, second.stopped]).toEqual([false, false]);
 });
