@@ -189,6 +189,50 @@ describe("planDrawingEdit", () => {
     expect((moved.y as number) + end[1]!).toBeCloseTo(204);
   });
 
+  it("keeps a person-drawn arrow's own gap when its shape is resized", () => {
+    const doc = new Y.Doc();
+    apply(doc, {
+      add: [
+        { id: "a", type: "rectangle", x: 0, y: 0, width: 100, height: 100 },
+        {
+          id: "go",
+          type: "arrow",
+          x: 120,
+          y: 50,
+          start: "a",
+          points: [
+            [0, 0],
+            [200, 0],
+          ],
+        },
+      ],
+    });
+    const go = foldScene(doc).elements.find((element) => element.id === "go")!;
+    insertElementRevision(doc, {
+      ...go,
+      version: 2,
+      startBinding: { elementId: "a", focus: 0, gap: 20 },
+    });
+    apply(doc, { update: [{ id: "a", expectedVersion: 1, width: 1000 }] });
+    expect(live(doc).find((element) => element.id === "go")).toMatchObject({ x: 1020, y: 50 });
+  });
+
+  it("edits around an arrow with no points", () => {
+    const doc = new Y.Doc();
+    apply(doc, { add: [{ id: "a", type: "rectangle", x: 0, y: 0 }] });
+    insertElementRevision(doc, {
+      id: "bad",
+      type: "arrow",
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      points: [],
+      startBinding: { elementId: "a", focus: 0, gap: 4 },
+    });
+    apply(doc, { update: [{ id: "a", expectedVersion: 1, x: 50 }] });
+    expect(live(doc).find((element) => element.id === "a")).toMatchObject({ x: 50 });
+  });
+
   it("leaves a bound arrow alone when its shape is only restyled", () => {
     const doc = new Y.Doc();
     apply(doc, {

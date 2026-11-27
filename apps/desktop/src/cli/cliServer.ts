@@ -2377,11 +2377,11 @@ function validateRequestPathSpellings(request: CliRequest): void {
 
 type CliPathMode = "read" | "write" | "materialize";
 
-// Validate the caller spelling before rebasing, then validate workspace authority.
 function isSecretPath(path: string): boolean {
   return classifyEngineFilePathForRead(path, process.platform).kind === "secret";
 }
 
+// Validate the caller spelling before rebasing, then validate workspace authority.
 async function callerPaths(context: Pick<CliWorkspaceContext, "rootPath">, cwd: string) {
   const root = await realpath(context.rootPath);
   // The cwd under the workspace's own spelling, so every rebased path is too.

@@ -162,16 +162,21 @@ function planned(doc: Y.Doc, edit: DrawingEdit, now: number): PlannedDrawingEdit
   for (const id of current.keys()) {
     const arrow = existing(id);
     if (placing.has(id) || arrow?.type !== "arrow" || !Array.isArray(arrow.points)) continue;
+    if (arrow.points.length < 2) continue;
     const ends = arrow.points as [number, number][];
     const last = ends.length - 1;
     const shift = (key: "startBinding" | "endBinding", [px, py]: [number, number]) => {
-      const target = (arrow[key] as JsonObject | null | undefined)?.elementId;
+      const binding = arrow[key] as JsonObject | null | undefined;
+      const target = binding?.elementId;
       const before = typeof target === "string" ? current.get(target) : undefined;
       const after = typeof target === "string" ? existing(target) : undefined;
       if (!before || !after) return [0, 0] as const;
       const change = (key: "x" | "y" | "width" | "height") =>
         numberOr(after[key]) - numberOr(before[key]);
-      const grow = (size: "width" | "height") => change(size) / (numberOr(before[size]) + 2 * GAP);
+      const grow = (size: "width" | "height") => {
+        const span = numberOr(before[size]) + 2 * numberOr(binding?.gap);
+        return span > 0 ? change(size) / span : 0;
+      };
       const [cx, cy] = center(before);
       const [ox, oy] = [numberOr(arrow.x) + px - cx, numberOr(arrow.y) + py - cy];
       const [cos, sin] = [Math.cos(numberOr(after.angle)), Math.sin(numberOr(after.angle))];
