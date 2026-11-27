@@ -184,7 +184,7 @@ export function createPhoneApps(options: {
       )
       .get(workspaceId, id);
     if (!row || !options.limits) throw notFound();
-    const published = served(userId, workspaceId, id, false);
+    const published = served(userId, workspaceId, id, false, false);
     if (
       !published ||
       published.local ||
@@ -384,13 +384,15 @@ export function createPhoneApps(options: {
                   publicationId,
                 );
                 const { appRoot, sourceRevision } = candidate;
-                return [listed({
+                return [
+                  listed({
                     publicationId,
                     audience: "workspace",
                     authorityRevision,
                     appRoot,
                     sourceRevision,
-                  })];
+                  }),
+                ];
               } catch (error) {
                 if (error instanceof RelayError) return [];
                 throw error;
@@ -444,7 +446,13 @@ export function createPhoneApps(options: {
         ended(launchHashes);
         return { revoked };
       }
-      const row = app(userId, workspaceId, id, operation !== "appLaunch", caller.clientKind === "phone");
+      const row = app(
+        userId,
+        workspaceId,
+        id,
+        operation !== "appLaunch",
+        caller.clientKind === "phone",
+      );
       const approval = phoneAppApproval(storage, { userId, workspaceId, publicationId: id });
       const approved =
         "member" in row
@@ -455,7 +463,7 @@ export function createPhoneApps(options: {
         const provenance = "member" in row ? undefined : row.approvalProvenance;
         return {
           publicationId: id,
-          audience: "member" in row ? ("workspace" as const) : publicationAudience(row.owner),
+          audience: "owner" in row ? publicationAudience(row.owner) : ("workspace" as const),
           authorityRevision: row.authorityRevision,
           createdAtMs: row.createdAtMs,
           appRoot: candidate.appRoot,
