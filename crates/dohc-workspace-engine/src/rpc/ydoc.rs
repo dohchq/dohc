@@ -2784,7 +2784,7 @@ impl EngineService {
             None => (
                 open.actor
                     .ydoc_resync(
-                        session.key,
+                        session.key.clone(),
                         session.lineage_claim_id,
                         cancellation.token(),
                         session.restore_generation,
@@ -2806,6 +2806,19 @@ impl EngineService {
                 .set_lineage_claim(state.lineage_claim_id.clone())
                 .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
+        }
+        if owner_draft.is_none() && session.restore_generation.is_none() {
+            open.actor
+                .ydoc_write_owed(
+                    session.key,
+                    YdocCloseMaterialization {
+                        root_dir: open.root.clone(),
+                        self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+                    },
+                    now_ms()?,
+                )
+                .await
+                .map_err(map_runtime)?;
         }
         // The resync committed the document's pulled edits, so it runs to its
         // answer, its blob included. If the blob cannot have its egress budget
