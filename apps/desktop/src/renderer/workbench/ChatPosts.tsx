@@ -1012,7 +1012,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           data-testid="chats-message"
           data-message-id={openingMessage.id}
           data-author-kind={openingMessage.authorKind}
-          className={`group relative flex gap-2.5 px-2 transition-shadow ${
+          className={`group relative flex items-start gap-2.5 px-2 transition-shadow ${
             flashMessageId === openingMessage.id ? "dohc-target-flash" : ""
           }`}
         >
