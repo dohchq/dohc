@@ -179,3 +179,128 @@ fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
     assert!(text.contains('z'), "{text}");
     assert!(ready(&store, "doc-a"));
 }
+
+#[test]
+fn a_hosted_edit_read_before_its_kept_base_applies_once_the_base_replays() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+    let base = note.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    let edit = crate::moment_apply_tests::format_two_sequence_edit(&note, 7, "z");
+    ydoc_row(&feed, ("writer", 0), ("doc-a", "a.md"), edit, &claim);
+    ydoc_row(&feed, ("owner", 1), ("doc-a", "a.md"), base, &claim);
+    feed.create("owner", 2, "doc-a", "a.md", "A note.\n");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert_eq!(kept_of(&store, "doc-a"), 2);
+    replay_reading(&mut store);
+    for _ in 0..2 {
+        reading_body_sequence_here(|| sync(&client, &mut store));
+    }
+    assert_eq!(kept_of(&store, "doc-a"), 0);
+    let text = note_text(&store, "doc-a");
+    assert_eq!(text.matches('z').count(), 1, "{text}");
+    assert!(ready(&store, "doc-a"));
+}
+
+#[test]
+fn a_kept_base_of_a_returning_note_waits_while_another_spelling_holds_its_path() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    format_two_note(&feed, (1, 0), "doc-a", "a.md");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync_parking(&client, &mut store);
+    assert_eq!(kept_of(&store, "doc-a"), 2);
+    let feed = client.transport();
+    feed.unshare("doc-a");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-a"));
+    feed.create("owner", 10, "doc-c", "A.md", "Other.\n");
+    feed.share("doc-c", "A.md");
+    sync_parking(&client, &mut store);
+    feed.share("doc-a", "a.md");
+    replay_reading(&mut store);
+    reading_body_sequence_here(|| sync_parking(&client, &mut store));
+    assert_eq!(kept_of(&store, "doc-a"), 2);
+    assert!(is_parked(&store, "doc-a"));
+    feed.unshare("doc-c");
+    reading_body_sequence_here(|| sync_parking(&client, &mut store));
+    reading_body_sequence_here(|| sync_parking(&client, &mut store));
+    assert!(ready(&store, "doc-a"));
+    assert_eq!(kept_of(&store, "doc-a"), 0);
+    let text = note_text(&store, "doc-a");
+    assert!(text.contains('z'), "{text}");
+}
+
+fn kept_reasons_of(store: &EngineStore, object_id: &str) -> Vec<String> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT k.reason FROM replication_refused_ydoc_blobs k \
+                 JOIN replication_log l USING (workspace_id, origin_id, origin_seq) \
+                 WHERE json_extract(l.payload_json,'$.objectId')=?1 ORDER BY k.relay_seq",
+            )?
+            .query_map([object_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_hosted_kept_base_refused_for_its_size_keeps_its_claim_and_refuses_a_later_edit() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let (base, later) = reading_body_sequence_here(|| {
+        let note = dohc_engine_collab::ydoc::format_two_note_for_test("A note.\n");
+        note.apply(&crate::moment_apply_tests::format_two_sequence_edit(
+            &note,
+            9,
+            &"x".repeat(MAX_TEXT_BYTES),
+        ))
+        .unwrap();
+        (
+            note.encode_full_state(),
+            crate::moment_apply_tests::format_two_sequence_edit(&note, 13, "q"),
+        )
+    });
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    ydoc_row(&feed, ("owner", 1), ("doc-a", "a.md"), base, &claim);
+    feed.create("owner", 2, "doc-a", "a.md", "A note.\n");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert_eq!(kept_of(&store, "doc-a"), 1);
+    replay_reading(&mut store);
+    reading_body_sequence_here(|| sync(&client, &mut store));
+    let reasons = kept_reasons_of(&store, "doc-a");
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].contains("projection exceeds"), "{reasons:?}");
+    ydoc_row(
+        client.transport(),
+        ("writer", 0),
+        ("doc-a", "a.md"),
+        later,
+        &claim,
+    );
+    reading_body_sequence_here(|| sync(&client, &mut store));
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM ydoc_deferred_updates"),
+        0
+    );
+    let refused: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id=?1",
+                ["writer"],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(refused, reasons[0]);
+}

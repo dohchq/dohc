@@ -7961,6 +7961,77 @@ mod tests {
         assert_eq!(store.commit_count_for_harness(), commits);
     }
 
+    struct CrashAtCommit {
+        nth: usize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl dohc_engine_storage::FaultInjector for CrashAtCommit {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            use std::sync::atomic::Ordering;
+            if point == dohc_engine_storage::FaultPoint::StorageBeforePersist
+                && self.seen.fetch_add(1, Ordering::SeqCst) == self.nth
+            {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+
+    #[test]
+    fn a_crash_at_each_commit_of_a_successor_replay_lands_its_edit_once() {
+        use std::sync::atomic::Ordering;
+        for moved in [false, true] {
+            let crash = |nth| CrashAtCommit {
+                nth,
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let counted = crash(usize::MAX);
+            let KeptSuccessor { mut store, .. } = kept_successor_with_edit(moved, false, true);
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                crate::replay_kept_format_two(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &counted,
+                )
+            })
+            .expect("the replay goes on");
+            let commits = counted.seen.load(Ordering::SeqCst);
+            assert!(commits >= 3, "moved {moved}: {commits} commits");
+            for nth in 0..commits {
+                let case = format!("moved {moved}, crash at commit {nth}");
+                let KeptSuccessor {
+                    mut store,
+                    key,
+                    successor,
+                    ..
+                } = kept_successor_with_edit(moved, false, true);
+                let crashed = crash(nth);
+                let _ = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                    crate::replay_kept_format_two(
+                        &mut store,
+                        &mut dohc_engine_collab::WriterDocCache::new(),
+                        &crashed,
+                    )
+                });
+                assert!(crashed.seen.load(Ordering::SeqCst) > nth, "{case}");
+                replay_reading(&mut store);
+                assert_eq!(kept_rows_and_notices(&store).0, 0, "{case}");
+                assert_eq!(deferred_rows(&store), 0, "{case}");
+                let text = if moved {
+                    archived_successor_text(&store)
+                } else {
+                    assert_eq!(active_claim(&store, &key), Some(successor), "{case}");
+                    dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                        projected_ydoc_text(&mut store, &key)
+                    })
+                };
+                assert_eq!(text.matches('z').count(), 1, "{case}: {text}");
+            }
+        }
+    }
+
     #[test]
     fn a_refused_resolution_with_no_successor_lets_the_pull_go_on() {
         use yrs::{Map as _, ReadTxn as _, Text as _, Transact as _};
