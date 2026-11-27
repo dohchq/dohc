@@ -235,7 +235,10 @@ fn a_hosted_replica_replays_a_kept_edit_onto_its_archived_note() {
     assert_eq!(kept_of(&store, "doc-a"), 1);
     assert_eq!(replay_reading(&mut store), 0);
     reading_body_sequence_here(|| sync(&client, &mut store));
-    assert_eq!(kept_of(&store, "doc-a"), 0);
+    assert_eq!(
+        (kept_reasons(&store, "writer"), refusal_of(&store, "writer")),
+        (Vec::new(), None)
+    );
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM ydoc_deferred_updates"),
         0
@@ -433,22 +436,17 @@ fn a_replayed_base_of_another_document_does_not_rewind_this_one() {
     let claim = dohc_engine_storage::hex_sha256(&base);
     let edit = crate::moment_apply_tests::format_two_sequence_edit(&note, 7, "z");
     ydoc_row(&feed, ("writer", 0), ("doc-a", "a.md"), edit, &claim);
-    ydoc_row(&feed, ("owner", 1), ("doc-b", "b.md"), base, &claim);
+    ydoc_row(&feed, ("owner", 1), ("doc-a", "a.md"), base.clone(), &claim);
+    ydoc_row(&feed, ("other", 0), ("doc-b", "b.md"), base, &claim);
     feed.share("doc-a", "a.md");
     feed.share("doc-b", "b.md");
     let client = RelaySyncClient::new(feed);
     sync(&client, &mut store);
-    assert_eq!(
-        count(
-            &store,
-            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
-        ),
-        2
-    );
+    assert_eq!((kept_of(&store, "doc-a"), kept_of(&store, "doc-b")), (2, 1));
     let retry = store
         .write_with(&NoFaults, |tx| {
             tx.execute(
-                "UPDATE replication_refused_ydoc_blobs SET replayed=1 WHERE origin_id='owner'",
+                "UPDATE replication_refused_ydoc_blobs SET replayed=1 WHERE origin_id='other'",
                 [],
             )
             .map_err(SyncError::persist)?;
@@ -587,6 +585,7 @@ fn resolution_after(
         successor.update.clone(),
         successor.state_vector.clone(),
         resolved.as_bytes().to_vec(),
+        head.text.as_bytes().to_vec(),
     ];
     (vec![parent, child], blobs, successor.lineage_claim_id)
 }
@@ -673,6 +672,7 @@ fn a_kept_base_of_a_renamed_note_replays_while_another_note_takes_its_old_spelli
         "A note.\n",
         "moment-owner-2",
     );
+    feed.share("doc-a", "b.md");
     sync(&client, &mut store);
     feed.create("owner", 4, "doc-c", "A.md", "Other.\n");
     feed.share("doc-c", "A.md");
