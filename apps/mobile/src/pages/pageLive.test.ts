@@ -362,7 +362,9 @@ describe("drops", () => {
 
   it("opens the page again by itself when the note's lineage was replaced and nothing is unsent", async () => {
     const t = await connected(ready(), ready());
-    t.fromPage(1)({
+    const page = t.fromPage(1);
+    page({ type: "close" });
+    page({
       type: "state",
       facts: {
         status: "quarantined",
@@ -374,6 +376,7 @@ describe("drops", () => {
     expect(t.sockets[0]!.socket.closed).toBe(true);
     await vi.waitFor(() => expect(t.sockets).toHaveLength(2));
     t.latest().open();
+    page({ type: "took" });
     expect(t.server.paths()).toEqual([OPEN, OPEN]);
     expect(t.posted.at(-1)).toMatchObject({ type: "connect", gen: 2, seq: 1 });
     expect(t.live.state().phase).toBe("open");
@@ -393,11 +396,21 @@ describe("drops", () => {
 
   it("stays stopped on any other changed binding, even with nothing unsent", async () => {
     const t = await connected(ready(), ready());
-    t.fromPage(1)({
+    const page = t.fromPage(1);
+    page({
       type: "state",
       facts: { status: "quarantined", reason: "binding-changed", pendingUpdates: 0, unsent: false },
     });
     expect(t.live.state()).toMatchObject({ phase: "refused", reason: "binding-changed" });
+    page({
+      type: "state",
+      facts: {
+        status: "quarantined",
+        reason: "lineage-replaced",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
     t.live.retry();
     expect(t.server.paths()).toEqual([OPEN]);
   });
