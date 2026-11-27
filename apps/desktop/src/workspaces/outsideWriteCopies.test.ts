@@ -501,6 +501,15 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(admit).not.toHaveBeenCalled();
   });
 
+  it("lets the engine write a file whose folder differs only in case", async () => {
+    const { rootPath, copies } = await setup();
+    await mkdir(join(rootPath, "docs"));
+    expect(await copies.beforeWrite("Docs/n.md", null, vi.fn(), vi.fn())).toEqual({
+      kept: false,
+      engine: { diskSha256: null },
+    });
+  });
+
   it.each([
     "a".repeat(250),
     "\u754c".repeat(process.platform === "win32" ? 90 : 80),

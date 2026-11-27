@@ -148,14 +148,17 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
     if (result.errors.length) loaded = null;
     return result;
   }
-  // Plain when the path leads where it is spelled, to a file or nothing.
   async function readSource(path: string): Promise<{ plain: boolean; source: CopySource | null }> {
     const { relative, resolvedAbsolute: absolute } = await resolved(path);
     const entry = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    const plain = relative === path && (entry === null || entry.isFile());
+    const unlinked =
+      process.platform === "linux"
+        ? relative === path
+        : relative.toLowerCase() === path.toLowerCase();
+    const plain = unlinked && (entry === null || entry.isFile());
     if (!entry?.isFile() || entry.isSymbolicLink()) return { plain, source: null };
     return { plain, source: { absolute, entry, sha256: await digest(absolute) } };
   }

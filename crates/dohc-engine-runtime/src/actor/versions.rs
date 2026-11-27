@@ -1455,7 +1455,8 @@ impl ActorHandle {
     /// Bring each text file to its head in the active version, but only
     /// where the disk still holds the state the caller approved: absent, or
     /// the digest it read. A file already at its head stays; any other change
-    /// since, or a head that is gone, refuses.
+    /// since, or a head that is gone, refuses. The caller admitted each path,
+    /// so a broken policy file does not stop it.
     pub async fn materialize_approved_heads(
         &self,
         workspace_id: String,
@@ -1577,7 +1578,8 @@ fn materialize_page_on_store(
         .get_active_version(workspace_id)?
         .version_id;
     let policy = read_engine_search_policy(root_dir);
-    if policy.is_degraded() {
+    let admitted = approved.is_some() && policy.is_degraded();
+    if policy.is_degraded() && !admitted {
         return Err(DomainError::StateCorrupt {
             reason: "ordinary materialization policy unavailable",
         }
@@ -1612,7 +1614,8 @@ fn materialize_page_on_store(
             }
             .into());
         }
-        let tracked = change.content_kind == "secret"
+        let tracked = admitted
+            || change.content_kind == "secret"
             || resolve_effective_policy(
                 &change.path,
                 policy.files_policy.as_deref(),
@@ -2158,6 +2161,8 @@ pub(super) mod tests {
             write_head(&mut store, &format!("doc-{index}"), path, "head\n", 3);
         }
         delete_head(&mut store, "gone.md", 4);
+        std::fs::create_dir_all(scratch.join(".dohc")).unwrap();
+        std::fs::write(scratch.join(".dohc/visibility.toml"), "[[[").unwrap();
         for (path, disk) in [
             ("approved.md", "old\n"),
             ("current.md", "head\n"),
