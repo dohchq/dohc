@@ -231,6 +231,38 @@ describe("the live document", () => {
     expect(written()).toBe(0);
     expect(hoisted.posted).toContain("unsupportedFormat");
   });
+
+  const copy = () => {
+    (window as unknown as { __dohcCopyMarkdown(): void }).__dohcCopyMarkdown();
+    return hoisted.copied.at(-1);
+  };
+
+  it("binds the editor to the reopened provider's document, and the old editor and copying leave the old one", () => {
+    const { changed } = follow();
+    changed(provider(sequenceNote()));
+    const [first] = hoisted.mounted;
+    const next = markdownToYDoc("Converted list", { bodySequence: true });
+    changed(provider(next));
+    const [, second] = hoisted.mounted;
+    expect(hoisted.mounted).toHaveLength(2);
+    expect(first?.destroy).toHaveBeenCalledOnce();
+    expect(second?.doc).toBe(next);
+    const change = vi.fn();
+    expect(first?.canEdit()).toBe(false);
+    expect(first?.edit(change)).toBe(false);
+    expect(change).not.toHaveBeenCalled();
+    expect(second?.canEdit()).toBe(true);
+    expect(copy()).toBe("Converted list\n");
+  });
+
+  it("still copies the old document while the page stays stopped with typing unsent", () => {
+    const { changed } = follow();
+    const old = sequenceNote();
+    changed(provider(old));
+    changed({ ...provider(old), state: () => ({ status: "quarantined" }) } as LiveProvider);
+    expect(hoisted.mounted).toHaveLength(1);
+    expect(copy()).toBe("Packing list\n");
+  });
 });
 
 describe("a newer read of the page", () => {

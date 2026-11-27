@@ -10,11 +10,15 @@ import {
   type ToPage,
 } from "../src/pages/liveBridge";
 
-// The page's side of a live connection, without the DOM: the provider, and the bridge to the app that owns its socket
-// (src/pages/liveBridge.ts). The provider is made on the first `connect` and reused on every later one, so its waiting
-// updates keep their IDs. It is never seeded with the text the app read, so it takes no edits until it is live.
-
 export type LiveProvider = ReturnType<typeof createNamedLiveProvider>;
+
+function unsent(made: LiveProvider) {
+  const state = made.state();
+  const ended = state.status === "quarantined" || state.status === "closed";
+  return state.pendingUpdates > 0 || (ended && made.unsentText() !== null);
+}
+
+const successorOf = (made: LiveProvider) => (unsent(made) ? null : made.replacement());
 
 export function createLiveAdapter(options: {
   /** Posts a message to the app. */
@@ -26,6 +30,7 @@ export function createLiveAdapter(options: {
   let check = incoming(0);
   let toApp: (body: Body<FromPage>) => void = () => undefined;
   let provider: LiveProvider | undefined;
+  let unsubscribe = () => {};
   let route: ReturnType<LiveProvider["connect"]> | undefined;
   // The connection, with the one frame the app hasn't sent yet: the provider waits for each send.
   type Connection = { waiting?: { resolve(): void; reject(error: Error): void } };
@@ -33,14 +38,13 @@ export function createLiveAdapter(options: {
 
   function report(made: LiveProvider) {
     const state = made.state();
-    const ended = state.status === "quarantined" || state.status === "closed";
     toApp({
       type: "state",
       facts: {
         status: state.status,
         reason: state.reason,
         pendingUpdates: state.pendingUpdates,
-        unsent: state.pendingUpdates > 0 || (ended && made.unsentText() !== null),
+        unsent: unsent(made),
       },
     });
   }
@@ -58,12 +62,17 @@ export function createLiveAdapter(options: {
     drop();
     const reply = toApp;
     try {
-      if (!provider) {
-        const made = createNamedLiveProvider(message.limits.provider, {
-          workspaceId: message.workspaceId,
-          objectId: message.objectId,
-        });
-        made.subscribe(() => {
+      const successor = provider && successorOf(provider);
+      if (!provider || successor) {
+        unsubscribe();
+        provider?.close();
+        const made = createNamedLiveProvider(
+          message.limits.provider,
+          { workspaceId: message.workspaceId, objectId: message.objectId },
+          undefined,
+          successor ?? undefined,
+        );
+        unsubscribe = made.subscribe(() => {
           options.changed(made);
           report(made);
         });

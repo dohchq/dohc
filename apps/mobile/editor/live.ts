@@ -14,7 +14,8 @@ export function followLive(input: {
   readonly label: string;
   endEditing(): void;
 }) {
-  let shown = false;
+  let shown: LiveProvider | null = null;
+  let host: HTMLDivElement | null = null;
   let wasLive = false;
   let refused = false;
   let editor: ReturnType<typeof mountLiveBodyEditor> | null = null;
@@ -28,16 +29,20 @@ export function followLive(input: {
   }
 
   function show(made: LiveProvider) {
-    shown = true;
+    shown = made;
     if (!opensFormat(made.doc)) {
       refuse();
       return;
     }
-    const next = document.createElement("div");
-    next.className = input.body.className;
-    next.hidden = true;
-    input.body.after(next);
-    const takesEdits = () => !refused && made.state().status === "live";
+    const first = !host;
+    const next = host ?? document.createElement("div");
+    host = next;
+    if (first) {
+      next.className = input.body.className;
+      next.hidden = true;
+      input.body.after(next);
+    }
+    const takesEdits = () => !refused && shown === made && made.state().status === "live";
     let sequence = readsBodySequence(made.doc);
     const mount = () =>
       mountLiveBodyEditor(next, {
@@ -51,27 +56,29 @@ export function followLive(input: {
         },
         unwritten: (why) => why !== "guarded" && post("unwritten", { why }),
       });
+    editor?.destroy();
     editor = mount();
     made.doc.on("update", () => {
-      if (refused) return;
+      if (refused || shown !== made) return;
       if (!opensFormat(made.doc)) return refuse();
       if (readsBodySequence(made.doc) === sequence) return;
       sequence = !sequence;
       editor?.destroy();
       editor = mount();
     });
-    made.subscribe(() => editor?.refresh());
+    made.subscribe(() => shown === made && editor?.refresh());
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(made.doc) });
     // Swapped once the live editor has drawn, so the read text never leaves an empty frame.
-    requestAnimationFrame(() =>
-      setTimeout(() => {
-        if (refused) return;
-        input.body.remove();
-        input.readOnly.destroy();
-        next.hidden = false;
-      }, 0),
-    );
+    if (first)
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          if (refused) return;
+          input.body.remove();
+          input.readOnly.destroy();
+          next.hidden = false;
+        }, 0),
+      );
   }
 
   const adapter = createLiveAdapter({
@@ -79,7 +86,7 @@ export function followLive(input: {
     changed(made) {
       if (refused) return;
       const live = made.state().status === "live";
-      if (live && !shown) show(made);
+      if (live && shown !== made) show(made);
       // Editing stops at once when the page isn't live: the caret goes, and the keyboard with it.
       if (wasLive && !live) input.endEditing();
       wasLive = live;
