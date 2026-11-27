@@ -23,6 +23,8 @@ mod file_search;
 mod hosted;
 mod hydration;
 mod journal;
+mod kept_replay;
+pub use kept_replay::replay_kept_format_two;
 mod live_audit;
 mod model;
 mod moment_apply;

@@ -7675,6 +7675,98 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_format_two_successor_and_its_held_edit_stay_kept_when_the_engine_reads_format_two() {
+        for (reading, with_field) in [(false, true), (false, false), (true, true)] {
+            successor_and_its_edit_stay_kept(reading, with_field);
+        }
+    }
+
+    fn successor_and_its_edit_stay_kept(reading: bool, with_field: bool) {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Text, Transact};
+        let (_scratch, mut store, key, built) = format_two_successor_fixture();
+        let successor = built.value["lineageTransition"]["successor"]["lineageClaimId"]
+            .as_str()
+            .expect("successor claim")
+            .to_owned();
+        refuses_the_successor(&mut store, &key, built.value, NEWER_BODY_FORMAT);
+        let raw = yrs::Doc::with_client_id(11);
+        let successor_bytes = store
+            .get_binary_blob(&successor)
+            .expect("read successor")
+            .expect("successor blob");
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&successor_bytes).expect("decode"))
+            .expect("load successor");
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_text(dohc_engine_collab::ydoc::ROOT_SEQUENCE)
+            .insert(&mut raw.transact_mut(), 0, "z");
+        let edit = store
+            .put_binary_blob(&raw.transact().encode_state_as_update_v1(&before))
+            .expect("edit blob");
+        let mut payload = json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"richdoc","updateBlobSha256":edit,"lineageClaimId":successor,"isBaseState":false});
+        if !with_field {
+            payload
+                .as_object_mut()
+                .expect("payload")
+                .remove("isBaseState");
+        }
+        let mut next = imported_envelope(1, "ydoc.update", payload);
+        next.relay_seq = Some(1);
+        let arrive = |store: &mut EngineStore| {
+            crate::apply_replication_envelope(
+                store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &next,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+        };
+        let arrived = if reading {
+            dohc_engine_collab::ydoc::reading_body_sequence_here(|| arrive(&mut store))
+        } else {
+            arrive(&mut store)
+        };
+        arrived.expect("the edit is kept");
+        let left = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT (SELECT COUNT(*) FROM replication_refused_ydoc_blobs), \
+                                (SELECT COUNT(*) FROM replication_pending_refusals \
+                                  WHERE origin_id='peer')",
+                        [],
+                        |row| Ok::<(i64, i64), _>((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .expect("kept rows")
+        };
+        let kept = left(&store);
+        assert_eq!(kept.0, 2, "reading {reading}, isBaseState {with_field}");
+        let state = (active_claim(&store, &key), divergence_state(&store));
+        for _ in 0..2 {
+            let replayed = dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
+                crate::replay_kept_format_two(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &NoFaults,
+                )
+            })
+            .expect("the replay goes on");
+            assert_eq!(replayed, 0);
+            assert_eq!(
+                left(&store),
+                kept,
+                "reading {reading}, isBaseState {with_field}"
+            );
+            assert_eq!(
+                (active_claim(&store, &key), divergence_state(&store)),
+                state
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_resolution_with_no_successor_lets_the_pull_go_on() {
         use yrs::{Map as _, ReadTxn as _, Text as _, Transact as _};
         let (_scratch, mut store, key, built) =

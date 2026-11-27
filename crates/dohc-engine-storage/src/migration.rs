@@ -3832,6 +3832,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("merge_bases_bidirectional.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 115,
+        id: "v2-kept-format-two-replay",
+        sql: include_str!("kept_format_two_replay.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5597,6 +5603,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_kept_ydoc_row_records_why_where_whether_it_replayed_and_whether_it_counted() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(
+            &mut conn,
+            BASELINE_MIGRATIONS,
+            &MigrationContext::current(1000),
+            &NoFaults,
+        )
+        .unwrap();
+        let columns = conn
+            .prepare("SELECT name, \"notnull\", dflt_value FROM pragma_table_info('replication_refused_ydoc_blobs') WHERE cid >= 4")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let open = |name: &str| (name.to_owned(), false, None);
+        assert_eq!(
+            columns,
+            [
+                open("reason"),
+                open("relay_seq"),
+                open("replication_epoch"),
+                open("stream_identity"),
+                ("replayed".to_owned(), true, Some("0".to_owned())),
+                ("counted".to_owned(), true, Some("0".to_owned())),
+            ]
+        );
+    }
+
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6054,6 +6098,10 @@ mod tests {
             (
                 "v2-merge-bases-bidirectional",
                 "72a93ceffe4dc0030240dc969356f91c6001884671531c1b003852eb93033ce9",
+            ),
+            (
+                "v2-kept-format-two-replay",
+                "68d67c24f40109fafd44d0a8f3f9277689fdc3f14c79013e9971b1c70bbbe587",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

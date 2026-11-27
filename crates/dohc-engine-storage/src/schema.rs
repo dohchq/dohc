@@ -287,6 +287,12 @@ const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("versions", "archived_at_ms"),
     ("merge_bases", "merge_seq"),
     ("secret_merge_bases", "merge_seq"),
+    ("replication_refused_ydoc_blobs", "reason"),
+    ("replication_refused_ydoc_blobs", "relay_seq"),
+    ("replication_refused_ydoc_blobs", "replication_epoch"),
+    ("replication_refused_ydoc_blobs", "stream_identity"),
+    ("replication_refused_ydoc_blobs", "replayed"),
+    ("replication_refused_ydoc_blobs", "counted"),
 ];
 
 /// How an existing file was classified by the fingerprint fence.

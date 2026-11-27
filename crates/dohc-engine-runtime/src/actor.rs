@@ -466,29 +466,38 @@ impl WorkspaceActor {
         let worker_markdown_recovery = markdown_recovery.clone();
         let wake = tx.downgrade();
         let worker_identity = identity.clone();
+        #[cfg(test)]
+        let reading = dohc_engine_collab::ydoc::reads_body_sequence();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
-                worker_main(
-                    StorePaths {
-                        named: named_path,
-                        open: db_path,
-                        identity: worker_identity,
-                    },
-                    now_ms,
-                    mode,
-                    root_token,
-                    rx,
-                    wake,
-                    worker_state,
-                    worker_metrics,
-                    worker_link_drain_holds,
-                    startup_tx,
-                    writer_lock,
-                    work,
-                    worker_tails,
-                    worker_markdown_recovery,
-                )
+                let serve = move || {
+                    worker_main(
+                        StorePaths {
+                            named: named_path,
+                            open: db_path,
+                            identity: worker_identity,
+                        },
+                        now_ms,
+                        mode,
+                        root_token,
+                        rx,
+                        wake,
+                        worker_state,
+                        worker_metrics,
+                        worker_link_drain_holds,
+                        startup_tx,
+                        writer_lock,
+                        work,
+                        worker_tails,
+                        worker_markdown_recovery,
+                    )
+                };
+                #[cfg(test)]
+                if reading {
+                    return dohc_engine_collab::ydoc::reading_body_sequence_here(serve);
+                }
+                serve()
             })
             .map_err(RuntimeError::ThreadSpawn)?;
 
@@ -1334,8 +1343,16 @@ fn worker_main(
     if matches!(mode, ActorOpenMode::ReadWrite) {
         close_stranded_owner_bindings(&mut store, now_ms);
     }
+    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
         replay_retained_owner_private(&mut store);
+        if let Err(error) = dohc_engine_sync::replay_kept_format_two(
+            &mut store,
+            &mut doc_cache,
+            &dohc_engine_storage::NoFaults,
+        ) {
+            eprintln!("engine: kept format-2 notes stay kept: {error}");
+        }
     }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the
@@ -1365,11 +1382,6 @@ fn worker_main(
     // batch per idle slot.
     let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
-    // The writer thread's cache of live Y.Docs serves the replay-parity gate
-    // base on the local append path only. It lives and dies with this thread,
-    // exactly the single-writer scope its validity proof (`doc_cache.rs`,
-    // CACHE-VALID) assumes.
-    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     let mut live_applications = live_application::Registry::default();
 
     // Blocking recv on the tokio channel keeps the SQLite work on this
@@ -1703,6 +1715,10 @@ mod reader_tests;
 #[cfg(test)]
 #[path = "actor/page_check_tests.rs"]
 mod page_check_tests;
+
+#[cfg(test)]
+#[path = "actor/kept_format_two_tests.rs"]
+mod kept_format_two_tests;
 
 #[cfg(test)]
 #[path = "actor/owner_retirement_tests.rs"]

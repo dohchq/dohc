@@ -318,7 +318,16 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // A hosted replica receives each origin sparsely, so the journal alone
         // says whether a coordinate applied, and its ack never moves.
         let hosted = crate::hosted::is_hosted(tx, &envelope.workspace_id)?;
-        if hosted {
+        let kept = crate::kept_replay::kept_candidate(tx, envelope)?;
+        if kept {
+            let row = journaled_coordinate(tx, envelope)?.ok_or(SyncError::CoordinateDiverged)?;
+            if !coordinate_matches(&row, envelope)? {
+                return Err(SyncError::CoordinateDiverged);
+            }
+            if crate::kept_replay::held_behind_its_base(tx, envelope)? {
+                return redelivered(tx, envelope, Some(row));
+            }
+        } else if hosted {
             if let Some(row) = journaled_coordinate(tx, envelope)? {
                 return redelivered(tx, envelope, Some(row));
             }
@@ -352,7 +361,10 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         let server_refusal = crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         let mutation_result = match server_refusal {
             Some(refusal) => Ok(MutationOutcome::RefusedRetainingMutation { reason: refusal.reason.message().to_owned() }),
-            None => mutation(tx,envelope),
+            None => mutation(tx,envelope).map_err(|error| match error {
+                SyncError::CoordinateDiverged if kept => SyncError::InvalidInput { reason: crate::kept_replay::CANNOT_SETTLE },
+                error => error,
+            }),
         };
         let admission = match mutation_result {
             Ok(MutationOutcome::Applied(value)) => {
@@ -421,7 +433,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             && !crate::live_audit::is_audit(envelope)
         {
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
-            if !exists { persist_refusal(tx, refusal)?; }
+            if !exists || kept { persist_refusal(tx, refusal)?; }
         }
         // A quietly retained record is not applied either.
         let apply_disposition = if matches!(&admission, Admission::Refused(_) | Admission::RetainedQuietly) {
@@ -430,10 +442,15 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             "applied"
         };
         tx.execute(
-            "INSERT INTO replication_log \
-             (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported, \
-              apply_disposition) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+            if kept {
+                "UPDATE replication_log SET apply_disposition=?7 \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3"
+            } else {
+                "INSERT INTO replication_log \
+                 (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported, \
+                  apply_disposition) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)"
+            },
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
@@ -454,7 +471,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not
         // when a later drain applies it.
-        if mutation_committed {
+        if mutation_committed && !(kept && crate::kept_replay::counted_when_parked(tx, envelope)?) {
             dohc_engine_storage::count_remote_change_in_tx(tx, &envelope.workspace_id)?;
         }
         if let Admission::Refused(refusal) = &admission
@@ -480,10 +497,19 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 crate::ydoc_apply::LIVE_UNADMITTED_UPDATE | crate::ydoc_apply::NEWER_BODY_FORMAT
             )
         {
-            crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq, refusal.reason.message(), envelope.relay_seq)?;
             if refusal.reason.message() == crate::ydoc_apply::NEWER_BODY_FORMAT {
-                crate::ydoc_apply::refuse_rows_of_a_kept_base_in_tx(tx, envelope)?;
+                crate::ydoc_apply::refuse_rows_of_a_kept_base_in_tx(tx, envelope, crate::ydoc_apply::NEWER_BODY_FORMAT)?;
             }
+        }
+        match &admission {
+            Admission::Refused(refusal) if kept && !mutation_committed => {
+                if refusal.reason.message() != crate::ydoc_apply::NEWER_BODY_FORMAT {
+                    crate::kept_replay::refuse_claim_in_tx(tx, envelope, refusal.reason.message())?;
+                }
+            }
+            _ if kept => crate::kept_replay::mark_replayed_in_tx(tx, envelope)?,
+            _ => {}
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         if hosted {
@@ -522,6 +548,9 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         }),
         SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
             reason: (*reason).to_owned(),
+        }),
+        SyncError::BaseRefused { reason } => Some(RefusalReason::InvalidInput {
+            reason: reason.clone(),
         }),
         SyncError::InputTooLarge {
             constraint,
@@ -564,7 +593,9 @@ pub(crate) fn persist_refusal(
     tx.execute(
         "INSERT INTO replication_pending_refusals \
          (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
-         VALUES (?1,?2,?3,?4,?5,?6)",
+         VALUES (?1,?2,?3,?4,?5,?6) \
+         ON CONFLICT(workspace_id,origin_id,origin_seq) DO UPDATE SET op_kind=excluded.op_kind, \
+           reason_code=excluded.reason_code, reason_message=excluded.reason_message, report_id=NULL",
         params![
             refusal.workspace_id,
             refusal.origin_id,

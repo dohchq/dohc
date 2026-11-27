@@ -621,7 +621,7 @@ mod tests {
             tx.execute("INSERT INTO owner_ydoc_outbox_refusals VALUES ('outbox','delivery','refusal-key')",[]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
-            tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO replication_refused_ydoc_blobs (workspace_id,origin_id,origin_seq,update_sha256) VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_publications VALUES ('relay','workspace','main','object',?1,'{}',?1,'peer',0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();

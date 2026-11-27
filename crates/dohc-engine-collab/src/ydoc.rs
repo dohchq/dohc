@@ -134,6 +134,10 @@ fn body_sequence_setting() -> bool {
     *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
 }
 
+pub fn reads_body_sequence() -> bool {
+    body_sequence_setting()
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READS_BODY_SEQUENCE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
