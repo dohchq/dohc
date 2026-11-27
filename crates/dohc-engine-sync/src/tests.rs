@@ -1451,6 +1451,7 @@ mod chat;
 mod file_export_lane;
 mod hosted_replica;
 mod markdown_write_hold;
+mod note_format_two;
 mod ordinary_pull_progress;
 mod outbound_authors;
 pub(crate) mod owner_publication;

@@ -64,8 +64,8 @@ pub use apply::{
 };
 pub use conflict_apply::{ConflictApplyResult, apply_conflict_envelope};
 pub use conflict_resolve_v1::{
-    PreparedLocalConflictResolveV1, commit_local_conflict_resolve_v1_in_tx,
-    prepare_local_conflict_resolve_v1_in_tx,
+    FormatTwoConversion, PreparedLocalConflictResolveV1, commit_local_conflict_resolve_v1_in_tx,
+    convert_note_to_format_two_in_tx, prepare_local_conflict_resolve_v1_in_tx,
 };
 pub use cursor::{
     CursorCommit, CursorKind, OrdinaryPullCompletion, RelayCursor, ShareCursor, SharedPeerPosition,

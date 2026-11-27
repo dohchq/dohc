@@ -26,6 +26,10 @@ use crate::{
     ReplicationEnvelope, SyncError,
 };
 
+mod note_format_two;
+
+pub use note_format_two::{FormatTwoConversion, convert_note_to_format_two_in_tx};
+
 const FORMAT_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Copy)]
