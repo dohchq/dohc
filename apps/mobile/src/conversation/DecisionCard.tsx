@@ -22,7 +22,7 @@ export function DecisionCard({
   answers?: AnswerActions;
 }) {
   const theme = useTheme();
-  const { state, options } = decision;
+  const { state, options, details } = decision;
   const open = state.kind === "open";
   const canAnswer = answers !== undefined && !answers.blocked && open;
   const chosen = "chosen" in state ? state.chosen : null;
@@ -41,9 +41,12 @@ export function DecisionCard({
       </View>
       {options.length > 0 ? (
         <View style={styles.options}>
-          {options.map((option) => {
+          {options.map((option, index) => {
             const selected = chosen === option;
             const pending = selected && state.kind === "answering";
+            const detail = details[index];
+            const color =
+              selected && !pending ? theme.bg : canAnswer || selected ? theme.ink : theme.muted;
             return (
               <Pressable
                 key={option}
@@ -53,7 +56,7 @@ export function DecisionCard({
                   answers?.choose(message, option);
                 }}
                 accessibilityRole="button"
-                accessibilityLabel={option}
+                accessibilityLabel={detail ? `${option}. ${detail}` : option}
                 accessibilityState={{ selected, busy: pending, disabled: !canAnswer }}
                 style={({ pressed }) => [
                   styles.option,
@@ -81,21 +84,19 @@ export function DecisionCard({
                     fallback={symbolFallback("checkmark", 14, theme.bg)}
                   />
                 ) : null}
-                <Text
-                  style={[
-                    styles.optionText,
-                    {
-                      color:
-                        selected && !pending
-                          ? theme.bg
-                          : canAnswer || selected
-                            ? theme.ink
-                            : theme.muted,
-                    },
-                  ]}
-                >
-                  {option}
-                </Text>
+                <View style={styles.optionWords}>
+                  <Text style={[styles.optionText, { color }]}>{option}</Text>
+                  {detail ? (
+                    <Text
+                      style={[
+                        styles.optionDetail,
+                        { color: selected && !pending ? theme.bg : theme.muted },
+                      ]}
+                    >
+                      {detail}
+                    </Text>
+                  ) : null}
+                </View>
               </Pressable>
             );
           })}
@@ -167,7 +168,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   pending: { borderStyle: "dashed" },
-  optionText: { flexShrink: 1, fontSize: 17, fontWeight: "600" },
+  optionWords: { flexShrink: 1, gap: 2 },
+  optionText: { fontSize: 17, fontWeight: "600" },
+  optionDetail: { fontSize: 15, lineHeight: 20 },
   actions: { flexDirection: "row" },
   winner: { gap: 2, paddingLeft: 10, borderLeftWidth: 3 },
   winnerName: { fontSize: 15, fontWeight: "600" },

@@ -19,6 +19,7 @@ export type Asked = Pick<
   | "parentMessageId"
   | "decisionState"
   | "options"
+  | "optionDetails"
   | "chosenOption"
   | "resolvedByMessageId"
 >;
@@ -69,7 +70,8 @@ export function decisionOf(
   shown: Shown = nothingShown,
 ): Decision | null {
   if (asked.decisionState === null) return null;
-  const { options } = asked;
+  const options = asked.options;
+  const details = asked.optionDetails;
   const resolved = asked.decisionState === "resolved";
   const serverChosen = resolved ? asked.chosenOption : null;
   const lost = latest(
@@ -82,6 +84,7 @@ export function decisionOf(
     const winner = winnerId === null ? undefined : shown(winnerId);
     return {
       options,
+      details,
       state: {
         kind: "lost",
         chosen: serverChosen,
@@ -91,13 +94,13 @@ export function decisionOf(
     };
   }
   const sending = latest(answers, (record) => unfinished(record) && !record.withheld);
-  if (sending) return { options, state: { kind: "answering", chosen: chosenOf(sending) } };
-  if (resolved) return { options, state: { kind: "answered", chosen: serverChosen } };
+  if (sending) return { options, details, state: { kind: "answering", chosen: chosenOf(sending) } };
+  if (resolved) return { options, details, state: { kind: "answered", chosen: serverChosen } };
   const saved = latest(answers, (record) => record.stage === "saved");
-  if (saved) return { options, state: { kind: "answered", chosen: chosenOf(saved) } };
+  if (saved) return { options, details, state: { kind: "answered", chosen: chosenOf(saved) } };
   if (answers.some((record) => unfinished(record) && record.withheld))
-    return { options, state: { kind: "held" } };
-  return { options, state: { kind: "open" } };
+    return { options, details, state: { kind: "held" } };
+  return { options, details, state: { kind: "open" } };
 }
 
 /** The card's status, in the desktop's words. A lost answer whose winner a read doesn't show says only Answered. */

@@ -68,6 +68,7 @@ const unshown = (id: string, threadId: string): Asked => ({
   parentMessageId: null,
   decisionState: "open",
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
 });

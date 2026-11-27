@@ -142,6 +142,7 @@ const novaAsks = (id: string, body: string, options: readonly string[]): ChatMes
   needsDecision: true,
   decisionState: "open",
   options,
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   reactions: [],

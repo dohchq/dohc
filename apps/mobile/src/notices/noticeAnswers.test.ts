@@ -41,6 +41,7 @@ const question = (fields: Partial<ChatMessage> = {}): ChatMessage => ({
   needsDecision: true,
   decisionState: "open",
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   reactions: [],

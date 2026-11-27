@@ -45,6 +45,7 @@ const question = (fields: Partial<Asked> = {}): Asked => ({
   parentMessageId: null,
   decisionState: "open",
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   ...fields,
@@ -246,7 +247,11 @@ describe("a decision's card", () => {
   });
 
   it("takes an answer while open", () => {
-    expect(decisionOf(poll())).toEqual({ options: ["Lisbon", "Porto"], state: { kind: "open" } });
+    expect(decisionOf(poll())).toEqual({
+      options: ["Lisbon", "Porto"],
+      details: [],
+      state: { kind: "open" },
+    });
   });
 
   it("offers no answer once resolved, and marks the server's choice", () => {
@@ -254,7 +259,11 @@ describe("a decision's card", () => {
       decisionOf(
         poll({ decisionState: "resolved", chosenOption: "Porto", resolvedByMessageId: "m-9" }),
       ),
-    ).toEqual({ options: ["Lisbon", "Porto"], state: { kind: "answered", chosen: "Porto" } });
+    ).toEqual({
+      options: ["Lisbon", "Porto"],
+      details: [],
+      state: { kind: "answered", chosen: "Porto" },
+    });
   });
 
   it("keeps a choice pending until the outbox saves it, then shows it answered", () => {

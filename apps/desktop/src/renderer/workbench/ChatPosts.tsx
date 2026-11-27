@@ -9,7 +9,7 @@ import {
   Reply,
   Zap,
 } from "lucide-react";
-import { memo, type ReactNode, useEffect, useRef, useState } from "react";
+import { memo, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { showMessage } from "./chatsOnScreen";
 import type {
   ActorPresentation,
@@ -112,14 +112,16 @@ export function PollOptions(props: {
   onChoose?: (option: string) => void;
   testIdPrefix: string;
 }) {
+  const id = useId();
   const options = props.decision.options ?? [];
   if (options.length === 0) return null;
+  const details = props.decision.optionDetails;
   const chosen = props.decision.chosenOption;
   const choose = props.onChoose;
   return (
     <ol
       data-testid={`${props.testIdPrefix}-poll-options`}
-      className="m-0 -mx-2 mt-1 flex w-full max-w-md list-none flex-col p-0"
+      className="m-0 -mx-2 flex list-none flex-col p-0"
       onKeyDown={(event) => {
         if (!choose || event.metaKey || event.ctrlKey || event.altKey) return;
         const option = /^[1-9]$/.test(event.key) ? options[Number(event.key) - 1] : undefined;
@@ -131,6 +133,7 @@ export function PollOptions(props: {
       {options.map((option, index) => {
         const taken = chosen === option;
         const key = choose && index < 9 ? String(index + 1) : undefined;
+        const detail = details?.[index];
         return (
           <li key={option}>
             <button
@@ -140,6 +143,8 @@ export function PollOptions(props: {
               disabled={!choose}
               aria-pressed={taken}
               aria-keyshortcuts={key}
+              aria-labelledby={detail ? `${id}-label-${index}` : undefined}
+              aria-describedby={detail ? `${id}-about-${index}` : undefined}
               onClick={() => choose?.(option)}
               className={`dohc-focus-row flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-[13px] leading-5 transition-colors duration-75 ${
                 taken
@@ -158,7 +163,18 @@ export function PollOptions(props: {
                   {taken ? <span className="size-1.5 rounded-full bg-bg" /> : null}
                 </span>
               </span>
-              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{option}</span>
+              <span className="flex min-w-0 flex-1 flex-col [overflow-wrap:anywhere]">
+                <span id={`${id}-label-${index}`}>{option}</span>
+                {detail ? (
+                  <span
+                    id={`${id}-about-${index}`}
+                    data-testid={`${props.testIdPrefix}-poll-option-detail`}
+                    className="text-[12px] font-normal text-muted"
+                  >
+                    {detail}
+                  </span>
+                ) : null}
+              </span>
               {key ? (
                 <kbd
                   aria-hidden
@@ -180,9 +196,12 @@ export function DecisionStatus(props: {
   testIdPrefix: string;
 }) {
   const hasOptions = (props.decision.options?.length ?? 0) > 0;
+  const frame = hasOptions
+    ? "flex w-full max-w-md flex-col gap-1 rounded-lg border border-line bg-panel p-3"
+    : "flex min-w-0 flex-1 flex-col";
   if (props.decision.state === "resolved") {
     return (
-      <span className="flex min-w-0 flex-1 flex-col">
+      <span className={frame}>
         <span
           data-testid={`${props.testIdPrefix}-decision-resolved`}
           className="inline-flex items-center gap-1 text-[12px] text-success"
@@ -195,7 +214,7 @@ export function DecisionStatus(props: {
     );
   }
   return (
-    <span className="flex min-w-0 flex-1 flex-col">
+    <span className={frame}>
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span
           data-testid={`${props.testIdPrefix}-decision-open`}
@@ -657,6 +676,18 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     ? NO_ATTACHMENTS
     : (attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS);
   const openingDecision = openingDeleted ? undefined : decisionsByMessage.get(openingMessage.id);
+  const openingStatus = openingDecision ? (
+    <DecisionStatus
+      decision={openingDecision}
+      onResolve={
+        !threadLocked && openingDecision.state === "open"
+          ? (option) => beginResolve(openingMessage, option)
+          : undefined
+      }
+      testIdPrefix="chats-message"
+    />
+  ) : null;
+  const openingPoll = (openingDecision?.options?.length ?? 0) > 0;
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = isAgentAuthor(openingMessage);
   // A live post shows no heading, so a deleted one shows none either; its
@@ -993,7 +1024,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           data-testid="chats-message"
           data-message-id={openingMessage.id}
           data-author-kind={openingMessage.authorKind}
-          className={`group relative flex gap-2.5 px-2 transition-shadow ${
+          className={`group relative flex items-start gap-2.5 px-2 transition-shadow ${
             flashMessageId === openingMessage.id ? "dohc-target-flash" : ""
           }`}
         >
@@ -1092,8 +1123,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 ))}
               </div>
             ) : null}
+            {openingPoll ? <div className="mt-2 flex">{openingStatus}</div> : null}
             {!openingDeleted &&
-            (openingMessage.work || openingDecision || runRecords[openingMessage.id]) ? (
+            (openingMessage.work ||
+              (openingDecision && !openingPoll) ||
+              runRecords[openingMessage.id]) ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {openingMessage.work ? (
                   <WorkStatus
@@ -1102,17 +1136,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                     className="mt-0"
                   />
                 ) : null}
-                {openingDecision ? (
-                  <DecisionStatus
-                    decision={openingDecision}
-                    onResolve={
-                      !threadLocked && openingDecision.state === "open"
-                        ? (option) => beginResolve(openingMessage, option)
-                        : undefined
-                    }
-                    testIdPrefix="chats-message"
-                  />
-                ) : null}
+                {openingPoll ? null : openingStatus}
                 {runRecords[openingMessage.id] ? (
                   <RunOpening
                     run={runRecords[openingMessage.id]}

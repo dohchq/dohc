@@ -433,6 +433,7 @@ describe("answerReply", () => {
     needsDecision: true,
     decisionState: "open",
     options: [],
+    optionDetails: [],
     chosenOption: null,
     resolvedByMessageId: null,
     reactions: [],

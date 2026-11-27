@@ -41,6 +41,7 @@ const poll = raw({
   needsDecision: true,
   decisionState: "resolved",
   options: ["Alfama", "Baixa"],
+  optionDetails: ["Closer to the river", null],
   chosenOption: "Alfama",
   resolvedByMessageId: "message-2",
   attachments: [
@@ -71,6 +72,7 @@ const kept = {
     needsDecision: true,
     decisionState: "resolved",
     options: ["Alfama", "Baixa"],
+    optionDetails: ["Closer to the river", null],
     chosenOption: "Alfama",
     resolvedByMessageId: "message-2",
     attachments: [
@@ -92,6 +94,7 @@ const kept = {
     needsDecision: false,
     decisionState: null,
     options: [],
+    optionDetails: [],
     chosenOption: null,
     resolvedByMessageId: null,
     attachments: [],
@@ -172,6 +175,15 @@ describe("a chat read's messages", () => {
       [
         "an empty choice",
         raw({ needsDecision: true, decisionState: "open", options: ["Alfama", ""] }),
+      ],
+      [
+        "an explanation for only some choices",
+        raw({
+          needsDecision: true,
+          decisionState: "open",
+          options: ["Alfama", "Baixa"],
+          optionDetails: ["Closer"],
+        }),
       ],
       [
         "a chosen option that isn't text",

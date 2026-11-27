@@ -27,6 +27,7 @@ const entry = (
   needsDecision: false,
   decisionState: null,
   options: [],
+  optionDetails: [],
   chosenOption: null,
   resolvedByMessageId: null,
   reactions: [],
