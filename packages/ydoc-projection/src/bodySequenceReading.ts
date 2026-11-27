@@ -1,4 +1,4 @@
-import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
+import { Fragment, type Node as ProseMirrorNode, type Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
   attrsFor,
@@ -106,6 +106,25 @@ function replacedAt(doc: ProseMirrorNode, pos: number, node: ProseMirrorNode): P
     made = parent.copy(parent.content.replaceChild($pos.index(depth), made));
   }
   return made;
+}
+
+function withNodesAt(
+  doc: ProseMirrorNode,
+  nodes: ReadonlyMap<number, ProseMirrorNode>,
+): ProseMirrorNode {
+  const places = [...nodes.keys()].sort((one, other) => one - other);
+  let next = 0;
+  const rebuilt = (node: ProseMirrorNode, start: number): ProseMirrorNode => {
+    if (next >= places.length || places[next]! >= start + node.content.size) return node;
+    const children: ProseMirrorNode[] = [];
+    node.forEach((child, offset) => {
+      const given = nodes.get(start + offset);
+      if (given) next++;
+      children.push(rebuilt(given ?? child, start + offset + 1));
+    });
+    return node.copy(Fragment.fromArray(children));
+  };
+  return rebuilt(doc, 0);
 }
 
 const contentSize = (node: ProseMirrorNode) => (node.isTextblock ? node.content.size : 0);
@@ -393,32 +412,26 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     return ids;
   };
 
-  const frameAt = (now: BodyReading, block: number, depth: number) =>
-    now.lines[block]?.read?.leaf.path[depth];
-
-  const isContainerOfBlockBefore = (now: BodyReading, block: number, depth: number) => {
-    const above = now.paths[block - 1];
-    const path = now.paths[block]!;
-    if (!above || above.length <= depth) return false;
-    for (let outer = 0; outer <= depth; outer++) if (above[outer] !== path[outer]) return false;
-    return frameAt(now, block - 1, depth)?.type === frameAt(now, block, depth)?.type;
-  };
-
   const refreshContainers = (now: BodyReading, ids: ReadonlySet<string>) => {
-    let doc = now.doc;
-    for (let block = 0; block < now.blocks.length; block++) {
-      const path = now.paths[block]!;
-      for (let depth = 0; depth < path.length; depth++) {
-        if (!ids.has(path[depth]!) || isContainerOfBlockBefore(now, block, depth)) continue;
-        const frame = frameAt(now, block, depth);
-        const pos = doc.resolve(now.starts[block]!).before(depth + 1);
-        const node = doc.nodeAt(pos)!;
+    const refreshed = new Map<number, ProseMirrorNode>();
+    let block = 0;
+    const visit = (parent: ProseMirrorNode, start: number, depth: number) =>
+      parent.forEach((node, offset) => {
+        if (node.isTextblock || node.isLeaf) {
+          block += 1;
+          return;
+        }
+        const pos = start + offset;
+        const id = now.paths[block]?.[depth];
+        const frame =
+          id !== undefined && ids.has(id) ? now.lines[block]?.read?.leaf.path[depth] : undefined;
         const attrs = frame ? attrsFor(node.type, frame.attrs) : node.attrs;
         if (!node.hasMarkup(node.type, attrs, node.marks))
-          doc = replacedAt(doc, pos, node.type.create(attrs, node.content, node.marks));
-      }
-    }
-    now.doc = doc;
+          refreshed.set(pos, node.type.create(attrs, node.content, node.marks));
+        visit(node, pos + 1, depth + 1);
+      });
+    visit(now.doc, 0, 0);
+    if (refreshed.size > 0) now.doc = withNodesAt(now.doc, refreshed);
   };
 
   const place = (): BodyReading => {

@@ -540,3 +540,48 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)("measures a tick in to-do lists of e
   }
   console.log(report.join("\n"));
 });
+
+it("reads a column of a 10,000-row table aligned by someone else in time, as the note reads", () => {
+  const rows = 10_000;
+  const table = noteOf(({ sequence, containers }) => {
+    const records = (id: string, type: string) => {
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        containers.set(key, value);
+    };
+    records("TB", "table");
+    for (let row = 0; row < rows; row++) {
+      records(`R${String(row)}`, "tableRow");
+      records(`C${String(row)}`, "tableCell");
+      sequence.insertEmbed(
+        sequence.length,
+        boundary({ path: ["TB", `R${String(row)}`, `C${String(row)}`] }),
+        {},
+      );
+      sequence.insert(sequence.length, LINE, {});
+    }
+  });
+  const base = page(table, 62);
+  const { view, release } = editorWithNoPage(base);
+  onStop(release);
+  const other = page(table, 63);
+  const report: string[] = [];
+  for (const align of ["center", "right"]) {
+    other.doc.transact(() => {
+      for (let row = 0; row < rows; row++) other.containers.set(`C${String(row)}.align`, align);
+    });
+    const update = other.sent.at(-1)!;
+    const start = performance.now();
+    base.receive(update);
+    const took = performance.now() - start;
+    report.push(`every cell of the column made ${align}, update to editor: ${took.toFixed(0)} ms`);
+    expect(took).toBeLessThan(1_000);
+    expect(readBodySequence(schema, base.doc).eq(view.state.doc)).toBe(true);
+    expect(
+      view.state.doc
+        .child(0)
+        .child(rows - 1)
+        .child(0).attrs.align,
+    ).toBe(align);
+  }
+  console.log(report.join("\n"));
+});

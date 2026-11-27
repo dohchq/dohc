@@ -992,13 +992,14 @@ function markupChangedAt(step: Step, before: ProseMirrorNode): number {
 
 /**
  * The records a dispatch writes when it only sets attributes of containers that each have an id
- * of their own, each to a value read back as itself, by key. Null for any other dispatch.
+ * of their own, each to a value read back as itself, in the order its steps set them. Null for any
+ * other dispatch.
  */
 function containerAttributes(
   reading: BodyReading,
   transactions: readonly Transform[],
-): Map<string, unknown> | null {
-  const writes = new Map<string, unknown>();
+): [key: string, value: unknown][] | null {
+  const writes: [key: string, value: unknown][] = [];
   let held: Map<string, number> | null = null;
   let steps = 0;
   for (const transaction of transactions) {
@@ -1022,7 +1023,7 @@ function containerAttributes(
       for (const [name, value] of Object.entries(node.attrs)) {
         if (same(was.attrs[name], value)) continue;
         if (typeof value === "string" && LONE_HALF.test(value)) return null;
-        writes.set(`${id}.${name}`, value);
+        writes.push([`${id}.${name}`, value]);
       }
     }
   }
@@ -1031,16 +1032,21 @@ function containerAttributes(
 
 const RECORD_BYTES = 64;
 
-function fitsOneChange(writes: ReadonlyMap<string, unknown>): boolean {
+function fitsOneChange(writes: readonly [key: string, value: unknown][]): boolean {
   let bytes = 0;
   for (const [key, value] of writes)
     bytes += RECORD_BYTES + RANGE_BYTES + 3 * (key.length + String(JSON.stringify(value)).length);
   return bytes <= BODY_SEQUENCE_CHANGE_MAX_VALUES;
 }
 
-function writeContainerAttributes(writing: BodyWriting, writes: ReadonlyMap<string, unknown>) {
+function writeContainerAttributes(
+  writing: BodyWriting,
+  writes: readonly [key: string, value: unknown][],
+) {
   const records = writing.sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
-  const changed = [...writes].filter(([key, value]) => !same(storedValue(records, key), value));
+  const changed = [...new Map(writes)].filter(
+    ([key, value]) => !same(storedValue(records, key), value),
+  );
   if (changed.length === 0) return;
   writing.reader.touchRecords(changed.map(([key]) => key));
   for (const [key, value] of changed) records.set(key, value);
@@ -1110,7 +1116,11 @@ export function writeTransaction(
   transaction: Transform,
   afterEachStep?: (shown: ProseMirrorNode) => boolean,
 ): boolean {
-  const attributes = containerAttributes(writing.reader.reading(), [transaction]);
+  const change = writing.sequence.doc!._transaction;
+  const attributes =
+    change && beforeTheDispatch.has(change)
+      ? null
+      : containerAttributes(writing.reader.reading(), [transaction]);
   if (attributes) {
     writeContainerAttributes(writing, attributes);
     return (
