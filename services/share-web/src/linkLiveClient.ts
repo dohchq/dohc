@@ -1,7 +1,4 @@
-import {
-  LIVE_CONNECTION_LIMIT_CLOSE_CODE,
-  liveConnectionLimitMessage,
-} from "@dohc/live-session-contract/live-connection";
+import { forwardedLiveClose } from "@dohc/live-session-contract/live-connection";
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
@@ -113,11 +110,7 @@ export function openLiveSocket(
       });
       socket.on("error", stop);
       socket.once("close", (code, reason) => {
-        if (
-          code !== LIVE_CONNECTION_LIMIT_CLOSE_CODE ||
-          !liveConnectionLimitMessage(reason.toString())
-        )
-          invalidated.abort();
+        if (!forwardedLiveClose(code, reason.toString())) invalidated.abort();
         signal.removeEventListener("abort", stop);
         finish(null);
       });

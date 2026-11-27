@@ -656,6 +656,7 @@ export const OwnerLiveDocument = z
         "conflict-parent-withheld",
         "live-history-over-budget",
         "live-start-failing",
+        "note-format-off",
       ])
       .optional(),
     // The server's word for why the row isn't live, and since when; a live-start-failing row has it. The server takes the word from a known list.
@@ -1788,6 +1789,7 @@ const SYNC_STATUS_BASE_FIELDS = {
       "conflict-parent-withheld",
       "live-history-over-budget",
       "live-start-failing",
+      "note-format-off",
       "restart-required",
       "unsent-edits-limit",
     ])

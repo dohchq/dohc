@@ -1321,6 +1321,7 @@ export interface SyncRelayStorage {
     activation?: ServiceActivationAccess,
   ): LiveCommittedDeliveryStore;
   createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
+  liveNoteFormatOff(document: LiveDocumentKey): boolean;
   readLiveUpdateJournalCut(
     input: { document: LiveDocumentKey },
     reserveBytes?: (size: number) => void,

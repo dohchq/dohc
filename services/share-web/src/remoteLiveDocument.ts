@@ -14,6 +14,7 @@ import {
 import {
   LIVE_CONNECTION_LIMIT_CLOSE_CODE,
   liveConnectionLimitMessage,
+  TRY_AGAIN_LATER_CLOSE_CODE,
 } from "@dohc/live-session-contract/live-connection";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
@@ -22,8 +23,6 @@ import { asRecord } from "@dohc/workspace-core/records";
 import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 
 export const LIVE_DOCUMENT_PREPARING = "The document is still starting. Try again shortly.";
-/** The WebSocket close that says to try again later. */
-const TRY_AGAIN_LATER_CLOSE_CODE = 1013;
 
 /** A personal agent's live access to one workspace, and its MCP's code and words for a relay refusal. */
 export interface PersonalLiveDocumentAccess {

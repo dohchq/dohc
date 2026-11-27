@@ -113,6 +113,10 @@ import { agentWriteAuthorityInTransaction } from "./agentConnections";
 import { authorizeLinkShareAction } from "../shareAuthorization";
 import { createAccountlessPathProjection } from "../accountlessPathProjection";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import {
+  baselineHoldsBodySequence,
+  bodySequenceNotesRefused,
+} from "@dohc/ydoc-projection/live-journal-validation";
 
 export function snapshotCurrentBindingRequest(
   input: CurrentLiveBindingRequest,
@@ -455,6 +459,30 @@ export function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapsh
       );
     }
   }
+}
+
+const baselineFormats = new WeakMap<StorageContext, Map<string, boolean>>();
+
+export function liveNoteFormatOff(storage: StorageContext, document: LiveDocumentKey): boolean {
+  if (!bodySequenceNotesRefused()) return false;
+  let formats = baselineFormats.get(storage);
+  if (!formats) baselineFormats.set(storage, (formats = new Map()));
+  let held = formats.get(document.lineageClaimId);
+  if (held === undefined) {
+    const row = storage.db
+      .prepare(`SELECT baseline_bytes FROM sync_relay_live_documents
+      WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? AND lineage_claim_id = ?`)
+      .get(
+        document.workspaceId,
+        document.mainVersionId,
+        document.objectId,
+        document.lineageClaimId,
+      ) as { baseline_bytes: Uint8Array } | undefined;
+    if (!row) return false;
+    held = baselineHoldsBodySequence(row.baseline_bytes);
+    formats.set(document.lineageClaimId, held);
+  }
+  return held;
 }
 
 function readLiveDocumentAuthority(

@@ -817,6 +817,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
   }
 
+  liveNoteFormatOff(document: LiveDocumentKey): boolean {
+    return liveDocumentAuthorityStorage.liveNoteFormatOff(this, document);
+  }
+
   readLiveUpdateJournalCut(
     input: { document: LiveDocumentKey },
     reserveBytes?: (size: number) => void,

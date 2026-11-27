@@ -103,6 +103,26 @@ it("shows a document whose edit history the server can't check, with Resume and 
   expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/long.md");
 });
 
+it("shows a document whose note format the server turned off, with Stop and no Resume", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(
+    page([
+      row("docs/off.md", { status: "unavailable", reason: "note-format-off", canResume: false }),
+    ]),
+  );
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const off = await screen.findByTestId("live-document-row-docs/off.md");
+  expect(off.children[1]?.textContent).toBe("Note format off on the server");
+  expect(
+    within(off).getByText(
+      "The server turned off the newer note format this document uses. Ask the server's operator to turn it back on.",
+    ),
+  ).toBeDefined();
+  expect(actions("docs/off.md").filter((name) => name?.endsWith("live editing"))).toEqual([
+    "Stop live editing",
+  ]);
+});
+
 it("shows a document whose live start keeps failing, with the server's reason to copy, Resume and Stop", async () => {
   const h = harness(),
     user = userEvent.setup();

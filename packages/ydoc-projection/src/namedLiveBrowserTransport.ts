@@ -1,6 +1,8 @@
 import {
   LIVE_CONNECTION_LIMIT_CLOSE_CODE,
   liveConnectionLimitMessage,
+  NOTE_FORMAT_OFF,
+  TRY_AGAIN_LATER_CLOSE_CODE,
 } from "@dohc/live-session-contract/live-connection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
@@ -38,6 +40,7 @@ export const NAMED_LIVE_NO_AUTOMATIC_RETRY: readonly string[] = [
   "paused",
   "live-stopped",
   "document-gone",
+  "note-format-off",
 ];
 /** How often a page whose note is off checks, while it is visible, whether its owner started it again. */
 export const NAMED_LIVE_OFF_CHECK_MS = 30_000;
@@ -99,6 +102,8 @@ export class LiveStoppedError extends Error {}
 export class LiveStartingError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
+/** The server answered that its operator turned off the note format the document uses. Trying again cannot help. */
+export class LiveNoteFormatOffError extends Error {}
 /** The server answered that the owner removed this account's access. */
 class AccessRemoved extends Error {}
 /** The page has no session and has already asked for a new one in this outage. */
@@ -362,11 +367,15 @@ export function createNamedLiveBrowserTransport<
           held.controller.signal.removeEventListener("abort", abort);
         };
         const onClose = (event: CloseEvent) => {
-          if (
+          const reason =
             event.code === LIVE_CONNECTION_LIMIT_CLOSE_CODE &&
             liveConnectionLimitMessage(event.reason)
-          ) {
-            fail(held, "disconnected", event.reason);
+              ? event.reason
+              : event.code === TRY_AGAIN_LATER_CLOSE_CODE && event.reason === NOTE_FORMAT_OFF
+                ? "note-format-off"
+                : undefined;
+          if (reason) {
+            fail(held, "disconnected", reason);
             finish();
             reject(new Error(event.reason));
           } else disconnected();
@@ -639,21 +648,23 @@ export function createNamedLiveBrowserTransport<
               ? "access-removed"
               : error instanceof LiveLinkFullError
                 ? "link-full"
-                : error instanceof SessionSpent
-                  ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
-                    ? "access-removed"
-                    : "authority-unavailable"
-                  : error instanceof LiveAuthorityUnavailableError
-                    ? !options.authorize && "grantId" in target
-                      ? await recheck(held, String(target.grantId), checking)
+                : error instanceof LiveNoteFormatOffError
+                  ? "note-format-off"
+                  : error instanceof SessionSpent
+                    ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                      ? "access-removed"
                       : "authority-unavailable"
-                    : error instanceof LiveStoppedError
-                      ? "live-stopped"
-                      : error instanceof LiveStartingError
-                        ? "live-starting"
-                        : error instanceof LiveHostUnavailableError
-                          ? "host-unavailable"
-                          : "connection-failed",
+                    : error instanceof LiveAuthorityUnavailableError
+                      ? !options.authorize && "grantId" in target
+                        ? await recheck(held, String(target.grantId), checking)
+                        : "authority-unavailable"
+                      : error instanceof LiveStoppedError
+                        ? "live-stopped"
+                        : error instanceof LiveStartingError
+                          ? "live-starting"
+                          : error instanceof LiveHostUnavailableError
+                            ? "host-unavailable"
+                            : "connection-failed",
         );
       }
     }

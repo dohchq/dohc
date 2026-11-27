@@ -1004,3 +1004,13 @@ it.each([null, "pause", "retire"] as const)(
     else expect(f.demandAtMs()).toBeGreaterThan(1);
   },
 );
+
+it("closes an agent's socket on a format-2 note while the relay's switch is off, before its initial sync", async () => {
+  const f = await fixture(),
+    helper = f.agent("helper");
+  const { token } = await f.mint(helper);
+  vi.spyOn(f.storage, "liveNoteFormatOff").mockReturnValue(true);
+  const socket = f.connect(token, helper);
+  expect(await socket.closed).toEqual([TRY_AGAIN_LATER, "note_format_off"]);
+  expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});

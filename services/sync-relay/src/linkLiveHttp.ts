@@ -221,7 +221,8 @@ export function createLinkLiveHttp(options: {
       if (!body) return refused();
       if (body instanceof Response) return body;
       if (state && "objectId" in body) {
-        if (!body.current) return asleep();
+        if (!body.current || options.storage.liveNoteFormatOff(body.current.binding))
+          return asleep();
         if (stateReads >= STATE_READS_AT_ONCE || !admitStateRead(context.grantId)) return asleep();
         stateReads++;
         try {

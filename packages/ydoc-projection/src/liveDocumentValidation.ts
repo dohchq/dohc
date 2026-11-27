@@ -103,6 +103,20 @@ export function admitBodySequenceNotes(admitted: boolean): void {
   bodySequenceNotesAdmitted = admitted;
 }
 
+export function bodySequenceNotesRefused(): boolean {
+  return !bodySequenceNotesAdmitted;
+}
+
+export function baselineHoldsBodySequence(baseline: Uint8Array): boolean {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, baseline);
+    return holdsBodySequence(doc);
+  } finally {
+    doc.destroy();
+  }
+}
+
 /** Each key's own rule from `validateMetadata`, for one item of a body-sequence note's metadata. */
 function bodySequenceMetadata(
   engineReader: boolean,

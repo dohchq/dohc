@@ -2477,6 +2477,7 @@ describe("server owner peer lifecycle", () => {
     const edited = { path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted" };
     const held = { path: "held.md", status: "unavailable", reason: "conflict-parent-withheld" };
     const long = { path: "long.md", status: "unavailable", reason: "live-history-over-budget" };
+    const formatOff = { path: "off.md", status: "unavailable", reason: "note-format-off" };
     const failing = {
       path: "failing.md",
       status: "unavailable",
@@ -2490,7 +2491,8 @@ describe("server owner peer lifecycle", () => {
     const ready = { path: "a.md", status: "ready", document };
     // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
     let rows: unknown[] = others,
-      diverged = false;
+      diverged = false,
+      lists = 0;
     const config = {
       nativeConfigPath: "native-config",
       nativeClient: { aggregateBytes: 100_000_000, maxUploads: 2 },
@@ -2527,7 +2529,10 @@ describe("server owner peer lifecycle", () => {
         keptEditsPage: unexpectedKeptEdits,
         ...noLivePauses,
         open: unexpectedOpen,
-        documents: async () => ({ ok: true, diverged, documents: rows }),
+        documents: async () => {
+          lists += 1;
+          return { ok: true, diverged, documents: rows };
+        },
       }),
     };
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
@@ -2547,6 +2552,12 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"),
       );
+      rows = [...others, failing, long, refused, unopened, edited, held, formatOff];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() =>
+        expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("note-format-off"),
+      );
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       rows = [...others, refused];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -2661,6 +2672,28 @@ describe("server owner peer lifecycle", () => {
       diverged = false;
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined());
+      ownerDeliveryMock.pass.mockResolvedValue("empty");
+      rows = [ready];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      rows = [{ ...formatOff, path: "a.md" }];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() =>
+        expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("note-format-off"),
+      );
+      const passes = ownerDeliveryMock.pass.mock.calls.length,
+        listed = lists;
+      for (let turn = 1; turn <= 2; turn++) {
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(lists).toBeGreaterThanOrEqual(listed + turn));
+      }
+      expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(passes);
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [ready];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(passes);
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
     } finally {
       credentials.abort();
       await f.close();

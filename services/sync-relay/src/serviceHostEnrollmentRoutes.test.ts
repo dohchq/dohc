@@ -1,3 +1,5 @@
+import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
+import { seededNote } from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport.js";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { ClientClosedRequest } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
@@ -1781,4 +1783,40 @@ it("offers Resume on a stopped, drained, moved note and rebinds it directly at i
     objectId: binding.objectId,
     changed: false,
   });
+});
+
+it("lists a format-2 note unavailable while the relay's switch is off, with no Resume, and ready with it on", async () => {
+  const f = await fixture(),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  const state = async () => (await (await f.handle(f.request())).json()).documents[0];
+  f.host.ready.mockReturnValue(true);
+  retainServiceActivation(f.raw, namespace);
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  f.storage.moveLiveNote({
+    workspaceId: scope.workspaceId,
+    objectId: binding.objectId,
+    generation: enrolled.note.generation,
+    nowMs: 30,
+    move: "started",
+  });
+  f.raw.prepare("UPDATE sync_relay_live_documents SET baseline_bytes = ?").run(seededNote());
+  expect(await state()).toEqual({
+    path: binding.currentPath,
+    objectId: binding.objectId,
+    status: "unavailable",
+    reason: "note-format-off",
+    ...noted(["stop"], "live"),
+  });
+  f.host.ready.mockReturnValue(false);
+  expect((await state()).reason).toBe("note-format-off");
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json=NULL");
+  expect((await state()).reason).toBe("note-format-off");
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  f.host.ready.mockReturnValue(true);
+  admitBodySequenceNotes(true);
+  try {
+    expect((await state()).status).toBe("ready");
+  } finally {
+    admitBodySequenceNotes(false);
+  }
 });

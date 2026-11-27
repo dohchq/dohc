@@ -859,6 +859,14 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  if (reason === "note-format-off") {
+    return {
+      title: "Live editing stopped",
+      body: "The server turned off the newer note format a document in this workspace uses, so live editing stopped. Your copy and its History are unchanged. Ask the server's operator to turn the format back on.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   // A Resume alone fails again: the server can start only a document that
   // dohc has opened once, so the owner's first step is to open it.
   if (reason === "live-document-without-lineage") {

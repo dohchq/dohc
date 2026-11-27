@@ -35,7 +35,8 @@ export type LiveDocumentRow = {
     | "live-edit-unadmitted"
     | "conflict-parent-withheld"
     | "live-history-over-budget"
-    | "live-start-failing";
+    | "live-start-failing"
+    | "note-format-off";
   /** The server's word for why the row isn't live, and since when, as an ISO time. A live-start-failing row has it. */
   failure?: { word: string; since: string };
   canResume: boolean;
@@ -259,6 +260,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "conflict-parent-withheld") return "Cannot resume";
   if (row.reason === "live-history-over-budget") return "History too long";
   if (row.reason === "live-start-failing") return "Cannot start";
+  if (row.reason === "note-format-off") return "Note format off on the server";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -311,7 +313,9 @@ function deferredStopNote(
       ? ""
       : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
   const resume =
-    row.reason === "session-host-diverged" || row.reason === "conflict-parent-withheld"
+    row.reason === "session-host-diverged" ||
+    row.reason === "conflict-parent-withheld" ||
+    row.reason === "note-format-off"
       ? ""
       : stop.unsentEdits === 0
         ? "Resume live editing to finish syncing. "
@@ -1106,6 +1110,14 @@ export function LiveDocumentsDialog({
                     This document's edit history is too long for the server to check, so live
                     editing cannot start. Your edits in dohc keep syncing, but others cannot edit it
                     live. Resume live editing to try again.
+                  </p>
+                ) : null}
+                {row.reason === "note-format-off" &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    The server turned off the newer note format this document uses. Ask the server's
+                    operator to turn it back on.
                   </p>
                 ) : null}
                 {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}

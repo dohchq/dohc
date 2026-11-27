@@ -1,5 +1,7 @@
 export {
   admitBodySequenceNotes,
+  baselineHoldsBodySequence,
+  bodySequenceNotesRefused,
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
   liveEditFitsCopy,

@@ -9,6 +9,7 @@ import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-upda
 import {
   createNamedLiveBrowserTransport,
   LiveAuthorityUnavailableError,
+  LiveNoteFormatOffError,
   parseNamedLiveBrowserLimits,
   type NamedLiveSelection,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -41,6 +42,8 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   "document-unavailable": "The page moved or was deleted.",
   // The owner's desktop starts the page's live history by itself once it is online.
   "live-document-without-lineage": "Editing starts once the owner's dohc is online.",
+  "note-format-off":
+    "The server turned off the newer note format this page uses. Ask the server's operator to turn it back on.",
 };
 
 /**
@@ -106,6 +109,7 @@ export function createNamedDesktopLiveCapture(options: {
           refusal && typeof refusal === "object" && !Array.isArray(refusal)
             ? (refusal as Record<string, unknown>).code
             : undefined;
+        if (code === "note-format-off") throw new LiveNoteFormatOffError();
         if (typeof code === "string") throw hostRefused(code);
       }
       if (
@@ -204,6 +208,7 @@ export function createNamedDesktopLiveCapture(options: {
       try {
         first = await admit(input.path, opening);
       } catch (error) {
+        if (error instanceof LiveNoteFormatOffError) throw hostRefused("note-format-off");
         if (error instanceof SharedDocumentWaitingError) throw error;
         const offline = error instanceof TypeError;
         throw new SharedDocumentWaitingError({
@@ -257,6 +262,7 @@ export function createNamedDesktopLiveCapture(options: {
         announce = () => {
           const state = session.state();
           if (state.status === "live") resolve();
+          else if (state.reason === "note-format-off") reject(hostRefused(state.reason));
           else if (!["authorizing", "connecting", "syncing"].includes(state.status)) {
             const limit = liveConnectionLimitMessage(state.reason);
             reject(

@@ -18,6 +18,13 @@ export function liveConnectionLimitMessage(value: unknown): string | undefined {
     ? LIVE_CONNECTION_LIMIT_MESSAGES[value as LiveConnectionLimitCode]
     : undefined;
 }
+export const TRY_AGAIN_LATER_CLOSE_CODE = 1013;
+export const NOTE_FORMAT_OFF = "note_format_off";
+export function forwardedLiveClose(code: number, reason: string): boolean {
+  return code === LIVE_CONNECTION_LIMIT_CLOSE_CODE
+    ? liveConnectionLimitMessage(reason) !== undefined
+    : code === TRY_AGAIN_LATER_CLOSE_CODE && reason === NOTE_FORMAT_OFF;
+}
 export class LiveConnectionLimitError extends Error {
   constructor(readonly code: LiveConnectionLimitCode) {
     super(LIVE_CONNECTION_LIMIT_MESSAGES[code]);

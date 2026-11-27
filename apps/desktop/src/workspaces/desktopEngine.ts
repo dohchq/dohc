@@ -173,6 +173,7 @@ type OwnerLiveDeliveryReason =
   | "conflict-parent-withheld"
   | "live-history-over-budget"
   | "live-start-failing"
+  | "note-format-off"
   | "restart-required"
   | "unsent-edits-limit";
 
@@ -1281,33 +1282,31 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       diverged === true || rows.some((row) => row.status === "unavailable");
                     const unavailableFor = (reason: OwnerLiveDeliveryReason) =>
                       rows.some((row) => row.status === "unavailable" && row.reason === reason);
-                    // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
-                    // One it cannot start goes before it: the owner must open it before a Resume can help.
-                    // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
-                    // A diverged server copy, or one document's damaged server record, goes first: only the server's operator can continue it.
-                    // One whose start keeps failing follows every reason that needs its owner, since the server keeps trying it.
                     const reason =
                       diverged === true || unavailableFor("session-host-diverged")
                         ? "session-host-diverged"
-                        : unavailableFor("live-document-without-lineage")
-                          ? "live-document-without-lineage"
-                          : unavailableFor("session-host-refused")
-                            ? "session-host-refused"
-                            : unavailableFor("live-edit-unadmitted")
-                              ? "live-edit-unadmitted"
-                              : unavailableFor("conflict-parent-withheld")
-                                ? "conflict-parent-withheld"
-                                : unavailableFor("live-history-over-budget")
-                                  ? "live-history-over-budget"
-                                  : unavailableFor("live-start-failing")
-                                    ? "live-start-failing"
-                                    : unavailableFor("workspace-changed")
-                                      ? "workspace-changed"
-                                      : unavailableFor("document-unavailable")
-                                        ? "document-unavailable"
-                                        : undefined;
+                        : unavailableFor("note-format-off")
+                          ? "note-format-off"
+                          : unavailableFor("live-document-without-lineage")
+                            ? "live-document-without-lineage"
+                            : unavailableFor("session-host-refused")
+                              ? "session-host-refused"
+                              : unavailableFor("live-edit-unadmitted")
+                                ? "live-edit-unadmitted"
+                                : unavailableFor("conflict-parent-withheld")
+                                  ? "conflict-parent-withheld"
+                                  : unavailableFor("live-history-over-budget")
+                                    ? "live-history-over-budget"
+                                    : unavailableFor("live-start-failing")
+                                      ? "live-start-failing"
+                                      : unavailableFor("workspace-changed")
+                                        ? "workspace-changed"
+                                        : unavailableFor("document-unavailable")
+                                          ? "document-unavailable"
+                                          : undefined;
                     const ownerMustAct =
                       reason === "session-host-diverged" ||
+                      reason === "note-format-off" ||
                       reason === "live-document-without-lineage" ||
                       reason === "session-host-refused" ||
                       reason === "live-edit-unadmitted" ||

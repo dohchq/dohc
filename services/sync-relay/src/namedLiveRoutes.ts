@@ -1,6 +1,8 @@
 import {
   LIVE_CONNECTION_LIMIT_CLOSE_CODE,
   LiveConnectionLimitError,
+  NOTE_FORMAT_OFF,
+  TRY_AGAIN_LATER_CLOSE_CODE,
   type LiveConnectionLimitCode,
 } from "@dohc/live-session-contract/live-connection";
 import { randomBytes } from "node:crypto";
@@ -265,8 +267,7 @@ export function createOwnerLiveRoutes(options: Omit<OwnerRouteOptions, "kind">) 
 export function createPersonalLiveRoutes(options: Omit<PersonalRouteOptions, "kind">) {
   return createLiveRoutes({ ...options, kind: "personal" });
 }
-// The standard close for a server that can't answer now: a personal agent's account can't be read.
-const TRY_AGAIN_LATER_CLOSE_CODE = 1013;
+class NoteFormatOff extends Error {}
 const personalUnavailable = (error: unknown) =>
   error instanceof RelayError && error.code === "personal_agent_unavailable";
 const personalLiveContext = (
@@ -388,7 +389,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   sessionChecks?.unref();
   const storage = options.storage,
     editors = liveEditors(storage);
-  const captureNative = options.captureNative.bind(options),
+  const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal) => {
+      if (storage.liveNoteFormatOff(binding)) throw new NoteFormatOff();
+      return options.captureNative(binding, signal);
+    },
     validate = options.validate;
   const sessionHostBlocked = options.kind === "owner" ? undefined : options.sessionHostBlocked;
   const liveNote = "liveNote" in options ? options.liveNote : undefined;
@@ -812,6 +816,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     const refuseRetryable = (error: unknown) => {
       if (error instanceof LiveConnectionLimitError) {
         refuseLimit(error.code);
+        return true;
+      }
+      if (error instanceof NoteFormatOff) {
+        refuseOpen(TRY_AGAIN_LATER_CLOSE_CODE, NOTE_FORMAT_OFF);
         return true;
       }
       // A WebSocket has no status, so a personal agent's 503 is the close that says to try again later.

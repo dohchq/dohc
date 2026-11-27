@@ -10,6 +10,7 @@ import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { getCookies } from "better-auth/cookies";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import {
   decodeLiveFrame,
@@ -25,6 +26,8 @@ import {
   type LiveGatewayLimits,
   type LiveGatewayOptions,
 } from "./liveGateway.js";
+import { openLiveSocket } from "./linkLiveClient.js";
+import { createNamedLiveRelayRoute } from "./namedLiveRelayRoute.js";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
@@ -107,6 +110,8 @@ async function fixture(
   const sockets: WebSocket[] = [];
   const rawSockets: Socket[] = [];
   const hosts: WebSocket[] = [];
+  const hostTransports: Duplex[] = [];
+  hostHttp.on("upgrade", (_request, socket: Duplex) => hostTransports.push(socket));
   hostServer.on("connection", (socket) => {
     socket.on("error", () => undefined);
     hosts.push(socket);
@@ -233,10 +238,12 @@ async function fixture(
     resolve,
     open,
     hosts,
+    hostTransports,
     makeRoute,
     receiveOptions,
     invalidated,
     completions,
+    hostUrl: `http://127.0.0.1:${hostPort}`,
   };
 }
 
@@ -1219,3 +1226,96 @@ it("keeps an unrelated connection while its account is resolving", async () => {
   expect(await socket.status).toBe(101);
   expect(socket.socket.readyState).toBe(WebSocket.OPEN);
 });
+
+const accountCookie = `${getCookies({ baseURL: origin }).sessionToken.name}=account-secret`;
+const relayAdapters: [string, (relayUrl: string) => LiveGatewayOptions["openHostRoute"]][] = [
+  [
+    "named",
+    (relayUrl) =>
+      createNamedLiveRelayRoute({
+        relayUrl,
+        publicOrigin: origin,
+        exchangeKey: "x".repeat(32),
+        handshakeTimeoutMs: 10_000,
+      }),
+  ],
+  [
+    "owner's browser",
+    (relayUrl) =>
+      createNamedLiveRelayRoute({
+        relayUrl,
+        publicOrigin: origin,
+        exchangeKey: "x".repeat(32),
+        handshakeTimeoutMs: 10_000,
+        owner: true,
+      }),
+  ],
+  [
+    "link",
+    (relayUrl) => (input, signal, receive) =>
+      openLiveSocket(
+        new URL("/sync/live/link", relayUrl),
+        input.ticketToken,
+        {},
+        10_000,
+        signal,
+        receive,
+      ),
+  ],
+];
+
+it.each(relayAdapters)(
+  "forwards the relay's format-off close through the %s route with its code and reason",
+  async (_route, adapter) => {
+    const state = await fixture();
+    state.open.mockImplementation(adapter(state.hostUrl));
+    const client = state.browser({ cookie: accountCookie });
+    expect(await client.status).toBe(101);
+    state.hosts[0]!.close(1013, "note_format_off");
+    expect(await client.closed).toEqual([1013, "note_format_off"]);
+  },
+);
+
+it.each(relayAdapters)(
+  "forwards the relay's format-off close through the %s route when the browser's hello arrives while the relay closes",
+  async (_route, adapter) => {
+    const state = await fixture({ limits: { ...limits, drainTimeoutMs: 10_000 } });
+    state.open.mockImplementation(adapter(state.hostUrl));
+    const client = state.browser({ cookie: accountCookie });
+    expect(await client.status).toBe(101);
+    const relay = state.hostTransports[0]!;
+    relay.pause();
+    state.hosts[0]!.close(1013, "note_format_off");
+    await vi.waitFor(() => expect(relay.readableLength).toBeGreaterThan(0));
+    client.socket.send(
+      encodeLiveFrame(
+        {
+          kind: "hello",
+          receivePolicy: {
+            maxFrameBytes: 2048,
+            maxStateVectorBytes: 512,
+            maxUpdateBytes: 1024,
+            maxSyncBytes: 2048,
+          },
+        },
+        2048,
+      ),
+    );
+    client.socket.ping(Buffer.from("after hello"));
+    await Promise.race([once(client.socket, "pong"), client.closed]);
+    relay.resume();
+    expect(await client.closed).toEqual([1013, "note_format_off"]);
+  },
+);
+
+it.each(relayAdapters)(
+  "drops any other try-again close through the %s route",
+  async (_route, adapter) => {
+    const state = await fixture();
+    state.open.mockImplementation(adapter(state.hostUrl));
+    const client = state.browser({ cookie: accountCookie });
+    expect(await client.status).toBe(101);
+    state.hosts[0]!.close(1013, "personal_agent_unavailable");
+    expect((await client.closed)[0]).toBe(1006);
+  },
+);

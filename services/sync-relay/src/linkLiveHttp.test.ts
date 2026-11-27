@@ -397,6 +397,16 @@ it("answers a note's early state as its socket's opening sync, and no state for 
   expect([asleep.status, await asleep.text()]).toEqual([204, ""]);
 });
 
+// Proves: a format-2 note the relay's switch turned off gives no state, so a reader never types into it before its
+// socket is refused.
+it("gives no state for a note whose format the relay turned off", async () => {
+  const f = await awakeFixture();
+  vi.spyOn(f.storage, "liveNoteFormatOff").mockReturnValue(true);
+  const response = await f.handle(stateRequest());
+  expect([response.status, await response.text()]).toEqual([204, ""]);
+  expect(f.reads).toEqual([]);
+});
+
 // Proves: a state read from a host that is no longer the note's current one, of a binding the note no longer has, or
 // larger than the route sends, gives no state.
 it("gives no state read from another host, under another binding, or larger than the route sends", async () => {

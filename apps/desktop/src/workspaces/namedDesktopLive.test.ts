@@ -808,6 +808,78 @@ it("stops desktop admission retries when access ends", async () => {
   await provider.close();
 });
 
+const formatOffReason =
+  "The server turned off the newer note format this page uses. Ask the server's operator to turn it back on.";
+
+it.each([
+  ["the open", () => Response.json({ ok: false, code: "note-format-off" }, { status: 409 })],
+  ["the socket", undefined],
+] as const)(
+  "ends the open on a note whose format the server turned off when %s refuses it, without waiting for the host",
+  async (_where, refusal) => {
+    const f = fixture();
+    if (refusal) f.request.mockResolvedValueOnce(refusal());
+    else {
+      f.session.reconnect = async () => {};
+      const state = f.session.state;
+      f.session.state = () => ({ ...state(), reason: "note-format-off" });
+    }
+    const opened = f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    });
+    await expect(opened).rejects.toMatchObject({
+      waiting: {
+        state: "host-refused",
+        message: `dohc could not open this page for editing. ${formatOffReason}`,
+        reason: formatOffReason,
+      },
+    });
+    expect(
+      ((await opened.catch((error: unknown) => error)) as SharedDocumentWaitingError).waiting,
+    ).not.toHaveProperty("awaitsHost");
+    expect(f.request).toHaveBeenCalledOnce();
+  },
+);
+
+it("stops reconnecting once the server refuses a note whose format it turned off", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  const actual = await vi.importActual<
+    typeof import("@dohc/ydoc-projection/named-live-browser-transport")
+  >("@dohc/ydoc-projection/named-live-browser-transport");
+  const options = transport.factory.mock.calls[0]![0] as Parameters<
+    typeof actual.createNamedLiveBrowserTransport<NamedLiveSelection>
+  >[0];
+  const selected = {
+    accountId: "reader",
+    workspaceId: "named:grant",
+    grantId: "grant",
+    objectId: "object",
+  };
+  await options.authorize!(selected, new AbortController().signal);
+  f.request.mockResolvedValue(
+    Response.json({ ok: false, code: "note-format-off" }, { status: 409 }),
+  );
+  vi.useFakeTimers();
+  const openSocket = vi.fn();
+  const manager = actual.createNamedLiveBrowserTransport({ ...options, openSocket });
+  cleanup.push(async () => manager.close());
+  const session = manager.select(selected);
+  await session.reconnect();
+  expect(session.state()).toMatchObject({ status: "disconnected", reason: "note-format-off" });
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.request).toHaveBeenCalledTimes(2);
+  expect(openSocket).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+  await provider.close();
+});
+
 it("selects the named binding from its own desktop admission and fences a changed reconnect grant", async () => {
   const f = fixture();
   const provider = await f.capture.openYDocSession({

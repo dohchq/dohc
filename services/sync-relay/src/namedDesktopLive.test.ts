@@ -215,6 +215,31 @@ it.each(["open", "ready"] as const)(
   },
 );
 
+it.each([
+  ["desktop", "open"],
+  ["desktop", "ready"],
+  ["browser", "open"],
+  ["browser", "ready"],
+] as const)(
+  "answers a member's %s %s at once on a note whose format the server turned off, before any ticket",
+  async (client, route) => {
+    const f = await fixture({ browser: client === "browser" });
+    const formatOff = vi.spyOn(f.storage, "liveNoteFormatOff").mockReturnValue(true);
+    const response = await (client === "browser" ? f.browserPost(route) : f.post(route));
+    if (route === "open") {
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ ok: false, code: "note-format-off" });
+    } else expect(await response.text()).toBe("waiting\nunavailable\n");
+    expect(formatOff).toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      }),
+    );
+    expect(f.tickets.mint).not.toHaveBeenCalled();
+  },
+);
+
 it.each(["comment", "view"] as const)(
   "refuses a member's open at %s at once and hosts nothing",
   async (level) => {
