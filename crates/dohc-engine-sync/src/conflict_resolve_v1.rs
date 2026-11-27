@@ -7977,7 +7977,11 @@ mod tests {
 
     #[test]
     fn a_replayed_successor_leaves_nothing_to_write_at_the_next_open() {
-        let KeptSuccessor { mut store, .. } = kept_successor_with_edit(false, false, true);
+        let KeptSuccessor {
+            _scratch,
+            mut store,
+            ..
+        } = kept_successor_with_edit(false, false, true);
         replay_reading(&mut store);
         let commits = store.commit_count_for_harness();
         assert_eq!(replay_reading(&mut store), 0);
@@ -8011,7 +8015,11 @@ mod tests {
                 seen: std::sync::atomic::AtomicUsize::new(0),
             };
             let counted = crash(usize::MAX);
-            let KeptSuccessor { mut store, .. } = kept_successor_with_edit(moved, false, true);
+            let KeptSuccessor {
+                _scratch,
+                mut store,
+                ..
+            } = kept_successor_with_edit(moved, false, true);
             dohc_engine_collab::ydoc::reading_body_sequence_here(|| {
                 crate::replay_kept_format_two(
                     &mut store,
@@ -8025,6 +8033,7 @@ mod tests {
             for nth in 0..commits {
                 let case = format!("moved {moved}, crash at commit {nth}");
                 let KeptSuccessor {
+                    _scratch,
                     mut store,
                     key,
                     successor,
