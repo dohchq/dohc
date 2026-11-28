@@ -1580,7 +1580,6 @@ describe.skipIf(engine.missing)(
           }),
         ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
 
-        // Binary upload (<= 5 MiB PNG) syncs to real desktop engine and reads back byte-for-byte via GET fileBytes.
         const pngBytes = new Uint8Array([
           137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
         ]);

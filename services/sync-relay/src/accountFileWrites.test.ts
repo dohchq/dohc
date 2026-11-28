@@ -875,7 +875,6 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
     };
     expect(pngResult.result).toMatchObject({ ok: true, path: "photos/receipt.png" });
 
-    // Idempotent retry with same requestId and same bytes succeeds with the same objectId.
     const replayPng = await h(
       postOp("trip", "uploadFile", "ana", {
         path: "photos/receipt.png",
@@ -888,7 +887,6 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
       result: { ok: true, path: "photos/receipt.png", objectId: pngResult.result.objectId },
     });
 
-    // Different requestId for an existing path returns path-exists refusal.
     const collision = await h(
       postOp("trip", "uploadFile", "ana", {
         path: "photos/receipt.png",
@@ -902,7 +900,6 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
       result: { ok: false, refusal: "path-exists" },
     });
 
-    // Upload PDF and read both back byte-for-byte via GET fileBytes.
     const upPdf = await h(
       postOp("trip", "uploadFile", "ana", {
         path: "docs/invoice.pdf",
@@ -912,7 +909,6 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
     );
     expect(upPdf.status).toBe(200);
 
-    // > 5 MiB rejected cleanly with 413 payload_too_large.
     const overResp = await h(
       postOp("trip", "uploadFile", "ana", {
         path: "big.bin",
@@ -923,7 +919,6 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
     expect(overResp.status).toBe(413);
     expect(await overResp.json()).toMatchObject({ ok: false, code: "payload_too_large" });
 
-    // Download PNG, PDF, SVG, and HTML with strict non-executing headers (even with copies=undefined).
     const svgBytes = new TextEncoder().encode(
       '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>',
     );
@@ -967,10 +962,8 @@ describe("binary file upload (uploadFile) and download (fileBytes)", () => {
       expect(new Uint8Array(await resp.arrayBuffer())).toEqual(expected);
     }
 
-    // Hidden files are 404 even for the owner.
     expect((await hNoCopies(getBytes("trip", ".env", "ana"))).status).toBe(404);
 
-    // Joined Member with folder access rule hiding private/: reads docs/, gets 404 on private/ and .env and uploadFile.
     expect(
       storage.inviteWorkspaceMember({
         workspaceId: "trip",

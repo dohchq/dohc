@@ -2735,7 +2735,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
     idempotencyKey: "seed-exp-1",
   });
 
-  // Collection description marks the attachment field editable.
   const desc = await f.op("collection", { datasetId: ATT_DS });
   expect(desc.status).toBe(200);
   expect(
@@ -2746,7 +2745,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
     ).tables[0]!.fields.find((item) => item.fieldId === ATT_FILE)?.editable,
   ).toBe(true);
 
-  // Owner uploads a PDF attachment (idempotent on retry key).
   const pdfBytes = new TextEncoder().encode("%PDF-1.7\nreceipt\n");
   const uploadArgs = {
     datasetId: ATT_DS,
@@ -2772,14 +2770,12 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
     replayed: true,
   });
 
-  // Same retry key with different bytes returns 409 conflict.
   const upConflict = await f.op("collectionAttachmentUpload", {
     ...uploadArgs,
     bytesBase64: Buffer.from("%PDF-1.7\nother\n").toString("base64"),
   });
   expect(upConflict.status).toBe(409);
 
-  // > 20 MiB attachment rejected cleanly with 413 payload_too_large.
   const over20 = await f.op("collectionAttachmentUpload", {
     ...uploadArgs,
     idempotencyKey: id(211),
@@ -2789,7 +2785,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
   });
   expect(over20.status).toBe(413);
 
-  // Attach to record via collectionEdit, then read back byte-for-byte with strict headers.
   expect(
     await f.op("collectionEdit", {
       datasetId: ATT_DS,
@@ -2817,7 +2812,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
   expect(ownerRead.headers.get("cache-control")).toBe("private, no-store");
   expect(new Uint8Array(await ownerRead.arrayBuffer())).toEqual(pdfBytes);
 
-  // Forged operationId is rejected with 400 (server always derives readOperation()).
   const forged = await f.op("collectionAttachmentRead", {
     datasetId: ATT_DS,
     tableId: ATT_TBL,
@@ -2828,7 +2822,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
   });
   expect(forged.status).toBe(400);
 
-  // Joined Member with Edit access + workspace defaults can upload, attach, and download SVG with strict headers.
   const storage = f.storage as SyncRelayStorage;
   storage.inviteWorkspaceMember({
     workspaceId: "w",
@@ -2917,7 +2910,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
   expect(memberRead.headers.get("cache-control")).toBe("private, no-store");
   expect(new Uint8Array(await memberRead.arrayBuffer())).toEqual(svgBytes);
 
-  // Member can no longer read the previous unattached fileId (row value changed -> 404).
   expect(
     (
       await f.opRaw(
@@ -2934,7 +2926,6 @@ it("uploads, attaches, and downloads Collection attachments for Owner and Member
     ).status,
   ).toBe(404);
 
-  // Clearing the attachment or revoking the Member's read default revokes access immediately -> 404.
   f.host.setWorkspaceDefaults(owner, {
     workspaceId: "w",
     datasetId: ATT_DS,
