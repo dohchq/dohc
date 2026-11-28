@@ -47,7 +47,7 @@ import { KeyboardSettings } from "./KeyboardSettings";
 import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
-import { NoteFormatSetting } from "./NoteFormatRow";
+import { OfferedNoteFormatRow } from "./NoteFormatRow";
 import type { NoteConversion } from "../shell/useNoteConversion";
 import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
 import { WorkspaceWebhooksSettings } from "./WorkspaceWebhooksSettings";
@@ -166,7 +166,6 @@ export function SettingsDialog(props: {
    * shared view never has.
    */
   sharedView?: boolean;
-  /** The window's Convert notes run, which outlives Settings. */
   noteConversion?: NoteConversion;
   membership?: boolean;
   // A joined workspace's id on the relay, which its agent link names.
@@ -1183,7 +1182,7 @@ export function SettingsDialog(props: {
                 {...(props.onError ? { onError: props.onError } : {})}
               />
               {props.noteConversion ? (
-                <NoteFormatSetting
+                <OfferedNoteFormatRow
                   workspaceId={props.workspaceId}
                   conversion={props.noteConversion}
                   searchMatch={rowSearchMatch("Note format", "convert notes")}

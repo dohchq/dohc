@@ -8360,7 +8360,6 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
-// How many of a workspace's notes a Convert notes run has gone through.
 export const NoteConversionProgress = z
   .object({
     workspaceId: z.string().min(1).max(256),
@@ -8369,9 +8368,6 @@ export const NoteConversionProgress = z
   })
   .strict();
 export type NoteConversionProgress = z.infer<typeof NoteConversionProgress>;
-// Settings › Advanced › Note format. Main decides whether this window's
-// workspace offers Convert notes, and sends notes a run converted but could
-// not send.
 export const noteConversionOperations = {
   readNoteConversionOffered: {
     capabilityId: "workspace.notes.convert.offer.read",

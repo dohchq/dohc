@@ -5349,7 +5349,10 @@ function Pane(props: { theme: "light" | "dark" }) {
         {NOTE_FORMAT_STATES.map(([label, state]) => (
           <Specimen key={label} label={label}>
             <div className="w-[640px]">
-              <NoteFormatRow conversion={{ state, start: noop, send: noop }} workspaceName="Trip" />
+              <NoteFormatRow
+                conversion={{ state, start: noop, sendConverted: noop }}
+                workspaceName="Trip"
+              />
             </div>
           </Specimen>
         ))}

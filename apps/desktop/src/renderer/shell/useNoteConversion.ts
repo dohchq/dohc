@@ -23,8 +23,7 @@ export type NoteConversionState =
 export interface NoteConversion {
   state: NoteConversionState;
   start(): void;
-  /** Sends the notes the last run converted but could not send. */
-  send(): void;
+  sendConverted(): void;
 }
 
 const KIND = "note-conversion";
@@ -34,7 +33,6 @@ const SHOWN_PER_GROUP = 3;
 const countWords = (count: number, one: string, many: string) =>
   count === 1 ? `1 ${one}` : `${count.toLocaleString("en-US")} ${many}`;
 
-/** What a finished run says first: how many notes it converted. */
 export function convertedWords(converted: number): string {
   return converted === 0
     ? "No notes to convert"
@@ -43,7 +41,6 @@ export function convertedWords(converted: number): string {
 
 const pathWords = (path: string) => path || "(no path)";
 
-/** The Notices row for a run that left notes or could not send them, or null for a clean run. */
 export function noteConversionNotice(result: ConvertNotesResult): {
   title?: string;
   message: string;
@@ -77,11 +74,6 @@ export function noteConversionNotice(result: ConvertNotesResult): {
   };
 }
 
-/**
- * Runs Convert notes for the workspace this window shows, follows its
- * progress, and files what it left in Notices. A run's result shows only in
- * the workspace that started it.
- */
 export function useNoteConversion(input: {
   workspaceId: string;
   report: Shell["reportShellFailure"];
@@ -123,14 +115,14 @@ export function useNoteConversion(input: {
         ...notice,
         ...(cause === undefined ? {} : { cause }),
         kind: KIND,
-        retry: result.sent ? null : send,
+        retry: result.sent ? null : sendConverted,
         ...(leftNoteCount(result) > 0
           ? { action: { label: "Convert remaining", run: convert, ends: true } }
           : {}),
       });
     }
 
-    function send() {
+    function sendConverted() {
       if (unsent.current?.workspaceId !== workspaceId) return;
       const { result } = unsent.current;
       const token = requests.next();
@@ -170,8 +162,8 @@ export function useNoteConversion(input: {
         );
     }
 
-    return { convert, send };
+    return { convert, sendConverted };
   }, [workspaceId, requests, report, success, clear]);
 
-  return { state, start: run.convert, send: run.send };
+  return { state, start: run.convert, sendConverted: run.sendConverted };
 }

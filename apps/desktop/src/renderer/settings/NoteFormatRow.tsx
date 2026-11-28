@@ -8,7 +8,6 @@ import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SettingRow } from "./SettingRow";
 
-/** What Convert notes asks before it runs. */
 export function convertNotesConfirm(workspaceName: string) {
   return {
     title: `Convert notes in ${workspaceName} to the new format`,
@@ -26,8 +25,7 @@ export function convertNotesConfirm(workspaceName: string) {
 
 type RowProps = { conversion: NoteConversion; workspaceName: string; searchMatch?: boolean };
 
-/** The Note format row, shown only when main offers Convert notes for this workspace. */
-export function NoteFormatSetting(props: RowProps & { workspaceId: string }) {
+export function OfferedNoteFormatRow(props: RowProps & { workspaceId: string }) {
   const { workspaceId, ...row } = props;
   const offered = useWorkspaceQuery(useWorkspaceSession(), {
     key: workspaceId,
@@ -36,9 +34,8 @@ export function NoteFormatSetting(props: RowProps & { workspaceId: string }) {
   return offered.value === true ? <NoteFormatRow {...row} /> : null;
 }
 
-/** Settings › Advanced › Note format: converts the owner's notes to the new format. */
 export function NoteFormatRow(props: RowProps) {
-  const { state, start, send } = props.conversion;
+  const { state, start, sendConverted } = props.conversion;
   const [confirming, setConfirming] = useState(false);
 
   const description =
@@ -85,7 +82,7 @@ export function NoteFormatRow(props: RowProps) {
       {state.status === "failed" ? (
         <SecondaryButton onClick={start}>Try again</SecondaryButton>
       ) : state.status === "unsent" || state.status === "sending" ? (
-        <SecondaryButton disabled={state.status === "sending"} onClick={send}>
+        <SecondaryButton disabled={state.status === "sending"} onClick={sendConverted}>
           Try again
         </SecondaryButton>
       ) : (

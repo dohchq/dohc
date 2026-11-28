@@ -6,9 +6,9 @@ import { NoteFormatRow } from "./NoteFormatRow";
 
 function show(state: NoteConversionState) {
   const start = vi.fn();
-  const send = vi.fn();
-  render(<NoteFormatRow conversion={{ state, start, send }} workspaceName="Trip" />);
-  return Object.assign(start, { send });
+  const sendConverted = vi.fn();
+  render(<NoteFormatRow conversion={{ state, start, sendConverted }} workspaceName="Trip" />);
+  return Object.assign(start, { sendConverted });
 }
 
 afterEach(() => {
@@ -72,7 +72,7 @@ describe("Settings › Advanced › Note format", () => {
       screen.getByText("Converted 11 notes. dohc could not send them to the server yet."),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(start.send).toHaveBeenCalledOnce();
+    expect(start.sendConverted).toHaveBeenCalledOnce();
     expect(start).not.toHaveBeenCalled();
     expect(screen.queryByTestId("settings-confirm-convert-notes")).toBeNull();
     cleanup();

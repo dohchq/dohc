@@ -229,7 +229,7 @@ describe("converting notes from this window", () => {
       retry: expect.any(Function),
     });
 
-    await act(async () => shell.conversion().send());
+    await act(async () => shell.conversion().sendConverted());
     expect(sendConvertedNotes).toHaveBeenCalledTimes(2);
     expect(convertNotes).toHaveBeenCalledOnce();
     expect(shell.conversion().state).toEqual({ status: "done", converted: 11 });

@@ -28,11 +28,6 @@ function ownsNotes(workspace: ConvertingWorkspace, signedInUserId: string | null
   return !remote || signedInUserId === null || remote.ownerUserId === signedInUserId;
 }
 
-/**
- * Whether Settings offers Convert notes: the engine main starts reads and
- * writes the new format, and this is not a shared view or another account's
- * synced workspace.
- */
 export function noteConversionOffered(
   env: Readonly<Record<string, string | undefined>>,
   workspace: ConvertingWorkspace,
@@ -46,11 +41,6 @@ export function noteConversionOffered(
   );
 }
 
-/**
- * Whether a run converts this workspace alone or through its relay. Only the
- * owner's own synced workspace reaches the relay; a member's full copy, a
- * shared view and a paused workspace are refused.
- */
 export function noteConversionReach(
   workspace: ConvertingWorkspace,
   signedInUserId: string | null,

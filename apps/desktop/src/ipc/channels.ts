@@ -241,7 +241,6 @@ export const CHANNELS = {
   setAsideDraftChanged: "desktop:set-aside-draft-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
-  // How far a workspace's Convert notes run has got.
   noteConversionProgress: "desktop:note-conversion-progress",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",

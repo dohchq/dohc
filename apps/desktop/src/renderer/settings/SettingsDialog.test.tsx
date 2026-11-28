@@ -1731,7 +1731,11 @@ it("shows Members in a joined workspace, which lists the owner's people", async 
 });
 
 describe("Settings › Advanced › Note format", () => {
-  const noteConversion = { state: { status: "idle" as const }, start: vi.fn(), send: vi.fn() };
+  const noteConversion = {
+    state: { status: "idle" as const },
+    start: vi.fn(),
+    sendConverted: vi.fn(),
+  };
   const open = (initialSection: "advanced" | "general") =>
     render(
       <SettingsDialog
