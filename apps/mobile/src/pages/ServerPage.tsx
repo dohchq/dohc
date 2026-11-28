@@ -13,6 +13,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -49,8 +50,15 @@ import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListSt
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
-import { createPageHost, createPageMountHold } from "./pageHost";
-import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
+import { createPageHost, pageMountKey, type HeldPageMount } from "./pageHost";
+import {
+  createPageLive,
+  holdsMount,
+  holdsPage,
+  holdsUnsent,
+  liveMark,
+  type PageLiveState,
+} from "./pageLive";
 import { unwrittenText } from "./pageNotices";
 import { pageTimings, timingOwner } from "./pageTimings";
 import {
@@ -101,26 +109,48 @@ export function ServerPage() {
   const { data } = useAccount();
   const signIn = useSignIn();
   const { path = "", workspace, t0 } = useLocalSearchParams<PageParams>();
-  const [hold] = useState(createPageMountHold);
+  const elsewhere = workspace !== undefined && data?.workspaceId !== workspace;
+  const heldRef = useRef<HeldPageMount | null>(null);
+  const holdingRef = useRef(false);
+  const activeKey = useRef("");
+  const latestInstance = useRef(0);
   const [, setSync] = useState(0);
-  const onUnsent = useCallback(
-    (forKey: string, next: boolean) => {
-      if (hold.setUnsent(forKey, next)) setSync((value) => value + 1);
-    },
-    [hold],
-  );
-  if (workspace !== undefined && data?.workspaceId !== workspace) {
-    hold.resolve(null, null, 0, "");
-    return <ElsewherePage />;
-  }
-  const key = hold.resolve(signIn, data?.workspaceId ?? null, data?.instance ?? 0, path);
+  const instance = data?.instance ?? 0;
+  const mount = elsewhere
+    ? null
+    : pageMountKey(
+        heldRef.current,
+        { signIn, workspaceId: data?.workspaceId ?? null, instance, path },
+        holdingRef.current,
+      );
+  useLayoutEffect(() => {
+    latestInstance.current = instance;
+    if (!mount) {
+      heldRef.current = null;
+      holdingRef.current = false;
+      activeKey.current = "";
+      return;
+    }
+    if (mount.key !== activeKey.current) holdingRef.current = false;
+    heldRef.current = mount.held;
+    activeKey.current = mount.key;
+    if (!holdingRef.current && mount.held && mount.held.instance !== instance)
+      setSync((value) => value + 1);
+  });
+  const onHold = useCallback((forKey: string, next: boolean) => {
+    if (forKey !== activeKey.current) return;
+    holdingRef.current = next;
+    if (!next && heldRef.current && heldRef.current.instance !== latestInstance.current)
+      setSync((value) => value + 1);
+  }, []);
+  if (!mount) return <ElsewherePage />;
   return (
     <PageScreen
-      key={key}
-      mountKey={key}
+      key={mount.key}
+      mountKey={mount.key}
       path={path}
       tap={Number(t0) || undefined}
-      onUnsent={onUnsent}
+      onHold={onHold}
     />
   );
 }
@@ -158,9 +188,9 @@ function PageScreen(props: {
   mountKey: string;
   path: string;
   tap?: number;
-  onUnsent: (forKey: string, unsent: boolean) => void;
+  onHold: (forKey: string, holding: boolean) => void;
 }) {
-  const { mountKey, path, tap, onUnsent } = props;
+  const { mountKey, path, tap, onHold } = props;
   const theme = useTheme();
   const router = useRouter();
   const name = path.split("/").pop() ?? path;
@@ -282,10 +312,10 @@ function PageScreen(props: {
     live?.state ?? (() => NO_STATE),
   );
   useEffect(() => {
-    const update = () => onUnsent(mountKey, live !== null && holdsUnsent(live.state()));
+    const update = () => onHold(mountKey, live !== null && holdsMount(live.state()));
     update();
     return live?.subscribe(update);
-  }, [live, mountKey, onUnsent]);
+  }, [live, mountKey, onHold]);
   const holding = live !== null && holdsPage(liveState);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const readObjectId = state.value?.kind === "page" ? (state.value.objectId ?? null) : null;

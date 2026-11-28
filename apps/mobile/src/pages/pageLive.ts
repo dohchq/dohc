@@ -333,6 +333,16 @@ export function liveMark(state: PageLiveState): MarkKey {
 export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && state.unsent;
 
 /**
+ * Whether a live page must stay mounted across a same-workspace store reopen: while edits are unsent, while the
+ * socket is open, or after a close until the web view confirms whether any edits remain unsent.
+ */
+export const holdsMount = (state: PageLiveState) =>
+  state.phase !== "ended" &&
+  (state.unsent ||
+    state.phase === "open" ||
+    (state.phase === "lost" && state.facts?.status === "live"));
+
+/**
  * Whether the web view must stay: it shows the live document, or may yet. Text the app reads later never replaces it.
  */
 export const holdsPage = (state: PageLiveState) =>

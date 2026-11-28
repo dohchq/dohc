@@ -115,7 +115,6 @@ export function createPhoneMemberLiveSessions(options: {
         }
       }
       const discriminator = randomBytes(9).toString("base64url");
-      if (entries.has(discriminator)) throw new Error("Phone session discriminator collision.");
       if (held >= PHONE_MEMBER_SESSIONS_PER_ACCOUNT && oldest !== undefined) entries.delete(oldest);
       if (entries.size >= maxSessions) return null;
       const { token, expiresAtMs, ...session } = input;
@@ -363,12 +362,6 @@ export function createPhonePages(options: {
           grantId: member.grantId,
         }
       : null;
-    const checkMember = () =>
-      member
-        ? memberRefusal(caller.userId, row.workspaceId, member, binding.currentPath, row.objectId)
-        : null;
-    const preDeny = checkMember();
-    if (preDeny !== null) return refused(preDeny);
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(waitMs)]);
     // The sign-in as its table holds it now, which also gives the ticket its end.
     const stored = (await within(options.sessions.read([caller.sessionId]), bounded)).get(
@@ -408,7 +401,9 @@ export function createPhonePages(options: {
       (after.status === "ready" && hiddenFile(after.document.binding.currentPath))
     )
       return refused("missing");
-    const postDeny = checkMember();
+    const postDeny = member
+      ? memberRefusal(caller.userId, row.workspaceId, member, binding.currentPath, row.objectId)
+      : null;
     if (postDeny !== null) return refused(postDeny);
     // Unless readiness still names the binding checked above, the ticket may be for another lineage, so the phone
     // opens again rather than connecting with this one.
@@ -439,7 +434,7 @@ export function createPhonePages(options: {
       expiresAtMs,
     });
     return created === null
-      ? preparing
+      ? refused("live_host_full")
       : {
           ...ready,
           mode: "named",

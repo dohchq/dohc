@@ -4,10 +4,11 @@ import { createAccount } from "../server/account";
 import { memoryStore, testServer, type Answer } from "../server/testServer";
 import type { ToPage } from "./liveBridge";
 import { facts, liveServer, OPEN, pageSide, ready } from "./liveFixtures";
-import { createPageHost, createPageMountHold } from "./pageHost";
+import { createPageHost, pageMountKey } from "./pageHost";
 import {
   createPageLive,
   createScopedEnds,
+  holdsMount,
   liveMark,
   type ScopedEnds,
   type WorkspaceScope,
@@ -166,27 +167,96 @@ describe("teardown", () => {
   });
 });
 
-describe("createPageMountHold", () => {
-  it("preserves the mounted page key across a store replace while unsent edits remain, then advances once cleared", () => {
+describe("pageMountKey + holdsMount", () => {
+  it("keeps the active web view mounted across a same-workspace reopen until the web view confirms whether edits remain unsent", async () => {
     const signIn = {};
-    const hold = createPageMountHold();
-    expect(hold.resolve(signIn, "ws-1", 1, "shared/plan.md")).toBe("1:shared/plan.md");
-    expect(hold.setUnsent("1:shared/plan.md", true)).toBe(false);
+    const t = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready());
+    const initial = pageMountKey(
+      null,
+      { signIn, workspaceId: "ws-1", instance: 1, path: "notes/plan.md" },
+      false,
+    );
+    expect(initial.key).toBe("1:notes/plan.md");
 
-    // A feed replace reopens the workspace store with a new instance while typing is unsent.
-    expect(hold.resolve(signIn, "ws-1", 2, "shared/plan.md")).toBe("1:shared/plan.md");
+    t.painted();
+    t.open();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.latest().open();
+    const live = t.host.state().live!;
+    const fromPage = pageSide(live)(1);
+    fromPage({ type: "state", facts: facts("live") });
+    expect(holdsMount(live.state())).toBe(true);
 
-    // Stale keys are ignored; clearing unsent on the active key asks for a catch-up render.
-    expect(hold.setUnsent("0:shared/plan.md", false)).toBe(false);
-    expect(hold.setUnsent("1:shared/plan.md", false)).toBe(true);
-    expect(hold.resolve(signIn, "ws-1", 2, "shared/plan.md")).toBe("2:shared/plan.md");
+    // Feed replace reopens the store (instance 1 -> 2) and socket closes BEFORE the web view's queued unsent report arrives.
+    t.latest().close();
+    expect(live.state()).toMatchObject({ phase: "lost", unsent: false });
+    expect(holdsMount(live.state())).toBe(true);
+    const duringRace = pageMountKey(
+      initial.held,
+      { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+      holdsMount(live.state()),
+    );
+    expect(duringRace.key).toBe("1:notes/plan.md");
 
-    // Switching workspace, sign-in, or path always remounts even while unsent is true.
-    hold.setUnsent("2:shared/plan.md", true);
-    expect(hold.resolve(signIn, "ws-2", 3, "shared/plan.md")).toBe("3:shared/plan.md");
-    hold.setUnsent("3:shared/plan.md", true);
-    expect(hold.resolve({}, "ws-2", 4, "shared/plan.md")).toBe("4:shared/plan.md");
-    hold.setUnsent("4:shared/plan.md", true);
-    expect(hold.resolve(signIn, "ws-2", 4, "shared/other.md")).toBe("4:shared/other.md");
+    // Queued web view disconnect arrives with unsent: true -> stays mounted to preserve the draft.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 1,
+        unsent: true,
+      },
+    });
+    expect(holdsMount(live.state())).toBe(true);
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+        holdsMount(live.state()),
+      ).key,
+    ).toBe("1:notes/plan.md");
+
+    // Once the web view confirms no unsent edits remain (or teardown ends the live session), the mount advances.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
+    expect(holdsMount(live.state())).toBe(false);
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+        holdsMount(live.state()),
+      ).key,
+    ).toBe("2:notes/plan.md");
+
+    // Switching workspace, sign-in, or path always remounts even while holding.
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-2", instance: 3, path: "notes/plan.md" },
+        true,
+      ).key,
+    ).toBe("3:notes/plan.md");
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn: {}, workspaceId: "ws-1", instance: 4, path: "notes/plan.md" },
+        true,
+      ).key,
+    ).toBe("4:notes/plan.md");
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/other.md" },
+        true,
+      ).key,
+    ).toBe("2:notes/other.md");
   });
 });

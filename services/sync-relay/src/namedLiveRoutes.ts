@@ -1322,8 +1322,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           ticket.binding.workspaceId !== context.workspaceId ||
           (boundPhone &&
             (ticket.binding.objectId !== boundPhone.objectId ||
-              ticket.binding.lineageClaimId !== boundPhone.lineageClaimId ||
-              hiddenFile(ticket.binding.currentPath)))
+              ticket.binding.lineageClaimId !== boundPhone.lineageClaimId))
         ) {
           stop();
           return;
@@ -1354,10 +1353,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
               trackedDesktop.userId,
               trackedDesktop.session,
             ) ||
-            accountIsFenced(storage, trackedDesktop.userId) ||
-            (boundPhone &&
-              (!storage.showsOnPhone(boundPhone.userId, boundPhone.workspaceId) ||
-                hiddenFile(ticket.binding.currentPath)))
+            accountIsFenced(storage, trackedDesktop.userId)
           ) {
             stop();
             return;
