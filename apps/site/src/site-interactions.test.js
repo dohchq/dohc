@@ -591,14 +591,18 @@ describe("Drive invite requests", () => {
     }
   });
 
-  it("confirms the signup when the dohc copy fails", async () => {
-    vi.mocked(fetch).mockImplementation(async (url) => {
-      if (String(url).startsWith("https://drive.dohc.computer/")) throw new TypeError("offline");
-      return Response.json({ success: true });
-    });
+  it.each([
+    ["fails", () => Promise.reject(new TypeError("offline"))],
+    ["never answers", () => new Promise(() => {})],
+  ])("confirms the signup when the dohc copy %s", async (_, copy) => {
+    vi.mocked(fetch).mockImplementation(async (url) =>
+      String(url).startsWith("https://drive.dohc.computer/")
+        ? copy()
+        : Response.json({ success: true }),
+    );
     const form = await join();
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-    expect(form.dataset.state).toBe("joined");
+    await vi.waitFor(() => expect(form.dataset.state).toBe("joined"));
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
       "Request received",
     );
