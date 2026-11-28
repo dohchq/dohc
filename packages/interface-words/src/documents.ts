@@ -53,6 +53,10 @@ export const documentWords = {
       label: "Read-only",
       explanation: "This document is shared with you to read.",
     },
+    readOnlyPausedByOwner: {
+      label: "Read-only",
+      explanation: "The owner paused live editing for this document.",
+    },
     readOnlyEnded: { label: "Read-only", explanation: "Your access to this document ended." },
     tooLarge: { label: "Read-only", explanation: "This file is too large to edit in dohc." },
     readOnlyOffline: { label: "Read-only", explanation: "dohc could not reach the server." },

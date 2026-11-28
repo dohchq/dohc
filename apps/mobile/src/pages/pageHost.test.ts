@@ -4,10 +4,11 @@ import { createAccount } from "../server/account";
 import { memoryStore, testServer, type Answer } from "../server/testServer";
 import type { ToPage } from "./liveBridge";
 import { facts, liveServer, OPEN, pageSide, ready } from "./liveFixtures";
-import { createPageHost } from "./pageHost";
+import { createPageHost, pageMountKey } from "./pageHost";
 import {
   createPageLive,
   createScopedEnds,
+  holdsMount,
   liveMark,
   type ScopedEnds,
   type WorkspaceScope,
@@ -163,5 +164,164 @@ describe("teardown", () => {
       expect(t.host.state().live, when).toBeNull();
       expect(t.opens(), when).toBe(when === "while recovering" ? 1 : 0);
     }
+  });
+});
+
+describe("pageMountKey + holdsMount", () => {
+  it("keeps the active web view mounted across a same-workspace reopen until the web view confirms whether edits remain unsent", async () => {
+    const signIn = {};
+    const t = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready());
+    const initial = pageMountKey(
+      null,
+      { signIn, workspaceId: "ws-1", instance: 1, path: "notes/plan.md" },
+      false,
+    );
+    expect(initial.key).toBe("1:notes/plan.md");
+
+    t.painted();
+    t.open();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.latest().open();
+    const live = t.host.state().live!;
+    const fromPage = pageSide(live)(1);
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Feed replace reopens the store (instance 1 -> 2) and socket closes BEFORE even the first `live` report arrives.
+    t.latest().close();
+    expect(live.state()).toMatchObject({
+      phase: "lost",
+      facts: null,
+      unsent: false,
+      confirming: true,
+    });
+    expect(holdsMount(live.state())).toBe(true);
+    const duringRace = pageMountKey(
+      initial.held,
+      { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+      holdsMount(live.state()),
+    );
+    expect(duringRace.key).toBe("1:notes/plan.md");
+
+    // Queued `live` report arrives while still awaiting disconnect -> stays mounted.
+    fromPage({ type: "state", facts: facts("live") });
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Queued web view disconnect arrives with unsent: true -> stays mounted to preserve the draft.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 1,
+        unsent: true,
+      },
+    });
+    expect(holdsMount(live.state())).toBe(true);
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+        holdsMount(live.state()),
+      ).key,
+    ).toBe("1:notes/plan.md");
+
+    // Once the web view confirms no unsent edits remain, the mount advances.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
+    expect(holdsMount(live.state())).toBe(false);
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/plan.md" },
+        holdsMount(live.state()),
+      ).key,
+    ).toBe("2:notes/plan.md");
+
+    // Switching workspace, sign-in, or path always remounts even while holding.
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-2", instance: 3, path: "notes/plan.md" },
+        true,
+      ).key,
+    ).toBe("3:notes/plan.md");
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn: {}, workspaceId: "ws-1", instance: 4, path: "notes/plan.md" },
+        true,
+      ).key,
+    ).toBe("4:notes/plan.md");
+    expect(
+      pageMountKey(
+        duringRace.held,
+        { signIn, workspaceId: "ws-1", instance: 2, path: "notes/other.md" },
+        true,
+      ).key,
+    ).toBe("2:notes/other.md");
+  });
+
+  it("keeps confirming across Try again until retired reports, and never pins mount on web-view close", async () => {
+    const signIn = {};
+    const t = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready(), {
+      status: 200,
+      body: { ok: true, result: { status: "refused", reason: "read-only" } },
+    });
+    t.painted();
+    t.open();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.latest().open();
+    const live = t.host.state().live!;
+    const fromPage = pageSide(live)(1);
+
+    // Socket closes before any report; user taps Try again immediately, and server refuses read-only.
+    t.latest().close();
+    expect(holdsMount(live.state())).toBe(true);
+    live.retry();
+    expect(live.state()).toMatchObject({ phase: "opening", confirming: true });
+    expect(holdsMount(live.state())).toBe(true);
+    await vi.waitFor(() => expect(live.state().phase).toBe("refused"));
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Retired connection delivers its queued disconnect with unsent edits -> stays held.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 1,
+        unsent: true,
+      },
+    });
+    expect(live.state()).toMatchObject({ phase: "refused", unsent: true, confirming: false });
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Separate page where WebView reports disconnected and then close: never sets confirming.
+    const t2 = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready());
+    t2.painted();
+    t2.open();
+    await vi.waitFor(() => expect(t2.sockets).toHaveLength(1));
+    t2.latest().open();
+    const live2 = t2.host.state().live!;
+    const fromPage2 = pageSide(live2)(1);
+    fromPage2({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
+    fromPage2({ type: "close" });
+    expect(live2.state()).toMatchObject({ phase: "lost", confirming: false, unsent: false });
+    expect(holdsMount(live2.state())).toBe(false);
   });
 });

@@ -30,6 +30,7 @@ import { createApnsClient } from "./apnsClient";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
 import { SHARE_INVITATION_EMAIL_TIMEOUT_MS } from "./shareInvitationEmail";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -124,7 +125,12 @@ import {
   createPersonalLiveRoutes,
 } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
-import { createPhonePages, type PhonePages } from "./phonePages";
+import {
+  createPhoneMemberLiveSessions,
+  createPhonePages,
+  type PhoneMemberLiveSessions,
+  type PhonePages,
+} from "./phonePages";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
 import { liveNoteStanding, normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
@@ -779,14 +785,18 @@ const relayApplication = createSyncRelayHandler({
   ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
   ownerLiveSockets: () =>
-    ownerLive || desktopLive
+    ownerLive || desktopLive || phoneLive || phoneMemberSessions
       ? {
           stopSession: (userId, sessionId) => {
             ownerLive?.stopSession(userId, sessionId);
             desktopLive?.stopSession(userId, sessionId);
+            phoneLive?.stopSession(userId, sessionId);
+            phoneMemberSessions?.stopSession(userId, sessionId);
           },
           stopPhoneWorkspace: (userId, workspaceId) => {
             ownerLive?.stopPhoneWorkspace(userId, workspaceId);
+            phoneLive?.stopPhoneWorkspace(userId, workspaceId);
+            phoneMemberSessions?.stopPhoneWorkspace(userId, workspaceId);
           },
         }
       : undefined,
@@ -876,6 +886,8 @@ let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let phoneLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let phoneMemberSessions: PhoneMemberLiveSessions | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let memberAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
@@ -941,6 +953,8 @@ const deletions = createAccountDeletionRoute({
     linkLive?.deleteAccount(userId, ids);
     personalLive?.deleteAccount(userId, ids);
     desktopLive?.deleteAccount(userId, ids);
+    phoneLive?.deleteAccount(userId, ids);
+    phoneMemberSessions?.deleteAccount(userId, ids);
     ownerLive?.deleteAccount(userId, ids);
     automations?.deleteAccount(userId);
   },
@@ -1456,11 +1470,12 @@ if (namedLiveConfig) {
     const host = mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
     return host?.readAwakeState(binding, namedLiveConfig.host.maxSyncOutputBytes, signal);
   };
+  const hostReports = createLiveHostReports({ storage, captureNative });
   const tickets = createLiveTickets({
     storage,
     audience: shareWebOrigin!,
     key: linkKey!,
-    hostReports: createLiveHostReports({ storage, captureNative }),
+    hostReports,
   });
   const admission = createLiveConnectionAdmission();
   const membership = createLiveMembershipRegistry(
@@ -1511,23 +1526,27 @@ if (namedLiveConfig) {
   // A paused note is refused to editors as a held one is: only its owner can start it again.
   const editorsBlocked = (document: { workspaceId: string; objectId: string }) =>
     liveRoomPaused(storage as StorageContext, document) ? "held" : sessionHostBlocked?.(document);
-  namedLive = createNamedLiveRoutes({
+  const liveHosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
+  const sharedNamedLive = {
     rooms,
-    kind: "named",
+    kind: "named" as const,
     storage,
     lookupUserDisplayName,
-    hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    hosts: liveHosts,
     publicOrigin: shareWebOrigin!,
     exchangeKey: relayExchangeKey!,
     limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames,
     bounds: namedLiveConfig.host,
     validate: namedLiveConfig.validate,
-    sessions: { resolve: relayApplication.resolveNamedBrowserSession },
-    tickets,
     captureNative,
     membership,
     admission,
+  };
+  namedLive = createNamedLiveRoutes({
+    ...sharedNamedLive,
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession },
+    tickets,
     sessionHostBlocked: editorsBlocked,
     liveNote,
   });
@@ -1689,6 +1708,31 @@ if (namedLiveConfig) {
   // within the editor limits the desktop's admission sends.
   if (selfHost && deployment && accountResolvers.sessions && desktopEditorLimits) {
     const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    let phoneNamedTickets: ReturnType<typeof createLiveTickets> | undefined;
+    if (resolvePhoneCapableAccountSession) {
+      phoneNamedTickets = createLiveTickets({
+        storage,
+        audience: shareWebOrigin!,
+        key: createHmac("sha256", linkKey!).update("dohc-phone-named-live-ticket").digest(),
+        hostReports,
+      });
+      phoneMemberSessions = createPhoneMemberLiveSessions({
+        storage,
+        maxSessions:
+          namedBrowserSessionLimits?.maxSessions ?? namedLiveConfig.transport.maxConnections,
+      });
+      phoneLive = createNamedLiveRoutes({
+        ...sharedNamedLive,
+        phoneBearer: true,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
+        accountSessions: accountResolvers.sessions,
+        phoneSessions: phoneMemberSessions,
+        tickets: phoneNamedTickets,
+      });
+      server.once("close", phoneLive.close);
+      process.once("SIGINT", phoneLive.close);
+      process.once("SIGTERM", phoneLive.close);
+    }
     phonePages = createPhonePages({
       storage,
       history: deployment.history,
@@ -1698,6 +1742,9 @@ if (namedLiveConfig) {
         return control?.configuredMode === "service" && control.configuredHostId === hostId;
       },
       tickets,
+      ...(phoneNamedTickets && phoneMemberSessions
+        ? { phoneNamedTickets, phoneMemberSessions }
+        : {}),
       sessions: accountResolvers.sessions,
       nowMs: () => Date.now(),
       editorLimits: desktopEditorLimits,
@@ -1719,6 +1766,10 @@ if (namedLiveConfig) {
     } else if (request.url?.startsWith("/sync/live/desktop?")) {
       if (desktopLive)
         void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+      else socket.destroy();
+    } else if (request.url?.startsWith("/sync/live/phone?")) {
+      if (phoneLive)
+        void phoneLive.handleUpgrade(request, socket, head).catch(() => socket.destroy());
       else socket.destroy();
     } else if (!deviceControl) socket.destroy();
   });

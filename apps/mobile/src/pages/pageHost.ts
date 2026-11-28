@@ -15,6 +15,38 @@ interface PageHostState {
   readonly stopped: boolean;
 }
 
+export interface HeldPageMount {
+  readonly signIn: object;
+  readonly workspaceId: string;
+  readonly path: string;
+  readonly instance: number;
+}
+
+export function pageMountKey(
+  held: HeldPageMount | null,
+  current: { signIn: object | null; workspaceId: string | null; instance: number; path: string },
+  holding: boolean,
+) {
+  if (
+    holding &&
+    held &&
+    held.signIn === current.signIn &&
+    held.workspaceId === current.workspaceId &&
+    held.path === current.path
+  )
+    return { key: `${held.instance}:${current.path}`, held };
+  const next =
+    current.signIn && current.workspaceId !== null
+      ? {
+          signIn: current.signIn,
+          workspaceId: current.workspaceId,
+          path: current.path,
+          instance: current.instance,
+        }
+      : null;
+  return { key: `${current.instance}:${current.path}`, held: next };
+}
+
 export function createPageHost(options: {
   /** Delivers a script to the mounted web view. */
   readonly inject: (script: string) => void;

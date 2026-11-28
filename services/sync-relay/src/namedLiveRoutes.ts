@@ -68,6 +68,11 @@ import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { authorizeLinkShareAction, authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
+import {
+  memberEditGrant,
+  type PhoneMemberLiveSession,
+  type PhoneMemberLiveSessions,
+} from "./phonePages";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   linkRefusal,
@@ -174,10 +179,12 @@ interface LiveRouteOptions {
 type BrowserRouteOptions = LiveRouteOptions & {
   kind: "named" | "link";
   desktopBearer?: boolean;
-  /** Desktop Bearer sign-in and uncached session table, paired so keepalive cannot outlive sign-out. */
+  phoneBearer?: boolean;
+  /** Desktop or phone Bearer sign-in and uncached session table, paired so keepalive cannot outlive sign-out. */
   resolveAccountSession?: ResolveAccountSession;
   accountSessions?: Pick<AccountSessions, "read">;
-  sessions: {
+  phoneSessions?: Pick<PhoneMemberLiveSessions, "has" | "take">;
+  sessions?: {
     resolve(
       request: Request,
       discriminator: string,
@@ -287,24 +294,34 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const options =
     input.kind === "owner" || input.kind === "personal"
       ? { ...input }
-      : { ...input, sessions: { resolve: input.sessions.resolve.bind(input.sessions) } };
+      : {
+          ...input,
+          sessions: input.sessions
+            ? { resolve: input.sessions.resolve.bind(input.sessions) }
+            : undefined,
+        };
   const limits = parseNamedLiveRouteLimits(options.limits),
     hosts = new Set(options.hosts);
   const kind = options.kind;
   const desktop = options.kind === "named" && options.desktopBearer === true;
+  const phone = options.kind === "named" && options.phoneBearer === true;
+  const bearerNamed = desktop || phone;
   if (options.kind !== "owner" && options.kind !== "personal") {
-    if (!desktop && (options.resolveAccountSession || options.accountSessions))
-      throw new TypeError("Only desktop live routes check account sessions.");
-    if (desktop && Boolean(options.resolveAccountSession) !== Boolean(options.accountSessions))
-      throw new TypeError(
-        "Desktop live routes require both resolveAccountSession and accountSessions.",
-      );
+    if (
+      (desktop && phone) ||
+      (!bearerNamed && (options.resolveAccountSession || options.accountSessions)) ||
+      (desktop && Boolean(options.resolveAccountSession) !== Boolean(options.accountSessions)) ||
+      (phone &&
+        (!options.resolveAccountSession || !options.accountSessions || !options.phoneSessions)) ||
+      (!phone && (!options.sessions || options.phoneSessions))
+    )
+      throw new TypeError("Invalid named live route authentication options.");
   }
-  const routeKind = desktop ? "desktop" : kind;
-  // Browsers reach named (not desktop) and link routes through the share page's
-  // gateway, which pings them; desktop and phone owner sockets are pinged from here,
+  const routeKind = phone ? "phone" : desktop ? "desktop" : kind;
+  // Browsers reach named (not desktop/phone) and link routes through the share page's
+  // gateway, which pings them; desktop and phone sockets are pinged from here,
   // while share-web's agent client opens link routes directly and keeps the idle close.
-  const gatewayFronted = !desktop && (kind === "named" || kind === "link");
+  const gatewayFronted = !bearerNamed && (kind === "named" || kind === "link");
   if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal")
     throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin),
@@ -351,13 +368,14 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   // Each connection's stop, under the account, sign-in, and workspace it was opened for.
   const connectionScopes = new Map<() => void, ConnectionScope>();
   const shutdown = new AbortController();
-  const accountSessions = options.kind === "owner" || desktop ? options.accountSessions : undefined;
-  const desktopResolveAccountSession = desktop ? options.resolveAccountSession : undefined;
+  const accountSessions =
+    options.kind === "owner" || bearerNamed ? options.accountSessions : undefined;
+  const namedResolveAccountSession = bearerNamed ? options.resolveAccountSession : undefined;
   const ownerTickets = options.kind === "owner" ? options.tickets : undefined;
   // A phone, browser or desktop sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
   async function checkTrackedSessions() {
     const tracked = [...connectionScopes].flatMap(([stop, scope]) =>
-      scope.session && scope.userId && (desktop || scope.session.clientKind !== "desktop")
+      scope.session && scope.userId && (bearerNamed || scope.session.clientKind !== "desktop")
         ? [{ stop, userId: scope.userId, session: scope.session, recheck: scope.recheck }]
         : [],
     );
@@ -436,7 +454,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     );
   const trusted = (headers: Headers) =>
     hosts.has(headers.get("host") ?? "") &&
-    (desktop
+    (bearerNamed
       ? (!headers.has("origin") || headers.get("origin") === origin) &&
         /^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") &&
         !headers.has("cookie")
@@ -444,7 +462,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
   // A link route forwards only the headers present, so the agent resolver sees exactly what was sent, and refuses a cookie.
   const credentials = (headers: Headers): Record<string, string> =>
-    (kind === "owner" && headers.has("authorization")) || desktop
+    (kind === "owner" && headers.has("authorization")) || bearerNamed
       ? { authorization: headers.get("authorization") ?? "" }
       : kind === "named" || kind === "owner"
         ? { cookie: headers.get("cookie") ?? "" }
@@ -485,7 +503,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     const url = new URL(request.url);
     if (
       options.kind === "owner" ||
-      desktop ||
+      bearerNamed ||
       url.pathname !== `/sync/live/${kind}-tickets` ||
       url.search ||
       request.method !== "POST" ||
@@ -572,7 +590,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           headers: credentials(request.headers),
           signal,
         });
-        const context = await options.sessions.resolve(authenticated, discriminator, "read");
+        const context = await options.sessions!.resolve(authenticated, discriminator, "read");
         signal.throwIfAborted();
         check();
         if (!context || context.kind !== kind) return refusal();
@@ -1171,22 +1189,49 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           fresh: () => linkAuthority.freshPersonal(authority),
         });
       } else {
-        const context = await options.sessions.resolve(authenticated, discriminator);
+        let boundPhone: PhoneMemberLiveSession | undefined;
+        let context = phone ? null : await options.sessions!.resolve(authenticated, discriminator);
         signal.throwIfAborted();
         check();
-        if (!context || context.kind !== kind) {
+        if (!phone && (!context || context.kind !== kind)) {
           stop();
           return;
         }
-        if (desktopResolveAccountSession) {
+        if (namedResolveAccountSession) {
+          if (phone && !options.phoneSessions!.has(discriminator)) {
+            stop();
+            return;
+          }
           const account = await bearerAccountSession(
             storage,
-            desktopResolveAccountSession,
+            namedResolveAccountSession,
             authenticated,
           );
           signal.throwIfAborted();
           check();
-          if (context.kind !== "named" || account.userId !== context.userId) {
+          if (phone) {
+            const taken =
+              account.clientKind === "phone"
+                ? options.phoneSessions!.take({
+                    discriminator,
+                    userId: account.userId,
+                    sessionId: account.sessionId,
+                    token,
+                  })
+                : null;
+            if (!taken) {
+              stop();
+              return;
+            }
+            boundPhone = taken;
+            context = {
+              kind: "named",
+              userId: taken.userId,
+              workspaceId: taken.workspaceId,
+              shareId: taken.shareId,
+              grantId: taken.grantId,
+            };
+          } else if (context!.kind !== "named" || account.userId !== context!.userId) {
             stop();
             return;
           }
@@ -1199,7 +1244,23 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             },
           };
         }
-        // Registered before the ticket is spent, so a sign-out from here on ends this connection.
+        if (!context) {
+          stop();
+          return;
+        }
+        const guard = boundPhone
+          ? (path = boundPhone.path) => {
+              if (
+                done ||
+                Date.now() >= trackedDesktop!.session.expiresAtMs ||
+                accountIsFenced(storage, boundPhone.userId) ||
+                !storage.showsOnPhone(boundPhone.userId, boundPhone.workspaceId) ||
+                !memberEditGrant(storage, { ...boundPhone, path })
+              )
+                throw new Error("The phone member's access ended.");
+            }
+          : undefined;
+        // Registered before the ticket is spent, so a sign-out or Show on phone turned off from here on ends this connection.
         connectionScopes.set(stop, {
           workspaceId: context.workspaceId,
           ...(context.kind === "named" ? { userId: context.userId } : {}),
@@ -1214,6 +1275,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             sessionExpiry.unref();
           }
         }
+        guard?.();
         const principalKey =
           context.kind === "named"
             ? context.userId
@@ -1228,7 +1290,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
               principalKey,
               context.workspaceId,
               context.grantId,
-              discriminator,
+              boundPhone ? boundPhone.sessionId : discriminator,
             ]),
             limits.maxConnectionsPerSession,
             "live_session_limit",
@@ -1257,7 +1319,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           ticket.authority.principalKind !== context.kind ||
           (context.kind === "named" && ticket.authority.principalId !== context.userId) ||
           ticket.authority.grantId !== context.grantId ||
-          ticket.binding.workspaceId !== context.workspaceId
+          ticket.binding.workspaceId !== context.workspaceId ||
+          (boundPhone &&
+            (ticket.binding.objectId !== boundPhone.objectId ||
+              ticket.binding.lineageClaimId !== boundPhone.lineageClaimId))
         ) {
           stop();
           return;
@@ -1304,6 +1369,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           validate,
           reserveBytes,
           validationBudget,
+          ...(guard ? { guard: () => guard(ticket.binding.currentPath), personOnly: true } : {}),
         });
         host = options.rooms ? options.rooms.join(captured) : captured;
         host.assertCurrent();
@@ -1377,7 +1443,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
           }
         });
-        if (desktop || ownerPhone) {
+        if (bearerNamed || ownerPhone) {
           let pendingPing: Buffer | undefined;
           accepted.on("pong", (bytes) => {
             if (done || !pendingPing || !Buffer.isBuffer(bytes) || !bytes.equals(pendingPing))

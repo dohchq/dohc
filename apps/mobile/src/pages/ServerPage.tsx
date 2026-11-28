@@ -11,7 +11,9 @@ import {
   useRouter,
 } from "expo-router";
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -40,7 +42,7 @@ import {
 } from "../server/fileWrites";
 import type { RecordValue } from "../server/phoneCollections";
 import { documentCollectionWrites } from "../server/phoneDocumentCollections";
-import { writesIn } from "../server/phoneWrites";
+import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { TOUCH } from "../touch";
@@ -48,8 +50,15 @@ import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListSt
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
-import { createPageHost } from "./pageHost";
-import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
+import { createPageHost, pageMountKey, type HeldPageMount } from "./pageHost";
+import {
+  createPageLive,
+  holdsMount,
+  holdsPage,
+  holdsUnsent,
+  liveMark,
+  type PageLiveState,
+} from "./pageLive";
 import { unwrittenText } from "./pageNotices";
 import { pageTimings, timingOwner } from "./pageTimings";
 import {
@@ -98,10 +107,51 @@ const pageScript = (
 // reads the page from another.
 export function ServerPage() {
   const { data } = useAccount();
+  const signIn = useSignIn();
   const { path = "", workspace, t0 } = useLocalSearchParams<PageParams>();
-  if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewherePage />;
+  const elsewhere = workspace !== undefined && data?.workspaceId !== workspace;
+  const heldRef = useRef<HeldPageMount | null>(null);
+  const holdingRef = useRef(false);
+  const activeKey = useRef("");
+  const latestInstance = useRef(0);
+  const [, setSync] = useState(0);
+  const instance = data?.instance ?? 0;
+  const mount = elsewhere
+    ? null
+    : pageMountKey(
+        heldRef.current,
+        { signIn, workspaceId: data?.workspaceId ?? null, instance, path },
+        holdingRef.current,
+      );
+  useLayoutEffect(() => {
+    latestInstance.current = instance;
+    if (!mount) {
+      heldRef.current = null;
+      holdingRef.current = false;
+      activeKey.current = "";
+      return;
+    }
+    if (mount.key !== activeKey.current) holdingRef.current = false;
+    heldRef.current = mount.held;
+    activeKey.current = mount.key;
+    if (!holdingRef.current && mount.held && mount.held.instance !== instance)
+      setSync((value) => value + 1);
+  });
+  const onHold = useCallback((forKey: string, next: boolean) => {
+    if (forKey !== activeKey.current) return;
+    holdingRef.current = next;
+    if (!next && heldRef.current && heldRef.current.instance !== latestInstance.current)
+      setSync((value) => value + 1);
+  }, []);
+  if (!mount) return <ElsewherePage />;
   return (
-    <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} tap={Number(t0) || undefined} />
+    <PageScreen
+      key={mount.key}
+      mountKey={mount.key}
+      path={path}
+      tap={Number(t0) || undefined}
+      onHold={onHold}
+    />
   );
 }
 
@@ -134,7 +184,13 @@ const openProblem = (reason: string): ServerProblemKind | null =>
       ? reason
       : null;
 
-function PageScreen({ path, tap }: { path: string; tap?: number }) {
+function PageScreen(props: {
+  mountKey: string;
+  path: string;
+  tap?: number;
+  onHold: (forKey: string, holding: boolean) => void;
+}) {
+  const { mountKey, path, tap, onHold } = props;
   const theme = useTheme();
   const router = useRouter();
   const name = path.split("/").pop() ?? path;
@@ -249,14 +305,17 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     };
   }, [attempt]);
 
-  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
-  // or workspace ended (appTeardown) stays read-only.
-  const editsLive =
-    writesIn(data) && state.value?.kind === "page" && data !== null && !stopped && !mutating;
+  const canOpenLive = phoneWrites && data !== null;
+  const editsLive = canOpenLive && state.value?.kind === "page" && !stopped && !mutating;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
   );
+  useEffect(() => {
+    const update = () => onHold(mountKey, live !== null && holdsMount(live.state()));
+    update();
+    return live?.subscribe(update);
+  }, [live, mountKey, onHold]);
   const holding = live !== null && holdsPage(liveState);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const readObjectId = state.value?.kind === "page" ? (state.value.objectId ?? null) : null;
@@ -489,7 +548,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
         ? pageScript(
             path,
             markdown,
-            writesIn(data),
+            canOpenLive,
             propertyFields,
             propertiesEditable,
             relationLabels,
@@ -573,7 +632,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
           : pageScript(
               path,
               markdown,
-              writesIn(data),
+              canOpenLive,
               propertyFields,
               propertiesEditable,
               relationLabels,
@@ -595,7 +654,8 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   // What stopped editing, under the header, with Try again when another open may work.
   const lostReason = liveState.phase === "lost" ? liveState.reason : null;
   const liveStrip =
-    liveState.phase === "refused" ? (
+    liveState.phase === "refused" &&
+    (liveState.reason !== "read-only" || liveState.shown || liveState.unsent) ? (
       <Strip theme={theme} icon="lock" text={explanationOf(markKey)} />
     ) : lostReason !== null ? (
       <Strip

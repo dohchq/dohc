@@ -3994,9 +3994,75 @@ describe("a Member's phone reads in a workspace they joined", () => {
     });
   });
 
+  it("routes a Member's openPage to phonePages without touching ServerCopies while refusing all owner-only file, sketch, and Document Collection ops", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
+    storage.claimWorkspace({ workspaceId: "notes", ownerUserId: "ana", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({
+      workspaceId: "trip",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    const copies = vi.fn(() => undefined);
+    const open = vi.fn(async (_input: unknown) => ({
+      status: "refused" as const,
+      reason: "read-only",
+    }));
+    const resolvePhone: ResolveAccountSession = async (request) => ({
+      ...(await resolveAccountSession(request)),
+      clientKind: "phone",
+    });
+    const h = testHandler(storage, {
+      resolveAccountSession: resolvePhone,
+      resolvePhoneCapableAccountSession: resolvePhone,
+      serverCopies: copies,
+      phonePages: () => ({ open }),
+    });
+    const res = await h(op("trip", "openPage", { path: "docs/plan.md" }, asBen));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      result: { status: "refused", reason: "read-only" },
+    });
+    expect(open).toHaveBeenCalledOnce();
+    expect(open.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "trip",
+      args: { path: "docs/plan.md" },
+      member: expect.objectContaining({ grantId: "grant-ben", shareId: "share-trip" }),
+    });
+    expect(copies).not.toHaveBeenCalled();
+
+    const missing = await denialBytes(await h(op("notes", "createPage", {}, asBen)));
+    for (const operation of [
+      "createPage",
+      "renameFile",
+      "deleteFile",
+      "saveSketch",
+      "documentCollections",
+      "documentCollectionRecords",
+      "createDocumentCollection",
+      "createDocumentRecord",
+      "editDocumentRecordFields",
+    ])
+      expect(await denialBytes(await h(op("trip", operation, {}, asBen))), operation).toBe(missing);
+  });
+
   it("refuses the owner's writes, marks, wakes, contexts and page opens alike, and a workspace they left", async () => {
     const { storage, h } = await joined();
-    const missing = await denialBytes(await h(op("notes", "groups", {}, asBen)));
+    const missing = await denialBytes(await h(op("notes", "createPage", {}, asBen)));
     for (const operation of [
       "send",
       "react",

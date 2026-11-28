@@ -32,6 +32,8 @@ export interface PageLiveState {
   readonly unsent: boolean;
   /** The page shows the live document, not the text the app read. */
   readonly shown: boolean;
+  /** A connected socket closed and the web view has not yet reported its post-disconnect state. */
+  readonly confirming?: boolean;
   /** The object identity of the live document opened by `openPage`, once bound. */
   readonly objectId?: string;
 }
@@ -132,25 +134,36 @@ export function createPageLive(options: {
     return closed;
   }
 
-  function lose(reason: string) {
+  const isSettled = (facts: LiveFacts | null) =>
+    facts?.status === "disconnected" || facts?.status === "quarantined";
+
+  function lose(reason: string, fromPage = false) {
     if (state.phase === "ended" || state.phase === "refused") return;
+    const confirming =
+      !fromPage &&
+      !isSettled(state.facts) &&
+      (Boolean(open?.connected) || Boolean(state.confirming));
     void close();
-    set({ phase: "lost", reason });
+    set({ phase: "lost", reason, confirming });
   }
 
   function refuse(reason: string) {
+    const confirming =
+      Boolean(state.confirming) || (Boolean(open?.connected) && !isSettled(state.facts));
     void close();
-    set({ phase: "refused", reason });
+    set({ phase: "refused", reason, confirming });
   }
 
   async function begin() {
+    const confirming =
+      Boolean(state.confirming) || (Boolean(open?.connected) && !isSettled(state.facts));
     void close();
     const held = { controller: new AbortController() };
     open = held;
     // The last connection's reports say nothing of this one.
     retired = stream ?? retired;
     stream = null;
-    set({ phase: "opening", reason: null, facts: null });
+    set({ phase: "opening", reason: null, facts: null, confirming });
     const current = () => open === held;
     let delay = FIRST_RETRY_MS;
     try {
@@ -176,11 +189,15 @@ export function createPageLive(options: {
 
   function connect(answer: Extract<PageOpen, { status: "ready" }>) {
     const held = open!;
-    const query = `objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
-    const socket = options.client.liveSocket(
-      `/sync/workspaces/${segment(options.workspaceId)}/live/owner?${query}`,
-      ["dohc-live-v1", `dohc-live-ticket.${answer.ticket}`],
-    );
+    const socketPath =
+      answer.mode === "named"
+        ? `/sync/live/phone?session=${encodeURIComponent(answer.session)}`
+        : `/sync/workspaces/${segment(options.workspaceId)}/live/owner?objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
+    const liveWorkspaceId = answer.mode === "named" ? answer.liveWorkspaceId : options.workspaceId;
+    const socket = options.client.liveSocket(socketPath, [
+      "dohc-live-v1",
+      `dohc-live-ticket.${answer.ticket}`,
+    ]);
     held.socket = socket;
     socket.binaryType = "arraybuffer";
     const frames = answer.limits.provider.frames;
@@ -198,11 +215,11 @@ export function createPageLive(options: {
       if (socket.protocol !== "dohc-live-v1") return refuse("invalid-socket-protocol");
       stream = next;
       held.connected = true;
-      set({ phase: "open", reason: null });
+      set({ phase: "open", reason: null, confirming: false });
       next.toPage({
         type: "connect",
         limits: answer.limits,
-        workspaceId: options.workspaceId,
+        workspaceId: liveWorkspaceId,
         objectId: answer.objectId,
       });
     };
@@ -225,8 +242,16 @@ export function createPageLive(options: {
     const held = stream;
     const order = held?.check(message) ?? "stale";
     if (order === "stale") {
-      if (retired?.check(message) === "next" && message.type === "state" && message.facts.unsent)
-        set({ unsent: true });
+      if (retired?.check(message) === "next") {
+        if (message.type === "state") {
+          const settled = isSettled(message.facts);
+          if (message.facts.unsent || (settled && state.confirming))
+            set({
+              ...(message.facts.unsent ? { unsent: true } : {}),
+              ...(settled ? { confirming: false } : {}),
+            });
+        } else if (message.type === "close" && state.confirming) set({ confirming: false });
+      }
       return;
     }
     if (order === "broken" || !held) return lose("bridge-order");
@@ -252,14 +277,16 @@ export function createPageLive(options: {
         return;
       case "close":
         // Only the open connection's: a late one must not end the open Try again started.
-        if (state.phase === "open") lose("connection");
+        if (state.phase === "open") lose("connection", true);
         return;
       case "state": {
         const facts = message.facts;
+        const settled = isSettled(facts);
         set({
           facts,
           unsent: facts.unsent,
           shown: state.shown || facts.status === "live",
+          ...(settled ? { confirming: false } : {}),
           ...(facts.status === "live" ? { objectId: held.objectId } : {}),
         });
         if (facts.status !== "quarantined") return;
@@ -286,7 +313,7 @@ export function createPageLive(options: {
     end() {
       const closed = close();
       stream = retired = null;
-      if (state.phase !== "ended") set({ phase: "ended" });
+      if (state.phase !== "ended") set({ phase: "ended", confirming: false });
       return closed;
     },
   };
@@ -313,7 +340,13 @@ export function liveMark(state: PageLiveState): MarkKey {
         ? "readOnlySetAside"
         : state.reason === "live-document-without-lineage"
           ? "readOnlyNeedsComputer"
-          : "readOnlyRefused";
+          : state.reason === "read-only"
+            ? "readOnlyShared"
+            : state.reason === "live_paused_by_owner"
+              ? "readOnlyPausedByOwner"
+              : state.reason === "authority-refused"
+                ? "readOnlyEnded"
+                : "readOnlyRefused";
     case "ended":
       return "readOnlyPhone";
   }
@@ -321,6 +354,13 @@ export function liveMark(state: PageLiveState): MarkKey {
 
 /** Whether leaving the page would lose text the server hasn't applied. */
 export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && state.unsent;
+
+/**
+ * Whether a live page must stay mounted across a same-workspace store reopen: while edits are unsent, while the
+ * socket is open, or after a close until the web view confirms whether any edits remain unsent.
+ */
+export const holdsMount = (state: PageLiveState) =>
+  state.phase !== "ended" && (state.unsent || state.phase === "open" || Boolean(state.confirming));
 
 /**
  * Whether the web view must stay: it shows the live document, or may yet. Text the app reads later never replaces it.
