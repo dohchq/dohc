@@ -617,6 +617,11 @@ test("the configuration must be private and complete for Drive, and the release'
     [{ stats: { [envFile]: stat("link") } }, /must be a regular file/],
     [{ stats: { [envFile]: stat("file", { uid: 1000 }) } }, /belongs to you/],
     [{ settings: { ...baseSettings(), DOHC_SIGN_UP_EMAILS: "" } }, /keeps sign-up private/],
+    [{ settings: { ...baseSettings(), DOHC_SIGN_UP_EMAILS: " , , " } }, /keeps sign-up private/],
+    [
+      { settings: { ...baseSettings(), DOHC_SIGN_UP_EMAILS: "owner@team.invalid,not-an-email" } },
+      /DOHC_SIGN_UP_EMAILS must list email addresses separated by commas/,
+    ],
     [
       {
         settings: {

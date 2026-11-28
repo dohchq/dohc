@@ -1,6 +1,14 @@
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isDeepStrictEqual, parseEnv } from "node:util";
 import { posix, resolve } from "node:path";
+
+export function parseSignUpEmails(value) {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
 
 export function supportedComposeVersion(value) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
@@ -257,6 +265,14 @@ export function validateSettings(settings) {
       "Set DOHC_DATA_DIRECTORY to an absolute folder on the data disk, or leave it empty.",
     );
   }
+  const invalidSignUpEmail = parseSignUpEmails(settings.DOHC_SIGN_UP_EMAILS).find(
+    (email) => !/^[^\s@]+@[^\s@]+$/.test(email),
+  );
+  if (invalidSignUpEmail !== undefined) {
+    errors.push(
+      `DOHC_SIGN_UP_EMAILS must list email addresses separated by commas, got "${invalidSignUpEmail}".`,
+    );
+  }
   return errors;
 }
 
@@ -298,6 +314,50 @@ export function readValidSettings(path, settings = readSettings(path)) {
 /** Behind Cloudflare, an app domain adds the gateway's app route. Without Cloudflare, the operator supplies that route. */
 export const cloudflareApps = (settings) =>
   settings.DOHC_BEHIND_CLOUDFLARE === "1" && Boolean(settings.DOHC_SHARE_WEB_APP_DOMAIN);
+
+export function gatewayConfigFiles(settings, cwd = process.cwd()) {
+  const local = (path) => resolve(cwd, path);
+  if (settings.DOHC_SERVER_NETWORK_ACCESS === "private")
+    return [local("tools/self-host/Caddyfile.private")];
+  if (cloudflareApps(settings)) {
+    return [
+      local("tools/self-host/Caddyfile.cloudflare-apps"),
+      local("tools/self-host/Caddyfile.cloudflare"),
+      local("tools/self-host/cloudflare-proxies.caddy"),
+      settings.DOHC_APP_TLS_CERT_FILE,
+      settings.DOHC_APP_TLS_KEY_FILE,
+    ].filter(Boolean);
+  }
+  if (settings.DOHC_BEHIND_CLOUDFLARE === "1") {
+    return [
+      local("tools/self-host/Caddyfile.cloudflare"),
+      local("tools/self-host/cloudflare-proxies.caddy"),
+    ];
+  }
+  return [local("tools/self-host/Caddyfile")];
+}
+
+export function gatewayConfigHash(settings, cwd = process.cwd()) {
+  const hash = createHash("sha256");
+  for (const file of gatewayConfigFiles(settings, cwd)) {
+    hash.update(file);
+    hash.update("\0");
+    try {
+      const bytes = readFileSync(file);
+      hash.update(String(bytes.length));
+      hash.update("\0");
+      hash.update(bytes);
+    } catch {
+      hash.update("missing");
+    }
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+export function composeEnv(settings, cwd = process.cwd(), base = process.env) {
+  return { ...base, DOHC_GATEWAY_CONFIG_HASH: gatewayConfigHash(settings, cwd) };
+}
 
 export function composeArgs(envFile, settings, ...args) {
   return [

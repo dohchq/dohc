@@ -22,7 +22,11 @@ import {
 import {
   accountsDatabaseError,
   apnsKeyTarget,
+  composeEnv,
   deploymentChecks,
+  gatewayConfigFiles,
+  gatewayConfigHash,
+  parseSignUpEmails,
   validateSettings,
   composeArgs,
   dataDiskVolumeErrors,
@@ -1445,4 +1449,72 @@ test("APNs settings are all or none, in the formats the relay accepts, with the 
       DOHC_DATA_DIRECTORY: dirname(values.DOHC_RELAY_APNS_KEY_FILE),
     }).some((error) => error.startsWith("Keep DOHC_RELAY_APNS_KEY_FILE outside")),
   );
+});
+
+test("sign-up email validation rejects malformed addresses while allowing open sign-up", () => {
+  assert.deepEqual(parseSignUpEmails(""), []);
+  assert.deepEqual(parseSignUpEmails(" , , "), []);
+  assert.deepEqual(parseSignUpEmails(" Owner@Team.Invalid , friend@team.invalid,"), [
+    "owner@team.invalid",
+    "friend@team.invalid",
+  ]);
+  assert.deepEqual(validateSettings({ ...settings(), DOHC_SIGN_UP_EMAILS: "" }), []);
+  assert.deepEqual(
+    validateSettings({
+      ...settings(),
+      DOHC_SIGN_UP_EMAILS: "Owner@Team.Invalid, friend@team.invalid",
+    }),
+    [],
+  );
+  for (const invalid of ["owner", "owner@team.invalid; friend@team.invalid", "bad @team.invalid"]) {
+    const errors = validateSettings({ ...settings(), DOHC_SIGN_UP_EMAILS: invalid });
+    assert.equal(errors.length, 1, invalid);
+    assert.match(errors[0], /DOHC_SIGN_UP_EMAILS must list email addresses separated by commas/);
+  }
+});
+
+test("gateway config hash changes when mounted gateway files change and covers all modes", (t) => {
+  assert.equal(compose.services["sync-relay"].stop_grace_period, "45s");
+  assert.equal(
+    compose.services.gateway.environment.DOHC_GATEWAY_CONFIG_HASH,
+    "${DOHC_GATEWAY_CONFIG_HASH:-}",
+  );
+  const root = mkdtempSync(join(tmpdir(), "dohc-gateway-hash-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "tools", "self-host"), { recursive: true });
+  writeFileSync(join(root, "tools", "self-host", "Caddyfile"), "a\n");
+  writeFileSync(join(root, "tools", "self-host", "Caddyfile.private"), "p\n");
+  writeFileSync(join(root, "tools", "self-host", "Caddyfile.cloudflare"), "cf\n");
+  writeFileSync(join(root, "tools", "self-host", "Caddyfile.cloudflare-apps"), "cfa\n");
+  writeFileSync(join(root, "tools", "self-host", "cloudflare-proxies.caddy"), "ranges\n");
+  const cert = join(root, "cert.pem"),
+    key = join(root, "key.pem");
+  writeFileSync(cert, "cert-v1\n");
+  writeFileSync(key, "key-v1\n");
+
+  const cfAppsSettings = {
+    ...settings(),
+    DOHC_BEHIND_CLOUDFLARE: "1",
+    DOHC_SHARE_WEB_APP_DOMAIN: "apps.team.invalid",
+    DOHC_APP_TLS_CERT_FILE: cert,
+    DOHC_APP_TLS_KEY_FILE: key,
+  };
+  assert.equal(gatewayConfigFiles(cfAppsSettings, root).length, 5);
+  const before = gatewayConfigHash(cfAppsSettings, root);
+  assert.equal(composeEnv(cfAppsSettings, root, {}).DOHC_GATEWAY_CONFIG_HASH, before);
+  writeFileSync(join(root, "tools", "self-host", "Caddyfile.cloudflare"), "cf-v2\n");
+  const afterCaddy = gatewayConfigHash(cfAppsSettings, root);
+  assert.notEqual(afterCaddy, before);
+  writeFileSync(cert, "cert-v2\n");
+  assert.notEqual(gatewayConfigHash(cfAppsSettings, root), afterCaddy);
+
+  const privateSettings = {
+    ...settings(),
+    DOHC_SERVER_NETWORK_ACCESS: "private",
+    DOHC_PUBLIC_ORIGIN: "https://host.tailnet.ts.net",
+    DOHC_PUBLIC_HOST: "host.tailnet.ts.net",
+  };
+  assert.deepEqual(gatewayConfigFiles(privateSettings, root), [
+    join(root, "tools", "self-host", "Caddyfile.private"),
+  ]);
 });

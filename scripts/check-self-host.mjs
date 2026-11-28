@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import {
   composeArgs,
+  composeEnv,
   deploymentChecks,
   readSettings,
   startupWaitSeconds,
@@ -81,20 +82,55 @@ else {
     if ((values.start || values.running) && compose.status === 0 && deploymentOk) {
       let upOk = true;
       if (values.start) {
-        const up = spawnSync(
+        const env = composeEnv(settings);
+        const runUp = (...args) =>
+          spawnSync("docker", composeArgs(envFile, settings, ...args), {
+            stdio: "inherit",
+            env,
+          }).status === 0;
+        const before = spawnSync(
           "docker",
-          composeArgs(
-            envFile,
-            settings,
-            "up",
-            "-d",
-            "--wait",
-            "--wait-timeout",
-            String(startupWaitSeconds),
-          ),
-          { stdio: "inherit" },
+          composeArgs(envFile, settings, "ps", "--status", "running", "--services"),
+          { encoding: "utf8", env },
         );
-        upOk = up.status === 0;
+        const alreadyRunning = new Set((before.stdout ?? "").trim().split(/\r?\n/).filter(Boolean));
+        const rolling =
+          !values["first-start"] &&
+          before.status === 0 &&
+          ["workspace-api", "sync-relay", "share-web", "gateway"].every((service) =>
+            alreadyRunning.has(service),
+          );
+        if (rolling) {
+          const steps = [
+            ...(settings.DOHC_POSTGRES_HOST
+              ? []
+              : [["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "postgres"]]),
+            ["run", "--rm", "--no-deps", "-T", "postgres-migrate"],
+            ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "60", "gateway"],
+            [
+              "up",
+              "-d",
+              "--no-deps",
+              "--wait",
+              "--wait-timeout",
+              String(startupWaitSeconds),
+              "workspace-api",
+              "sync-relay",
+            ],
+            ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "share-web"],
+            ...(settings.DOHC_SNAPSHOT_S3_BUCKET
+              ? [["up", "-d", "--no-deps", "relay-snapshot"]]
+              : []),
+          ];
+          for (const step of steps) {
+            if (!runUp(...step)) {
+              upOk = false;
+              break;
+            }
+          }
+        } else {
+          upOk = runUp("up", "-d", "--wait", "--wait-timeout", String(startupWaitSeconds));
+        }
         record("compose startup", upOk);
       }
       if (upOk) {

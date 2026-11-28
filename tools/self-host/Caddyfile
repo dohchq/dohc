@@ -11,7 +11,9 @@
   redir @home /account 302
   @account path /account /account/* /device /api/auth/* /.well-known/dohc-server
   handle @account {
-    reverse_proxy workspace-api:1786
+    reverse_proxy workspace-api:1786 {
+      lb_try_duration 30s
+    }
   }
   @relay path /sync/*
   handle @relay {
@@ -25,9 +27,13 @@
     request_body @relayBounded {
       max_size 28MiB
     }
-    reverse_proxy sync-relay:1788
+    reverse_proxy sync-relay:1788 {
+      lb_try_duration 30s
+    }
   }
   handle {
-    reverse_proxy share-web:1790
+    reverse_proxy share-web:1790 {
+      lb_try_duration 30s
+    }
   }
 }

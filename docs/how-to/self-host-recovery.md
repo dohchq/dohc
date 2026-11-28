@@ -155,10 +155,9 @@ For Amazon S3, use the regional endpoint, such as `https://s3.us-east-1.amazonaw
 Cloudflare R2 uses the region `auto`.
 
 6. Set `DOHC_SNAPSHOT_HEARTBEAT_URL` to an HTTPS monitoring URL, as described below.
-7. Stop and start the deployment:
+7. Apply the updated settings without stopping the running services:
 
 ```sh
-node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
@@ -347,10 +346,12 @@ An absent `recovery.json` means the export did not complete.
 
 ## Upgrade without rolling back authority
 
-Stop the deployment, then save a relay snapshot and a complete private archive before upgrading.
-[Upgrade the server](self-host.md#upgrade-the-server) lists the commands, which stop the server once.
+Save an online relay snapshot (and an online `pg_dump` if you use the bundled Postgres database) before upgrading.
+[Upgrade the server](self-host.md#upgrade-the-server) lists the commands, which keep unchanged services running during the upgrade.
+An online snapshot covers offline file salvage, not an in-place `restore`.
+If you want a stopped continuity-matched backup and volume archive before a major upgrade, stop the deployment and run `recovery.mjs backup` and `recovery.mjs archive`.
 If the new version changes the schema, its migration advances continuity.
-The pre-upgrade snapshot can then be used for offline salvage, but not in-place rollback.
+The pre-upgrade snapshot or backup can then be used for offline salvage, but not in-place rollback.
 If an upgrade fails, keep its volumes and diagnose or install a corrected version.
 Do not reset continuity or automatically restore an older deployment archive.
 

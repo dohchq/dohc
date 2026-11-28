@@ -6,7 +6,7 @@ import {
 } from "@dohc/workspace-auth/signUp";
 import type { ClosedSignUp } from "./config";
 
-const INVITE_CHECK_TIMEOUT_MS = 5000;
+const INVITE_CHECK_TIMEOUT_MS = 10_000;
 
 // A listed address never waits on the relay. Any other address needs the
 // relay to confirm a pending invite, or a workspace invite link the sign-up

@@ -8,6 +8,7 @@ import {
   parseGracePeriodMs,
   serveFetchHandler,
   waitsOnQuery,
+  withConnectRetry,
 } from "@dohc/service-http";
 import { createServiceAnalyticsClient } from "@dohc/service-http/telemetry";
 import { loadShareWebConfig } from "./config";
@@ -67,6 +68,8 @@ const application = createShareWebApplication({
   publicHosts: config.publicHosts,
   internalHosts: config.internalHosts,
   viewerAssetsDir,
+  fetchRelay: withConnectRetry(fetch),
+  fetchAuth: withConnectRetry(fetch, { retryRequestBody: true }),
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
   namedSessionCheckIntervalMs:

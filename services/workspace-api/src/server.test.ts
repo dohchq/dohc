@@ -56,6 +56,7 @@ describe("workspace server", () => {
       requestTimeout: REQUEST_TIMEOUTS.requestMs,
       connectionsCheckingInterval: REQUEST_TIMEOUTS.checkEveryMs,
       timeout: REQUEST_TIMEOUTS.idleMs,
+      keepAliveTimeout: 150_000,
     });
   });
 
