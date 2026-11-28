@@ -760,6 +760,18 @@ fn apply_moment_append(
                 record_facts: None,
             });
         }
+        if crate::ydoc_recovery::same_recovery_in_tx(
+            tx,
+            &envelope.workspace_id,
+            &creation,
+            payload.before_blob_sha256.as_deref(),
+        )? {
+            return Ok(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: Vec::new(),
+                record_facts: None,
+            });
+        }
         return Err(SyncError::InvalidInput {
             reason: "replicated plaintext moment id collides with existing history",
         });

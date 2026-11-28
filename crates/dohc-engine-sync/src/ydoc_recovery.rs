@@ -35,6 +35,65 @@ pub(crate) use released::{
     validate_redundant_recoveries,
 };
 
+const RECOVERY_MOMENT_PREFIX: &str = "ydoc-recovery-moment-";
+const INACTIVE_RECOVERY_MOMENT_PREFIX: &str = "ydoc-inactive-recovery-";
+
+pub(crate) fn same_recovery_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    creation: &ReceivedCreation<'_>,
+    before_blob_sha256: Option<&str>,
+) -> Result<bool, SyncError> {
+    let continuation = creation
+        .moment_id
+        .starts_with(INACTIVE_RECOVERY_MOMENT_PREFIX);
+    let before = match (continuation, creation.before_present, before_blob_sha256) {
+        (false, "absent" | "null", _) => None,
+        (true, "present", Some(before)) => Some(before),
+        _ => return Ok(false),
+    };
+    let Some(correlation_id) = creation.correlation_id else {
+        return Ok(false);
+    };
+    if !(continuation || creation.moment_id.starts_with(RECOVERY_MOMENT_PREFIX))
+        || creation.operation != "write"
+        || !matches!(creation.after_content_kind, None | Some("text"))
+    {
+        return Ok(false);
+    }
+    let stored: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT blob.byte_length,blob.text FROM moments AS moment
+               JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
+              WHERE moment.workspace_id=?1 AND moment.moment_id=?2 AND moment.version_id=?3
+                AND moment.object_id=?4 AND moment.operation='write'
+                AND moment.after_content_kind='text' AND moment.after_blob_sha256=?5
+                AND moment.metadata_correlation_id=?6
+                AND moment.before_blob_sha256 IS ?7
+                AND (moment.before_present=2)=?8",
+            params![
+                workspace_id,
+                creation.moment_id,
+                creation.version_id,
+                creation.object_id,
+                creation.after_blob_sha256,
+                correlation_id,
+                before,
+                continuation,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(stored.is_some_and(|(length, text)| {
+        creation
+            .after_byte_length
+            .is_none_or(|incoming| incoming == length)
+            && i64::try_from(text.len()).is_ok_and(|actual| actual == length)
+            && dohc_engine_storage::hex_sha256(text.as_bytes()) == creation.after_blob_sha256
+    }))
+}
+
 const MAX_RECOVERED_NAME_BYTES: usize = 255;
 const MAX_RECOVERED_NAME_UTF16_UNITS: usize = 255;
 const LOCAL_RECOVERY_CORRELATION_PREFIX: &str = "ydoc-local-recovery:v1:";
@@ -241,7 +300,7 @@ fn recovery_identity(
     let digest = dohc_engine_storage::hex_sha256(input.as_bytes());
     RecoveryIdentity {
         object_id: format!("ydoc-recovery-object-{digest}"),
-        moment_id: format!("ydoc-recovery-moment-{digest}"),
+        moment_id: format!("{RECOVERY_MOMENT_PREFIX}{digest}"),
         summary: recovery_summary(cause, original_path),
         correlation_id: format!("ydoc-recovery:v1:{losing_claim_id}"),
     }
@@ -1084,7 +1143,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
             object_id,
             path: path.clone(),
             text: content.to_owned(),
-            moment_id: format!("ydoc-inactive-recovery-{moment}"),
+            moment_id: format!("{INACTIVE_RECOVERY_MOMENT_PREFIX}{moment}"),
             metadata_origin: "sync".to_owned(),
             metadata_summary: Some(recovery_summary(
                 RecoveryCause::RelayArbitration,
