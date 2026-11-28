@@ -605,8 +605,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     input: Parameters<typeof serviceHostEnrollmentStorage.rebindRetiredServiceHostEnrollment>[1],
   ) {
     const result = serviceHostEnrollmentStorage.rebindRetiredServiceHostEnrollment(this, input);
-    if (result)
-      notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
+    if (result.status === "rebound")
+      notifyDesktopReadiness(this, {
+        workspaceId: result.enrollment.workspaceId,
+        path: result.enrollment.path,
+      });
     return result;
   }
   clearDrainedDeletedServiceHostEnrollment(

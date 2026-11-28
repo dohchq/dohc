@@ -8,7 +8,7 @@ import { parseAccountFileWrite, validateAllowedFileWritePath } from "./accountFi
 import { liveEditors } from "./liveEditors";
 import { LIVE_ROOM_EDITS } from "./storage/liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./storage/liveRoomPauses";
-import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
+import { LiveHostingRefusal, SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import type { StorageContext } from "./storage/context";
 import {
   claimWorkspace,
@@ -66,9 +66,11 @@ describe("owner file write path allowlist & argument validation", () => {
     expect(parseAccountFileWrite("createPage", { path: "hello.md", requestId: "req-1" })).toEqual({
       operation: "createPage",
       path: "hello.md",
-      content: "",
       requestId: "req-1",
     });
+    expect(() =>
+      parseAccountFileWrite("createPage", { path: "hello.md", content: "hi", requestId: "req-1" }),
+    ).toThrow();
     expect(
       parseAccountFileWrite("renameFile", {
         fromPath: "a.excalidraw",
@@ -79,7 +81,7 @@ describe("owner file write path allowlist & argument validation", () => {
     ).toMatchObject({ fromPath: "a.excalidraw", toPath: "b.excalidraw" });
   });
 
-  it("refuses system, collection, hidden, traversal, marker, non-page/sketch, and cross-kind paths", () => {
+  it("refuses system, collection, hidden, traversal, marker, non-page/sketch, cross-kind, and cross-folder paths", () => {
     const blocked = [
       "collection.yaml",
       "tasks/collection.yaml",
@@ -95,6 +97,7 @@ describe("owner file write path allowlist & argument validation", () => {
       ".dohc-folder",
       "notes/.dohc-access",
       "readme.txt",
+      "Guide.markdown",
       "../escape.md",
       "/leading.md",
       "CON.md",
@@ -123,6 +126,23 @@ describe("owner file write path allowlist & argument validation", () => {
         requestId: "req-1",
       }),
     ).toThrow();
+    for (const [fromPath, toPath] of [
+      ["Notes/One.md", "Archive/One.md"],
+      ["Notes/One.md", "One.md"],
+      ["One.md", "Notes/One.md"],
+      ["Notes/One.md", "notes/One.md"],
+    ]) {
+      expect(
+        () =>
+          parseAccountFileWrite("renameFile", {
+            fromPath,
+            toPath,
+            expectedObjectId: "obj-1",
+            requestId: "req-1",
+          }),
+        `${fromPath} -> ${toPath}`,
+      ).toThrow();
+    }
     expect(() =>
       parseAccountFileWrite("createPage", { path: "a.md", requestId: "bad:undo:id" }),
     ).toThrow();
@@ -323,7 +343,10 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       ownerUserId: "ana",
       guard() {},
     });
-    expect(rebound).toMatchObject({ path: "notes/new.md", retired: true });
+    expect(rebound).toMatchObject({
+      status: "rebound",
+      enrollment: { path: "notes/new.md", retired: true },
+    });
 
     storage.db
       .prepare(
@@ -339,5 +362,156 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       }),
     ).toBe(true);
     expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-1")).toBeNull();
+  });
+
+  it("preserves owner Pause across retirement and rebind so opening still refuses as paused", async () => {
+    const storage = await enrolledStorage();
+    expect(
+      storage.setServiceHostEnrollmentEnabled({
+        workspaceId: "trip",
+        path: "notes/old.md",
+        ownerUserId: "ana",
+        enabled: false,
+        nowMs: 5,
+        guard() {},
+      }),
+    ).toMatchObject({ ownerStop: "pause", note: { state: "off", reason: "paused" } });
+
+    const retired = storage.retireIdleServiceHostEnrollment({
+      workspaceId: "trip",
+      objectId: "obj-1",
+      toPath: "notes/new.md",
+      ownerUserId: "ana",
+      drainNow: true,
+      nowMs: 10,
+      guard() {},
+    });
+    expect(retired).toMatchObject({
+      status: "retired",
+      enrollment: {
+        retired: true,
+        enabled: false,
+        ownerStop: "pause",
+        hostDrainedAtMs: 10,
+        note: { state: "off", reason: "paused", changedBy: "person:ana" },
+      },
+    });
+
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_object_moments SET path='notes/new.md' WHERE workspace_id='trip' AND object_id='obj-1'`,
+      )
+      .run();
+    const rebound = storage.rebindRetiredServiceHostEnrollment({
+      workspaceId: "trip",
+      objectId: "obj-1",
+      toPath: "notes/new.md",
+      ownerUserId: "ana",
+      guard() {},
+    });
+    expect(rebound).toMatchObject({
+      status: "rebound",
+      enrollment: {
+        path: "notes/new.md",
+        ownerStop: "pause",
+        note: { state: "off", reason: "paused", changedBy: "person:ana" },
+      },
+    });
+
+    let refusal: unknown;
+    try {
+      storage.ensureOwnedLiveDocument({
+        intent: "owner-open",
+        workspaceId: "trip",
+        path: "notes/new.md",
+        ownerUserId: "ana",
+        nowMs: 15,
+        guard() {},
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(LiveHostingRefusal);
+    expect((refusal as LiveHostingRefusal).reason).toBe("paused");
+  });
+
+  it("clears a safely drained deleted destination enrollment and refuses an undrained one before mutation", async () => {
+    const storage = await enrolledStorage();
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+         VALUES ('trip','obj-old',2,'m-2','main',NULL,?,'text',5,2)`,
+      )
+      .run("a".repeat(64));
+    storage.db
+      .prepare(
+        `INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,retired,host_drained_at_ms,
+          created_at_ms,updated_at_ms,demand_at_ms,owner_demand,accounted_bytes,generation,state,reason,since_ms,changed_by)
+         VALUES ('trip','obj-old','notes/new.md','ana',NULL,'epoch','stream',0,1,NULL,1,2,NULL,0,64,1,'off','access-ended',2,'server')`,
+      )
+      .run();
+
+    // Undrained deleted occupant blocks before mutating source enrollment.
+    expect(
+      storage.retireIdleServiceHostEnrollment({
+        workspaceId: "trip",
+        objectId: "obj-1",
+        toPath: "notes/new.md",
+        ownerUserId: "ana",
+        drainNow: true,
+        nowMs: 10,
+        guard() {},
+      }),
+    ).toEqual({ status: "unsettled" });
+    expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-1")).toMatchObject({
+      enabled: true,
+      retired: false,
+    });
+    expect(
+      storage.rebindRetiredServiceHostEnrollment({
+        workspaceId: "trip",
+        objectId: "obj-1",
+        toPath: "notes/new.md",
+        ownerUserId: "ana",
+        guard() {},
+      }),
+    ).toEqual({ status: "blocked" });
+
+    // Once the deleted destination enrollment is drained, rename clears it and rebinds cleanly.
+    storage.db
+      .prepare(
+        `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=5 WHERE workspace_id='trip' AND object_id='obj-old'`,
+      )
+      .run();
+    expect(
+      storage.retireIdleServiceHostEnrollment({
+        workspaceId: "trip",
+        objectId: "obj-1",
+        toPath: "notes/new.md",
+        ownerUserId: "ana",
+        drainNow: true,
+        nowMs: 10,
+        guard() {},
+      }),
+    ).toMatchObject({ status: "retired" });
+    expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-old")).toBeNull();
+
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_object_moments SET path='notes/new.md' WHERE workspace_id='trip' AND object_id='obj-1'`,
+      )
+      .run();
+    expect(
+      storage.rebindRetiredServiceHostEnrollment({
+        workspaceId: "trip",
+        objectId: "obj-1",
+        toPath: "notes/new.md",
+        ownerUserId: "ana",
+        guard() {},
+      }),
+    ).toMatchObject({
+      status: "rebound",
+      enrollment: { path: "notes/new.md", objectId: "obj-1" },
+    });
   });
 });

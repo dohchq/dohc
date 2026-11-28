@@ -46,9 +46,10 @@ import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
 import { appState } from "../apps/reviewControls";
 import { shownProblem } from "../server/client";
-import { canWriteFiles } from "../server/fileWrites";
+import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
+import { writesIn } from "../server/phoneWrites";
 import { views, type ReadProblem } from "../server/workspaceData";
 import { allSketchRows, uniqueSketchPath } from "../sketches/sketchList";
 import { useTheme } from "../theme";
@@ -185,7 +186,7 @@ function Files({
   }, [lifecycle, openCreateRef, router]);
   const canOpenSketch = data !== null && !data.joined;
   const canCreateSketch =
-    canEditFiles && rows !== null && !state.fromCache && state.problem === null;
+    writesIn(data) && rows !== null && !state.fromCache && state.problem === null;
   useEffect(() => () => createAbort.current?.abort(), []);
   const toggle = useCallback((set: typeof setExpanded, key: string) => {
     void Haptics.selectionAsync();
@@ -423,7 +424,11 @@ function Files({
             row={row}
             onPress={press}
             onPressIn={pressInRow}
-            onActions={canEditFiles && row.kind === "page" ? openRowActions : undefined}
+            onActions={
+              canEditFiles && row.kind === "page" && isLifecycleManagedPath(row.path)
+                ? openRowActions
+                : undefined
+            }
             busy={lifecycle.deletingPath === row.path}
           />
         ))
@@ -445,7 +450,9 @@ function Files({
                   row={row}
                   onPress={press}
                   openable={canOpenSketch}
-                  onActions={canEditFiles ? openRowActions : undefined}
+                  onActions={
+                    canEditFiles && isLifecycleManagedPath(row.path) ? openRowActions : undefined
+                  }
                   busy={lifecycle.deletingPath === row.path}
                 />
               ))}

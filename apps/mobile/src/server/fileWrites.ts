@@ -8,7 +8,6 @@ import type { WorkspaceData } from "./workspaceData";
 export const FILE_WRITE_TIMEOUT_MS = 45_000;
 
 const REFUSAL_TEXT = {
-  "invalid-path": () => documentWords.invalidName,
   "path-exists": () => documentWords.refusedExists,
   "not-found": () => documentWords.refusedMissing,
   "stale-object": () => documentWords.refusedChanged,
@@ -39,6 +38,16 @@ export function newFileRequestId(): string {
 
 export const fileWriteRefusalText = (refusal: FileWriteRefusal, fallback: string): string =>
   REFUSAL_TEXT[refusal]?.() ?? fallback;
+
+export function isLifecycleManagedPath(path: string): boolean {
+  if (!path || path.startsWith("/") || path.endsWith("/")) return false;
+  const segments = path.split("/");
+  if (segments.some((s) => !s || s.startsWith("."))) return false;
+  const base = segments.at(-1)!;
+  return (
+    (/\.md$/i.test(base) && base.length > 3) || (/\.excalidraw$/i.test(base) && base.length > 11)
+  );
+}
 
 export const fileExtension = (path: string): ".md" | ".excalidraw" =>
   /\.excalidraw$/i.test(path) ? ".excalidraw" : ".md";
@@ -102,10 +111,8 @@ export function fileWriteOperations(client: ServerClient, workspaceId: string) {
       },
     );
   return {
-    createPage: (
-      input: { path: string; requestId: string; content?: string },
-      signal?: AbortSignal,
-    ) => run("createPage", input, signal),
+    createPage: (input: { path: string; requestId: string }, signal?: AbortSignal) =>
+      run("createPage", input, signal),
     renameFile: (
       input: { fromPath: string; toPath: string; expectedObjectId: string; requestId: string },
       signal?: AbortSignal,

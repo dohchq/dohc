@@ -1,4 +1,3 @@
-import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -27,7 +26,6 @@ export const isAccountFileWriteOperation = (name: string): name is AccountFileWr
   name === "createPage" || name === "renameFile" || name === "deleteFile";
 
 export type AccountFileWriteRefusal =
-  | "invalid-path"
   | "path-exists"
   | "not-found"
   | "stale-object"
@@ -69,6 +67,8 @@ const UNSETTLED_CODES = new Set([
 ]);
 const UNSETTLED_MSG =
   "Recent live edits have not finished saving yet. Wait a moment, then try again.";
+const parentDir = (path: string) =>
+  path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const refuse = (refusal: AccountFileWriteRefusal, reason: string): AccountFileWriteResult => ({
   ok: false,
   refusal,
@@ -131,15 +131,12 @@ export function validateAllowedFileWritePath(
 
 export function parseAccountFileWrite(operation: AccountFileWriteOperation, args: unknown) {
   if (operation === "createPage") {
-    const body = parseFields(args, ["path", "requestId", "content"]);
+    const body = parseFields(args, ["path", "requestId"]);
     const { path } = validateAllowedFileWritePath(body.path, {
       allowSketch: false,
       checkDestination: true,
     });
-    const content = body.content === undefined ? "" : body.content;
-    if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > LIVE_MARKDOWN_MAX_BYTES)
-      throw badRequest("Invalid page content.");
-    return { operation, path, content, requestId: parseRequestId(body.requestId) } as const;
+    return { operation, path, requestId: parseRequestId(body.requestId) } as const;
   }
   if (operation === "renameFile") {
     const body = parseFields(args, ["fromPath", "toPath", "expectedObjectId", "requestId"]);
@@ -151,8 +148,14 @@ export function parseAccountFileWrite(operation: AccountFileWriteOperation, args
       allowSketch: true,
       checkDestination: true,
     });
-    if (from.kind !== to.kind || from.path === to.path)
-      throw badRequest("Rename must keep the same file kind and choose a different path.");
+    if (
+      from.kind !== to.kind ||
+      from.path === to.path ||
+      parentDir(from.path) !== parentDir(to.path)
+    )
+      throw badRequest(
+        "Rename must keep the same folder and file kind and choose a different name.",
+      );
     return {
       operation,
       fromPath: from.path,
@@ -197,7 +200,6 @@ async function waitForDrain(
       if (done) return;
       done = true;
       clearTimeout(deadline);
-      clearInterval(poll);
       unwatch();
       signal.removeEventListener("abort", onAbort);
       fn();
@@ -207,8 +209,6 @@ async function waitForDrain(
       if (isDrained(storage, workspaceId, objectId)) stop(() => resolve(true));
     };
     const unwatch = observeRelayWrites(storage, check);
-    const poll = setInterval(check, 50);
-    poll.unref?.();
     const deadline = setTimeout(
       () => stop(() => resolve(isDrained(storage, workspaceId, objectId))),
       ENROLLMENT_DRAIN_WAIT_MS,
@@ -224,6 +224,7 @@ async function prepareLiveMutation(
   deps: { storage: SyncRelayStorage; liveHost?: () => AccountFileWriteLiveHost | undefined },
   workspaceId: string,
   objectId: string,
+  toPath: string | undefined,
   ownerUserId: string,
   nowMs: () => number,
   signal: AbortSignal,
@@ -235,6 +236,7 @@ async function prepareLiveMutation(
     deps.storage.retireIdleServiceHostEnrollment({
       workspaceId,
       objectId,
+      toPath,
       ownerUserId,
       prepared,
       drainNow: host === undefined,
@@ -317,7 +319,7 @@ export async function runAccountFileWrite(
               workspaceId,
               versionId: "main",
               path: parsed.path,
-              text: parsed.content,
+              text: "",
               publish: true,
               createOnly: true,
               requestId: parsed.requestId,
@@ -372,8 +374,8 @@ export async function runAccountFileWrite(
       const rich = liveDocumentKindForPath(srcPath) === "richdoc";
       const resolve = async () => {
         const targets = dstPath ? [{ path: srcPath }, { path: dstPath }] : [{ path: srcPath }];
-        const { results } = await files.resolveFiles({ workspaceId, targets });
-        return { from: results[0], to: results[1] };
+        const { versionId, results } = await files.resolveFiles({ workspaceId, targets });
+        return { versionId, from: results[0], to: results[1] };
       };
       const blockedTarget = (to: Awaited<ReturnType<typeof resolve>>["to"]) =>
         to?.status === "found" && (!caseOnly || to.objectId !== parsed.expectedObjectId);
@@ -396,16 +398,18 @@ export async function runAccountFileWrite(
                 })
               ).links;
           await replica.sync(signal);
-          if (objectAt(dstPath) !== objectId || (!caseOnly && objectAt(srcPath) !== undefined))
+          if (objectAt(dstPath) !== objectId || (!caseOnly && objectAt(srcPath) === objectId))
             throw unconfirmed("the rename");
-          if (rich)
-            deps.storage.rebindRetiredServiceHostEnrollment({
+          if (rich) {
+            const rebound = deps.storage.rebindRetiredServiceHostEnrollment({
               workspaceId,
               objectId,
               toPath: dstPath,
               ownerUserId: owner,
               guard: () => signal.throwIfAborted(),
             });
+            if (rebound.status === "blocked") throw unconfirmed("the rename");
+          }
           return await complete({
             ok: true,
             fromPath: srcPath,
@@ -415,7 +419,7 @@ export async function runAccountFileWrite(
           });
         }
         await replica.sync(signal);
-        if (objectAt(srcPath) !== undefined) throw unconfirmed("the deletion");
+        if (objectAt(srcPath) === objectId) throw unconfirmed("the deletion");
         deps.storage.clearDrainedDeletedServiceHostEnrollment({
           workspaceId,
           objectId,
@@ -425,39 +429,46 @@ export async function runAccountFileWrite(
         return await complete({ ok: true, path: srcPath, objectId });
       };
 
-      let { from, to } = await resolve();
-      if (from?.status !== "found") {
-        const latest = (
-          await files.listMoments({
-            workspaceId,
-            versionId: "main",
-            objectId: parsed.expectedObjectId,
-            limit: 1,
-            metadataOnly: true,
-          })
-        ).moments[0];
-        const replayed =
-          dstPath !== null
-            ? to?.status === "found" &&
-              to.objectId === parsed.expectedObjectId &&
-              latest?.operation === "rename" &&
-              latest.beforePath === srcPath &&
-              latest.path === dstPath &&
-              latest.metadataCorrelationId === operationId
-            : latest?.operation === "delete" &&
-              latest.path === srcPath &&
-              latest.metadataCorrelationId === operationId;
-        return replayed
-          ? await finish(parsed.expectedObjectId)
+      let { versionId, from, to } = await resolve();
+      if (from?.status !== "found" || from.objectId !== parsed.expectedObjectId) {
+        const canReplay =
+          versionId === "main" &&
+          (dstPath === null || (to?.status === "found" && to.objectId === parsed.expectedObjectId));
+        if (canReplay) {
+          const opMoments = (
+            await files.readHistoryPage({
+              workspaceId,
+              versionId: "main",
+              objectId: parsed.expectedObjectId,
+              operationId,
+              limit: 10,
+            })
+          ).moments;
+          const replayed = opMoments.some((m) =>
+            dstPath !== null
+              ? m.operation === "rename" &&
+                m.objectId === parsed.expectedObjectId &&
+                m.beforePath === srcPath &&
+                m.path === dstPath &&
+                m.metadataCorrelationId === operationId
+              : m.operation === "delete" &&
+                m.objectId === parsed.expectedObjectId &&
+                m.path === srcPath &&
+                m.metadataCorrelationId === operationId,
+          );
+          if (replayed) return await finish(parsed.expectedObjectId);
+        }
+        return from?.status === "found"
+          ? stale()
           : refuse("not-found", "This file is no longer here.");
       }
-      if (from.objectId !== parsed.expectedObjectId) return stale();
       if (blockedTarget(to)) return refuse("path-exists", "A file with this name already exists.");
       if (rich) {
         const blocked = await prepareLiveMutation(
           deps,
           workspaceId,
           parsed.expectedObjectId,
+          dstPath ?? undefined,
           owner,
           input.nowMs,
           signal,

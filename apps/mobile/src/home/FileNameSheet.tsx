@@ -164,6 +164,8 @@ export function useFileLifecycle(workspaceName: string) {
       readonly path: string;
       readonly objectId: string;
       readonly guard?: () => boolean;
+      readonly before?: () => Promise<void>;
+      readonly onCancel?: () => void;
       readonly onRenamed?: (path: string) => void;
       readonly onDeleted?: () => void;
     }) => {
@@ -176,10 +178,14 @@ export function useFileLifecycle(workspaceName: string) {
         ],
       }).then((chosen) => {
         if (chosen === null || target.guard?.()) return;
-        if (chosen === 0)
-          openRename({ path: target.path, objectId: target.objectId, onDone: target.onRenamed });
-        else if (chosen === 1)
-          confirmDelete({ path: target.path, objectId: target.objectId, onDone: target.onDeleted });
+        const shared = {
+          path: target.path,
+          objectId: target.objectId,
+          before: target.before,
+          onCancel: target.onCancel,
+        };
+        if (chosen === 0) openRename({ ...shared, onDone: target.onRenamed });
+        else if (chosen === 1) confirmDelete({ ...shared, onDone: target.onDeleted });
       });
     },
     [confirmDelete, deletingPath, openRename],

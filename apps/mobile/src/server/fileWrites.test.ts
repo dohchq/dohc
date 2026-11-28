@@ -8,6 +8,7 @@ import {
   fileExtension,
   fileWriteOperations,
   fileWriteRefusalText,
+  isLifecycleManagedPath,
   newFileRequestId,
 } from "./fileWrites";
 import type { ServerClient } from "./client";
@@ -46,6 +47,21 @@ describe("path & stem helpers", () => {
     expect(editableStem("sketches/Board.excalidraw")).toBe("Board");
     expect(fileExtension("sketches/Board.excalidraw")).toBe(".excalidraw");
     expect(fileExtension("notes/Plan.md")).toBe(".md");
+    expect(isLifecycleManagedPath("Guide.md")).toBe(true);
+    expect(isLifecycleManagedPath("notes/Guide.MD")).toBe(true);
+    expect(isLifecycleManagedPath("sketches/Board.excalidraw")).toBe(true);
+    for (const unsupported of [
+      "Guide.markdown",
+      "notes/Guide.markdown",
+      ".hidden.md",
+      "notes/.secret.md",
+      ".md",
+      ".excalidraw",
+      "readme.txt",
+      "",
+    ]) {
+      expect(isLifecycleManagedPath(unsupported), unsupported).toBe(false);
+    }
   });
 
   it("refuses empty, hidden, slash, and Windows-reserved names", () => {

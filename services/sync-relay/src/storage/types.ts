@@ -931,7 +931,7 @@ export interface SyncRelayStorage {
     input: Parameters<
       typeof import("./serviceHostEnrollment").rebindRetiredServiceHostEnrollment
     >[1],
-  ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  ): import("./serviceHostEnrollment").RebindRetiredServiceHostEnrollmentResult;
   clearDrainedDeletedServiceHostEnrollment(
     input: Parameters<
       typeof import("./serviceHostEnrollment").clearDrainedDeletedServiceHostEnrollment

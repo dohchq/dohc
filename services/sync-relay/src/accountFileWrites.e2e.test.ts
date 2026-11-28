@@ -798,12 +798,39 @@ describe.skipIf(engine.missing)(
       async () => {
         const stack = await startRealStack();
 
-        // Seed a page, a linking index page, and an .excalidraw sketch.
+        // Set up Desktop once for fixture seeding, interrupted-rename edits, and Proof 6 History restore.
+        const desktopRoot = join(stack.root, "desktop-history");
+        await mkdir(desktopRoot, { recursive: true });
+        const desktop = await openLiveDaemonWorkspace(
+          { workspaceId: WORKSPACE, rootPath: desktopRoot },
+          { maxRestarts: 0, allowInsecureLoopbackForTests: false },
+        );
+        cleanup.push(() => desktop.close());
+        const relay = desktop.relay.bind({ ...desktop.workspace, relay: stack.relayConnection });
+        const probe = await probeRelayWorkspace({
+          workspaceId: WORKSPACE,
+          relay: stack.relayConnection,
+        });
+        await bootstrapJoinedWorkspace({
+          workspaceId: WORKSPACE,
+          identity: probe.identity,
+          transport: relay,
+          installDataKey: async (key) => await installWorkspaceDataKey(desktopRoot, key),
+        });
+        const desktopCapture = createWorkspaceEngineCapture({
+          ...desktop.workspace,
+          rustEngineSessions: desktop.sessions,
+        });
+        cleanup.push(() => desktopCapture.stop());
+        const pushDesktop = async () => {
+          for (let more = true; more;) more = (await relay.push()).hasMore;
+        };
+
+        // Seed a page via createPage (always empty body), plus a linking index page via Desktop.
         const created = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
           "createPage",
           {
             path: "notes/target.md",
-            content: "# Target\n",
             requestId: "req-create-target",
           },
         );
@@ -812,13 +839,13 @@ describe.skipIf(engine.missing)(
         // Proof 2a: idempotent createPage retry (immediate + after replica restart) vs path-exists with new requestId.
         const createReplay = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
           "createPage",
-          { path: "notes/target.md", content: "# Target\n", requestId: "req-create-target" },
+          { path: "notes/target.md", requestId: "req-create-target" },
         );
         expect(createReplay).toEqual(created);
         await stack.restartCopies();
         const createReplayCold = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
           "createPage",
-          { path: "notes/target.md", content: "# Target\n", requestId: "req-create-target" },
+          { path: "notes/target.md", requestId: "req-create-target" },
         );
         expect(createReplayCold).toEqual(created);
         expect(
@@ -828,15 +855,20 @@ describe.skipIf(engine.missing)(
           }),
         ).toMatchObject({ ok: false, refusal: "path-exists" });
 
-        const index = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
-          "createPage",
-          {
+        await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+        await desktop.sessions.run(desktop.workspace, async ({ client, workspace: handle }) => {
+          const adapter = new VersionedLiveAdapter(client, handle, { workspaceId: WORKSPACE });
+          await adapter.writeTextFile({
+            workspaceId: WORKSPACE,
+            versionId: "main",
             path: "notes/index.md",
-            content: "See [[target]] for details.\n",
-            requestId: "req-create-index",
-          },
-        );
-        expect(index.ok).toBe(true);
+            text: "See [[target]] and [[sketches/board.excalidraw]] for details.\n",
+            publish: true,
+            createOnly: true,
+            metadata: { origin: "api" },
+          });
+        });
+        await pushDesktop();
 
         // Open target live and edit it from the phone.
         const live = await stack.openPhoneLive("notes/target.md");
@@ -1001,31 +1033,7 @@ describe.skipIf(engine.missing)(
           }),
         ).toEqual(deleted);
 
-        // Proof 6: Desktop History sees the phone-deleted file and restores it via undoHistoryOperation!
-        // Also write a .excalidraw sketch from Desktop to prove sketch rename & delete on phone.
-        const desktopRoot = join(stack.root, "desktop-history");
-        await mkdir(desktopRoot, { recursive: true });
-        const desktop = await openLiveDaemonWorkspace(
-          { workspaceId: WORKSPACE, rootPath: desktopRoot },
-          { maxRestarts: 0, allowInsecureLoopbackForTests: false },
-        );
-        cleanup.push(() => desktop.close());
-        const relay = desktop.relay.bind({ ...desktop.workspace, relay: stack.relayConnection });
-        const probe = await probeRelayWorkspace({
-          workspaceId: WORKSPACE,
-          relay: stack.relayConnection,
-        });
-        await bootstrapJoinedWorkspace({
-          workspaceId: WORKSPACE,
-          identity: probe.identity,
-          transport: relay,
-          installDataKey: async (key) => await installWorkspaceDataKey(desktopRoot, key),
-        });
-        const desktopCapture = createWorkspaceEngineCapture({
-          ...desktop.workspace,
-          rustEngineSessions: desktop.sessions,
-        });
-        cleanup.push(() => desktopCapture.stop());
+        // Proof 6: Desktop History sees the phone-deleted file and restores it via History Restore!
         await relay.pull((apply) => desktopCapture.runRelaySync(apply));
 
         // File is deleted on desktop disk after pulling phone delete.
@@ -1057,7 +1065,7 @@ describe.skipIf(engine.missing)(
           "Edited after rename",
         );
 
-        // Sketch (.excalidraw) rename and delete from phone.
+        // Sketch (.excalidraw) rename with interrupted link rewrite + intervening edit, then idempotent retry + delete.
         const sketchObjId = await desktop.sessions.run(
           desktop.workspace,
           async ({ client, workspace: handle }) => {
@@ -1074,21 +1082,67 @@ describe.skipIf(engine.missing)(
             return written.object.id;
           },
         );
-        for (let more = true; more;) more = (await relay.push()).hasMore;
+        await pushDesktop();
 
-        expect(
-          await stack.phoneOp("renameFile", {
+        const interruptRewrite = vi
+          .spyOn(VersionedLiveAdapter.prototype, "rewriteHistoryLinks")
+          .mockRejectedValueOnce(new Error("interrupted link rewrite"));
+        const interrupted = await fetch(`${stack.origin}/sync/${WORKSPACE}/ops/renameFile`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer session:${OWNER}:phone-1`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
             fromPath: "sketches/board.excalidraw",
             toPath: "sketches/wireframe.excalidraw",
             expectedObjectId: sketchObjId,
             requestId: "req-sketch-rename",
           }),
-        ).toMatchObject({
+        });
+        expect(interrupted.status).toBeGreaterThanOrEqual(500);
+        interruptRewrite.mockRestore();
+
+        // Edit the renamed sketch so its latest moment is "write" rather than "rename", then retry with the same requestId.
+        await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+        await desktop.sessions.run(desktop.workspace, async ({ client, workspace: handle }) => {
+          const adapter = new VersionedLiveAdapter(client, handle, { workspaceId: WORKSPACE });
+          await adapter.writeTextFile({
+            workspaceId: WORKSPACE,
+            versionId: "main",
+            path: "sketches/wireframe.excalidraw",
+            text: '{"type":"excalidraw","version":2,"elements":[{"id":"e1"}]}\n',
+            publish: true,
+            metadata: { origin: "api" },
+          });
+        });
+        await pushDesktop();
+
+        const retriedSketchRename = await stack.phoneOp<{
+          ok: true;
+          fromPath: string;
+          path: string;
+          objectId: string;
+          linksUpdated: number;
+        }>("renameFile", {
+          fromPath: "sketches/board.excalidraw",
+          toPath: "sketches/wireframe.excalidraw",
+          expectedObjectId: sketchObjId,
+          requestId: "req-sketch-rename",
+        });
+        expect(retriedSketchRename).toMatchObject({
           ok: true,
           fromPath: "sketches/board.excalidraw",
           path: "sketches/wireframe.excalidraw",
           objectId: sketchObjId,
         });
+        expect(retriedSketchRename.linksUpdated).toBeGreaterThanOrEqual(1);
+        const indexAfterSketch = await stack.phoneOp<{ ok?: boolean; markdown?: string }>(
+          "documentRead",
+          { path: "notes/index.md" },
+        );
+        expect(indexAfterSketch.markdown).toContain("[[sketches/wireframe.excalidraw]]");
+
         expect(
           await stack.phoneOp("deleteFile", {
             path: "sketches/wireframe.excalidraw",

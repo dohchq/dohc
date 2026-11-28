@@ -16,7 +16,7 @@ import { useFileLifecycle } from "../home/FileNameSheet";
 import { isOutOfSpace } from "../pages/editorFile";
 import { LoadingLines, pageStyles, Strip } from "../pages/pageParts";
 import { shownProblem } from "../server/client";
-import { canWriteFiles } from "../server/fileWrites";
+import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import {
   nextSaveAttempt,
   preserveLostElements,
@@ -89,8 +89,10 @@ function SketchScreen({ path }: { path: string }) {
   const [webPhase, setWebPhase] = useState<"idle" | "started" | "painted">("idle");
   const [edit, setEdit] = useState(CLEAN_EDIT);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const [mutating, setMutating] = useState(false);
+  const mutatingRef = useRef(false);
   const conflictReadOnly = readState.kind === "ready" && readState.scene.readOnly === true;
-  const editable = writesIn(data) && !conflictReadOnly;
+  const editable = writesIn(data) && !conflictReadOnly && !mutating;
 
   const sceneRef = useRef<SketchScene | null>(null);
   const loadedIntoWeb = useRef(false);
@@ -207,7 +209,15 @@ function SketchScreen({ path }: { path: string }) {
   );
 
   const performSave = useCallback(async (): Promise<boolean> => {
-    if (!data || !editable || edit.saving || !sceneRef.current || !web.current) return false;
+    if (
+      !data ||
+      !editable ||
+      edit.saving ||
+      mutatingRef.current ||
+      !sceneRef.current ||
+      !web.current
+    )
+      return false;
     setEdit((prev) => ({ ...prev, saving: true, error: null, conflicts: 0 }));
     const controller = new AbortController();
     saveAbortRef.current = controller;
@@ -342,6 +352,7 @@ function SketchScreen({ path }: { path: string }) {
     if (msg.kind === "started") setWebPhase((p) => (p === "idle" ? "started" : p));
     else if (msg.kind === "painted") setWebPhase("painted");
     else if (msg.kind === "dirty" && typeof msg.dirty === "boolean") {
+      if (mutatingRef.current) return;
       setEdit((prev) =>
         prev.dirty === msg.dirty ? prev : { ...prev, dirty: msg.dirty as boolean },
       );
@@ -404,8 +415,10 @@ function SketchScreen({ path }: { path: string }) {
       : (filesState.value?.find((file) => file.path === path)?.objectId ?? null);
   const canEditFiles =
     canWriteFiles(data, currentWorkspace) &&
+    isLifecycleManagedPath(path) &&
     objectId !== null &&
     !edit.saving &&
+    !mutating &&
     lifecycle.deletingPath === null;
   const guardDirty = () => {
     if (!edit.dirty) return false;
@@ -414,16 +427,38 @@ function SketchScreen({ path }: { path: string }) {
     ]);
     return true;
   };
+  const freezeForMutation = async () => {
+    mutatingRef.current = true;
+    setMutating(true);
+    saveAbortRef.current?.abort();
+    web.current?.injectJavaScript("document.activeElement?.blur?.(); true;");
+  };
+  const unfreezeAfterMutation = () => {
+    mutatingRef.current = false;
+    setMutating(false);
+  };
   const onRenamed = (nextPath: string) =>
     router.replace({ pathname: "/sketch", params: { path: nextPath } });
   const onDeleted = () => (router.canGoBack() ? router.back() : router.replace("/"));
   const startRename = () => {
     if (canEditFiles && objectId && !guardDirty())
-      lifecycle.openRename({ path, objectId, onDone: onRenamed });
+      lifecycle.openRename({
+        path,
+        objectId,
+        before: freezeForMutation,
+        onCancel: unfreezeAfterMutation,
+        onDone: onRenamed,
+      });
   };
   const startDelete = () => {
     if (canEditFiles && objectId && !guardDirty())
-      lifecycle.confirmDelete({ path, objectId, onDone: onDeleted });
+      lifecycle.confirmDelete({
+        path,
+        objectId,
+        before: freezeForMutation,
+        onCancel: unfreezeAfterMutation,
+        onDone: onDeleted,
+      });
   };
 
   return (
@@ -460,6 +495,8 @@ function SketchScreen({ path }: { path: string }) {
                             path,
                             objectId,
                             guard: guardDirty,
+                            before: freezeForMutation,
+                            onCancel: unfreezeAfterMutation,
                             onRenamed,
                             onDeleted,
                           })
@@ -509,7 +546,7 @@ function SketchScreen({ path }: { path: string }) {
             />
           ))}
           {webShown ? (
-            <View style={pageStyles.web} pointerEvents={edit.saving ? "none" : "auto"}>
+            <View style={pageStyles.web} pointerEvents={edit.saving || mutating ? "none" : "auto"}>
               <WebView
                 ref={web}
                 originWhitelist={["file://*"]}

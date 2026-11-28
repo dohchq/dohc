@@ -28,7 +28,7 @@ import { useShownWorkspaces } from "../chats/Workspaces";
 import { copyText, useCopiedMark } from "../copy";
 import { useFileLifecycle } from "../home/FileNameSheet";
 import { pageTitle } from "../home/homeModel";
-import { canWriteFiles } from "../server/fileWrites";
+import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
@@ -187,7 +187,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const objectId = filesState.value?.find((file) => file.path === path)?.objectId ?? null;
   const canEditFiles =
-    canWriteFiles(data, currentWorkspace) && !deleted && objectId !== null && !mutating;
+    canWriteFiles(data, currentWorkspace) &&
+    isLifecycleManagedPath(path) &&
+    !deleted &&
+    objectId !== null &&
+    !mutating;
   const closeSocketBeforeMutation = async () => {
     setMutating(true);
     await host.gone();
