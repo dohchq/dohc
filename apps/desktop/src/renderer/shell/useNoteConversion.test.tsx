@@ -15,13 +15,9 @@ const clean: ConvertNotesResult = {
 };
 
 let progress: ((event: NoteConversionProgress) => void) | null = null;
-function install(
-  convertNotes: DohcDesktopBridge["convertNotes"],
-  sendConvertedNotes: DohcDesktopBridge["sendConvertedNotes"] = vi.fn(async () => null),
-) {
+function install(convertNotes: DohcDesktopBridge["convertNotes"]) {
   window.dohcDesktop = {
     convertNotes,
-    sendConvertedNotes,
     onNoteConversionProgress: (listener: (event: NoteConversionProgress) => void) => {
       progress = listener;
       return () => {
@@ -138,7 +134,7 @@ describe("converting notes from this window", () => {
     expect(shell.conversion().state).toEqual({ status: "running", done: 400, total: 2000 });
 
     await act(async () => call.resolve(clean));
-    expect(shell.conversion().state).toEqual({ status: "done", converted: 1980 });
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 1980, left: 0 });
     expect(shell.clear).toHaveBeenCalledWith("note-conversion");
     expect(shell.success).toHaveBeenCalledExactlyOnceWith(
       "Converted 1,980 notes",
@@ -194,21 +190,17 @@ describe("converting notes from this window", () => {
     expect(convertNotes).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the count of notes it could not send, and Try again only sends them", async () => {
-    const convertNotes = vi.fn<DohcDesktopBridge["convertNotes"]>(async () => ({
-      ...clean,
-      converted: 11,
-      sent: false,
-    }));
-    const sendConvertedNotes = vi
-      .fn<DohcDesktopBridge["sendConvertedNotes"]>()
+  it("keeps the count of notes it could not send, and Try again runs Convert notes again", async () => {
+    const convertNotes = vi
+      .fn<DohcDesktopBridge["convertNotes"]>()
+      .mockResolvedValueOnce({ ...clean, converted: 11, sent: false })
       .mockRejectedValueOnce(new Error("dohc could not reach your server."))
-      .mockResolvedValueOnce(null);
-    install(convertNotes, sendConvertedNotes);
+      .mockResolvedValueOnce({ ...clean, converted: 0 });
+    install(convertNotes);
     const shell = mount();
 
     await act(async () => shell.conversion().start());
-    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11 });
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11, left: 0 });
     expect(shell.success).not.toHaveBeenCalled();
     expect(shell.report).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
@@ -220,19 +212,17 @@ describe("converting notes from this window", () => {
     );
 
     await act(async () => shell.report.mock.calls[0]![0].retry());
-    expect(sendConvertedNotes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
-    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11 });
-    expect(shell.report).toHaveBeenCalledTimes(2);
+    expect(convertNotes).toHaveBeenCalledTimes(2);
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11, left: 0 });
     expect(shell.report.mock.calls[1]![0]).toMatchObject({
       kind: "note-conversion",
-      cause: expect.objectContaining({ message: "dohc could not reach your server." }),
+      message: "dohc could not reach your server.",
       retry: expect.any(Function),
     });
 
-    await act(async () => shell.conversion().sendConverted());
-    expect(sendConvertedNotes).toHaveBeenCalledTimes(2);
-    expect(convertNotes).toHaveBeenCalledOnce();
-    expect(shell.conversion().state).toEqual({ status: "done", converted: 11 });
+    await act(async () => shell.conversion().start());
+    expect(convertNotes).toHaveBeenCalledTimes(3);
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 11, left: 0 });
     expect(shell.clear).toHaveBeenCalledWith("note-conversion");
     expect(shell.success).toHaveBeenCalledExactlyOnceWith(
       "Converted 11 notes",
@@ -241,7 +231,32 @@ describe("converting notes from this window", () => {
     );
   });
 
-  it("keeps Convert remaining beside Try again when it left notes and could not send", async () => {
+  it("runs once for a double click, from Settings or Notices, and keeps that run's result", async () => {
+    const call = held();
+    const convertNotes = vi
+      .fn<DohcDesktopBridge["convertNotes"]>()
+      .mockResolvedValueOnce({ ...clean, converted: 11, sent: false })
+      .mockReturnValueOnce(call.promise);
+    install(convertNotes);
+    const shell = mount();
+    await act(async () => shell.conversion().start());
+
+    act(() => {
+      shell.conversion().start();
+      shell.report.mock.calls[0]![0].retry();
+    });
+    expect(convertNotes).toHaveBeenCalledTimes(2);
+
+    await act(async () => call.resolve({ ...clean, converted: 3 }));
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 14, left: 0 });
+    expect(shell.success).toHaveBeenCalledExactlyOnceWith(
+      "Converted 14 notes",
+      undefined,
+      "note-conversion",
+    );
+  });
+
+  it("offers Try again alone when it left notes and could not send, since a new run does both", async () => {
     install(
       vi.fn(async () => ({
         ...clean,
@@ -253,18 +268,28 @@ describe("converting notes from this window", () => {
 
     await act(async () => shell.conversion().start());
     expect(shell.report).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        retry: expect.any(Function),
-        action: expect.objectContaining({ label: "Convert remaining" }),
-      }),
+      expect.objectContaining({ retry: expect.any(Function) }),
     );
-    await act(async () => shell.report.mock.calls[0]![0].retry());
-    expect(shell.report).toHaveBeenCalledTimes(2);
-    expect(shell.report.mock.calls[1]![0]).toMatchObject({
-      title: "1 note was not converted",
-      retry: null,
-      action: expect.objectContaining({ label: "Convert remaining" }),
-    });
+    expect(shell.report.mock.calls[0]![0]).not.toHaveProperty("action");
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 1980, left: 1 });
+  });
+
+  it("counts the notes it left when it skipped every one", async () => {
+    install(
+      vi.fn(async () => ({
+        ...clean,
+        converted: 0,
+        unchanged: 0,
+        skipped: [
+          { path: "Day 1.md", reason: "open-here" },
+          { path: "Day 2.md", reason: "open-elsewhere" },
+        ],
+      })),
+    );
+    const shell = mount();
+
+    await act(async () => shell.conversion().start());
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 0, left: 2 });
     expect(shell.success).not.toHaveBeenCalled();
   });
 

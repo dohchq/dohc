@@ -1,3 +1,4 @@
+import type { CloudCredentials } from "./cloudCredentialStore";
 import { describe, expect, it, vi } from "vitest";
 import {
   NOTE_CONVERSION_NOT_OWNER,
@@ -494,50 +495,76 @@ describe("note conversion run", () => {
       [3, 3],
     ]);
   });
+
+  it("keeps converting when a progress report fails", async () => {
+    const progress = vi.fn(() => {
+      throw new Error("Object has been destroyed");
+    });
+    await expect(
+      createNoteConversion()("ws", {
+        relay: null,
+        convert: oneNoteAtATime([{ converted: 1 }, { converted: 1 }]),
+        assertCurrent: () => undefined,
+        progress,
+      }),
+    ).resolves.toMatchObject({ converted: 2 });
+    expect(progress).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("who converts a workspace's notes", () => {
-  const owner = { serverUrl: "https://relay.example", ownerUserId: "owner" };
+  const remote = { serverUrl: "https://relay.example", ownerUserId: "owner" };
+  const owner: CloudCredentials = {
+    serverUrl: "https://relay.example",
+    userId: "owner",
+    email: "owner@example.com",
+    token: "token",
+  };
+  const member: CloudCredentials = { ...owner, userId: "member" };
+  const elsewhere: CloudCredentials = { ...owner, serverUrl: "https://other.example" };
+  const shareView = {
+    shareId: "share-1",
+    granterEmail: owner.email,
+    genericChatWritable: false,
+    grantedSelector: { paths: [], versionId: "main", access: "view" as const },
+  };
 
   it("runs a local-only workspace without the relay and an owner's synced one through it", () => {
-    expect(noteConversionReach({ sharedView: false }, null)).toBe("local");
-    expect(noteConversionReach({ sharedView: false, remote: owner }, "owner")).toBe("relay");
+    expect(noteConversionReach({}, null)).toBe("local");
+    expect(noteConversionReach({}, member)).toBe("local");
+    expect(noteConversionReach({ remote }, owner)).toBe("relay");
   });
 
-  it("refuses a member's own full copy of a synced workspace, a shared view, and paused sync", () => {
-    expect(() => noteConversionReach({ sharedView: false, remote: owner }, "member")).toThrow(
-      NOTE_CONVERSION_NOT_OWNER,
-    );
-    expect(() => noteConversionReach({ sharedView: true, remote: owner }, "owner")).toThrow(
+  it("refuses a member's copy, a signed-out owner, another server, a shared view, and paused sync", () => {
+    for (const credentials of [member, null, elsewhere])
+      expect(() => noteConversionReach({ remote }, credentials)).toThrow(NOTE_CONVERSION_NOT_OWNER);
+    expect(() => noteConversionReach({ remote, shareView }, owner)).toThrow(
       NOTE_CONVERSION_SHARED_VIEW,
     );
-    expect(() => noteConversionReach({ sharedView: false, pausedRemote: owner }, "owner")).toThrow(
+    expect(() => noteConversionReach({ pausedRemote: remote }, owner)).toThrow(
       NOTE_CONVERSION_PAUSED,
     );
-    expect(() => noteConversionReach({ sharedView: false, pausedRemote: owner }, "member")).toThrow(
+    expect(() => noteConversionReach({ pausedRemote: remote }, member)).toThrow(
       NOTE_CONVERSION_NOT_OWNER,
     );
   });
 
   it("offers conversion only to the owner, and only while the engine reads and writes the new format", () => {
     const on = { DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1", DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "1" };
-    const local = { sharedView: false };
-    expect(noteConversionOffered(on, local, null)).toBe(true);
-    expect(noteConversionOffered(on, { sharedView: false, remote: owner }, "owner")).toBe(true);
-    expect(noteConversionOffered(on, { sharedView: false, pausedRemote: owner }, "owner")).toBe(
-      true,
-    );
+    expect(noteConversionOffered(on, {}, null)).toBe(true);
+    expect(noteConversionOffered(on, { remote }, owner)).toBe(true);
+    expect(noteConversionOffered(on, { pausedRemote: remote }, owner)).toBe(true);
 
-    expect(noteConversionOffered(on, { sharedView: false, remote: owner }, "member")).toBe(false);
-    expect(noteConversionOffered(on, { sharedView: false, pausedRemote: owner }, "member")).toBe(
+    for (const credentials of [member, null, elsewhere]) {
+      expect(noteConversionOffered(on, { remote }, credentials)).toBe(false);
+      expect(noteConversionOffered(on, { pausedRemote: remote }, credentials)).toBe(false);
+    }
+    expect(noteConversionOffered(on, { remote, shareView }, owner)).toBe(false);
+
+    expect(noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, {}, null)).toBe(
       false,
     );
-    expect(noteConversionOffered(on, { sharedView: true, remote: owner }, "owner")).toBe(false);
-
-    expect(
-      noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, local, null),
-    ).toBe(false);
-    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, local, null)).toBe(false);
-    expect(noteConversionOffered({}, local, null)).toBe(false);
+    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, {}, null)).toBe(false);
+    expect(noteConversionOffered({}, {}, null)).toBe(false);
   });
 });

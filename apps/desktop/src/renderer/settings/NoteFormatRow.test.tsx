@@ -6,9 +6,8 @@ import { NoteFormatRow } from "./NoteFormatRow";
 
 function show(state: NoteConversionState) {
   const start = vi.fn();
-  const sendConverted = vi.fn();
-  render(<NoteFormatRow conversion={{ state, start, sendConverted }} workspaceName="Trip" />);
-  return Object.assign(start, { sendConverted });
+  render(<NoteFormatRow conversion={{ state, start }} workspaceName="Trip" />);
+  return start;
 }
 
 afterEach(() => {
@@ -52,11 +51,17 @@ describe("Settings › Advanced › Note format", () => {
   });
 
   it("says what the last run did, and Try again runs it again without asking", () => {
-    show({ status: "done", converted: 1980 });
+    show({ status: "done", converted: 1980, left: 0 });
     expect(screen.getByText("Converted 1,980 notes")).toBeTruthy();
     cleanup();
-    show({ status: "done", converted: 0 });
+    show({ status: "done", converted: 0, left: 0 });
     expect(screen.getByText("No notes to convert")).toBeTruthy();
+    cleanup();
+    show({ status: "done", converted: 0, left: 2 });
+    expect(screen.getByText("2 notes were not converted")).toBeTruthy();
+    cleanup();
+    show({ status: "done", converted: 5, left: 1 });
+    expect(screen.getByText("Converted 5 notes. 1 note was not converted.")).toBeTruthy();
     cleanup();
 
     const start = show({ status: "failed" });
@@ -66,21 +71,13 @@ describe("Settings › Advanced › Note format", () => {
     expect(screen.queryByTestId("settings-confirm-convert-notes")).toBeNull();
   });
 
-  it("keeps the count of notes it could not send, and Try again only sends them", () => {
-    const start = show({ status: "unsent", converted: 11 });
+  it("keeps the count of notes it could not send, and Try again runs it again without asking", () => {
+    const start = show({ status: "unsent", converted: 11, left: 0 });
     expect(
       screen.getByText("Converted 11 notes. dohc could not send them to the server yet."),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(start.sendConverted).toHaveBeenCalledOnce();
-    expect(start).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("settings-confirm-convert-notes")).toBeNull();
-    cleanup();
-
-    show({ status: "sending", converted: 11 });
-    expect(screen.getByText("Sending 11 converted notes…")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
   });
 });
