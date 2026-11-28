@@ -23,28 +23,48 @@ const clientOf = (server: ReturnType<typeof testServer>) =>
   });
 
 describe("phoneDocumentCollections client & validation", () => {
-  it("reads documentCollections and documentCollectionRecords pages", async () => {
+  it("reads paginated documentCollections and documentCollectionRecords pages", async () => {
     const server = testServer();
-    server.on(
-      "POST",
-      "/sync/ws-1/ops/documentCollections",
-      ops({
-        ok: true,
-        collections: [
-          {
-            path: "Tasks",
-            name: "Tasks",
-            description: null,
-            status: "valid",
-            fields: [
-              { name: "Name", type: "text" },
-              { name: "Status", type: "select", options: ["Todo", "Done"] },
-              { name: "Project", type: "relation", collection: "Projects", many: false },
-            ],
-          },
-        ],
-      }),
-    );
+    server.on("POST", "/sync/ws-1/ops/documentCollections", (req) => {
+      const body = (req.body ?? {}) as { afterPath?: string };
+      return body.afterPath
+        ? ops(
+            {
+              ok: true,
+              collections: [
+                {
+                  path: "Trips",
+                  name: "Trips",
+                  description: null,
+                  status: "valid",
+                  fields: [{ name: "Name", type: "text" }],
+                },
+              ],
+              nextPath: null,
+            },
+            "0.2.1",
+          )
+        : ops(
+            {
+              ok: true,
+              collections: [
+                {
+                  path: "Tasks",
+                  name: "Tasks",
+                  description: null,
+                  status: "valid",
+                  fields: [
+                    { name: "Name", type: "text" },
+                    { name: "Status", type: "select", options: ["Todo", "Done"] },
+                    { name: "Project", type: "relation", collection: "Projects", many: false },
+                  ],
+                },
+              ],
+              nextPath: "Tasks/collection.yaml",
+            },
+            "0.1.1",
+          );
+    });
     server.on(
       "POST",
       "/sync/ws-1/ops/documentCollectionRecords",
@@ -68,12 +88,12 @@ describe("phoneDocumentCollections client & validation", () => {
         ],
         relationLabels: { rec_bbbbbbbbbbbbbbbbbbbbbbbbbb: "Beta" },
         nextPath: "Tasks/Alpha.md",
-        bounded: false,
       }),
     );
     const client = clientOf(server);
     const list = await readDocumentCollections(client, "ws-1", new AbortController().signal);
-    expect(list.value).toHaveLength(1);
+    expect(list.cursor).toBe("0.1.1");
+    expect(list.value.map((c) => c.path)).toEqual(["Tasks", "Trips"]);
     expect(list.value[0]?.fields[2]).toEqual({
       name: "Project",
       type: "relation",
@@ -83,7 +103,7 @@ describe("phoneDocumentCollections client & validation", () => {
     const page = await readDocumentCollectionRecords(
       client,
       "ws-1",
-      { collectionPath: "Tasks", search: "alp", sortField: "Name", sortDirection: "desc" },
+      { collectionPath: "Tasks", search: "alp" },
       new AbortController().signal,
     );
     expect(page.value).toMatchObject({
@@ -91,7 +111,6 @@ describe("phoneDocumentCollections client & validation", () => {
       records: [{ path: "Tasks/Alpha.md", title: "Alpha" }],
       relationLabels: { rec_bbbbbbbbbbbbbbbbbbbbbbbbbb: "Beta" },
       nextPath: "Tasks/Alpha.md",
-      bounded: false,
     });
   });
 

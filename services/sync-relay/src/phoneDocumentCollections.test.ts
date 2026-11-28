@@ -257,11 +257,19 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
     expect(recBody.result.relationLabels).toEqual({ [projectRecId]: "Launch" });
   });
 
-  it("paginates default order and bounds search/sort to <= 200 records on large collections", async () => {
+  it("paginates >200 collections, binds conflicted records to currentFileObjectId, and bounds record search to <= 200 records", async () => {
     const storage = (await testStorage()) as StorageContext;
     const h = testHandler(storage, { resolvePhoneCapableAccountSession: resolveAccountSession });
     await claimWorkspace(h, "ana", "big");
     await seedTextFiles(h, "big", [
+      {
+        path: ".hidden-col/collection.yaml",
+        text: "name: Hidden\nfields:\n  Name:\n    type: text\n",
+      },
+      ...Array.from({ length: 201 }, (_, idx) => ({
+        path: `Col-${String(idx + 1).padStart(3, "0")}/collection.yaml`,
+        text: `name: Col ${idx + 1}\nfields:\n  Name:\n    type: text\n`,
+      })),
       { path: "Items/collection.yaml", text: "name: Items\nfields:\n  Rank:\n    type: number\n" },
       ...Array.from({ length: 250 }, (_, idx) => {
         const i = idx + 1;
@@ -272,16 +280,69 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       }),
     ]);
 
+    const cols1 = (await (await h(postOp("big", "documentCollections", "ana", {}))).json()) as {
+      result: { collections: Array<{ path: string }>; nextPath: string | null };
+    };
+    expect(cols1.result.collections).toHaveLength(200);
+    expect(cols1.result.nextPath).toBeTruthy();
+    const cols2 = (await (
+      await h(postOp("big", "documentCollections", "ana", { afterPath: cols1.result.nextPath }))
+    ).json()) as { result: { collections: Array<{ path: string }>; nextPath: string | null } };
+    expect(cols2.result.collections.map((c) => c.path)).toEqual(["Col-201", "Items"]);
+    expect(cols2.result.nextPath).toBeNull();
+
+    // Two conflicting creates at the same path: record objectId must match currentFileObjectId.
+    const firstText = "---\nName: First\n---\n";
+    const secondText = "---\nName: Second\n---\n";
+    await putBlob(h, "ana", "big", firstText);
+    await putBlob(h, "ana", "big", secondText);
+    await appendLog(h, "ana", "big", [
+      moment("Col-001/Follow-up.md", firstText, {
+        objectId: "obj-first",
+        momentId: "mom-a",
+        recordedAtMs: 100,
+      }),
+    ]);
+    await appendLog(
+      h,
+      "ana",
+      "big",
+      [
+        {
+          ...moment("Col-001/Follow-up.md", secondText, {
+            objectId: "obj-second",
+            momentId: "mom-b",
+            recordedAtMs: 50,
+          }),
+          originSeq: 0,
+        },
+      ],
+      { originId: "origin-b" },
+    );
+    const conflictRecs = (await (
+      await h(postOp("big", "documentCollectionRecords", "ana", { collectionPath: "Col-001" }))
+    ).json()) as {
+      result: { records: Array<{ path: string; objectId: string; values: { Name?: string } }> };
+    };
+    const winningObjId = storage.currentFileObjectId({
+      workspaceId: "big",
+      versionId: "main",
+      path: "Col-001/Follow-up.md",
+    });
+    expect(conflictRecs.result.records[0]?.objectId).toBe(winningObjId);
+    expect(conflictRecs.result.records[0]?.values.Name).toBe(
+      winningObjId === "obj-first" ? "First" : "Second",
+    );
+
     const page1 = (await (
       await h(
         postOp("big", "documentCollectionRecords", "ana", { collectionPath: "Items", limit: 50 }),
       )
     ).json()) as {
-      result: { records: Array<{ path: string }>; nextPath: string | null; bounded: boolean };
+      result: { records: Array<{ path: string }>; nextPath: string | null };
     };
     expect(page1.result.records).toHaveLength(50);
     expect(page1.result.nextPath).toBe("Items/Item-050.md");
-    expect(page1.result.bounded).toBe(false);
 
     const page2 = (await (
       await h(
@@ -294,30 +355,26 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
     ).json()) as { result: { records: Array<{ path: string }> } };
     expect(page2.result.records[0]?.path).toBe("Items/Item-051.md");
 
-    const sorted = (await (
+    const searched = (await (
       await h(
         postOp("big", "documentCollectionRecords", "ana", {
           collectionPath: "Items",
-          sortField: "Rank",
-          sortDirection: "asc",
+          search: "Item-",
         }),
       )
     ).json()) as {
-      result: {
-        records: Array<{ path: string; values: { Rank: number } }>;
-        bounded: boolean;
-        nextPath: string | null;
-      };
+      result: { records: Array<{ path: string }>; nextPath: string | null };
     };
-    expect(sorted.result.records.length).toBeLessThanOrEqual(PHONE_DOC_COLLECTION_MAX_SCAN);
-    expect(sorted.result.bounded).toBe(true);
-    expect(sorted.result.nextPath).toBeNull();
-    expect(sorted.result.records[0]?.values.Rank).toBe(51);
+    expect(searched.result.records.length).toBeLessThanOrEqual(PHONE_DOC_COLLECTION_MAX_SCAN);
+    expect(searched.result.nextPath).toBeNull();
   });
 
   it("refuses invalid query arguments and allows deleteFile inside collection.yaml while blocking dataset.json", async () => {
     const storage = (await testStorage()) as StorageContext;
-    const h = testHandler(storage, { resolvePhoneCapableAccountSession: resolveAccountSession });
+    const h = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => ({ endHold() {} }) as never,
+    });
     await claimWorkspace(h, "ana", "v");
     await seedTextFiles(h, "v", [
       {
@@ -333,17 +390,19 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
     expect(
       (
         await h(
-          postOp("v", "documentCollectionRecords", "ana", {
-            collectionPath: "Tasks",
-            sortField: "Tags",
-          }),
+          postOp("v", "documentCollectionRecords", "ana", { collectionPath: "Tasks", limit: 99 }),
         )
       ).status,
     ).toBe(400);
     expect(
       (
         await h(
-          postOp("v", "documentCollectionRecords", "ana", { collectionPath: "Tasks", limit: 99 }),
+          postOp("v", "editDocumentRecordFields", "ana", {
+            path: "Tasks/Sketch.excalidraw",
+            expectedObjectId: "obj-1",
+            fields: { Name: "X" },
+            requestId: "req-non-md",
+          }),
         )
       ).status,
     ).toBe(400);

@@ -5,12 +5,10 @@ import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import * as Haptics from "expo-haptics";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ellipsis, Plus } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
-  Modal,
-  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -19,12 +17,11 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
-import { useBackCloses } from "../backCloses";
 import { useShownWorkspaces } from "../chats/Workspaces";
 import { choose, confirm } from "../confirm";
+import { SheetModal } from "../home/FileNameSheet";
 import { shownProblem } from "../server/client";
 import {
   buildTargetPath,
@@ -105,6 +102,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const loadedRef = useRef(false);
   const mounted = useMounted();
   const jsonLabels = useMemo(() => toJsonKeyLabels(relationLabels), [relationLabels]);
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -132,6 +130,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
           setReading(null);
           return;
         }
+        loadedRef.current = true;
         setMissing(false);
         setCollection(value.collection);
         setNextPath(value.nextPath);
@@ -157,7 +156,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
 
   useFocusEffect(
     useCallback(() => {
-      void load(collection ? "refresh" : "first");
+      void load(loadedRef.current ? "refresh" : "first");
     }, [load]),
   );
 
@@ -493,7 +492,7 @@ function CreateNameSheet(props: {
   };
 
   return (
-    <SheetFrame
+    <SheetModal
       open={props.open}
       title={props.title}
       saving={saving}
@@ -536,7 +535,7 @@ function CreateNameSheet(props: {
           </Text>
         ) : null}
       </ScrollView>
-    </SheetFrame>
+    </SheetModal>
   );
 }
 
@@ -551,6 +550,7 @@ export function PropertyEditorSheet(props: {
   readonly onSave: (value: RecordValue, labels?: Readonly<Record<string, string>>) => void;
 }) {
   const { open, field, value, saving, error, onClose, onSave } = props;
+  const theme = useTheme();
   const { data } = useAccount();
   const signIn = useSignIn();
   const [draft, setDraft] = useState<Draft>("");
@@ -615,8 +615,10 @@ export function PropertyEditorSheet(props: {
     onSave(coerced.value, plainLabels);
   };
 
+  const shownError = localError ?? error;
+
   return (
-    <SheetFrame
+    <SheetModal
       open={open && field !== null}
       title={field?.name ?? ""}
       saving={saving}
@@ -626,17 +628,28 @@ export function PropertyEditorSheet(props: {
       onAction={() => commit()}
     >
       {field?.type === "relation" ? (
-        <RelationPicker
-          name={field.name}
-          many={field.many}
-          selected={Array.isArray(draft) ? (draft as readonly RecordId[]) : []}
-          labels={labels}
-          load={loadRelations}
-          onChange={(next, nextLabels) => {
-            setDraft(next);
-            setLabels(nextLabels);
-          }}
-        />
+        <>
+          {shownError ? (
+            <Text
+              style={[styles.errLine, styles.errPad, { color: theme.danger }]}
+              accessibilityRole="alert"
+            >
+              {shownError}
+            </Text>
+          ) : null}
+          <RelationPicker
+            name={field.name}
+            many={field.many}
+            selected={Array.isArray(draft) ? (draft as readonly RecordId[]) : []}
+            labels={labels}
+            load={loadRelations}
+            onChange={(next, nextLabels) => {
+              setDraft(next);
+              setLabels(nextLabels);
+              setLocalError(null);
+            }}
+          />
+        </>
       ) : field ? (
         <ScrollView
           contentContainerStyle={styles.form}
@@ -654,85 +667,12 @@ export function PropertyEditorSheet(props: {
             inlineDate
             autoFocus
             disabled={saving}
-            error={localError ?? error}
+            error={shownError}
             onClearDate={value === null || value === "" ? null : () => commit("")}
           />
         </ScrollView>
       ) : null}
-    </SheetFrame>
-  );
-}
-
-function SheetFrame(props: {
-  readonly open: boolean;
-  readonly title: string;
-  readonly saving: boolean;
-  readonly savingLabel: string;
-  readonly actionLabel: string;
-  readonly onClose: () => void;
-  readonly onAction: () => void;
-  readonly children: ReactNode;
-}) {
-  const theme = useTheme();
-  const insets = useSafeAreaInsets();
-  const close = () => {
-    if (!props.saving) props.onClose();
-  };
-  useBackCloses(props.open, close);
-  return (
-    <Modal
-      visible={props.open}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={close}
-    >
-      {props.open ? (
-        <View
-          style={[
-            styles.flex,
-            {
-              backgroundColor: theme.bg,
-              paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
-              paddingBottom: insets.bottom,
-            },
-          ]}
-        >
-          <View style={[styles.header, { borderColor: theme.line }]}>
-            <Pressable
-              onPress={close}
-              disabled={props.saving}
-              android_ripple={ripple(theme, true)}
-              style={[styles.btn, styles.side]}
-              accessibilityRole="button"
-            >
-              <Text style={[styles.btnText, { color: props.saving ? theme.subtle : theme.ink }]}>
-                {confirmWords.cancel}
-              </Text>
-            </Pressable>
-            <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
-              {props.title}
-            </Text>
-            {props.saving ? (
-              <View style={[styles.btn, styles.side, styles.right]}>
-                <ActivityIndicator accessibilityLabel={props.savingLabel} />
-              </View>
-            ) : (
-              <Pressable
-                onPress={props.onAction}
-                android_ripple={ripple(theme, true)}
-                style={[styles.btn, styles.side, styles.right]}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.btnText, styles.strong, { color: theme.ink }]}>
-                  {props.actionLabel}
-                </Text>
-              </Pressable>
-            )}
-          </View>
-          {props.children}
-        </View>
-      ) : null}
-    </Modal>
+    </SheetModal>
   );
 }
 
@@ -741,6 +681,7 @@ const styles = StyleSheet.create({
   iconBtn: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
   pad: { paddingHorizontal: 16, paddingBottom: 8 },
   errLine: { fontSize: 14, paddingHorizontal: 16, paddingBottom: 8 },
+  errPad: { paddingTop: 12 },
   rowWrap: {
     flexDirection: "row",
     alignItems: "center",
@@ -757,19 +698,6 @@ const styles = StyleSheet.create({
   },
   recordTitle: { fontSize: 17 },
   recordDetail: { fontSize: 15 },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 8,
-    minHeight: 52,
-  },
-  side: { minWidth: 84 },
-  right: { alignItems: "flex-end" },
-  btn: { minHeight: TOUCH, justifyContent: "center", paddingHorizontal: 12 },
-  btnText: { fontSize: 17 },
-  strong: { fontWeight: "600" },
-  title: { flex: 1, textAlign: "center", fontSize: 17, fontWeight: "600" },
   form: { padding: 16, gap: 16, paddingBottom: 48 },
   input: {
     fontSize: 17,

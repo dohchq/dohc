@@ -1,6 +1,9 @@
 // A page in the app's web view: icon, title, properties and body in one scroll, so the caret stays above the
 // keyboard without the app coordinating two scroll views. The app passes the page in `window.__dohcPage`.
-import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
+import {
+  RECORD_ID_FRONTMATTER_KEY,
+  type FieldDefinition,
+} from "@dohc/workspace-contracts/collection";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import {
@@ -14,7 +17,8 @@ import { opensFormat, refuseFormat } from "./format";
 import { followLive } from "./live";
 import { createEditorToolbar, type EditorToolbar } from "./toolbar";
 
-const HIDDEN_PROPERTY_KEYS = new Set(["id", "title", "icon"]);
+export const isHiddenPropertyKey = (key: string, field: FieldDefinition | undefined): boolean =>
+  key === RECORD_ID_FRONTMATTER_KEY || (!field && (key === "title" || key === "icon"));
 
 export interface PageProperty {
   readonly name: string;
@@ -177,11 +181,7 @@ export function mountDocument(page: PageConfig) {
     const seen = new Set<string>();
     const entries: Array<{ key: string; value: unknown; field: FieldDefinition | undefined }> = [];
     for (const field of propertyFields) {
-      if (
-        field.type === "button" ||
-        HIDDEN_PROPERTY_KEYS.has(field.name.toLowerCase()) ||
-        seen.has(field.name)
-      )
+      if (field.type === "button" || isHiddenPropertyKey(field.name, field) || seen.has(field.name))
         continue;
       seen.add(field.name);
       entries.push({
@@ -191,7 +191,7 @@ export function mountDocument(page: PageConfig) {
       });
     }
     for (const [key, value] of Object.entries(values)) {
-      if (HIDDEN_PROPERTY_KEYS.has(key.toLowerCase()) || seen.has(key)) continue;
+      if (isHiddenPropertyKey(key, undefined) || seen.has(key)) continue;
       seen.add(key);
       entries.push({ key, value, field: undefined });
     }

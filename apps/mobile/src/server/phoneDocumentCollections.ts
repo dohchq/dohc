@@ -7,7 +7,9 @@ import { each, isFields, okAnswer, segment, text } from "./api";
 import type { ServerClient } from "./client";
 import { FILE_WRITE_TIMEOUT_MS } from "./fileWrites";
 import type { RecordValue } from "./phoneCollections";
-import { isCursor, type Read } from "./workspaceReads";
+import { earlierCursor, isCursor, type Read } from "./workspaceReads";
+
+const MAX_COLLECTION_PAGES = 20;
 
 export interface DocumentCollectionSummary {
   readonly path: string;
@@ -32,7 +34,6 @@ export type DocumentCollectionRecordsPage =
       readonly records: readonly DocumentCollectionRecord[];
       readonly relationLabels: Readonly<Record<string, string>>;
       readonly nextPath: string | null;
-      readonly bounded: boolean;
     }
   | { readonly kind: "missing" };
 
@@ -159,19 +160,47 @@ const opRead = <T>(
     { signal },
   );
 
-export const readDocumentCollections = (
+export async function readDocumentCollections(
   client: ServerClient,
   workspaceId: string,
   signal: AbortSignal,
-): Promise<Read<readonly DocumentCollectionSummary[]>> =>
-  opRead(
-    client,
-    workspaceId,
-    "documentCollections",
-    {},
-    (result) => each(okAnswer(result)?.collections, readSummary),
-    signal,
-  );
+): Promise<Read<readonly DocumentCollectionSummary[]>> {
+  const all: DocumentCollectionSummary[] = [];
+  const seen = new Set<string>();
+  let cursor = "";
+  let afterPath: string | undefined;
+  for (let page = 0; page < MAX_COLLECTION_PAGES; page += 1) {
+    const next = await opRead(
+      client,
+      workspaceId,
+      "documentCollections",
+      afterPath ? { afterPath } : {},
+      (result) => {
+        const answer = okAnswer(result);
+        const collections = each(answer?.collections, readSummary);
+        if (!answer || !collections) return null;
+        if (
+          answer.nextPath !== undefined &&
+          answer.nextPath !== null &&
+          !text(answer.nextPath, 1024)
+        )
+          return null;
+        return { collections, nextPath: answer.nextPath ?? null };
+      },
+      signal,
+    );
+    cursor = cursor ? earlierCursor(cursor, next.cursor) : next.cursor;
+    for (const item of next.value.collections) {
+      if (!seen.has(item.path)) {
+        seen.add(item.path);
+        all.push(item);
+      }
+    }
+    if (!next.value.nextPath || next.value.nextPath === afterPath) break;
+    afterPath = next.value.nextPath;
+  }
+  return { value: all, cursor };
+}
 
 export function readDocumentCollectionRecords(
   client: ServerClient,
@@ -181,8 +210,6 @@ export function readDocumentCollectionRecords(
     readonly afterPath?: string;
     readonly limit?: number;
     readonly search?: string;
-    readonly sortField?: string;
-    readonly sortDirection?: "asc" | "desc";
   },
   signal: AbortSignal,
 ): Promise<Read<DocumentCollectionRecordsPage>> {
@@ -190,10 +217,6 @@ export function readDocumentCollectionRecords(
   if (input.afterPath !== undefined) args.afterPath = input.afterPath;
   if (input.limit !== undefined) args.limit = input.limit;
   if (input.search) args.search = input.search;
-  if (input.sortField) {
-    args.sortField = input.sortField;
-    args.sortDirection = input.sortDirection ?? "asc";
-  }
   return opRead(
     client,
     workspaceId,
@@ -209,8 +232,7 @@ export function readDocumentCollectionRecords(
         !collection ||
         !records ||
         !isFields(result.relationLabels) ||
-        (result.nextPath !== null && !text(result.nextPath, 1024)) ||
-        typeof result.bounded !== "boolean"
+        (result.nextPath !== null && !text(result.nextPath, 1024))
       )
         return null;
       const relationLabels = Object.fromEntries(
@@ -218,14 +240,7 @@ export function readDocumentCollectionRecords(
           text(entry[1], 1024),
         ),
       );
-      return {
-        kind: "ready",
-        collection,
-        records,
-        relationLabels,
-        nextPath: result.nextPath,
-        bounded: result.bounded,
-      };
+      return { kind: "ready", collection, records, relationLabels, nextPath: result.nextPath };
     },
     signal,
   );
@@ -272,12 +287,7 @@ export function documentCollectionWrites(client: ServerClient, workspaceId: stri
       signal?: AbortSignal,
     ) => run("createDocumentCollection", input, signal),
     createRecord: (
-      input: {
-        readonly collectionPath: string;
-        readonly name: string;
-        readonly fields?: Readonly<Record<string, RecordValue>>;
-        readonly requestId: string;
-      },
+      input: { readonly collectionPath: string; readonly name: string; readonly requestId: string },
       signal?: AbortSignal,
     ) => run("createDocumentRecord", input, signal),
     editRecordFields: (

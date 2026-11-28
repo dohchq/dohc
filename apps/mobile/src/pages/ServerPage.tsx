@@ -167,7 +167,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const [propSaving, setPropSaving] = useState(false);
   const [propError, setPropError] = useState<string | null>(null);
   const pendingPropReq = useRef<string | null>(null);
-  const fallbackPropReq = useRef<string | null>(null);
+  const fallbackPropReq = useRef<{
+    readonly key: string;
+    readonly valueJson: string;
+    readonly id: string;
+  } | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -311,9 +315,17 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
       );
       return;
     }
-    if (!fallbackProps || !data || !objectId) return;
+    if (!fallbackProps || !data || !objectId) {
+      setPropError(collectionWords.editPropertyFailed);
+      return;
+    }
     const active = data;
-    fallbackPropReq.current ??= newFileRequestId();
+    const valueJson = JSON.stringify(nextValue);
+    if (
+      fallbackPropReq.current?.key !== editingProp.key ||
+      fallbackPropReq.current.valueJson !== valueJson
+    )
+      fallbackPropReq.current = { key: editingProp.key, valueJson, id: newFileRequestId() };
     setPropSaving(true);
     setPropError(null);
     try {
@@ -324,7 +336,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
         path,
         expectedObjectId: objectId,
         fields: { [editingProp.key]: nextValue },
-        requestId: fallbackPropReq.current,
+        requestId: fallbackPropReq.current.id,
       });
       if (!mountedRef.current || !signIn.isCurrent() || !active.isOpen()) return;
       if (!res.ok) {

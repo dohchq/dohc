@@ -8,7 +8,8 @@ import {
   type LiveFrameBegin,
 } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import {
@@ -17,7 +18,12 @@ import {
 } from "@dohc/ydoc-projection/live-journal-validation";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { formatProperty, isEditablePropertyValue } from "../../editor/document";
+import {
+  formatProperty,
+  isEditablePropertyValue,
+  isHiddenPropertyKey,
+} from "../../editor/document";
+import { applyCheckedFrontmatterPatch } from "../../editor/live";
 import { createLiveAdapter } from "../../editor/liveAdapter";
 import { fromBase64, outgoing, toBase64, type FromPage, type ToPage } from "./liveBridge";
 import { liveLimits } from "./liveFixtures";
@@ -417,5 +423,28 @@ describe("the page's live connection", () => {
         many: true,
       }),
     ).toBe(true);
+
+    expect(isHiddenPropertyKey("Title", { name: "Title", type: "text" })).toBe(false);
+    expect(isHiddenPropertyKey("Icon", { name: "Icon", type: "text" })).toBe(false);
+    expect(isHiddenPropertyKey("id", undefined)).toBe(true);
+    expect(isHiddenPropertyKey("title", undefined)).toBe(true);
+    expect(isHiddenPropertyKey("icon", undefined)).toBe(true);
+
+    const declaredDoc = markdownToYDoc("---\nTitle: Old\n---\nbody\n");
+    expect(
+      applyCheckedFrontmatterPatch(declaredDoc, "Title", "New", { name: "Title", type: "text" }),
+    ).toEqual({ ok: true, changed: true });
+    expect(frontmatterMapValues(declaredDoc.getMap("frontmatter")).Title).toBe("New");
+
+    const nearLimit = `---\nName: a\n---\n\n${"x".repeat(LIVE_MARKDOWN_MAX_BYTES - 45)}\n`;
+    const bigDoc = markdownToYDoc(nearLimit);
+    const before = yDocToMarkdown(bigDoc);
+    expect(
+      applyCheckedFrontmatterPatch(bigDoc, "Name", "y".repeat(80), { name: "Name", type: "text" }),
+    ).toEqual({ ok: false, reason: "refused" });
+    expect(yDocToMarkdown(bigDoc)).toBe(before);
+    expect(
+      applyCheckedFrontmatterPatch(bigDoc, "Name", "b", { name: "Name", type: "text" }),
+    ).toEqual({ ok: true, changed: true });
   });
 });

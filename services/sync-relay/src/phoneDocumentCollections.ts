@@ -37,9 +37,9 @@ import {
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   loadMarkdownFrontmatter,
-  writeMarkdownFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   assertOutsideCollection,
   parseFields,
@@ -131,23 +131,18 @@ const isJsonSafe = (v: unknown, d = 0): boolean =>
 function validateRecordFields(
   raw: unknown,
   schema: CollectionSchema | null,
-  requireNonEmpty: boolean,
 ): Record<string, unknown> {
-  if (raw === undefined && !requireNonEmpty) return {};
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw badRequest("Fields must be an object.");
   const entries = Object.entries(raw as Record<string, unknown>);
-  if ((requireNonEmpty && !entries.length) || entries.length > MAX_FIELDS)
-    throw badRequest("Invalid field count.");
+  if (!entries.length || entries.length > MAX_FIELDS) throw badRequest("Invalid field count.");
   const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of entries) {
     if (!key || key.length > 256 || key === RECORD_ID_FRONTMATTER_KEY || !isJsonSafe(value))
       throw badRequest(`Invalid value for field "${key}".`);
     const def = schema?.fields.find((f) => f.name === key);
-    if (def) {
-      if (def.type === "button" || validateFieldValue(def, value).status !== "valid")
-        throw badRequest(`Invalid value for field "${key}".`);
-    } else if (schema && !requireNonEmpty) throw badRequest(`Unknown field "${key}".`);
+    if (def && (def.type === "button" || validateFieldValue(def, value).status !== "valid"))
+      throw badRequest(`Invalid value for field "${key}".`);
     out[key] = typeof value === "number" && Object.is(value, -0) ? 0 : value;
   }
   return out;
@@ -224,19 +219,6 @@ function overlayLiveFrontmatter(
   }
 }
 
-function compareValues(a: unknown, b: unknown, dir: "asc" | "desc"): number {
-  const emptyA = a === null || a === undefined || a === "";
-  const emptyB = b === null || b === undefined || b === "";
-  if (emptyA || emptyB) return emptyA && emptyB ? 0 : emptyA ? 1 : -1;
-  const cmp =
-    typeof a === "number" && typeof b === "number"
-      ? a - b
-      : typeof a === "boolean" && typeof b === "boolean"
-        ? Number(a) - Number(b)
-        : String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
-  return dir === "desc" ? -cmp : cmp;
-}
-
 function hasDatasetAncestor(ctx: StorageContext, workspaceId: string, folder: string): boolean {
   const parts = folder.split("/");
   const stmt = ctx.db.prepare(
@@ -281,42 +263,53 @@ export function runPhoneDocumentCollectionRead(
   const ctx = storage as StorageContext;
   const { workspaceId, operation } = input;
   if (operation === "documentCollections") {
-    parseFields(input.args, []);
-    const collections = ctx.readTx(() => {
-      const rows = ctx.db
-        .prepare(
-          "SELECT path, blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND content_kind='text' AND path GLOB '*/collection.yaml' ORDER BY path LIMIT ?",
-        )
-        .all(workspaceId, MAX_COLLECTIONS);
-      return rows.flatMap((row) => {
-        const schemaPath = String(row.path);
-        const folder = parentDir(schemaPath);
-        if (
-          !folder ||
-          Buffer.byteLength(folder, "utf8") > 512 ||
-          hiddenFile(schemaPath) ||
-          folder.split("/").some((s) => s.startsWith(".")) ||
-          hasDatasetAncestor(ctx, workspaceId, folder)
-        )
-          return [];
-        const parsed = parseSchemaBlob(ctx, workspaceId, String(row.blob_sha256));
-        return parsed ? [summaryOf(folder, parsed)] : [];
-      });
+    const body = parseFields(input.args, ["afterPath"]);
+    if (
+      body.afterPath !== undefined &&
+      (typeof body.afterPath !== "string" || Buffer.byteLength(body.afterPath, "utf8") > 1_024)
+    )
+      throw badRequest("Invalid Document Collection cursor.");
+    const result = ctx.readTx(() => {
+      const stmt = ctx.db.prepare(
+        "SELECT path, blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND content_kind='text' AND path GLOB '*/collection.yaml' AND path>? ORDER BY path LIMIT ?",
+      );
+      let cursorPath = typeof body.afterPath === "string" ? body.afterPath : "";
+      let hasMore = false;
+      let scanned = 0;
+      const collections: Array<ReturnType<typeof summaryOf>> = [];
+      while (collections.length < MAX_COLLECTIONS && scanned < MAX_COLLECTIONS * 4) {
+        const batchSize = Math.min(
+          MAX_COLLECTIONS - collections.length,
+          MAX_COLLECTIONS * 4 - scanned,
+        );
+        const rows = stmt.all(workspaceId, cursorPath, batchSize + 1);
+        hasMore = rows.length > batchSize;
+        const slice = rows.slice(0, batchSize);
+        if (!slice.length) break;
+        for (const row of slice) {
+          scanned += 1;
+          const schemaPath = String(row.path);
+          cursorPath = schemaPath;
+          const folder = parentDir(schemaPath);
+          if (
+            !folder ||
+            Buffer.byteLength(folder, "utf8") > 512 ||
+            hiddenFile(schemaPath) ||
+            folder.split("/").some((s) => s.startsWith(".")) ||
+            hasDatasetAncestor(ctx, workspaceId, folder)
+          )
+            continue;
+          const parsed = parseSchemaBlob(ctx, workspaceId, String(row.blob_sha256));
+          if (parsed) collections.push(summaryOf(folder, parsed));
+        }
+        if (!hasMore) break;
+      }
+      return { ok: true, collections, nextPath: hasMore ? cursorPath : null };
     });
-    return {
-      result: { ok: true, collections },
-      cursor: currentAccountFeedCursor(storage, workspaceId, null),
-    };
+    return { result, cursor: currentAccountFeedCursor(storage, workspaceId, null) };
   }
 
-  const body = parseFields(input.args, [
-    "collectionPath",
-    "afterPath",
-    "limit",
-    "search",
-    "sortField",
-    "sortDirection",
-  ]);
+  const body = parseFields(input.args, ["collectionPath", "afterPath", "limit", "search"]);
   const collectionPath = validateCollectionFolder(body.collectionPath);
   const limit = body.limit === undefined ? PHONE_DOC_COLLECTION_PAGE : body.limit;
   if (
@@ -326,20 +319,12 @@ export function runPhoneDocumentCollectionRead(
     limit > PHONE_DOC_COLLECTION_PAGE ||
     (body.afterPath !== undefined &&
       (typeof body.afterPath !== "string" || Buffer.byteLength(body.afterPath, "utf8") > 1_024)) ||
-    (body.search !== undefined && (typeof body.search !== "string" || body.search.length > 200)) ||
-    (body.sortField !== undefined &&
-      (typeof body.sortField !== "string" || !body.sortField || body.sortField.length > 256)) ||
-    (body.sortDirection !== undefined &&
-      body.sortDirection !== "asc" &&
-      body.sortDirection !== "desc")
+    (body.search !== undefined && (typeof body.search !== "string" || body.search.length > 200))
   )
     throw badRequest("Invalid Document Collection query.");
   const search = typeof body.search === "string" ? body.search.trim().toLowerCase() : "";
-  const sortField = typeof body.sortField === "string" ? body.sortField : null;
-  const sortDir = (body.sortDirection as "asc" | "desc" | undefined) ?? "asc";
-  const filtering = search.length > 0 || sortField !== null;
 
-  const snap = ctx.readTx(() => {
+  const found = ctx.readTx(() => {
     if (hasDatasetAncestor(ctx, workspaceId, collectionPath)) return null;
     const row = ctx.db
       .prepare(
@@ -351,18 +336,13 @@ export function runPhoneDocumentCollectionRead(
         ? parseSchemaBlob(ctx, workspaceId, String(row.blob_sha256))
         : null;
     if (!parsed) return null;
-    if (sortField !== null && sortField !== "title") {
-      const def = parsed.schema.fields.find((f) => f.name === sortField);
-      if (!def || def.type === "button" || def.type === "multi-select")
-        throw badRequest("Invalid sort field.");
-    }
-    const target = filtering ? PHONE_DOC_COLLECTION_MAX_SCAN : limit;
+    const target = search ? PHONE_DOC_COLLECTION_MAX_SCAN : limit;
     const rows: Array<{
       path: string;
       objectId: string;
       frontmatter: Record<string, unknown> | null;
     }> = [];
-    let cursorPath = filtering ? undefined : (body.afterPath as string | undefined);
+    let cursorPath = search ? undefined : (body.afterPath as string | undefined);
     let scannedTotal = 0;
     let hasMore = false;
     while (rows.length < target && scannedTotal < PHONE_DOC_COLLECTION_MAX_SCAN) {
@@ -378,7 +358,7 @@ export function runPhoneDocumentCollectionRead(
         scannedTotal += 1;
         cursorPath = item.path;
         if (hiddenFile(item.path) || posix.basename(item.path).startsWith(".")) continue;
-        const objectId = storage.objectIdAtPathInVersion({
+        const objectId = storage.currentFileObjectId({
           workspaceId,
           versionId: "main",
           path: item.path,
@@ -397,15 +377,15 @@ export function runPhoneDocumentCollectionRead(
   });
 
   const cursor = currentAccountFeedCursor(storage, workspaceId, null);
-  if (!snap)
+  if (!found)
     return {
       result: { ok: false, refusal: "not-found", reason: "This Collection is no longer here." },
       cursor,
     };
 
-  const schemaFields = snap.parsed.schema.fields.filter((f) => f.type !== "button");
+  const schemaFields = found.parsed.schema.fields.filter((f) => f.type !== "button");
   const relationIds = new Set<string>();
-  let records = snap.rows.map((entry) => {
+  let records = found.rows.map((entry) => {
     const raw =
       overlayLiveFrontmatter(storage, workspaceId, entry.path, entry.objectId) ??
       entry.frontmatter ??
@@ -444,15 +424,6 @@ export function runPhoneDocumentCollectionRead(
             (Array.isArray(v) ? v.join(" ") : String(v)).toLowerCase().includes(search),
         ),
     );
-  if (sortField)
-    records.sort(
-      (a, b) =>
-        compareValues(
-          sortField === "title" ? a.title : a.values[sortField],
-          sortField === "title" ? b.title : b.values[sortField],
-          sortDir,
-        ) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
-    );
   const relationLabels: Record<string, string> = {};
   if (relationIds.size > 0) {
     const lookup = ctx.db.prepare(
@@ -472,11 +443,10 @@ export function runPhoneDocumentCollectionRead(
   return {
     result: {
       ok: true,
-      collection: summaryOf(collectionPath, snap.parsed),
+      collection: summaryOf(collectionPath, found.parsed),
       records,
       relationLabels,
-      nextPath: filtering ? null : snap.hasMore ? snap.lastScanned : null,
-      bounded: filtering && snap.hasMore,
+      nextPath: search ? null : found.hasMore ? found.lastScanned : null,
     },
     cursor,
   };
@@ -621,7 +591,7 @@ export async function runPhoneDocumentCollectionWrite(
   }
 
   if (operation === "createDocumentRecord") {
-    const body = parseFields(input.args, ["collectionPath", "name", "fields", "requestId"]);
+    const body = parseFields(input.args, ["collectionPath", "name", "requestId"]);
     const collectionPath = validateCollectionFolder(body.collectionPath);
     const requestId = parseRequestId(body.requestId);
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -654,21 +624,10 @@ export async function runPhoneDocumentCollectionWrite(
       });
       if (schemaFile?.contentKind !== "text" || typeof schemaFile.text !== "string")
         return { ok: false, refusal: "not-found", reason: "This Collection is no longer here." };
-      const fields = validateRecordFields(
-        body.fields,
-        parseCollectionSchema(schemaFile.text).schema,
-        false,
-      );
-      const text = Object.keys(fields).length
-        ? writeMarkdownFrontmatter(prepared.text, {
-            [RECORD_ID_FRONTMATTER_KEY]: prepared.recordId,
-            ...fields,
-          })
-        : prepared.text;
       const created = await createIdempotentFile(files, {
         workspaceId,
         path: prepared.path,
-        text,
+        text: prepared.text,
         requestId,
         correlationId,
         author,
@@ -705,9 +664,10 @@ export async function runPhoneDocumentCollectionWrite(
     allowSketch: false,
     checkDestination: false,
   });
+  if (!/\.md$/i.test(path)) throw badRequest("Properties can only be edited on Markdown pages.");
   const expectedObjectId = parseObjectId(body.expectedObjectId);
   const requestId = parseRequestId(body.requestId);
-  const rawFields = validateRecordFields(body.fields, null, true);
+  const rawFields = validateRecordFields(body.fields, null);
   const result = await withCopy(async (replica, files) => {
     await assertOutsideCollection(files, workspaceId, path, true);
     const found = (await files.resolveFiles({ workspaceId, targets: [{ path }] })).results[0];
@@ -727,7 +687,7 @@ export async function runPhoneDocumentCollectionWrite(
         path: `${folder}/${COLLECTION_SCHEMA_FILENAME}`,
       });
       if (schemaFile?.contentKind === "text" && typeof schemaFile.text === "string")
-        validateRecordFields(rawFields, parseCollectionSchema(schemaFile.text).schema, true);
+        validateRecordFields(rawFields, parseCollectionSchema(schemaFile.text).schema);
     }
     if (
       liveEditors(deps.storage).connected({ workspaceId, objectId: found.objectId }) ||
@@ -752,11 +712,7 @@ export async function runPhoneDocumentCollectionWrite(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (
-        message === FRONTMATTER_EDIT_REFUSED_MESSAGE ||
-        message.includes("cannot be edited") ||
-        message.includes("can't edit this note")
-      )
+      if (message === FRONTMATTER_EDIT_REFUSED_MESSAGE || message === lossyNoteRefusal(path))
         return { ok: false, refusal: "edit-refused", reason: message };
       throw error;
     }

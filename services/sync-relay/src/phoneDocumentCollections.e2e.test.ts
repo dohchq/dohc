@@ -551,7 +551,6 @@ describe.skipIf(engine.missing)(
         }>("createDocumentRecord", {
           collectionPath: "Tasks",
           name: "Ship Milestone",
-          fields: { Name: "Initial" },
           requestId: "rec-req-1",
         });
         expect(createdRec).toMatchObject({ ok: true, path: "Tasks/Ship Milestone.md" });
@@ -691,9 +690,35 @@ describe.skipIf(engine.missing)(
               publish: true,
               metadata: { origin: "api" },
             });
+            await files.writeTextFile({
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              path: "Projects/Lossy.md",
+              text: "---\nid: rec_dddddddddddddddddddddddddd\nStatus: Todo\n---\n1. Run this:\n\n       pnpm install\n\n2. Done\n",
+              publish: true,
+              metadata: { origin: "api" },
+            });
           },
         );
         await desktop.push();
+
+        const lossyObjId = stack.storage.currentFileObjectId({
+          workspaceId: WORKSPACE,
+          versionId: "main",
+          path: "Projects/Lossy.md",
+        });
+        expect(lossyObjId).toBeTruthy();
+        const lossyRefusal = await stack.phoneOp<{
+          ok: false;
+          refusal: string;
+          reason: string;
+        }>("editDocumentRecordFields", {
+          path: "Projects/Lossy.md",
+          expectedObjectId: lossyObjId!,
+          fields: { Status: "Done" },
+          requestId: "fallback-lossy-1",
+        });
+        expect(lossyRefusal).toMatchObject({ ok: false, refusal: "edit-refused" });
 
         const alphaObjId = stack.storage.objectIdAtPathInVersion({
           workspaceId: WORKSPACE,
