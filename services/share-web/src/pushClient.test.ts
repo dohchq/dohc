@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { getCookies } from "better-auth/cookies";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { RELAY_API_VERSION } from "@dohc/workspace-contracts/relay-values";
 import { createSyncRelayHandler } from "../../sync-relay/src/server";
 import { parsePushVapidPublicKey } from "../../sync-relay/src/pushRoutes";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
@@ -140,7 +141,7 @@ it("turns alerts on and off through the account session, forwarding nothing else
     origin,
     "x-dohc-relay-exchange-key": exchangeKey,
     "content-type": "application/json",
-    "x-dohc-api-version": "1",
+    "x-dohc-api-version": String(RELAY_API_VERSION),
   });
   expect(await (await f.web.handle(status("bob"))).json()).toMatchObject({
     enabled: false,

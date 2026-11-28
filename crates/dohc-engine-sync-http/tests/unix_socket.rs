@@ -73,7 +73,7 @@ mod unix {
         let request = served.join().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /sync/w/log?"));
         assert!(request.contains("authorization: bearer private-lease\r\n"));
-        assert!(request.contains("x-dohc-api-version: 1\r\n"));
+        assert!(request.contains("x-dohc-api-version: 2\r\n"));
     }
 
     #[test]

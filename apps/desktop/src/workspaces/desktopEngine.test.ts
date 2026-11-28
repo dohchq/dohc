@@ -766,6 +766,26 @@ describe("desktop engine construction", () => {
     }
   });
 
+  it.each<[string | undefined, string]>([
+    [undefined, "1"],
+    ["0", "0"],
+    ["", ""],
+  ])(
+    "starts the engine reading the new note format from %j as %j and leaves dohc's own setting alone",
+    async (given, launched) => {
+      const f = fixture();
+      const env = given === undefined ? {} : { DOHC_ENGINE_NOTE_BODY_SEQUENCE: given };
+      f.dependencies.process.env = { ...env };
+      try {
+        await f.engine.start();
+        expect(f.spawns[0]!.env?.DOHC_ENGINE_NOTE_BODY_SEQUENCE).toBe(launched);
+        expect(f.dependencies.process.env).toEqual(env);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
   it.each<[string, Partial<RegistryEntry>, boolean]>([
     ["a saved pause", { pausedRemote: remote }, true],

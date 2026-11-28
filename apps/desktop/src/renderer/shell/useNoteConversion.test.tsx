@@ -108,20 +108,22 @@ describe("the Notices row for notes a conversion left", () => {
         { path: "Trip/Day 4.md", reason: "open-elsewhere" },
         { path: "Trip/Day 5.md", reason: "open-elsewhere" },
         { path: "Budget.md", reason: "ydoc-artifact-pending" },
+        { path: "Ideas.md", reason: "local-new-notes-format-one" },
       ],
       doesNotFit: [{ path: "Huge.md" }],
       failed: [{ path: "", reason: "object_id must be non-empty and bounded" }],
     });
 
     expect(notice).toEqual({
-      title: "8 notes were not converted",
+      title: "9 notes were not converted",
       message:
-        "Converted 12 notes. The rest stay as they were and can still be edited. Convert them once they close or finish syncing.",
+        "Converted 12 notes. The rest stay as they were and can still be edited. Run Convert notes again for notes that were open or busy.",
       tone: "warning",
       rows: [
         "Open on this computer: Trip/Day 1.md",
         "Open elsewhere: Trip/Day 2.md, Trip/Day 3.md, Trip/Day 4.md and 1 more",
         "History incomplete: Budget.md",
+        "Converts in a later update, in workspaces that don't sync: Ideas.md",
         "Doesn't fit the new format: Huge.md",
         "Could not be read: (no path)",
       ],
@@ -132,6 +134,7 @@ describe("the Notices row for notes a conversion left", () => {
         ["Open elsewhere", "Trip/Day 4.md"],
         ["Open elsewhere", "Trip/Day 5.md"],
         ["History incomplete", "Budget.md"],
+        ["Converts in a later update, in workspaces that don't sync", "Ideas.md"],
         ["Doesn't fit the new format", "Huge.md"],
         ["Could not be read", "(no path): object_id must be non-empty and bounded"],
       ],
@@ -202,6 +205,20 @@ describe("converting notes from this window", () => {
     await act(async () => shell.report.mock.calls[0]![0].action.run());
     expect(convertNotes).toHaveBeenCalledTimes(2);
     expect(shell.success).toHaveBeenCalledOnce();
+  });
+
+  it("offers no Convert remaining when no note it left would convert on another run", async () => {
+    install(async () => ({
+      ...clean,
+      skipped: [{ path: "Ideas.md", reason: "local-new-notes-format-one" }],
+      doesNotFit: [{ path: "Big.md" }],
+    }));
+    const shell = mount();
+
+    await act(async () => shell.conversion().start());
+
+    expect(shell.report).toHaveBeenCalledOnce();
+    expect(shell.report.mock.calls[0]![0]).not.toHaveProperty("action");
   });
 
   it("reports a failed run with Try again", async () => {

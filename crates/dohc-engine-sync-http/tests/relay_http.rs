@@ -986,7 +986,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let handler_etag = etag.clone();
     let server = FakeServer::start(move |request| {
         assert_eq!(request.header("authorization"), Some("Bearer test-token"));
-        assert_eq!(request.header("x-dohc-api-version"), Some("1"));
+        assert_eq!(request.header("x-dohc-api-version"), Some("2"));
         let mut seen = handler_seen.lock().expect("seen endpoints");
         seen.insert(format!("{} {}", request.method, request.path()));
         seen.insert(format!("TARGET {}", request.target));

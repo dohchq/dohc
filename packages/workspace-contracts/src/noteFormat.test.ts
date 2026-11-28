@@ -8,6 +8,7 @@ const ENGINE_SKIP_REASONS = {
   "open-conflict": "Waiting on a review",
   "unsent-edit": "Unsent edits",
   "ydoc-unsettled": "Not saved to disk yet",
+  "local-new-notes-format-one": "Converts in a later update, in workspaces that don't sync",
   "ydoc-lineage-unclaimed": "History incomplete",
   "ydoc-incomplete-lineage": "History incomplete",
   "ydoc-deferred-updates-pending": "History incomplete",
