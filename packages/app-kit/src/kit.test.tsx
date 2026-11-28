@@ -2,8 +2,23 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { StrictMode, createRef, useEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
-import { Button, DateField, Field, Input, Modal, Textarea } from "./ui";
-import { LineChart } from "./charts";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  Checkbox,
+  DataTable,
+  DateField,
+  Field,
+  Input,
+  Modal,
+  ProgressBar,
+  Select,
+  Tabs,
+  Textarea,
+} from "./ui";
+import { BarChart, LineChart, Sparkline } from "./charts";
 
 afterEach(cleanup);
 
@@ -111,6 +126,149 @@ describe("dohc/ui", () => {
     ).toBe(true);
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("forwards refs on Button and Select, renders Button loading spinner, and supports iconOnly", () => {
+    const btn = createRef<HTMLButtonElement>();
+    const sel = createRef<HTMLSelectElement>();
+    const { container } = render(
+      <>
+        <Button ref={btn} variant="primary" loading>
+          Saving
+        </Button>
+        <Button iconOnly aria-label="Settings">
+          S
+        </Button>
+        <Select ref={sel} aria-label="Currency" defaultValue="USD">
+          <option value="USD">USD</option>
+        </Select>
+      </>,
+    );
+    expect(btn.current).toBe(screen.getByRole("button", { name: "Saving" }));
+    expect(btn.current?.disabled).toBe(true);
+    expect(btn.current?.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelector(".kit-spinner")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settings" }).className).toContain("kit-btn-icon");
+    expect(sel.current).toBe(screen.getByLabelText("Currency"));
+  });
+
+  it("wires Field error aria-invalid and required without changing accessible label names", () => {
+    render(
+      <>
+        <Field label="Merchant" htmlFor="f-m" error="Required" required>
+          <Input id="f-m" />
+        </Field>
+        <Field label="Group" error="Pick one">
+          <div>
+            <Checkbox label="Alpha" />
+          </div>
+        </Field>
+      </>,
+    );
+    const input = screen.getByLabelText("Merchant");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-required")).toBe("true");
+    expect(screen.getAllByRole("alert").map((node) => node.textContent)).toEqual([
+      "Required",
+      "Pick one",
+    ]);
+    const wrapper = screen.getByLabelText("Alpha").closest("div");
+    expect(wrapper?.getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it("renders Badge dot/info, Callout info, ProgressBar info, Tabs badge, and Checkbox description", () => {
+    const { container } = render(
+      <Card title="Settings">
+        <Checkbox label="Include pending" description="Show unposted charges" defaultChecked />
+        <Badge tone="info" dot>
+          Synced
+        </Badge>
+        <Callout tone="info" title="Heads up">
+          Offline cache ready.
+        </Callout>
+        <ProgressBar value={50} max={100} tone="info" label="Sync" />
+        <Tabs
+          value="a"
+          onChange={() => {}}
+          items={[{ id: "a", label: "Inbox", badge: 4, content: <p>Items</p> }]}
+        />
+      </Card>,
+    );
+    const box = screen.getByLabelText(/Include pending/) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    expect(box.checked).toBe(false);
+    expect(screen.getByText("Show unposted charges")).toBeTruthy();
+    expect(container.querySelector(".kit-badge-dot")).toBeTruthy();
+    expect(container.querySelector(".kit-callout.kit-tone-info")).toBeTruthy();
+    expect(container.querySelector(".kit-progress-fill-info")).toBeTruthy();
+    expect(screen.getByText("4").className).toContain("kit-tab-badge");
+  });
+
+  it("clears DataTable search filter and renders loading skeletons", () => {
+    const { rerender, container } = render(
+      <DataTable
+        searchable
+        loading
+        rows={[]}
+        rowKey={(_, i) => String(i)}
+        columns={[
+          { key: "name", header: "Name", sortValue: (r: { name: string }) => r.name },
+          { key: "amount", header: "Amount", align: "right" },
+        ]}
+      />,
+    );
+    expect(container.querySelectorAll(".kit-skeleton").length).toBe(3);
+
+    rerender(
+      <DataTable
+        searchable
+        rows={[
+          { id: "1", name: "Coffee", amount: 5 },
+          { id: "2", name: "Tea", amount: 4 },
+        ]}
+        rowKey={(r) => r.id}
+        columns={[
+          { key: "name", header: "Name", sortValue: (r) => r.name },
+          { key: "amount", header: "Amount", align: "right", sortValue: (r) => r.amount },
+        ]}
+      />,
+    );
+    const search = screen.getByRole("searchbox", { name: "Filter rows" });
+    fireEvent.change(search, { target: { value: "Coffee" } });
+    expect(screen.queryByText("Tea")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    expect(screen.getByText("Tea")).toBeTruthy();
+  });
+
+  it("respects defaultPrevented Escape in Modal and links description via aria-describedby", () => {
+    let closed = false;
+    render(
+      <Modal
+        open
+        title="Delete record"
+        description="This action moves the record to History."
+        size="sm"
+        onClose={() => {
+          closed = true;
+        }}
+      >
+        <p>Body</p>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Delete record" });
+    expect(dialog.className).toContain("kit-modal-sm");
+    const descId = dialog.getAttribute("aria-describedby");
+    expect(descId).toBeTruthy();
+    expect(document.getElementById(descId!)?.textContent).toBe(
+      "This action moves the record to History.",
+    );
+    const prevented = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    prevented.preventDefault();
+    window.dispatchEvent(prevented);
+    expect(closed).toBe(false);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(closed).toBe(true);
   });
 });
 
@@ -227,5 +385,50 @@ describe("dohc/charts", () => {
     fireEvent.keyDown(chart, { key: "End" });
     expect(container.querySelector(".kit-chart-marker")).toBeTruthy();
     expect(points.map((point) => point.getAttribute("r"))).toEqual(["2.5", "4.5", "4.5"]);
+  });
+
+  it("renders smooth LineChart curves across gaps, flat series, and extreme values without NaN", () => {
+    const { container } = render(
+      <>
+        <LineChart
+          variant="area"
+          curve="smooth"
+          labels={["A", "B", "C", "D", "E", "F"]}
+          series={[
+            { name: "Spend", values: [10, 40, Number.NaN, 25, 25, 25] },
+            { name: "Extreme", values: [-Number.MAX_VALUE, 0, Number.NaN, Number.MAX_VALUE, 0, 0] },
+          ]}
+          ariaLabel="Smooth gaps"
+        />
+        <BarChart
+          data={[
+            { label: "Q1", value: 120 },
+            { label: "Q2", value: 180 },
+          ]}
+          ariaLabel="Sparse bars"
+        />
+        <Sparkline values={[5, 5, 5]} ariaLabel="Flat spark" />
+      </>,
+    );
+    expect(container.innerHTML).not.toContain("NaN");
+    expect(container.innerHTML).not.toContain("Infinity");
+    // Smooth curve emits cubic bezier commands on multi-point segments and breaks across NaN gaps.
+    const smoothGroup = screen.getByRole("group", { name: "Smooth gaps" });
+    expect(smoothGroup.querySelectorAll('path[fill="none"]').length).toBe(4);
+    expect(smoothGroup.innerHTML).toContain(" C ");
+    const gradients = [...container.getElementsByTagName("linearGradient")];
+    expect(gradients.map((el) => el.getAttribute("gradientUnits"))).toEqual([
+      "userSpaceOnUse",
+      "userSpaceOnUse",
+      "userSpaceOnUse",
+    ]);
+    // Sparse BarChart caps bar width rather than inflating into giant slabs.
+    const barRects = [
+      ...screen.getByRole("group", { name: "Sparse bars" }).querySelectorAll("rect"),
+    ];
+    expect(barRects).toHaveLength(2);
+    for (const rect of barRects) {
+      expect(Number(rect.getAttribute("width"))).toBeLessThanOrEqual(42);
+    }
   });
 });

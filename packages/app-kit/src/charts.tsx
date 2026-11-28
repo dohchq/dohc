@@ -1,5 +1,5 @@
 import "./tokens.css";
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useState, type KeyboardEvent } from "react";
 
 const SERIES_COLORS = [
   "var(--kit-chart-1)",
@@ -15,6 +15,39 @@ const colorAt = (index: number, explicit?: string) =>
 
 const finiteOrNull = (value: number | undefined): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
+
+function smoothCurvePath(points: ReadonlyArray<{ x: number; y: number }>): string {
+  const n = points.length;
+  if (n < 3) return points.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x},${pt.y}`).join(" ");
+  const dx: number[] = [];
+  const m: number[] = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    const step = points[i + 1]!.x - points[i]!.x;
+    dx.push(step);
+    const slope = step > 1e-6 ? (points[i + 1]!.y - points[i]!.y) / step : 0;
+    m.push(Number.isFinite(slope) ? slope : 0);
+  }
+  const t = new Array<number>(n).fill(0);
+  t[0] = m[0]!;
+  t[n - 1] = m[n - 2]!;
+  for (let i = 1; i < n - 1; i += 1) {
+    if (m[i - 1]! * m[i]! > 0) {
+      const w1 = 2 * dx[i]! + dx[i - 1]!;
+      const w2 = dx[i]! + 2 * dx[i - 1]!;
+      const denom = w1 / m[i - 1]! + w2 / m[i]!;
+      t[i] = denom !== 0 && Number.isFinite(denom) ? (w1 + w2) / denom : 0;
+    }
+  }
+  let d = `M ${points[0]!.x},${points[0]!.y}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const [p0, p1, step] = [points[i]!, points[i + 1]!, dx[i]!];
+    d +=
+      step <= 1e-6
+        ? ` L ${p1.x},${p1.y}`
+        : ` C ${p0.x + step / 3},${p0.y + (t[i]! * step) / 3} ${p1.x - step / 3},${p1.y - (t[i + 1]! * step) / 3} ${p1.x},${p1.y}`;
+  }
+  return d;
+}
 
 function useContainerWidth(fallback = 560) {
   const [node, setNode] = useState<HTMLDivElement | null>(null);
@@ -126,6 +159,7 @@ export interface LineChartProps {
   readonly series?: readonly ChartSeries[];
   readonly data?: readonly ChartPoint[];
   readonly variant?: "line" | "area";
+  readonly curve?: "linear" | "smooth";
   readonly height?: number;
   readonly goal?: { readonly value: number; readonly label?: string };
   readonly formatValue?: (value: number) => string;
@@ -138,12 +172,14 @@ export function LineChart({
   series: rawSeries,
   data,
   variant = "line",
+  curve = "linear",
   height = 240,
   goal,
   formatValue = (value) => value.toLocaleString(),
   ariaLabel = "Trend chart",
   markerIndex,
 }: LineChartProps) {
+  const chartId = useId();
   const { ref, width } = useContainerWidth(560);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [keyboardFocused, setKeyboardFocused] = useState(false);
@@ -191,6 +227,8 @@ export function LineChart({
 
   const maxLabels = Math.max(2, Math.floor(plotW / 52));
   const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
+  const lastRegularLabel = Math.floor((labels.length - 1) / labelStep) * labelStep;
+  const areaTopOpacity = series.length > 1 ? 0.09 : 0.18;
 
   const readout =
     !keyboardFocused || selected === null
@@ -234,6 +272,28 @@ export function LineChart({
         aria-hidden="true"
         onMouseLeave={() => setActiveIndex(null)}
       >
+        {variant === "area" ? (
+          <defs>
+            {series.map((entry, seriesIndex) => {
+              const stroke = colorAt(seriesIndex, entry.color);
+              return (
+                <linearGradient
+                  key={`grad-${seriesIndex}`}
+                  id={`${chartId}-area-${seriesIndex}`}
+                  gradientUnits="userSpaceOnUse"
+                  x1={0}
+                  y1={pad.top}
+                  x2={0}
+                  y2={baselineY}
+                >
+                  <stop offset="0%" stopColor={stroke} stopOpacity={areaTopOpacity} />
+                  <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+                </linearGradient>
+              );
+            })}
+          </defs>
+        ) : null}
+
         {scale.values.map((tick) => {
           const y = yOf(tick);
           return (
@@ -266,7 +326,7 @@ export function LineChart({
             {validGoal.label ? (
               <text
                 x={pad.left + plotW}
-                y={yOf(validGoal.value) - 5}
+                y={yOf(validGoal.value) - 6}
                 textAnchor="end"
                 className="kit-chart-axis"
               >
@@ -284,6 +344,7 @@ export function LineChart({
             x2={xOf(marker)}
             y2={pad.top + plotH}
             stroke="var(--kit-ink)"
+            strokeOpacity={0.4}
             strokeWidth={1.5}
           />
         ) : null}
@@ -308,15 +369,16 @@ export function LineChart({
           return (
             <g key={`${seriesIndex}-${entry.name}`}>
               {segments.map((segment, segIndex) => {
-                const coords = segment.map((pt) => `${xOf(pt.index)},${yOf(pt.value)}`);
-                const linePath = `M ${coords.join(" L ")}`;
-                const first = segment[0]!;
-                const last = segment[segment.length - 1]!;
-                const areaPath = `${linePath} L ${xOf(last.index)},${baselineY} L ${xOf(first.index)},${baselineY} Z`;
+                const pts = segment.map((pt) => ({ x: xOf(pt.index), y: yOf(pt.value) }));
+                const linePath =
+                  curve === "smooth"
+                    ? smoothCurvePath(pts)
+                    : `M ${pts.map((pt) => `${pt.x},${pt.y}`).join(" L ")}`;
+                const areaPath = `${linePath} L ${pts[pts.length - 1]!.x},${baselineY} L ${pts[0]!.x},${baselineY} Z`;
                 return (
                   <g key={`${seriesIndex}-seg-${segIndex}`}>
                     {variant === "area" && segment.length > 1 ? (
-                      <path d={areaPath} fill={stroke} fillOpacity={0.14} />
+                      <path d={areaPath} fill={`url(#${chartId}-area-${seriesIndex})`} />
                     ) : null}
                     {segment.length > 1 ? (
                       <path
@@ -334,13 +396,16 @@ export function LineChart({
               {labels.map((_, index) => {
                 const value = finiteOrNull(entry.values[index]);
                 if (value === null) return null;
+                const emphasized = selected === index || marker === index;
                 return (
                   <circle
                     key={`${seriesIndex}-pt-${index}`}
                     cx={xOf(index)}
                     cy={yOf(value)}
-                    r={selected === index || marker === index ? 4.5 : 2.5}
+                    r={emphasized ? 4.5 : 2.5}
                     fill={stroke}
+                    stroke={emphasized ? "var(--kit-panel)" : undefined}
+                    strokeWidth={emphasized ? 1.75 : undefined}
                   />
                 );
               })}
@@ -362,7 +427,9 @@ export function LineChart({
         {labels.map((label, index) => {
           const x = xOf(index);
           const sliceW = labels.length === 1 ? plotW : plotW / (labels.length - 1);
-          const showLabel = index % labelStep === 0 || index === labels.length - 1;
+          const showLabel =
+            index % labelStep === 0 ||
+            (index === labels.length - 1 && index - lastRegularLabel >= Math.ceil(labelStep * 0.6));
           return (
             <g key={`${label}-${index}`}>
               {showLabel ? (
@@ -575,6 +642,12 @@ export function BarChart({
                   setActiveIndex(index);
                 }}
               >
+                {selected === index ? (
+                  <path
+                    className="kit-chart-hover-band"
+                    d={`M ${pad.left},${rowTop} H ${pad.left + plotW} V ${rowTop + rowHeight} H ${pad.left} Z`}
+                  />
+                ) : null}
                 <text
                   x={pad.left - 8}
                   y={rowTop + rowHeight / 2 + 4}
@@ -617,9 +690,9 @@ export function BarChart({
                       y={y}
                       width={Math.max(val === 0 ? 0 : 1, barW)}
                       height={barH}
-                      rx={3}
+                      rx={4}
                       fill={fill}
-                      opacity={selected === null || selected === index ? 1 : 0.45}
+                      opacity={selected === null || selected === index ? 1 : 0.42}
                     />
                   );
                 })}
@@ -743,9 +816,14 @@ export function BarChart({
           const groupX = pad.left + index * groupW;
           const innerPad = Math.min(10, groupW * 0.16);
           const usableW = Math.max(0, groupW - innerPad * 2);
-          const slotW = usableW / series.length;
-          const gap = !stacked && series.length > 1 ? Math.min(2, slotW * 0.2) : 0;
-          const barW = stacked ? usableW : Math.max(0, slotW - gap);
+          const maxBar = stacked || series.length === 1 ? 42 : 26;
+          const rawSlotW = usableW / series.length;
+          const gap = !stacked && series.length > 1 ? Math.min(4, rawSlotW * 0.22) : 0;
+          const barW = stacked
+            ? Math.min(usableW, maxBar)
+            : Math.min(Math.max(0, rawSlotW - gap), maxBar);
+          const clusterW = stacked ? barW : barW * series.length + gap * (series.length - 1);
+          const clusterStart = groupX + (groupW - clusterW) / 2;
           const showLabel =
             index % labelStep === 0 ||
             (index === labels.length - 1 && index - lastRegularLabel >= Math.ceil(labelStep * 0.6));
@@ -760,10 +838,16 @@ export function BarChart({
                 setActiveIndex(index);
               }}
             >
+              {selected === index ? (
+                <path
+                  className="kit-chart-hover-band"
+                  d={`M ${groupX + 2},${pad.top} H ${groupX + groupW - 2} V ${pad.top + plotH} H ${groupX + 2} Z`}
+                />
+              ) : null}
               {series.map((entry, seriesIndex) => {
                 const value = rawValues[seriesIndex]![index]!;
                 if (value === null) return null;
-                const x = stacked ? groupX + innerPad : groupX + innerPad + seriesIndex * slotW;
+                const x = stacked ? clusterStart : clusterStart + seriesIndex * (barW + gap);
                 let yTop: number;
                 let yBottom: number;
                 if (stacked) {
@@ -791,13 +875,13 @@ export function BarChart({
                     y={Math.min(yTop, yBottom)}
                     width={barW}
                     height={Math.max(value === 0 ? 0 : 1, barH)}
-                    rx={3}
+                    rx={4}
                     fill={
                       series.length === 1 && data?.[index]?.color
                         ? data[index]!.color
                         : colorAt(seriesIndex, entry.color)
                     }
-                    opacity={selected === null || selected === index ? 1 : 0.5}
+                    opacity={selected === null || selected === index ? 1 : 0.42}
                   />
                 );
               })}
@@ -939,7 +1023,7 @@ export function DonutChart({
           r={radius}
           fill="none"
           stroke="var(--kit-panel-2)"
-          strokeWidth={18}
+          strokeWidth={15}
         />
         {items.map((item, index) => {
           const share = item.value / total;
@@ -954,9 +1038,10 @@ export function DonutChart({
               r={radius}
               fill="none"
               stroke={colorAt(index, item.color)}
-              strokeWidth={selected === index ? 22 : 18}
-              strokeDasharray={`${Math.max(0, length - 1.5)} ${circumference}`}
+              strokeWidth={selected === index ? 19 : 15}
+              strokeDasharray={`${Math.max(0, length - 2)} ${circumference}`}
               strokeDashoffset={offset}
+              opacity={selected === null || selected === index ? 1 : 0.55}
               transform={`rotate(-90 ${size / 2} ${size / 2})`}
               onMouseEnter={() => {
                 setKeyboardFocused(false);
@@ -967,16 +1052,16 @@ export function DonutChart({
         })}
         <text
           x={size / 2}
-          y={size / 2 - 4}
+          y={size / 2 - 2}
           textAnchor="middle"
           fill="var(--kit-ink)"
-          fontSize={16}
+          fontSize={18}
           fontWeight={650}
-          style={{ fontVariantNumeric: "tabular-nums" }}
+          style={{ fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}
         >
           {focused ? formatValue(focused.value) : (centerValue ?? formatValue(total))}
         </text>
-        <text x={size / 2} y={size / 2 + 14} textAnchor="middle" className="kit-chart-axis">
+        <text x={size / 2} y={size / 2 + 16} textAnchor="middle" className="kit-chart-axis">
           {focused ? focused.label : (centerLabel ?? "Total")}
         </text>
       </svg>
@@ -1003,8 +1088,9 @@ export function DonutChart({
                 />
                 <span>{item.label}</span>
               </span>
-              <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--kit-muted)" }}>
-                {formatValue(item.value)} · {share}%
+              <span className="kit-donut-meta">
+                <span>{formatValue(item.value)}</span>
+                <span className="kit-donut-share">{share}%</span>
               </span>
             </div>
           );
@@ -1031,6 +1117,7 @@ export function Sparkline({
   area = true,
   ariaLabel = "Sparkline",
 }: SparklineProps) {
+  const sparkId = useId();
   const finite = values.filter((value) => Number.isFinite(value));
   if (finite.length === 0) return null;
 
@@ -1065,7 +1152,7 @@ export function Sparkline({
   const min = Math.min(...finite);
   const max = Math.max(...finite);
   const span = max - min || 1;
-  const pad = 2;
+  const pad = 3;
   const denom = Math.max(1, values.length - 1);
 
   const segments: Array<Array<{ readonly x: number; readonly y: number }>> = [];
@@ -1082,6 +1169,9 @@ export function Sparkline({
     }
   }
   if (current.length > 0) segments.push(current);
+  const lastSegment = segments[segments.length - 1];
+  const terminal =
+    lastSegment && lastSegment.length > 1 ? lastSegment[lastSegment.length - 1] : null;
 
   return (
     <svg
@@ -1092,6 +1182,21 @@ export function Sparkline({
       aria-label={ariaLabel}
       style={{ display: "block", width, height }}
     >
+      {area ? (
+        <defs>
+          <linearGradient
+            id={`${sparkId}-fill`}
+            gradientUnits="userSpaceOnUse"
+            x1={0}
+            y1={pad}
+            x2={0}
+            y2={height - pad}
+          >
+            <stop offset="0%" stopColor={stroke} stopOpacity={0.22} />
+            <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+      ) : null}
       {segments.map((segment, segmentIndex) => {
         if (segment.length === 1) {
           return (
@@ -1110,7 +1215,7 @@ export function Sparkline({
         const areaPath = `${linePath} L ${last.x},${height - pad} L ${first.x},${height - pad} Z`;
         return (
           <g key={`seg-${segmentIndex}`}>
-            {area ? <path d={areaPath} fill={stroke} fillOpacity={0.14} /> : null}
+            {area ? <path d={areaPath} fill={`url(#${sparkId}-fill)`} /> : null}
             <path
               d={linePath}
               fill="none"
@@ -1122,6 +1227,7 @@ export function Sparkline({
           </g>
         );
       })}
+      {terminal ? <circle cx={terminal.x} cy={terminal.y} r={2.5} fill={stroke} /> : null}
     </svg>
   );
 }

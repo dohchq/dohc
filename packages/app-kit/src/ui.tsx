@@ -11,18 +11,47 @@ import {
   useMemo,
   useRef,
   useState,
-  type ButtonHTMLAttributes,
   type ComponentProps,
   type CSSProperties,
   type InputHTMLAttributes,
   type KeyboardEvent,
   type ReactNode,
-  type SelectHTMLAttributes,
 } from "react";
 
-export type Tone = "neutral" | "success" | "warning" | "danger";
+export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
 
 const cx = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(" ");
+
+const GLYPHS = {
+  x: "M18 6 6 18M6 6l12 12",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm9 16-3.5-3.5",
+  sort: "m8 9 4-4 4 4m-8 6 4 4 4-4",
+  asc: "m7 14 5-5 5 5",
+  desc: "m7 10 5 5 5-5",
+  success: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-3 9 2 2 4-4",
+  warning:
+    "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4m0 4h.01",
+  danger: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5v4m0 4h.01",
+  info: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 13v-4m0-4h.01",
+} as const;
+
+function Glyph({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={GLYPHS[name]} />
+    </svg>
+  );
+}
 
 export interface AppShellProps {
   readonly width?: "narrow" | "default" | "wide";
@@ -143,13 +172,15 @@ export function Card({ title, subtitle, action, className, children }: CardProps
 
 export interface BadgeProps {
   readonly tone?: Tone;
+  readonly dot?: boolean;
   readonly className?: string;
   readonly children: ReactNode;
 }
 
-export function Badge({ tone = "neutral", className, children }: BadgeProps) {
+export function Badge({ tone = "neutral", dot = false, className, children }: BadgeProps) {
   return (
     <span className={cx("kit-badge", tone !== "neutral" && `kit-tone-${tone}`, className)}>
+      {dot ? <span className="kit-badge-dot" aria-hidden="true" /> : null}
       {children}
     </span>
   );
@@ -161,6 +192,7 @@ export interface StatCardProps {
   readonly delta?: string;
   readonly tone?: Tone;
   readonly hint?: string;
+  readonly icon?: ReactNode;
   readonly footer?: ReactNode;
   readonly className?: string;
 }
@@ -171,12 +203,20 @@ export function StatCard({
   delta,
   tone = "neutral",
   hint,
+  icon,
   footer,
   className,
 }: StatCardProps) {
   return (
     <div className={cx("kit-card", "kit-stat", className)}>
-      <span className="kit-stat-label">{label}</span>
+      <div className="kit-stat-head">
+        <span className="kit-stat-label">{label}</span>
+        {icon ? (
+          <span className="kit-stat-icon" aria-hidden="true">
+            {icon}
+          </span>
+        ) : null}
+      </div>
       <div className="kit-stat-row">
         <span className="kit-stat-value">{value}</span>
         {delta ? <Badge tone={tone}>{delta}</Badge> : null}
@@ -190,6 +230,7 @@ export function StatCard({
 export interface TabItem {
   readonly id: string;
   readonly label: string;
+  readonly badge?: ReactNode;
   readonly content?: ReactNode;
 }
 
@@ -240,7 +281,10 @@ export function Tabs({ items, value, onChange, label = "Sections" }: TabsProps) 
               onClick={() => onChange(item.id)}
               onKeyDown={(event) => onKeyDown(event, index)}
             >
-              {item.label}
+              <span>{item.label}</span>
+              {item.badge !== undefined && item.badge !== null ? (
+                <span className="kit-tab-badge">{item.badge}</span>
+              ) : null}
             </button>
           );
         })}
@@ -310,13 +354,15 @@ export function ProgressBar({
         aria-valuemax={safeMax}
         aria-valuetext={ariaValueText}
       >
-        <div
-          className={cx(
-            "kit-progress-fill",
-            resolvedTone !== "neutral" && `kit-progress-fill-${resolvedTone}`,
-          )}
-          style={{ width: `${pct}%` }}
-        />
+        <div className="kit-progress-fill-wrap">
+          <div
+            className={cx(
+              "kit-progress-fill",
+              resolvedTone !== "neutral" && `kit-progress-fill-${resolvedTone}`,
+            )}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
         {targetPct !== null ? (
           <div
             className="kit-progress-target"
@@ -341,9 +387,12 @@ export function Callout({ tone = "neutral", title, action, children }: CalloutPr
       className={cx("kit-callout", tone !== "neutral" && `kit-tone-${tone}`)}
       role={tone === "danger" ? "alert" : "status"}
     >
-      <div>
-        {title ? <p className="kit-callout-title">{title}</p> : null}
-        <div className="kit-callout-body">{children}</div>
+      <div className="kit-callout-main">
+        <Glyph name={tone === "neutral" ? "info" : tone} />
+        <div>
+          {title ? <p className="kit-callout-title">{title}</p> : null}
+          <div className="kit-callout-body">{children}</div>
+        </div>
       </div>
       {action ? <div className="kit-actions">{action}</div> : null}
     </div>
@@ -375,16 +424,18 @@ export function Skeleton({ height = 16, width = "100%" }: SkeletonProps) {
   return <span className="kit-skeleton" aria-hidden="true" style={{ height, width }} />;
 }
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends ComponentProps<"button"> {
   readonly variant?: "primary" | "secondary" | "ghost" | "danger";
   readonly size?: "sm" | "md";
   readonly loading?: boolean;
+  readonly iconOnly?: boolean;
 }
 
 export function Button({
   variant = "secondary",
   size = "md",
   loading = false,
+  iconOnly = false,
   disabled,
   className,
   type = "button",
@@ -397,8 +448,15 @@ export function Button({
       type={type}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cx("kit-btn", `kit-btn-${variant}`, size === "sm" && "kit-btn-sm", className)}
+      className={cx(
+        "kit-btn",
+        `kit-btn-${variant}`,
+        size === "sm" && "kit-btn-sm",
+        iconOnly && "kit-btn-icon",
+        className,
+      )}
     >
+      {loading ? <span className="kit-spinner" aria-hidden="true" /> : null}
       {children}
     </button>
   );
@@ -409,35 +467,52 @@ export interface FieldProps {
   readonly htmlFor?: string;
   readonly hint?: string;
   readonly error?: string;
+  readonly required?: boolean;
   readonly children: ReactNode;
 }
 
-export function Field({ label, htmlFor, hint, error, children }: FieldProps) {
+const NON_CONTROL_TAGS = new Set(["div", "span", "section", "fieldset", "p", "ul", "ol"]);
+
+export function Field({ label, htmlFor, hint, error, required = false, children }: FieldProps) {
   const messageId = useId();
-  const hasMessage = Boolean(error || hint);
-  const describedChildren =
-    hasMessage &&
-    isValidElement<{ "aria-describedby"?: string }>(children) &&
+  let enhancedChildren = children;
+  if (
+    isValidElement<{
+      "aria-describedby"?: string;
+      "aria-invalid"?: boolean | "true" | "false";
+      "aria-required"?: boolean | "true" | "false";
+      required?: boolean;
+    }>(children) &&
     children.type !== Fragment
-      ? cloneElement(children, {
-          "aria-describedby": Array.from(
-            new Set([
-              ...(children.props["aria-describedby"]?.split(/\s+/).filter(Boolean) ?? []),
-              messageId,
-            ]),
-          ).join(" "),
-        })
-      : children;
+  ) {
+    const isControl =
+      !(typeof children.type === "string" && NON_CONTROL_TAGS.has(children.type)) &&
+      children.type !== Stack &&
+      children.type !== Grid;
+    const next: Record<string, unknown> = {};
+    if (error || hint) {
+      const ids = children.props["aria-describedby"]?.split(/\s+/).filter(Boolean) ?? [];
+      next["aria-describedby"] = Array.from(new Set([...ids, messageId])).join(" ");
+    }
+    if (isControl && error && children.props["aria-invalid"] === undefined) {
+      next["aria-invalid"] = true;
+    }
+    if (isControl && required && !children.props.required && !children.props["aria-required"]) {
+      next["aria-required"] = true;
+    }
+    if (Object.keys(next).length > 0) enhancedChildren = cloneElement(children, next);
+  }
 
   return (
     <div className="kit-field">
-      <label className="kit-field-label" htmlFor={htmlFor}>
+      <label className={cx("kit-field-label", required && "kit-field-required")} htmlFor={htmlFor}>
         {label}
       </label>
-      {describedChildren}
+      {enhancedChildren}
       {error ? (
         <span id={messageId} className="kit-field-error" role="alert">
-          {error}
+          <Glyph name="danger" size={13} />
+          <span>{error}</span>
         </span>
       ) : hint ? (
         <span id={messageId} className="kit-field-hint">
@@ -452,7 +527,7 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
   return <input {...props} className={cx("kit-input", className)} />;
 }
 
-export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+export function Select({ className, ...props }: ComponentProps<"select">) {
   return <select {...props} className={cx("kit-select", className)} />;
 }
 
@@ -552,15 +627,19 @@ export function DateField({
 
 export interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
   readonly label: string;
+  readonly description?: string;
 }
 
-export function Checkbox({ label, className, id, ...props }: CheckboxProps) {
+export function Checkbox({ label, description, className, id, ...props }: CheckboxProps) {
   const autoId = useId();
   const fieldId = id ?? autoId;
   return (
     <label className={cx("kit-checkbox-row", className)} htmlFor={fieldId}>
       <input {...props} id={fieldId} type="checkbox" className="kit-checkbox" />
-      <span>{label}</span>
+      <span className="kit-control-copy">
+        <span>{label}</span>
+        {description ? <span className="kit-control-desc">{description}</span> : null}
+      </span>
     </label>
   );
 }
@@ -588,6 +667,8 @@ function isVisibleFocusable(element: HTMLElement): boolean {
 export interface ModalProps {
   readonly open: boolean;
   readonly title: string;
+  readonly description?: string;
+  readonly size?: "sm" | "md" | "lg";
   readonly onClose: () => void;
   readonly footer?: ReactNode;
   readonly children: ReactNode;
@@ -595,8 +676,17 @@ export interface ModalProps {
 
 const openModalStack: Element[] = [];
 
-export function Modal({ open, title, onClose, footer, children }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  description,
+  size = "md",
+  onClose,
+  footer,
+  children,
+}: ModalProps) {
   const titleId = useId();
+  const descId = useId();
   const onCloseRef = useRef(onClose);
   useLayoutEffect(() => {
     onCloseRef.current = onClose;
@@ -620,6 +710,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (!isTopModal()) return;
       if (event.key === "Escape") {
+        if (event.defaultPrevented) return;
         event.preventDefault();
         onCloseRef.current();
         return;
@@ -681,18 +772,32 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     >
       <div
         ref={dialogRef}
-        className="kit-modal"
+        className={cx("kit-modal", size !== "md" && `kit-modal-${size}`)}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={description ? descId : undefined}
         tabIndex={-1}
       >
         <div className="kit-modal-head">
-          <h2 id={titleId} className="kit-modal-title">
-            {title}
-          </h2>
-          <Button variant="ghost" size="sm" onClick={() => onCloseRef.current()} aria-label="Close">
-            Close
+          <div>
+            <h2 id={titleId} className="kit-modal-title">
+              {title}
+            </h2>
+            {description ? (
+              <p id={descId} className="kit-modal-desc">
+                {description}
+              </p>
+            ) : null}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            onClick={() => onCloseRef.current()}
+            aria-label="Close"
+          >
+            <Glyph name="x" size={15} />
           </Button>
         </div>
         {children}
@@ -789,14 +894,27 @@ export function DataTable<T>({
     <div>
       {searchable ? (
         <div className="kit-table-tools">
-          <Input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={searchPlaceholder}
-            aria-label={searchPlaceholder}
-            className="kit-table-search"
-          />
+          <div className="kit-table-search-wrap">
+            <Glyph name="search" size={14} />
+            <Input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={searchPlaceholder}
+              aria-label={searchPlaceholder}
+              className="kit-table-search"
+            />
+            {query ? (
+              <button
+                type="button"
+                className="kit-table-clear"
+                onClick={() => setQuery("")}
+                aria-label="Clear filter"
+              >
+                <Glyph name="x" size={13} />
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {loading ? (
@@ -833,9 +951,7 @@ export function DataTable<T>({
                           onClick={() => toggleSort(column.key)}
                         >
                           <span>{column.header}</span>
-                          <span aria-hidden="true">
-                            {active === "asc" ? "↑" : active === "desc" ? "↓" : "↕"}
-                          </span>
+                          <Glyph name={active ?? "sort"} size={13} />
                         </button>
                       ) : (
                         column.header
