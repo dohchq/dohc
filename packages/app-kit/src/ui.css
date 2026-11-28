@@ -503,28 +503,6 @@ body {
   background: var(--kit-on-accent);
 }
 
-@media (forced-colors: active) {
-  .kit-checkbox,
-  .kit-select {
-    appearance: auto;
-  }
-
-  .kit-select {
-    background-image: none;
-    padding-right: 11px;
-  }
-
-  .kit-checkbox::after {
-    display: none;
-  }
-
-  .kit-tab[aria-selected="true"] {
-    border-color: Highlight;
-    background: Highlight;
-    color: HighlightText;
-  }
-}
-
 .kit-progress {
   display: flex;
   flex-direction: column;
@@ -873,6 +851,28 @@ body {
 
   .kit-table th {
     background: color-mix(in srgb, var(--kit-ink) 3.5%, var(--kit-panel));
+  }
+}
+
+@media (forced-colors: active) {
+  .kit-checkbox,
+  .kit-select {
+    appearance: auto;
+  }
+
+  .kit-select {
+    background-image: none;
+    padding-right: 11px;
+  }
+
+  .kit-checkbox::after {
+    display: none;
+  }
+
+  .kit-tab[aria-selected="true"] {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
   }
 }
 

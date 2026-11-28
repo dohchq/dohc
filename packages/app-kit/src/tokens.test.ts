@@ -10,6 +10,9 @@ const nodeProcess = (
 const css = nodeProcess
   ?.getBuiltinModule?.("node:fs")
   ?.readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
+const uiCss = nodeProcess
+  ?.getBuiltinModule?.("node:fs")
+  ?.readFileSync(new URL("./ui.css", import.meta.url), "utf8");
 
 function extractVars(block: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -130,4 +133,12 @@ describe("app-kit design tokens WCAG contrast", () => {
       ).toBeGreaterThanOrEqual(3.0);
     });
   }
+
+  it("places forced-colors overrides after dark-mode rules in ui.css", () => {
+    const sourceUi = uiCss ?? "";
+    const darkAt = sourceUi.lastIndexOf("@media (prefers-color-scheme: dark)");
+    const forcedAt = sourceUi.indexOf("@media (forced-colors: active)");
+    expect(darkAt).toBeGreaterThan(0);
+    expect(forcedAt).toBeGreaterThan(darkAt);
+  });
 });
