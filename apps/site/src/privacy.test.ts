@@ -49,6 +49,19 @@ it("names only disclosed hosts and the Discord redirect in the site's own source
   expect(unexpectedHosts).toEqual([]);
 });
 
+it("discloses each place the invite form sends an email address", () => {
+  const index = sources.find(({ path }) => path === "index.html")!.text;
+  const privacy = sources.find(({ path }) => path === "privacy.html")!.text;
+  const form = index.match(/<form[^>]*data-waitlist[^>]*>/)![0];
+  const destinations = [...form.matchAll(/(?:action|data-waitlist-copy)="https:\/\/([^/"]+)/g)].map(
+    (match) => match[1],
+  );
+  expect(destinations).toEqual(["app.loops.so", "drive.dohc.computer"]);
+  const invites = privacy.match(/<h2>Drive invite requests<\/h2>\s*<p>([\s\S]*?)<\/p>/)![1];
+  expect(invites).toContain("Loops");
+  expect(invites).toContain("drive.dohc.computer");
+});
+
 it("sets no cookies and sends no beacons from the site's own sources", () => {
   for (const { path, text } of sources) {
     expect(text, path).not.toMatch(/document\.cookie|sendBeacon|googletagmanager|gtag\(/);
