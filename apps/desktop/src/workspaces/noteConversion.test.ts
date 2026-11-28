@@ -50,7 +50,6 @@ const live = (objectIds: string[], engineApiMin: unknown = 2) => ({
 
 function relay(overrides: Partial<NoteConversionRelay> = {}) {
   return {
-    assertSyncAllowed: vi.fn(async () => undefined),
     liveNotes: vi.fn(async (): Promise<unknown> => live(["live-1"])),
     drainRecorded: vi.fn(async () => undefined),
     ...overrides,
@@ -323,9 +322,10 @@ describe("note conversion run", () => {
     const error = await failure(
       createNoteConversion()("ws", {
         relay: relay({
-          assertSyncAllowed: vi
-            .fn<NoteConversionRelay["assertSyncAllowed"]>()
-            .mockResolvedValueOnce(undefined)
+          liveNotes: vi
+            .fn<NoteConversionRelay["liveNotes"]>()
+            .mockResolvedValueOnce(live([]))
+            .mockResolvedValueOnce(live([]))
             .mockRejectedValueOnce(new Error(NOTE_CONVERSION_PAUSED)),
         }),
         convert,

@@ -1273,16 +1273,30 @@ describe("relaySyncEngine", () => {
       await sync.stop();
     });
 
-    it("refuses instead of looping when a push sends nothing and still reports more", async () => {
+    it("keeps draining through seven pushes in a row that send nothing, once one sends", async () => {
       const sync = engine({ capture: capture() });
       await sync.start();
       pushMock.mockClear();
-      for (let pass = 0; pass < 3; pass += 1)
+      for (let pass = 0; pass < 7; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      pushMock.mockResolvedValueOnce(more);
+      for (let pass = 0; pass < 7; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      await sync.drainRecorded();
+      expect(pushMock).toHaveBeenCalledTimes(16);
+      await sync.stop();
+    });
+
+    it("refuses instead of looping after eight pushes in a row that send nothing and report more", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      for (let pass = 0; pass < 9; pass += 1)
         pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
       await expect(sync.drainRecorded()).rejects.toThrow(
-        "dohc could not send changes to your server. It took none of them and said more were waiting.",
+        "dohc could not send changes to your server. It took none of them 8 times in a row and said more were waiting.",
       );
-      expect(pushMock).toHaveBeenCalledOnce();
+      expect(pushMock).toHaveBeenCalledTimes(8);
       await sync.stop();
     });
 
