@@ -460,7 +460,7 @@ The server's own host still gets its certificate from Caddy's automatic HTTPS.
 Only Cloudflare trusts an Origin CA certificate. Browsers do not.
 Keep the wildcard record proxied.
 Never turn off certificate checks in a client to reach the origin directly.
-To replace the certificate, install the new files at the same paths, then run `node tools/self-host/bootstrap.mjs start`.
+To replace the certificate, install the new files at the same paths, then run `sudo node tools/self-host/bootstrap.mjs start` (so the command can read the root-owned certificate and key files).
 
 ## Use your own proxy
 
@@ -713,8 +713,10 @@ node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/relay-before-upgr
 If you use the bundled Postgres database, also save an online database dump before upgrading:
 
 ```sh
-docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T postgres \
-  pg_dump -U "${POSTGRES_USER:-dohc}" "${POSTGRES_DB:-dohc}" > /srv/dohc-backups/postgres-before-upgrade.sql
+(umask 077 && install -d -m 0700 /srv/dohc-backups && \
+  docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T postgres \
+    sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > /srv/dohc-backups/postgres-before-upgrade.sql.tmp && \
+  mv /srv/dohc-backups/postgres-before-upgrade.sql.tmp /srv/dohc-backups/postgres-before-upgrade.sql)
 ```
 
 An online snapshot covers offline file salvage, not an in-place relay `restore`.
@@ -733,10 +735,10 @@ node tools/self-host/bootstrap.mjs upgrade --image ghcr.io/dohchq/dohc-self-host
 If you built the image from source or pinned a specific tag, pass that image name instead.
 
 The upgrade checks that the image is loaded, saves the previous configuration privately, updates `DOHC_IMAGE`, and runs the deployment check without stopping unchanged services.
-If the release changed a gateway Caddyfile, Cloudflare trust file, or app certificate, it updates `gateway` first.
+If the release changed a gateway Caddyfile, Cloudflare trust file, or app certificate (or on the first upgrade from a release before gateway config hashing), it recreates `gateway` first (a brief interruption on ports 80 and 443).
 Otherwise `gateway` and `postgres` keep running untouched.
-Database migrations run before the application containers recreate, so release migrations remain compatible with the running release.
-Compose then recreates only the services whose image or settings changed.
+Database migrations run before the application containers recreate; if a release includes a schema change incompatible with the older API, sign-in can fail briefly until `workspace-api` finishes recreating.
+Compose then recreates only the services whose image or settings changed (`workspace-api` and `sync-relay`, then `share-web`).
 The gateway holds and retries incoming requests for up to 30 s while a backend restarts, and internal calls from `share-web` and `workspace-api` retry connection errors across the handover.
 Because `sync-relay` is a single SQLite writer, its restart or SQLite migration has a brief handover of a few seconds (or longer if a release builds an index over a large relay log).
 Live editing connections reconnect once the new relay listens.

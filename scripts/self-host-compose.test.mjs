@@ -27,6 +27,7 @@ import {
   gatewayConfigFiles,
   gatewayConfigHash,
   parseSignUpEmails,
+  rollingUpdateSteps,
   validateSettings,
   composeArgs,
   dataDiskVolumeErrors,
@@ -1474,6 +1475,7 @@ test("sign-up email validation rejects malformed addresses while allowing open s
 });
 
 test("gateway config hash changes when mounted gateway files change and covers all modes", (t) => {
+  assert.equal(compose.services["workspace-api"].stop_grace_period, "15s");
   assert.equal(compose.services["sync-relay"].stop_grace_period, "45s");
   assert.equal(
     compose.services.gateway.environment.DOHC_GATEWAY_CONFIG_HASH,
@@ -1516,5 +1518,34 @@ test("gateway config hash changes when mounted gateway files change and covers a
   };
   assert.deepEqual(gatewayConfigFiles(privateSettings, root), [
     join(root, "tools", "self-host", "Caddyfile.private"),
+  ]);
+  assert.throws(
+    () => gatewayConfigHash({ ...cfAppsSettings, DOHC_APP_TLS_KEY_FILE: root }, root),
+    /Could not read gateway configuration file/,
+  );
+});
+
+test("rollingUpdateSteps updates services in dependency order and stops disabled snapshots", () => {
+  const running = new Set(["postgres", "workspace-api", "sync-relay", "share-web", "gateway"]);
+  const bundled = rollingUpdateSteps(settings(), running);
+  assert.deepEqual(
+    bundled.map((step) => step.at(-1)),
+    ["postgres", "postgres-migrate", "gateway", "sync-relay", "share-web"],
+  );
+  assert.deepEqual(bundled[3].slice(-2), ["workspace-api", "sync-relay"]);
+
+  const externalWithSnapshots = rollingUpdateSteps(
+    { ...settings(), DOHC_POSTGRES_HOST: "db.team.invalid", DOHC_SNAPSHOT_S3_BUCKET: "bucket" },
+    running,
+  );
+  assert.deepEqual(
+    externalWithSnapshots.map((step) => step.at(-1)),
+    ["postgres-migrate", "gateway", "sync-relay", "share-web", "relay-snapshot"],
+  );
+
+  const disabledSnapshots = rollingUpdateSteps(settings(), new Set([...running, "relay-snapshot"]));
+  assert.deepEqual(disabledSnapshots.slice(-2), [
+    ["--profile", "snapshots", "stop", "relay-snapshot"],
+    ["--profile", "snapshots", "rm", "-f", "relay-snapshot"],
   ]);
 });

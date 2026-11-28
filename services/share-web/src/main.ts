@@ -68,7 +68,7 @@ const application = createShareWebApplication({
   publicHosts: config.publicHosts,
   internalHosts: config.internalHosts,
   viewerAssetsDir,
-  fetchRelay: withConnectRetry(fetch),
+  fetchRelay: withConnectRetry(fetch, { retryRequestBody: true }),
   fetchAuth: withConnectRetry(fetch, { retryRequestBody: true }),
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,

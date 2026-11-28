@@ -583,6 +583,7 @@ Salvage the files from the latest snapshot:
 
    ```sh
    cd /srv/dohc-release
+   sudo install -d -o 1000 -g 1000 -m 0700 /srv/dohc-backups
    sudo node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/relay-before-upgrade --env-path /etc/dohc/drive.env
    ```
 

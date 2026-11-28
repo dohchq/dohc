@@ -347,7 +347,12 @@ export function gatewayConfigHash(settings, cwd = process.cwd()) {
       hash.update(String(bytes.length));
       hash.update("\0");
       hash.update(bytes);
-    } catch {
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new Error(
+          `Could not read gateway configuration file ${file}. Run with permissions that can read it, such as sudo.`,
+        );
+      }
       hash.update("missing");
     }
     hash.update("\0");
@@ -357,6 +362,35 @@ export function gatewayConfigHash(settings, cwd = process.cwd()) {
 
 export function composeEnv(settings, cwd = process.cwd(), base = process.env) {
   return { ...base, DOHC_GATEWAY_CONFIG_HASH: gatewayConfigHash(settings, cwd) };
+}
+
+export function rollingUpdateSteps(settings, alreadyRunning) {
+  return [
+    ...(settings.DOHC_POSTGRES_HOST
+      ? []
+      : [["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "postgres"]]),
+    ["run", "--rm", "--no-deps", "-T", "postgres-migrate"],
+    ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "60", "gateway"],
+    [
+      "up",
+      "-d",
+      "--no-deps",
+      "--wait",
+      "--wait-timeout",
+      String(startupWaitSeconds),
+      "workspace-api",
+      "sync-relay",
+    ],
+    ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "share-web"],
+    ...(settings.DOHC_SNAPSHOT_S3_BUCKET
+      ? [["up", "-d", "--no-deps", "relay-snapshot"]]
+      : alreadyRunning.has("relay-snapshot")
+        ? [
+            ["--profile", "snapshots", "stop", "relay-snapshot"],
+            ["--profile", "snapshots", "rm", "-f", "relay-snapshot"],
+          ]
+        : []),
+  ];
 }
 
 export function composeArgs(envFile, settings, ...args) {

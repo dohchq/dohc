@@ -6,6 +6,7 @@ import {
   composeEnv,
   deploymentChecks,
   readSettings,
+  rollingUpdateSteps,
   startupWaitSeconds,
   supportedComposeVersion,
   validateSettings,
@@ -90,7 +91,15 @@ else {
           }).status === 0;
         const before = spawnSync(
           "docker",
-          composeArgs(envFile, settings, "ps", "--status", "running", "--services"),
+          composeArgs(
+            envFile,
+            settings,
+            ...(settings.DOHC_SNAPSHOT_S3_BUCKET ? [] : ["--profile", "snapshots"]),
+            "ps",
+            "--status",
+            "running",
+            "--services",
+          ),
           { encoding: "utf8", env },
         );
         const alreadyRunning = new Set((before.stdout ?? "").trim().split(/\r?\n/).filter(Boolean));
@@ -101,28 +110,7 @@ else {
             alreadyRunning.has(service),
           );
         if (rolling) {
-          const steps = [
-            ...(settings.DOHC_POSTGRES_HOST
-              ? []
-              : [["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "postgres"]]),
-            ["run", "--rm", "--no-deps", "-T", "postgres-migrate"],
-            ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "60", "gateway"],
-            [
-              "up",
-              "-d",
-              "--no-deps",
-              "--wait",
-              "--wait-timeout",
-              String(startupWaitSeconds),
-              "workspace-api",
-              "sync-relay",
-            ],
-            ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "share-web"],
-            ...(settings.DOHC_SNAPSHOT_S3_BUCKET
-              ? [["up", "-d", "--no-deps", "relay-snapshot"]]
-              : []),
-          ];
-          for (const step of steps) {
+          for (const step of rollingUpdateSteps(settings, alreadyRunning)) {
             if (!runUp(...step)) {
               upOk = false;
               break;
@@ -130,6 +118,11 @@ else {
           }
         } else {
           upOk = runUp("up", "-d", "--wait", "--wait-timeout", String(startupWaitSeconds));
+          if (upOk && !settings.DOHC_SNAPSHOT_S3_BUCKET && alreadyRunning.has("relay-snapshot")) {
+            upOk =
+              runUp("--profile", "snapshots", "stop", "relay-snapshot") &&
+              runUp("--profile", "snapshots", "rm", "-f", "relay-snapshot");
+          }
         }
         record("compose startup", upOk);
       }

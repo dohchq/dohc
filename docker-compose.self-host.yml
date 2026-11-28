@@ -57,6 +57,7 @@ services:
   workspace-api:
     <<: *service
     command: [workspace-api]
+    stop_grace_period: 15s
     logging: {driver: json-file, options: {max-size: 2m, max-file: "5"}}
     environment:
       <<: *auth

@@ -69,6 +69,7 @@ const accountDeletion = createAccountDeletion({
   secret: config.secret,
   serverOrigin: config.baseURL,
   relayUrl: config.internalRelayUrl,
+  fetch: withConnectRetry(fetch),
   ...(analytics ? { onDeleted: () => analytics.track("drive_account_deleted") } : {}),
 });
 const auth = createWorkspaceAuth({
@@ -202,7 +203,12 @@ server.listen(config.port, config.bindHost, () => {
 });
 
 installShutdown(server, {
-  gracePeriodMs: parseGracePeriodMs(process.env.WORKSPACE_API_SHUTDOWN_GRACE_MS, 10_000),
+  gracePeriodMs: parseGracePeriodMs(
+    process.env.NODE_ENV === "test"
+      ? process.env.DOHC_WORKSPACE_API_TEST_SHUTDOWN_GRACE_PERIOD_MS
+      : undefined,
+    10_000,
+  ),
   onClosed: async () => {
     try {
       await Promise.allSettled([analytics?.flush(), pool.end()]);

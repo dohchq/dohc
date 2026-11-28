@@ -86,7 +86,6 @@ export function createWorkspaceServer(
       });
     },
   );
-  server.keepAliveTimeout = 150_000;
   server.setTimeout(timeouts.idleMs);
   return server;
 }
