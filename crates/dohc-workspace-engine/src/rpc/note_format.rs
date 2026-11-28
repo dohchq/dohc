@@ -78,11 +78,12 @@ impl EngineService {
             skipped.extend(pass.skipped.into_iter().map(|(key, path, reason)| {
                 json!({"objectId": key.object_id, "path": path, "reason": reason})
             }));
-            does_not_fit.extend(
-                pass.does_not_fit
-                    .into_iter()
-                    .map(|(key, path)| json!({"objectId": key.object_id, "path": path})),
-            );
+            does_not_fit.extend(pass.does_not_fit.into_iter().map(|(key, path, over)| {
+                let limit = over.map(|over| {
+                    json!({"limit": over.limit, "unit": over.unit, "used": over.used, "max": over.max})
+                });
+                json!({"objectId": key.object_id, "path": path, "limit": limit})
+            }));
             failed.extend(pass.failed.into_iter().map(|(object_id, path, reason)| {
                 json!({"objectId": object_id, "path": path, "reason": reason})
             }));

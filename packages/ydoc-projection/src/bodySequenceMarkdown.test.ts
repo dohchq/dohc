@@ -579,10 +579,13 @@ describe("a note made in format 2 only where the save's check and the engine's M
     expect(registered(withItsSource(inFormat1(markdown), markdown)).kind).toBe("accepted");
   }, 120_000);
 
-  it("is refused one value, one byte of text or one engine node past each limit", () => {
+  it("is refused one value, one byte of text, one engine node or one key sort past each limit", () => {
     const none: NewNoteCounts = {
       structs: 0,
       elements: 0,
+      rootEntries: 0,
+      keySorts: 0,
+      astral: 0,
       values: 0,
       markValues: 0,
       bytes: 0,
@@ -613,6 +616,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
       fits({ engineBytes: MAX_PROJECTION_BYTES }),
       fits({ engineBytes: MAX_PROJECTION_BYTES + 1 }),
     ]).toEqual([true, false]);
+    expect([fits({ keySorts: 30_286_363 }), fits({ keySorts: 30_286_364 })]).toEqual([true, false]);
   });
 });
 

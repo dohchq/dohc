@@ -2562,6 +2562,7 @@ fn imported_successor(
         result_sha256: successor.result_sha256.clone(),
         update,
         state_vector,
+        does_not_fit: None,
     })
 }
 

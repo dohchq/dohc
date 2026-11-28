@@ -1,3 +1,4 @@
+import { utf8ByteLength } from "@dohc/live-session-contract/limits";
 import * as Y from "yjs";
 import type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
 
@@ -45,6 +46,16 @@ export const SAVE_VISITS_PER_READ: OrderedLiveUpdateCutPolicy = Object.freeze({
 /** How many times the save's check is at each value and each byte of text outside a mark. */
 export const SAVE_VISITS_OUTSIDE_A_MARK = 4;
 
+const INDEX_OPERATIONS_PER = Object.freeze({
+  note: 50_000,
+  structSearch: 31,
+  struct: 370,
+  rootEntry: 80,
+  keySortPass: 3,
+  astralSearch: 5,
+  boundarySearch: 4,
+});
+
 /**
  * The most nodes the engine's Markdown writer reads one note into, `MAX_PROJECTION_NODES` in
  * `crates/dohc-engine-collab/src/limits.rs`.
@@ -65,15 +76,76 @@ export type LiveNoteWeight = { structs: number; elements: number };
  * Values and bytes are what one read of the note is at: values outside a mark and in one, and the
  * bytes of text, keys and names outside a mark and in one.
  */
-export type NewNoteCounts = LiveNoteWeight & {
-  values: number;
-  markValues: number;
-  bytes: number;
-  markBytes: number;
-  /** The nodes and the bytes of text the engine's Markdown writer spends reading the note. */
-  engineNodes: number;
-  engineBytes: number;
+export type NewNoteCounts = LiveNoteWeight &
+  IndexCounts & {
+    values: number;
+    markValues: number;
+    bytes: number;
+    markBytes: number;
+    /** The nodes and the bytes of text the engine's Markdown writer spends reading the note. */
+    engineNodes: number;
+    engineBytes: number;
+  };
+
+export type IndexCounts = {
+  structs: number;
+  rootEntries: number;
+  keySorts: number;
+  astral: number;
 };
+
+const log2Up = (count: number) => (count <= 1 ? 0 : 32 - Math.clz32(count - 1));
+
+export function newNoteIndexOperations({
+  structs,
+  rootEntries,
+  keySorts,
+  astral,
+}: IndexCounts): number {
+  const per = INDEX_OPERATIONS_PER;
+  const operations =
+    per.note +
+    per.structSearch * structs * log2Up(Math.max(structs, 2)) +
+    per.struct * (structs - rootEntries) +
+    per.rootEntry * rootEntries +
+    per.keySortPass * keySorts +
+    per.astralSearch * astral * log2Up(astral) +
+    per.boundarySearch * (structs + 1) * log2Up(astral);
+  return Math.floor((operations * 11 + 9) / 10);
+}
+
+export function keySorts(value: unknown): number {
+  if (value instanceof Y.Map) return keySortsOf(value.entries());
+  if (value instanceof Y.Array) return keySorts(value.toArray());
+  if (Array.isArray(value)) return value.reduce((sum: number, held) => sum + keySorts(held), 0);
+  if (typeof value !== "object" || value === null || value instanceof Uint8Array) return 0;
+  return keySortsOf(Object.entries(value));
+}
+
+export function astralLetters(text: string): number {
+  let letters = 0;
+  for (let at = 0; at < text.length - 1; at++) {
+    const high = text.charCodeAt(at);
+    const low = text.charCodeAt(at + 1);
+    if (high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) {
+      letters++;
+      at++;
+    }
+  }
+  return letters;
+}
+
+function keySortsOf(entries: Iterable<[string, unknown]>): number {
+  let keys = 0,
+    longest = 0,
+    held = 0;
+  for (const [key, value] of entries) {
+    keys++;
+    longest = Math.max(longest, utf8ByteLength(key));
+    held += keySorts(value);
+  }
+  return held + (keys < 2 ? keys : keys * log2Up(keys) * (longest + 3));
+}
 
 /** The weight of what `doc` stores. */
 export function liveNoteWeight(doc: Y.Doc): LiveNoteWeight {
@@ -105,8 +177,9 @@ export function fitsLiveNoteCapacity(
 }
 
 /**
- * Whether a new note of these counts fits: its weight, the save's visits under `policy`, and the
- * engine's Markdown writer's limits. A new note's update holds each struct the note stores.
+ * Whether a new note of these counts fits: its weight, the save's visits and index operations
+ * under `policy`, and the engine's Markdown writer's limits. A new note's update holds each
+ * struct the note stores.
  */
 export function fitsNewNote(counts: NewNoteCounts, policy: OrderedLiveUpdateCutPolicy): boolean {
   const visits = (outside: number, inside: number, perRead: number) =>
@@ -119,7 +192,8 @@ export function fitsNewNote(counts: NewNoteCounts, policy: OrderedLiveUpdateCutP
     visits(counts.bytes, counts.markBytes, SAVE_VISITS_PER_READ.maxDecodedPayloadByteVisits) <=
       policy.maxDecodedPayloadByteVisits &&
     counts.engineNodes <= MAX_PROJECTION_NODES &&
-    counts.engineBytes <= MAX_PROJECTION_BYTES
+    counts.engineBytes <= MAX_PROJECTION_BYTES &&
+    newNoteIndexOperations(counts) <= policy.maxIndexOperations
   );
 }
 

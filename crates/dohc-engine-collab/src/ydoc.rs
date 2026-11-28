@@ -435,6 +435,19 @@ pub struct SuccessorBase {
     pub result_sha256: String,
     pub update: Vec<u8>,
     pub state_vector: Vec<u8>,
+    /// The first relay limit a format-2 note of the artifact would go past, when it was asked
+    /// for and the base fell back to format 1 for that.
+    pub does_not_fit: Option<Overweight>,
+}
+
+/// The first relay limit a note goes past: what the limit counts, in which unit, the note's
+/// count and the most the limit allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Overweight {
+    pub limit: &'static str,
+    pub unit: &'static str,
+    pub used: usize,
+    pub max: usize,
 }
 
 /// Build a fresh Y.Doc from an exact artifact without merging predecessor items.
@@ -453,13 +466,13 @@ pub fn fresh_successor_base(
     if format_two && !body_sequence_setting() {
         return Err(CollabError::NewerBodyFormat);
     }
-    let in_format_two = format_two
+    let candidate = format_two
         .then(|| successor_doc(identity, artifact, 2.0).ok())
-        .flatten()
-        .filter(|doc| doc.fits_a_live_note(artifact));
-    let doc = match in_format_two {
-        Some(doc) => doc,
-        None => successor_doc(identity, artifact, 1.0)?,
+        .flatten();
+    let (doc, does_not_fit) = match candidate.map(|doc| (doc.fits_a_live_note(artifact), doc)) {
+        Some((Ok(()), doc)) => (doc, None),
+        Some((Err(overweight), _)) => (successor_doc(identity, artifact, 1.0)?, overweight),
+        None => (successor_doc(identity, artifact, 1.0)?, None),
     };
     let update = doc.encode_full_state();
     Ok(SuccessorBase {
@@ -471,6 +484,7 @@ pub fn fresh_successor_base(
         result_sha256: identity.result_sha256.clone(),
         state_vector: doc.encode_state_vector(),
         update,
+        does_not_fit,
     })
 }
 
@@ -668,13 +682,21 @@ impl Ydoc {
         }
     }
 
-    fn fits_a_live_note(&self, markdown: &str) -> bool {
-        let weight = body_sequence_writer::Weight::of(&self.doc);
+    fn live_note_weight(&self, markdown: &str) -> body_sequence_writer::Weight {
+        let weight = body_sequence_writer::Weight::of(&self.doc).with_room_for_a_trailing_line();
         match self.markdown_source_reference() {
             Some(_) => weight,
             None => weight.with_room_for_a_kept_source(markdown),
         }
-        .fits_a_live_note()
+    }
+
+    fn fits_a_live_note(&self, markdown: &str) -> Result<(), Option<Overweight>> {
+        if body_sequence_writer::frontmatter_holds_a_plain_proto_key(&self.doc) {
+            return Err(None);
+        }
+        self.live_note_weight(markdown)
+            .fits_a_live_note()
+            .map_err(Some)
     }
 
     /// Refuses a format-2 note on an engine that does not read format 2.
@@ -1929,7 +1951,7 @@ impl Ydoc {
             }
             if staged.body_sequence_roots().is_some()
                 && staged.seed_relation_note(markdown).is_ok()
-                && staged.fits_a_live_note(markdown)
+                && staged.fits_a_live_note(markdown).is_ok()
             {
                 let before = self.doc.transact().state_vector();
                 return self.apply(&staged.doc.transact().encode_state_as_update_v1(&before));

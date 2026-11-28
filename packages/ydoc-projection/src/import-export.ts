@@ -42,6 +42,7 @@ import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   fitsNewNote,
+  keySorts,
   WORKER_LIVE_VALIDATION_POLICY,
   type NewNoteCounts,
 } from "./liveValidationPolicy.js";
@@ -581,6 +582,7 @@ function withinElements(root: JSONContent, limit: number): boolean {
 }
 
 const SHA256_HEX_BYTES = 64;
+const LINEAGE_EPOCH_ENTRIES = 1;
 
 function newNoteCounts(doc: Y.Doc, body: NewNoteCounts, markdown: string): NewNoteCounts | null {
   const read = readLiveUpdateAsTheCutDoes(
@@ -588,12 +590,18 @@ function newNoteCounts(doc: Y.Doc, body: NewNoteCounts, markdown: string): NewNo
     WORKER_LIVE_VALIDATION_POLICY,
   );
   if (read.kind === "refused") return null;
-  const engine = engineReadOfFrontmatter(doc.getMap(FRONTMATTER_FIELD));
+  const frontmatter = doc.getMap(FRONTMATTER_FIELD);
+  const meta = doc.getMap(META_FIELD);
+  const engine = engineReadOfFrontmatter(frontmatter);
+  const reserved = SOURCE_META_KEYS.length + LINEAGE_EPOCH_ENTRIES;
   let keptBytes = utf8ByteLength(markdown) + 2 * SHA256_HEX_BYTES;
   for (const key of SOURCE_META_KEYS) keptBytes += utf8ByteLength(META_FIELD + key);
   return {
-    structs: read.usage.structVisits + body.structs + SOURCE_META_KEYS.length,
+    structs: read.usage.structVisits + body.structs + reserved,
     elements: body.elements,
+    rootEntries: frontmatter.size + meta.size + body.rootEntries + reserved,
+    keySorts: keySorts([...frontmatter.values(), ...meta.values()]) + body.keySorts,
+    astral: body.astral,
     values: read.usage.valueNodeVisits + body.values + SOURCE_META_KEYS.length,
     markValues: body.markValues,
     bytes: read.usage.decodedPayloadByteVisits + body.bytes + keptBytes,

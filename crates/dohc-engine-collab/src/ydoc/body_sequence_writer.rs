@@ -16,7 +16,16 @@ const SAVE_VISITS_PER_STRUCT: usize = 4;
 const SAVE_VISITS_PER_VALUE: usize = 7;
 const LIVE_NOTE_CAPACITY: usize = 280_000;
 const LIVE_NOTE_ELEMENT_WEIGHT: usize = 6;
+const MAX_INDEX_OPERATIONS: usize = 100_000_000;
+const INDEX_OPERATIONS_PER_NOTE: usize = 50_000;
+const INDEX_OPERATIONS_PER_STRUCT_SEARCH: usize = 31;
+const INDEX_OPERATIONS_PER_STRUCT: usize = 370;
+const INDEX_OPERATIONS_PER_ROOT_ENTRY: usize = 80;
+const KEY_SORT_PASSES: usize = 3;
+const INDEX_OPERATIONS_PER_ASTRAL_SEARCH: usize = 5;
+const INDEX_OPERATIONS_PER_BOUNDARY_SEARCH: usize = 4;
 const SHA256_HEX_BYTES: usize = 64;
+const TRAILING_LINE_STRUCTS: usize = 3;
 
 const KINDS_A_CONTAINER_CAN_BECOME: [&[&str]; 4] = [
     &["blockquote", "callout"],
@@ -239,6 +248,138 @@ pub(super) struct Weight {
     elements: usize,
     values: usize,
     bytes: usize,
+    root_entries: usize,
+    key_sorts: usize,
+    astral: usize,
+}
+
+fn log2_up(count: usize) -> usize {
+    (usize::BITS - count.saturating_sub(1).leading_zeros()) as usize
+}
+
+fn needs_a_shared_type(value: &Any) -> bool {
+    match value {
+        Any::Array(values) => values.iter().any(needs_a_shared_type),
+        Any::Map(values) => {
+            values.contains_key("constructor")
+                || values.contains_key("__proto__")
+                || values.values().any(needs_a_shared_type)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct Stored {
+    structs: usize,
+    key_sorts: usize,
+}
+
+impl std::ops::AddAssign for Stored {
+    fn add_assign(&mut self, other: Self) {
+        self.structs += other.structs;
+        self.key_sorts += other.key_sorts;
+    }
+}
+
+fn plain(value: &Any) -> Stored {
+    Stored {
+        structs: 0,
+        key_sorts: key_sorts(value),
+    }
+}
+
+fn stored_frontmatter_value(value: &Any) -> Stored {
+    if needs_a_shared_type(value) {
+        in_a_shared_type(value)
+    } else {
+        plain(value)
+    }
+}
+
+pub(super) fn frontmatter_holds_a_plain_proto_key(doc: &Doc) -> bool {
+    fn holds(value: &Any) -> bool {
+        match value {
+            Any::Array(values) => values.iter().any(holds),
+            Any::Map(values) => values.contains_key("__proto__") || values.values().any(holds),
+            _ => false,
+        }
+    }
+    let txn = doc.transact();
+    txn.get_map(ROOT_FRONTMATTER).is_some_and(|frontmatter| {
+        frontmatter
+            .iter(&txn)
+            .any(|(_, value)| matches!(value, Out::Any(value) if holds(&value)))
+    })
+}
+
+fn in_a_shared_type(value: &Any) -> Stored {
+    match value {
+        Any::BigInt(_) => Stored {
+            structs: 1,
+            key_sorts: 1,
+        },
+        Any::Array(values) => {
+            let mut stored = Stored::default();
+            let mut packed = false;
+            for value in values.iter() {
+                match value {
+                    Any::Map(_) | Any::Array(_) | Any::BigInt(_) | Any::Buffer(_) => {
+                        packed = false;
+                        stored.structs += 1;
+                        stored += in_a_shared_type(value);
+                    }
+                    _ => stored.structs += usize::from(!std::mem::replace(&mut packed, true)),
+                }
+            }
+            stored
+        }
+        Any::Map(values) => {
+            let longest = values
+                .keys()
+                .map(|key| key.len() + usize::from(escaped(key)))
+                .max()
+                .unwrap_or(0);
+            let mut stored = Stored {
+                structs: values.len(),
+                key_sorts: sorted_keys(values.len(), longest),
+            };
+            for value in values.values() {
+                stored += stored_frontmatter_value(value);
+            }
+            stored
+        }
+        _ => Stored::default(),
+    }
+}
+
+fn escaped(key: &str) -> bool {
+    key.starts_with('$') && key.trim_start_matches('$') == "dohcBigInt"
+}
+
+fn sorted_keys(keys: usize, longest: usize) -> usize {
+    match keys {
+        0..=1 => keys,
+        keys => keys * log2_up(keys) * (longest + 3),
+    }
+}
+
+fn key_sorts(value: &Any) -> usize {
+    match value {
+        Any::Array(values) => values.iter().map(key_sorts).sum(),
+        Any::Map(values) => {
+            let longest = values.keys().map(|key| key.len()).max().unwrap_or(0);
+            let held: usize = values.values().map(key_sorts).sum();
+            held + sorted_keys(values.len(), longest)
+        }
+        _ => 0,
+    }
+}
+
+#[derive(Default)]
+struct Run {
+    marks: HashMap<String, Any>,
+    counted: Option<HashMap<String, Any>>,
 }
 
 impl Weight {
@@ -253,13 +394,15 @@ impl Weight {
             match root {
                 Out::YMap(map) => {
                     for (key, value) in map.iter(&txn) {
+                        weight.root_entries += 1;
                         weight.item(name.len() + key.len());
-                        weight.out(value);
+                        weight.out(value, name == ROOT_FRONTMATTER);
                     }
                 }
                 Out::YText(text) => {
+                    let mut run = Run::default();
                     let _ = text.try_visit_items(&txn, |item| {
-                        weight.text_item(&txn, name.len(), item);
+                        weight.text_item(&txn, name.len(), item, &mut run);
                         Ok::<(), ()>(())
                     });
                 }
@@ -275,32 +418,66 @@ impl Weight {
         self.bytes += bytes;
     }
 
-    fn text_item<T: ReadTxn>(&mut self, txn: &T, root_bytes: usize, item: TextItem<'_>) {
+    fn text_item<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        root_bytes: usize,
+        item: TextItem<'_>,
+        run: &mut Run,
+    ) {
         match item {
-            TextItem::Letters(text) => self.item(root_bytes + text.len()),
+            TextItem::Letters(text) => {
+                self.values += 1;
+                self.bytes += root_bytes + text.len();
+                self.astral += text.bytes().filter(|byte| *byte >= 0xF0).count();
+                if run.counted.as_ref() != Some(&run.marks) {
+                    self.structs += 1 + 2 * run.marks.len();
+                    self.key_sorts += run.marks.values().map(key_sorts).sum::<usize>();
+                    run.counted = Some(run.marks.clone());
+                }
+            }
             TextItem::Format(key, value) => {
-                self.item(root_bytes + key.len());
+                self.values += 1;
+                self.bytes += root_bytes + key.len();
                 self.any(value);
+                match value {
+                    Any::Null => run.marks.remove(key),
+                    value => run.marks.insert(key.to_owned(), value.clone()),
+                };
             }
             TextItem::Embed(Out::YXmlElement(element)) => {
+                run.counted = None;
                 self.item(root_bytes + element.tag().len());
                 self.elements += 1;
                 for (key, value) in element.attributes(txn) {
                     self.item(key.len());
-                    self.out(value);
+                    self.out(value, false);
                 }
             }
             TextItem::Embed(embedded) => {
+                run.counted = None;
                 self.item(root_bytes);
-                self.out(embedded);
+                self.out(embedded, false);
             }
-            TextItem::Other => self.item(root_bytes),
+            TextItem::Other => {
+                run.counted = None;
+                self.item(root_bytes);
+            }
         }
     }
 
-    fn out(&mut self, value: Out) {
+    fn out(&mut self, value: Out, frontmatter: bool) {
         match value {
-            Out::Any(value) => self.any(&value),
+            Out::Any(value) => {
+                let stored = if frontmatter {
+                    stored_frontmatter_value(&value)
+                } else {
+                    plain(&value)
+                };
+                self.structs += stored.structs;
+                self.key_sorts += stored.key_sorts;
+                self.any(&value);
+            }
             _ => self.values += 1,
         }
     }
@@ -321,6 +498,12 @@ impl Weight {
         }
     }
 
+    pub(super) fn with_room_for_a_trailing_line(mut self) -> Self {
+        self.structs += TRAILING_LINE_STRUCTS;
+        self.elements += 1;
+        self
+    }
+
     pub(super) fn with_room_for_a_kept_source(mut self, markdown: &str) -> Self {
         let keys = [
             MARKDOWN_SOURCE_META_KEY,
@@ -328,6 +511,7 @@ impl Weight {
             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
         ];
         self.structs += keys.len();
+        self.root_entries += keys.len();
         self.values += keys.len();
         self.bytes += markdown.len() + 2 * SHA256_HEX_BYTES;
         self.bytes += keys
@@ -337,11 +521,59 @@ impl Weight {
         self
     }
 
-    pub(super) fn fits_a_live_note(&self) -> bool {
-        SAVE_VISITS_PER_STRUCT * self.structs <= MAX_STRUCT_VISITS
-            && self.structs + LIVE_NOTE_ELEMENT_WEIGHT * self.elements <= LIVE_NOTE_CAPACITY
-            && SAVE_VISITS_PER_VALUE * self.values <= MAX_VALUE_NODE_VISITS
-            && SAVE_VISITS_PER_VALUE * self.bytes <= MAX_DECODED_PAYLOAD_BYTE_VISITS
+    pub(super) fn index_operations(&self) -> usize {
+        let operations = INDEX_OPERATIONS_PER_NOTE
+            + INDEX_OPERATIONS_PER_STRUCT_SEARCH * self.structs * log2_up(self.structs.max(2))
+            + INDEX_OPERATIONS_PER_STRUCT * self.structs.saturating_sub(self.root_entries)
+            + INDEX_OPERATIONS_PER_ROOT_ENTRY * self.root_entries
+            + KEY_SORT_PASSES * self.key_sorts
+            + INDEX_OPERATIONS_PER_ASTRAL_SEARCH * self.astral * log2_up(self.astral)
+            + INDEX_OPERATIONS_PER_BOUNDARY_SEARCH * (self.structs + 1) * log2_up(self.astral);
+        (operations * 11).div_ceil(10)
+    }
+
+    pub(super) fn fits_a_live_note(&self) -> Result<(), Overweight> {
+        let structs = SAVE_VISITS_PER_STRUCT * self.structs;
+        let weight = self.structs + LIVE_NOTE_ELEMENT_WEIGHT * self.elements;
+        let values = SAVE_VISITS_PER_VALUE * self.values;
+        let bytes = SAVE_VISITS_PER_VALUE * self.bytes;
+        [
+            (
+                "maxStructVisits",
+                "struct visits",
+                structs,
+                MAX_STRUCT_VISITS,
+            ),
+            ("liveNoteCapacity", "weight", weight, LIVE_NOTE_CAPACITY),
+            (
+                "maxValueNodeVisits",
+                "value visits",
+                values,
+                MAX_VALUE_NODE_VISITS,
+            ),
+            (
+                "maxDecodedPayloadByteVisits",
+                "byte visits",
+                bytes,
+                MAX_DECODED_PAYLOAD_BYTE_VISITS,
+            ),
+            (
+                "maxIndexOperations",
+                "index operations",
+                self.index_operations(),
+                MAX_INDEX_OPERATIONS,
+            ),
+        ]
+        .into_iter()
+        .find(|&(_, _, used, max)| used > max)
+        .map_or(Ok(()), |(limit, unit, used, max)| {
+            Err(Overweight {
+                limit,
+                unit,
+                used,
+                max,
+            })
+        })
     }
 }
 
@@ -355,6 +587,8 @@ mod tests {
     );
     const POLICY: &str =
         include_str!("../../../../packages/ydoc-projection/src/liveValidationPolicy.ts");
+    const FIT: &str =
+        include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence-fit.json");
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -426,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_structs_and_elements_the_relay_counts_and_at_least_its_values_and_bytes() {
+    fn counts_structs_and_elements_as_typescript_writes_an_upper_bound_when_runs_share_marks() {
         for note in written_notes() {
             let weight = Weight::of(&opened(&note.update).doc);
             assert_eq!(
@@ -440,6 +674,83 @@ mod tests {
                 weight.bytes >= note.decoded_payload_byte_visits,
                 "{}",
                 note.name
+            );
+        }
+    }
+
+    #[test]
+    fn counts_a_frontmatter_value_as_typescript_stores_it() {
+        let number = |value: f64| Any::Number(value);
+        let list = |values: &[Any]| Any::from(values.to_vec());
+        let map = |entries: &[(&str, Any)]| {
+            Any::from(
+                entries
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+        for (value, structs, key_sorts) in [
+            (
+                list(&[
+                    number(1.0),
+                    number(2.0),
+                    list(&[number(3.0), number(4.0)]),
+                    map(&[("a", number(1.0))]),
+                    Any::BigInt(5),
+                    Any::from("x"),
+                    map(&[("constructor", number(1.0))]),
+                ]),
+                10,
+                3,
+            ),
+            (
+                map(&[
+                    ("constructor", number(1.0)),
+                    (
+                        "plain",
+                        map(&[("x", number(1.0)), ("y", list(&[number(1.0), number(2.0)]))]),
+                    ),
+                    ("big", Any::BigInt(7)),
+                    ("$dohcBigInt", number(1.0)),
+                ]),
+                4,
+                128,
+            ),
+            (
+                map(&[("a", map(&[("constructor", map(&[("b", number(1.0))]))]))]),
+                2,
+                3,
+            ),
+            (
+                list(&[
+                    list(&[
+                        number(1.0),
+                        list(&[number(2.0), map(&[("k", number(1.0)), ("kk", number(2.0))])]),
+                    ]),
+                    Any::BigInt(9),
+                ]),
+                0,
+                10,
+            ),
+            (
+                list(&[map(&[
+                    ("$dohcBigInt", number(1.0)),
+                    ("$$dohcBigInt", number(2.0)),
+                    ("constructor", number(1.0)),
+                ])]),
+                4,
+                96,
+            ),
+        ] {
+            let doc = Doc::new();
+            let frontmatter = doc.get_or_insert_map(ROOT_FRONTMATTER);
+            frontmatter.insert(&mut doc.transact_mut(), "v", value.clone());
+            let weight = Weight::of(&doc);
+            assert_eq!(
+                (weight.structs, weight.key_sorts),
+                (1 + structs, key_sorts),
+                "{value:?}"
             );
         }
     }
@@ -459,7 +770,7 @@ mod tests {
         ] {
             assert!(POLICY.contains(declared), "{declared}");
         }
-        let at_most = |weight: Weight| weight.fits_a_live_note();
+        let at_most = |weight: Weight| weight.fits_a_live_note().is_ok();
         let structs = Weight {
             structs: MAX_STRUCT_VISITS / SAVE_VISITS_PER_STRUCT,
             ..Weight::default()
@@ -486,6 +797,63 @@ mod tests {
             ..Weight::default()
         };
         assert!(!at_most(bytes));
+    }
+
+    #[test]
+    fn counts_the_index_operations_typescript_counts_and_names_the_first_limit_a_note_passes() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Bound {
+            structs: usize,
+            root_entries: usize,
+            key_sorts: usize,
+            astral: usize,
+            index_operations: usize,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fit {
+            bounds: Vec<Bound>,
+        }
+        let fit: Fit = serde_json::from_str(FIT).expect("the fit fixture parses");
+        assert_eq!(fit.bounds.len(), 8);
+        for bound in fit.bounds {
+            let weight = Weight {
+                structs: bound.structs,
+                root_entries: bound.root_entries,
+                key_sorts: bound.key_sorts,
+                astral: bound.astral,
+                ..Weight::default()
+            };
+            assert_eq!(weight.index_operations(), bound.index_operations);
+        }
+        let over = |weight: Weight| weight.fits_a_live_note().unwrap_err();
+        let structs = Weight {
+            structs: MAX_STRUCT_VISITS / SAVE_VISITS_PER_STRUCT + 1,
+            ..Weight::default()
+        };
+        assert_eq!(
+            over(structs),
+            Overweight {
+                limit: "maxStructVisits",
+                unit: "struct visits",
+                used: MAX_STRUCT_VISITS + SAVE_VISITS_PER_STRUCT,
+                max: MAX_STRUCT_VISITS,
+            }
+        );
+        let sorted = |key_sorts| Weight {
+            key_sorts,
+            ..Weight::default()
+        };
+        assert!(sorted(30_286_363).fits_a_live_note().is_ok());
+        assert_eq!(
+            over(sorted(30_286_364)),
+            Overweight {
+                limit: "maxIndexOperations",
+                unit: "index operations",
+                used: 100_000_002,
+                max: MAX_INDEX_OPERATIONS,
+            }
+        );
     }
 
     fn reading_of(markdown: &str) -> Vec<MarkdownNode> {

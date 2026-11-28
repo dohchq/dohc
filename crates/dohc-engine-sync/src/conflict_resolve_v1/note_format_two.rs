@@ -1,6 +1,6 @@
 use super::*;
 use dohc_engine_collab::ydoc::without_final_markdown_newline;
-use dohc_engine_collab::{CloseOutcome, CloseProjection, CollabError};
+use dohc_engine_collab::{CloseOutcome, CloseProjection, CollabError, Overweight};
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,7 +8,7 @@ pub enum FormatTwoConversion {
     Converted,
     NothingToConvert,
     NotNow(&'static str),
-    DoesNotFit,
+    DoesNotFit(Option<Overweight>),
 }
 
 pub(crate) const CONVERSION_ID_PREFIX: &str = "note-format-two-";
@@ -90,15 +90,16 @@ pub fn convert_note_to_format_two_in_tx(
         &predecessor_state_vector_sha256,
         &predecessor_delete_set_sha256,
     );
-    let Some(successor) = successor_in_format_two(
+    let successor = match successor_in_format_two(
         key,
         &predecessor_claim_id,
         &predecessor_state_vector_sha256,
         &conflict_id,
         &text,
         &text_sha256,
-    ) else {
-        return Ok(DoesNotFit);
+    ) {
+        Ok(successor) => successor,
+        Err(overweight) => return Ok(DoesNotFit(overweight)),
     };
     let created = object_created_at_ms(tx, &key.workspace_id, &key.object_id)?;
     let built = build_conflict_resolve_v1(ConflictResolveV1 {
@@ -278,7 +279,7 @@ fn successor_in_format_two(
     artifact_id: &str,
     text: &str,
     text_sha256: &str,
-) -> Option<SuccessorBase> {
+) -> Result<SuccessorBase, Option<Overweight>> {
     let identity = SuccessorIdentity::derive_with_schema_version(
         SuccessorIdentityInput {
             key,
@@ -292,12 +293,16 @@ fn successor_in_format_two(
         },
         2,
     );
-    fresh_successor_base(&identity, text)
-        .ok()
-        .filter(|successor| {
-            in_format_two(&successor.update)
-                .is_some_and(|doc| settled_source(&doc, text).as_deref() == Some(text))
-        })
+    let Ok(successor) = fresh_successor_base(&identity, text) else {
+        return Err(None);
+    };
+    if in_format_two(&successor.update)
+        .is_some_and(|doc| settled_source(&doc, text).as_deref() == Some(text))
+    {
+        Ok(successor)
+    } else {
+        Err(successor.does_not_fit)
+    }
 }
 
 pub(super) enum Received {
@@ -375,7 +380,7 @@ pub struct FormatTwoPass {
     pub converted: Vec<DocKey>,
     pub unchanged: usize,
     pub skipped: Vec<(DocKey, String, &'static str)>,
-    pub does_not_fit: Vec<(DocKey, String)>,
+    pub does_not_fit: Vec<(DocKey, String, Option<Overweight>)>,
     pub failed: Vec<(String, String, String)>,
     pub resume_after: Option<String>,
 }
@@ -475,7 +480,10 @@ pub fn convert_notes_to_format_two(
             Ok(Converted) => pass.converted.push(key.clone()),
             Ok(NothingToConvert) => pass.unchanged += 1,
             Ok(NotNow(reason)) => pass.skipped.push((key.clone(), path.clone(), reason)),
-            Ok(DoesNotFit) => pass.does_not_fit.push((key.clone(), path.clone())),
+            Ok(DoesNotFit(overweight)) => {
+                pass.does_not_fit
+                    .push((key.clone(), path.clone(), overweight));
+            }
             Err(error) if fails_only_the_note(&error) => {
                 pass.failed
                     .push((object_id.clone(), path.clone(), error.to_string()));
@@ -561,8 +569,10 @@ fn drop_local_format_one(
         Ok(ready) => ready,
         Err(outcome) => return Ok(outcome),
     };
-    if successor_in_format_two(key, "", "", "", &ready.text, &ready.text_sha256).is_none() {
-        return Ok(DoesNotFit);
+    if let Err(overweight) =
+        successor_in_format_two(key, "", "", "", &ready.text, &ready.text_sha256)
+    {
+        return Ok(DoesNotFit(overweight));
     }
     let Some(projection) = settled_source(&ready.doc, &ready.text) else {
         return Ok(NotNow("ydoc-unsettled"));

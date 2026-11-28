@@ -645,21 +645,25 @@ fn a_crash_at_each_commit_converts_once() {
 #[test]
 fn a_note_format_two_cannot_hold_is_left_in_format_one() {
     let linked = "Run [`npm install`](https://example.com) first\n";
-    let (_scratch, _path, mut store) = open_store();
-    let key = seed_note(
-        &mut store,
-        linked,
-        "moment-linked",
-        Some(&base_of(&[linked])),
-    );
-    let before = claim(&store, &key);
-    assert_eq!(
-        on(|| convert(&mut store, &key, &NoLiveLeases)),
-        FormatTwoConversion::DoesNotFit
-    );
-    assert_eq!(claim(&store, &key), before);
-    assert_eq!(note(&store, &key), (1, linked.to_owned()));
-    assert!(carriers(&store).is_empty());
+    let proto = "---\nnested:\n  __proto__: preserved\n---\n\nBody\n";
+    for markdown in [linked, proto] {
+        let (_scratch, _path, mut store) = open_store();
+        let key = seed_note(
+            &mut store,
+            markdown,
+            "moment-linked",
+            Some(&base_of(&[markdown])),
+        );
+        let before = claim(&store, &key);
+        assert_eq!(
+            on(|| convert(&mut store, &key, &NoLiveLeases)),
+            FormatTwoConversion::DoesNotFit(None),
+            "{markdown:?}"
+        );
+        assert_eq!(claim(&store, &key), before, "{markdown:?}");
+        assert_eq!(note(&store, &key), (1, markdown.to_owned()));
+        assert!(carriers(&store).is_empty(), "{markdown:?}");
+    }
 }
 
 #[test]
@@ -1134,10 +1138,16 @@ fn a_note_too_large_for_format_two_does_not_fit() {
         Some(&base_of(&[&large])),
     );
     let before = claim(&store, &key);
+    let FormatTwoConversion::DoesNotFit(Some(over)) =
+        on(|| convert(&mut store, &key, &NoLiveLeases))
+    else {
+        panic!("the note fits format 2");
+    };
     assert_eq!(
-        on(|| convert(&mut store, &key, &NoLiveLeases)),
-        FormatTwoConversion::DoesNotFit
+        (over.limit, over.unit, over.max),
+        ("maxStructVisits", "struct visits", 400_000)
     );
+    assert!(over.used > over.max, "{over:?}");
     assert_eq!(claim(&store, &key), before);
     assert_eq!(note(&store, &key).0, 1);
     assert!(carriers(&store).is_empty());
@@ -1359,7 +1369,13 @@ fn the_pass_names_a_note_too_large_for_format_two_and_leaves_it() {
     );
     let before = (claim(&store, &key), changes(&store));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
+    let [(named, path, Some(over))] = pass.does_not_fit.as_slice() else {
+        panic!("{:?}", pass.does_not_fit);
+    };
+    assert_eq!(
+        (named, path.as_str(), over.limit),
+        (&key, "doc.md", "maxStructVisits")
+    );
     assert_eq!(pass.converted.len(), 0);
     assert_eq!((claim(&store, &key), changes(&store)), before);
     assert_eq!(note(&store, &key).0, 1);
@@ -1568,7 +1584,10 @@ fn a_local_note_whose_file_format_two_cannot_hold_keeps_its_cache() {
     write(&mut store, linked, "moment-linked", 13);
     let before = (head(&store, &key), changes(&store));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
+    assert_eq!(
+        pass.does_not_fit,
+        vec![(key.clone(), "doc.md".to_owned(), None)]
+    );
     assert_eq!((head(&store, &key), changes(&store)), before);
 }
 
