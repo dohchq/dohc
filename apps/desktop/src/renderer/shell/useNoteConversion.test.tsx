@@ -15,9 +15,13 @@ const clean: ConvertNotesResult = {
 };
 
 let progress: ((event: NoteConversionProgress) => void) | null = null;
-function install(convertNotes: DohcDesktopBridge["convertNotes"]) {
+function install(
+  convertNotes: DohcDesktopBridge["convertNotes"],
+  sendConvertedNotes: DohcDesktopBridge["sendConvertedNotes"] = vi.fn(async () => null),
+) {
   window.dohcDesktop = {
     convertNotes,
+    sendConvertedNotes,
     onNoteConversionProgress: (listener: (event: NoteConversionProgress) => void) => {
       progress = listener;
       return () => {
@@ -106,7 +110,7 @@ describe("the Notices row for notes a conversion left", () => {
     expect(noteConversionNotice(clean)).toBeNull();
     expect(noteConversionNotice({ ...clean, sent: false })).toEqual({
       message:
-        "Converted 1,980 notes. dohc could not send them to the server yet. It sends them on the next sync.",
+        "Converted 1,980 notes. dohc could not send them to the server yet. Try again to send them.",
       tone: "warning",
     });
     expect(
@@ -188,6 +192,80 @@ describe("converting notes from this window", () => {
     );
     await act(async () => shell.report.mock.calls[0]![0].retry());
     expect(convertNotes).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the count of notes it could not send, and Try again only sends them", async () => {
+    const convertNotes = vi.fn<DohcDesktopBridge["convertNotes"]>(async () => ({
+      ...clean,
+      converted: 11,
+      sent: false,
+    }));
+    const sendConvertedNotes = vi
+      .fn<DohcDesktopBridge["sendConvertedNotes"]>()
+      .mockRejectedValueOnce(new Error("dohc could not reach your server."))
+      .mockResolvedValueOnce(null);
+    install(convertNotes, sendConvertedNotes);
+    const shell = mount();
+
+    await act(async () => shell.conversion().start());
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11 });
+    expect(shell.success).not.toHaveBeenCalled();
+    expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message:
+          "Converted 11 notes. dohc could not send them to the server yet. Try again to send them.",
+        kind: "note-conversion",
+        retry: expect.any(Function),
+      }),
+    );
+
+    await act(async () => shell.report.mock.calls[0]![0].retry());
+    expect(sendConvertedNotes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 11 });
+    expect(shell.report).toHaveBeenCalledTimes(2);
+    expect(shell.report.mock.calls[1]![0]).toMatchObject({
+      kind: "note-conversion",
+      cause: expect.objectContaining({ message: "dohc could not reach your server." }),
+      retry: expect.any(Function),
+    });
+
+    await act(async () => shell.conversion().send());
+    expect(sendConvertedNotes).toHaveBeenCalledTimes(2);
+    expect(convertNotes).toHaveBeenCalledOnce();
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 11 });
+    expect(shell.clear).toHaveBeenCalledWith("note-conversion");
+    expect(shell.success).toHaveBeenCalledExactlyOnceWith(
+      "Converted 11 notes",
+      undefined,
+      "note-conversion",
+    );
+  });
+
+  it("keeps Convert remaining beside Try again when it left notes and could not send", async () => {
+    install(
+      vi.fn(async () => ({
+        ...clean,
+        sent: false,
+        skipped: [{ path: "Day 1.md", reason: "open-here" }],
+      })),
+    );
+    const shell = mount();
+
+    await act(async () => shell.conversion().start());
+    expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        retry: expect.any(Function),
+        action: expect.objectContaining({ label: "Convert remaining" }),
+      }),
+    );
+    await act(async () => shell.report.mock.calls[0]![0].retry());
+    expect(shell.report).toHaveBeenCalledTimes(2);
+    expect(shell.report.mock.calls[1]![0]).toMatchObject({
+      title: "1 note was not converted",
+      retry: null,
+      action: expect.objectContaining({ label: "Convert remaining" }),
+    });
+    expect(shell.success).not.toHaveBeenCalled();
   });
 
   it("shows nothing from workspace A's run once the window moves to workspace B", async () => {

@@ -6,8 +6,9 @@ import { NoteFormatRow } from "./NoteFormatRow";
 
 function show(state: NoteConversionState) {
   const start = vi.fn();
-  render(<NoteFormatRow conversion={{ state, start }} workspaceName="Trip" />);
-  return start;
+  const send = vi.fn();
+  render(<NoteFormatRow conversion={{ state, start, send }} workspaceName="Trip" />);
+  return Object.assign(start, { send });
 }
 
 afterEach(() => {
@@ -63,5 +64,23 @@ describe("Settings › Advanced › Note format", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(start).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("settings-confirm-convert-notes")).toBeNull();
+  });
+
+  it("keeps the count of notes it could not send, and Try again only sends them", () => {
+    const start = show({ status: "unsent", converted: 11 });
+    expect(
+      screen.getByText("Converted 11 notes. dohc could not send them to the server yet."),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(start.send).toHaveBeenCalledOnce();
+    expect(start).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("settings-confirm-convert-notes")).toBeNull();
+    cleanup();
+
+    show({ status: "sending", converted: 11 });
+    expect(screen.getByText("Sending 11 converted notes…")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 });

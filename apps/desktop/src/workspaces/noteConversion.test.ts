@@ -6,8 +6,8 @@ import {
   NOTE_CONVERSION_RUNNING,
   NOTE_CONVERSION_SHARED_VIEW,
   RELAY_UNREACHABLE,
-  convertsNotes,
   createNoteConversion,
+  noteConversionOffered,
   noteConversionReach,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
@@ -510,13 +510,29 @@ describe("who converts a workspace's notes", () => {
     expect(() => noteConversionReach({ sharedView: false, pausedRemote: owner }, "owner")).toThrow(
       NOTE_CONVERSION_PAUSED,
     );
+    expect(() => noteConversionReach({ sharedView: false, pausedRemote: owner }, "member")).toThrow(
+      NOTE_CONVERSION_NOT_OWNER,
+    );
   });
 
-  it("offers conversion only when the engine reads and writes the new format", () => {
+  it("offers conversion only to the owner, and only while the engine reads and writes the new format", () => {
     const on = { DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1", DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "1" };
-    expect(convertsNotes(on)).toBe(true);
-    expect(convertsNotes({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" })).toBe(false);
-    expect(convertsNotes({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" })).toBe(false);
-    expect(convertsNotes({})).toBe(false);
+    const local = { sharedView: false };
+    expect(noteConversionOffered(on, local, null)).toBe(true);
+    expect(noteConversionOffered(on, { sharedView: false, remote: owner }, "owner")).toBe(true);
+    expect(noteConversionOffered(on, { sharedView: false, pausedRemote: owner }, "owner")).toBe(
+      true,
+    );
+
+    expect(noteConversionOffered(on, { sharedView: false, remote: owner }, "member")).toBe(false);
+    expect(noteConversionOffered(on, { sharedView: false, pausedRemote: owner }, "member")).toBe(
+      false,
+    );
+    expect(noteConversionOffered(on, { sharedView: true, remote: owner }, "owner")).toBe(false);
+
+    expect(noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, local, null)).toBe(false);
+    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, local, null)).toBe(false);
+    expect(noteConversionOffered({}, local, null)).toBe(false);
   });
+
 });

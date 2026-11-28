@@ -164,7 +164,7 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 }
 
 const bridge = {
-  convertsNotes: false,
+  readNoteConversionOffered: vi.fn(async () => ({ offered: false })),
   onWorkspaceActivity: vi.fn(() => () => {}),
   listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({
@@ -1730,35 +1730,45 @@ it("shows Members in a joined workspace, which lists the owner's people", async 
   expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
 });
 
-it("offers Note format in Advanced only while the engine writes the new format, never in a shared view", async () => {
-  const noteConversion = { state: { status: "idle" as const }, start: vi.fn() };
-  const advanced = (sharedView: boolean) =>
+describe("Settings › Advanced › Note format", () => {
+  const noteConversion = { state: { status: "idle" as const }, start: vi.fn(), send: vi.fn() };
+  const open = (initialSection: "advanced" | "general") =>
     render(
       <SettingsDialog
         workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x/Trip"
-        initialSection="advanced"
-        sharedView={sharedView}
+        initialSection={initialSection}
         noteConversion={noteConversion}
         onClose={vi.fn()}
       />,
     );
-  try {
-    advanced(false);
+
+  it("hides the row unless main says this account converts the workspace's notes", async () => {
+    open("advanced");
     await screen.findByTestId("settings-row-reset-workspace");
+    await waitFor(() =>
+      expect(bridge.readNoteConversionOffered).toHaveBeenCalledWith({ workspaceId: "ws-1" }),
+    );
     expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
     cleanup();
 
-    bridge.convertsNotes = true;
-    advanced(false);
+    bridge.readNoteConversionOffered.mockResolvedValueOnce({ offered: true });
+    open("advanced");
     expect(await screen.findByTestId("settings-row-note-format")).toBeTruthy();
-    cleanup();
+  });
 
-    advanced(true);
-    await screen.findByTestId("settings-dialog");
-    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
-  } finally {
-    bridge.convertsNotes = false;
-  }
+  it.each(["Note format", "convert"])("finds the row when someone searches %s", async (term) => {
+    bridge.readNoteConversionOffered.mockResolvedValue({ offered: true });
+    try {
+      open("general");
+      await screen.findByTestId("settings-dialog");
+      fireEvent.change(screen.getByTestId("settings-search"), { target: { value: term } });
+      expect(screen.getByTestId(settingsSectionPin("advanced"))).toBeTruthy();
+      const row = await screen.findByTestId("settings-row-note-format");
+      expect(row.getAttribute("data-search-match")).toBe("true");
+    } finally {
+      bridge.readNoteConversionOffered.mockResolvedValue({ offered: false });
+    }
+  });
 });
