@@ -20,8 +20,7 @@ const EnginePass = z.object({
 });
 
 export interface NoteConversionRelay {
-  engineApiMin(): Promise<number | undefined>;
-  liveNotes(): Promise<string[]>;
+  liveNotes(): Promise<{ engineApiMin: number | null; objectIds: string[] }>;
   drainRecorded(): Promise<void>;
 }
 
@@ -31,7 +30,7 @@ export interface NoteConversionRun {
   assertCurrent(): void;
 }
 
-export function floorRefusal(found: number | undefined): string {
+export function floorRefusal(found: number | null): string {
   return `dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is ${found ?? "not set"}; it must be ${RELAY_ENGINE_API_FLOOR}.`;
 }
 
@@ -43,6 +42,13 @@ function stoppedAfter(error: unknown, converted: number): unknown {
     `${words} dohc converted ${notes} before it stopped. Run Convert notes again to finish.`,
     { cause: error },
   );
+}
+
+async function liveAboveFloor(relay: NoteConversionRelay): Promise<string[]> {
+  const { engineApiMin, objectIds } = await relay.liveNotes();
+  if (engineApiMin === null || engineApiMin < RELAY_ENGINE_API_FLOOR)
+    throw new Error(floorRefusal(engineApiMin));
+  return objectIds;
 }
 
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
@@ -57,9 +63,6 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
       const { relay } = run;
       run.assertCurrent();
       if (relay) {
-        const floor = await relay.engineApiMin();
-        if (floor === undefined || floor < RELAY_ENGINE_API_FLOOR)
-          throw new Error(floorRefusal(floor));
         await relay.drainRecorded();
       }
       const result: ConvertNotesResult = {
@@ -75,7 +78,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
         let more = true;
         while (more) {
           run.assertCurrent();
-          const relayLive = relay ? await relay.liveNotes() : [];
+          const relayLive = relay ? await liveAboveFloor(relay) : [];
           const before = result.converted;
           for (let note = 0; note < batch && more; note += 1) {
             run.assertCurrent();

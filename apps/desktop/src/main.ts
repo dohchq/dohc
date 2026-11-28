@@ -2278,31 +2278,24 @@ async function relayForNoteConversion(
     }
   };
   return {
-    engineApiMin: () =>
-      reach(async () => {
-        if (!credentials.relayUrl)
-          throw new Error(
-            "Reconnect your server to refresh its connection settings, then try again.",
-          );
-        const response = await relayShareFetch(`${normalizeServerUrl(credentials.relayUrl)}/ready`);
-        if (!response.ok) throw new TypeError("The relay is not ready.");
-        const { engineApiMin } = z
-          .object({ engineApiMin: z.number().int().optional() })
-          .parse(await response.json());
-        return engineApiMin;
-      }),
     liveNotes: () =>
-      reach(async () =>
-        z
-          .object({ notes: z.array(z.object({ objectId: z.string() })) })
+      reach(async () => {
+        const live = z
+          .object({
+            engineApiMin: z.number().int().nullish(),
+            notes: z.array(z.object({ objectId: z.string() })),
+          })
           .parse(
             await relayShareJsonWithCredentials<unknown>(
               credentials,
               `/sync/${encodeURIComponent(workspace.workspaceId)}/live-notes`,
             ),
-          )
-          .notes.map(({ objectId }) => objectId),
-      ),
+          );
+        return {
+          engineApiMin: live.engineApiMin ?? null,
+          objectIds: live.notes.map(({ objectId }) => objectId),
+        };
+      }),
     drainRecorded: () => activity.drainRecorded(workspace.workspaceId),
   };
 }
