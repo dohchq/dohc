@@ -70,9 +70,9 @@ type OutboxResult =
     }
   | { readonly kind: "missing"; readonly reason: string };
 
-/** The thread or stream a record waits its turn in. */
+/** The thread, stream, or file a record waits its turn in. */
 interface Target {
-  readonly kind: "thread" | "stream";
+  readonly kind: "thread" | "stream" | "file";
   readonly id: string;
 }
 
@@ -311,6 +311,8 @@ function targetOf(write: ChatWrite, thread: string | undefined): Target | null |
       return write.args.threadId === null ? null : { kind: "thread", id: write.args.threadId };
     case "react":
       return thread === undefined ? undefined : { kind: "thread", id: thread };
+    case "comment":
+      return { kind: "file", id: write.args.expectedObjectId };
   }
 }
 
@@ -1330,7 +1332,9 @@ function readResult(value: unknown): OutboxResult | null | undefined {
 
 function readTarget(value: unknown): Target | null | undefined {
   if (value === null) return null;
-  return isFields(value) && (value.kind === "thread" || value.kind === "stream") && id(value.id)
+  return isFields(value) &&
+    (value.kind === "thread" || value.kind === "stream" || value.kind === "file") &&
+    id(value.id)
     ? { kind: value.kind, id: value.id }
     : undefined;
 }

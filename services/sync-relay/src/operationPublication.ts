@@ -20,16 +20,19 @@ export type RefusalReason =
   | "already answered"
   | "The message it replies to wasn't sent"
   | "This workspace changed on your server"
+  | "This file changed or was replaced"
   | "Couldn't send"
   | "too old";
 export const COULD_NOT_SEND: RefusalReason = "Couldn't send";
 export const WORKSPACE_CHANGED: RefusalReason = "This workspace changed on your server";
+export const FILE_CHANGED: RefusalReason = "This file changed or was replaced";
 export const TOO_OLD: RefusalReason = "too old";
 const ALREADY_ANSWERED: RefusalReason = "already answered";
 const REFUSAL_REASONS: ReadonlySet<string> = new Set<RefusalReason>([
   ALREADY_ANSWERED,
   "The message it replies to wasn't sent",
   WORKSPACE_CHANGED,
+  FILE_CHANGED,
   COULD_NOT_SEND,
   TOO_OLD,
 ]);

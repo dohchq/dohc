@@ -3152,4 +3152,62 @@ describe("fault schedules", () => {
     expect(onDisk(disk, 3)).toBeNull();
     second.stop();
   });
+
+  it("enqueues file comments on the file lane, retries across relaunch, and settles saved or file-changed refusals", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on(
+      "POST",
+      path("comment"),
+      "offline",
+      SAVED("thread-file-1", "message-file-1"),
+      REFUSED("This file changed or was replaced"),
+    );
+    const first = launch(disk, server);
+    await ready(first.outbox);
+    const firstComment = await first.outbox.enqueue({
+      workspaceId: "ws-1",
+      write: {
+        operation: "comment",
+        args: { path: "docs/plan.md", expectedObjectId: "obj-plan", body: "First comment" },
+      },
+    });
+    const secondComment = await first.outbox.enqueue({
+      workspaceId: "ws-1",
+      write: {
+        operation: "comment",
+        args: { path: "docs/plan.md", expectedObjectId: "obj-plan", body: "Second comment" },
+      },
+    });
+    await vi.waitFor(() => expect(requests(server, "comment")).toHaveLength(1));
+    expect(requests(server, "comment")[0]).toEqual({
+      operationId: firstComment.operationId,
+      path: "docs/plan.md",
+      expectedObjectId: "obj-plan",
+      body: "First comment",
+    });
+    first.stop();
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    await vi.waitFor(() =>
+      expect(record(second.outbox, firstComment.sequence)?.stage).toBe("saved"),
+    );
+    await vi.waitFor(() =>
+      expect(record(second.outbox, secondComment.sequence)?.stage).toBe("refused"),
+    );
+    expect(record(second.outbox, secondComment.sequence)?.result).toEqual({
+      kind: "refused",
+      reason: "This file changed or was replaced",
+      threadId: null,
+      winnerMessageId: null,
+    });
+    second.outbox.handoff(ME, "ws-1", [message("message-file-1")]);
+    await vi.waitFor(() =>
+      expect(second.outbox.state().records.map((r) => r.operationId)).toEqual([
+        secondComment.operationId,
+      ]),
+    );
+    second.stop();
+  });
 });

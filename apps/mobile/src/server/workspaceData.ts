@@ -20,6 +20,7 @@ import {
   markThreadRead,
   readChanges,
   readChats,
+  readFileChats,
   readFiles,
   readPage,
   readStream,
@@ -30,6 +31,7 @@ import {
   type ChatThread,
   type FeedAnswer,
   type FeedChanges,
+  type FileChatsRead,
   type GroupStream,
   type MissingChat,
   type PageRead,
@@ -190,6 +192,14 @@ export const views = {
     };
   },
 
+  fileChats(path: string): View<FileChatsRead> {
+    return {
+      id: `fileChats:${path}`,
+      read: (client, workspaceId, signal) => readFileChats(client, workspaceId, path, signal),
+      affectedBy: (changes) => changes.chats !== undefined || changes.files !== undefined,
+    };
+  },
+
   /**
    * A page: a change to the object at its path, or to any file while the store doesn't know which object that is. A
    * page that goes keeps the last text this store read of it.
@@ -244,6 +254,7 @@ export function viewOf(id: string): View<unknown> | null {
   if (kind === "stream") return views.stream(key);
   if (kind === "lanes") return views.lanes(key);
   if (kind === "thread") return views.thread(key);
+  if (kind === "fileChats") return views.fileChats(key);
   if (kind === "page") return views.page(key);
   return null;
 }

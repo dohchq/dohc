@@ -126,6 +126,11 @@ export function ServerConversation() {
   const joined = data?.joined === true;
   const isThread = thread === "1" || id.startsWith("thread-") || id.startsWith("browser-thread:");
   const joinedThreadId = isThread && phoneWrites && joined ? id : null;
+  const threadView = useMemo(
+    () => (joinedThreadId !== null ? views.thread(joinedThreadId) : null),
+    [joinedThreadId],
+  );
+  const { state: joinedThreadState } = useView(threadView);
   const threadKnown =
     joinedThreadId !== null &&
     chats?.some((each) => each.threadIds.includes(joinedThreadId)) === true;
@@ -143,7 +148,11 @@ export function ServerConversation() {
   const writesKey = `${data?.instance ?? 0}:${isThread ? id : streamId}`;
   const writes = writesIn(data);
   if (isThread) {
-    const joinedWritable = joinedThreadId !== null && writableJoinedThread(chats, joinedThreadId);
+    const joinedWritable =
+      joinedThreadId !== null &&
+      (writableJoinedThread(chats, joinedThreadId) ||
+        (joinedThreadState.value?.kind === "thread" &&
+          joinedThreadState.value.access === "read-write"));
     return writes || joinedWritable ? (
       <WritableThread
         key={writesKey}

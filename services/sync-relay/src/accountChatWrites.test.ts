@@ -1123,4 +1123,63 @@ describe("an answer whose decision the engine refused", () => {
       expect(resolves(f), label).toBe(2);
     }
   });
+
+  it("starts a file comment bound to expectedObjectId, refuses stale replacements and secret files, and replays idempotently", async () => {
+    const f = await fixture();
+    const comment = (
+      operationId: string,
+      path: string,
+      expectedObjectId: string,
+      body: string,
+    ): PhoneWrite => ({
+      operation: "comment",
+      args: { operationId, path, expectedObjectId, body },
+    });
+
+    const first = await f.run(comment("op-comment-1", "README.md", "object-readme", "Check intro"));
+    const ids = phoneWriteIds(OWNER, WORKSPACE, "op-comment-1");
+    expect(first).toEqual({
+      ok: true,
+      state: "saved",
+      threadId: ids.threadId,
+      messageId: ids.messageId("post"),
+    });
+    expect(
+      await readChat(serverChats(f.storage, f.copy, WORKSPACE), {
+        threadId: ids.threadId,
+      }),
+    ).toMatchObject({
+      ok: true,
+      thread: { id: ids.threadId },
+      messages: [expect.objectContaining({ id: ids.messageId("post"), body: "Check intro" })],
+    });
+
+    const beforeRetry = f.engine.writes.length;
+    expect(
+      await f.run(comment("op-comment-1", "README.md", "object-readme", "Check intro")),
+    ).toEqual(first);
+    expect(f.engine.writes.length).toBe(beforeRetry);
+
+    const beforeStale = f.engine.writes.length;
+    expect(
+      await f.run(comment("op-comment-stale", "README.md", "object-old", "Wrong target")),
+    ).toEqual({
+      ok: false,
+      refusal: "refused",
+      reason: "This file changed or was replaced",
+    });
+    expect(f.engine.writes.length).toBe(beforeStale);
+
+    expect(await f.run(comment("op-comment-secret", ".env", "object-env", "Leak"))).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at .env.",
+    });
+    expect(await f.run(comment("op-comment-missing", "missing.md", "object-x", "Gone"))).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at missing.md.",
+    });
+    expect(f.engine.writes.length).toBe(beforeStale);
+  });
 });

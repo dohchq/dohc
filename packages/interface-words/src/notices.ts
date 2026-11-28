@@ -163,6 +163,8 @@ export const chatWords = {
         return "This message wasn't sent, because the message it replies to wasn't sent.";
       case "This workspace changed on your server":
         return "This message wasn't sent, because this workspace changed on your server.";
+      case "This file changed or was replaced":
+        return "This comment wasn't sent, because the file changed or was replaced.";
       case "too old":
         return "This message wasn't sent, because it waited too long.";
       // The reply may still have published: only the question's answer was lost.

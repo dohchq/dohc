@@ -439,3 +439,24 @@ export function createConversationWrites(options: {
       ),
   };
 }
+
+export function canStartFileComment(input: {
+  readonly enabled: boolean;
+  readonly joined: boolean;
+  readonly objectId: string | null;
+  readonly access?: "read-write" | "read-only";
+}): boolean {
+  return (
+    input.enabled && input.objectId !== null && (!input.joined || input.access === "read-write")
+  );
+}
+
+export function fileCommentWrite(
+  path: string,
+  expectedObjectId: string,
+  body: string,
+): ChatWrite | null {
+  return body.trim() && path && expectedObjectId
+    ? { operation: "comment", args: { path, expectedObjectId, body } }
+    : null;
+}

@@ -476,7 +476,8 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, userId, id]))}`;
   const replying = input.threadId !== undefined;
   if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
-  if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
+  if (file && !input.allowPostParent && input.parentMessageId !== undefined)
+    throw badRequest("invalid parent");
   const parentMessageId =
     input.parentMessageId === undefined
       ? undefined
@@ -489,8 +490,9 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const requestHash = input.bindRequest
     ? sha256Hex(
         JSON.stringify([
-          replying ? "reply" : "post",
+          replying ? "reply" : file ? "comment" : "post",
           channelWireId ?? "",
+          ...(file ? [file.objectId, file.filePath] : []),
           requestedThreadId ?? "",
           parentMessageId ?? null,
           rawTitle,
@@ -674,6 +676,13 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
             "Your access to this workspace changed. Try again.",
             503,
           );
+      }
+      if (file && createThread) {
+        const createOp = ops.find((op) => op.opKind === "chat.thread.create");
+        const boundObjectId = createOp
+          ? (JSON.parse(createOp.payloadJson) as { linkedObjectId?: unknown }).linkedObjectId
+          : undefined;
+        if (boundObjectId !== file.objectId) throw relayError("share_op_rejected");
       }
       for (const op of ops) {
         if (

@@ -30,6 +30,7 @@ describe("a write's answer", () => {
       "already answered",
       "The message it replies to wasn't sent",
       "This workspace changed on your server",
+      "This file changed or was replaced",
       "Couldn't send",
       "too old",
     ]) {
@@ -152,6 +153,15 @@ describe("checking a write", () => {
       operation: "react",
       args: { messageId: "message-1", emoji: "👍", state: "added" },
     });
+    expect(
+      readChatWrite({
+        operation: "comment",
+        args: { path: "docs/plan.md", expectedObjectId: "obj-1", body: "Check this", extra: 1 },
+      }),
+    ).toEqual({
+      operation: "comment",
+      args: { path: "docs/plan.md", expectedObjectId: "obj-1", body: "Check this" },
+    });
   });
 
   it("refuses a write the route would refuse", () => {
@@ -159,6 +169,9 @@ describe("checking a write", () => {
       { operation: "post", args: { groupId: "group-1", body: "" } },
       { operation: "send", args: { body: "Hi" } },
       { operation: "reply", args: { body: "Hi" } },
+      { operation: "comment", args: { path: "docs/plan.md", body: "Hi" } },
+      { operation: "comment", args: { expectedObjectId: "obj-1", body: "Hi" } },
+      { operation: "comment", args: { path: "docs/plan.md", expectedObjectId: "obj-1", body: "" } },
       { operation: "react", args: { messageId: "message-1", emoji: "👍", state: "toggle" } },
       {
         operation: "post",
@@ -189,6 +202,12 @@ describe("a write's message ID", () => {
       derivedMessageId("u-1", "ws-1", "op-1", {
         operation: "send",
         args: { streamId: "dm-1", body: "Hi" },
+      }),
+    ).resolves.toBe("message-7d3792fc451f8c3341ad9dbfe9f7d769");
+    await expect(
+      derivedMessageId("u-1", "ws-1", "op-1", {
+        operation: "comment",
+        args: { path: "docs/plan.md", expectedObjectId: "obj-1", body: "Hi" },
       }),
     ).resolves.toBe("message-7d3792fc451f8c3341ad9dbfe9f7d769");
     await expect(

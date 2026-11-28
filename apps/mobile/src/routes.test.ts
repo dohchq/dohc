@@ -58,6 +58,7 @@ describe("routes opened from a link", () => {
       expect(wrapped(route), route).toBe("sampleOnly");
     for (const route of [
       "settings.tsx",
+      "search.tsx",
       "workspaces.tsx",
       "outbox.tsx",
       "app-review.tsx",

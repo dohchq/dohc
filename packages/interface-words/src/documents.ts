@@ -113,6 +113,13 @@ export const documentWords = {
     "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
   unwritten: "dohc can't save this change in a live note yet, so it put the note back as it was.",
   dismiss: "Dismiss",
+  comments: "Comments",
+  noComments: "No comments yet.",
+  commentsFailed: "dohc could not read comments for this file.",
+  commentPlaceholder: "Add a comment",
+  commentAction: "Comment",
+  commentThread: "Comment",
+  close: "Close",
   toolbar: {
     label: "Formatting",
     bold: "Bold",

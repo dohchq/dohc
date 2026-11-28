@@ -17,17 +17,19 @@ const NO_FEED: FeedState = { problem: null, failures: 0 };
  * A view of the open workspace, read while the screen shows it. `view` must keep its identity between renders: a
  * constant from `views`, or one made in a memo.
  */
-export function useView<T>(view: View<T>): { readonly state: ViewState<T>; retry(): void } {
+export function useView<T>(view: View<T> | null): { readonly state: ViewState<T>; retry(): void } {
   const { data } = useAccount();
   const subscribe = useCallback(
-    (listener: () => void) => (data ? data.subscribe(view, listener) : () => {}),
+    (listener: () => void) => (data && view ? data.subscribe(view, listener) : () => {}),
     [data, view],
   );
   const state = useSyncExternalStore(
     subscribe,
-    useCallback((): ViewState<T> => (data ? data.state(view) : NOTHING), [data, view]),
+    useCallback((): ViewState<T> => (data && view ? data.state(view) : NOTHING), [data, view]),
   );
-  const retry = useCallback(() => data?.retry(view), [data, view]);
+  const retry = useCallback(() => {
+    if (view) data?.retry(view);
+  }, [data, view]);
   return { state, retry };
 }
 

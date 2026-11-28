@@ -20,7 +20,7 @@ import {
   useSyncExternalStore,
   type ComponentRef,
 } from "react";
-import { Check, EllipsisVertical } from "lucide-react-native";
+import { Check, EllipsisVertical, MessageSquare } from "lucide-react-native";
 import { Alert, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
@@ -50,6 +50,7 @@ import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListSt
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
+import { FileCommentsSheet } from "./FileCommentsSheet";
 import { createPageHost, pageMountKey, type HeldPageMount } from "./pageHost";
 import {
   createPageLive,
@@ -243,6 +244,10 @@ function PageScreen(props: {
   const signIn = useSignIn();
   const web = useRef<ComponentRef<typeof WebView>>(null);
   const [mutating, setMutating] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  useEffect(() => {
+    setCommentsOpen(false);
+  }, [path, data?.workspaceId]);
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
@@ -707,17 +712,26 @@ function PageScreen(props: {
                   typing ? (
                     <HeaderButton label="Done" onPress={endEditing} />
                   ) : (
-                    <HeaderButton
-                      icon={copied ? Check : EllipsisVertical}
-                      label={documentWords.documentActions}
-                      onPress={() =>
-                        void documentActions({
-                          copyMarkdown: () => copyMarkdown(),
-                          ...(canRenameFile ? { rename: startRename } : {}),
-                          ...(canEditFiles ? { remove: startDelete } : {}),
-                        })
-                      }
-                    />
+                    <View style={{ flexDirection: "row", alignItems: "center" }}>
+                      {!deleted ? (
+                        <HeaderButton
+                          icon={MessageSquare}
+                          label={documentWords.comments}
+                          onPress={() => setCommentsOpen(true)}
+                        />
+                      ) : null}
+                      <HeaderButton
+                        icon={copied ? Check : EllipsisVertical}
+                        label={documentWords.documentActions}
+                        onPress={() =>
+                          void documentActions({
+                            copyMarkdown: () => copyMarkdown(),
+                            ...(canRenameFile ? { rename: startRename } : {}),
+                            ...(canEditFiles ? { remove: startDelete } : {}),
+                          })
+                        }
+                      />
+                    </View>
                   )
               : undefined,
         }}
@@ -728,6 +742,14 @@ function PageScreen(props: {
             <Stack.Toolbar.Button variant="done" onPress={endEditing}>
               Done
             </Stack.Toolbar.Button>
+          ) : null}
+          {!deleted ? (
+            <Stack.Toolbar.Button
+              hidden={typing}
+              icon="text.bubble"
+              accessibilityLabel={documentWords.comments}
+              onPress={() => setCommentsOpen(true)}
+            />
           ) : null}
           <Stack.Toolbar.Menu
             hidden={typing}
@@ -819,6 +841,12 @@ function PageScreen(props: {
         </Pressable>
       ) : null}
       {lifecycle.sheet}
+      <FileCommentsSheet
+        open={commentsOpen}
+        path={path}
+        objectId={objectId}
+        onClose={() => setCommentsOpen(false)}
+      />
       <PropertyEditorSheet
         open={editingProp !== null}
         field={editingProp?.field ?? null}

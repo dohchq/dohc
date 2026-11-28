@@ -198,6 +198,7 @@ export default function RootLayout() {
               }}
             />
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
+            <Stack.Screen name="search" options={{ title: workspaceWords.search }} />
             <Stack.Screen name="outbox" options={{ title: chatWords.messagesOnPhone }} />
             <Stack.Screen name="app-review" options={{ title: appWords.review }} />
             {/* A record's field, changed in a sheet with Cancel and Save in its header. */}
