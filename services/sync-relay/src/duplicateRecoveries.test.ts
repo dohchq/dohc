@@ -29,6 +29,7 @@ type Moment = {
   delete?: boolean;
   rename?: boolean;
   objectId?: string;
+  beforePath?: string;
 };
 
 function op(originSeq: number, moment: Moment) {
@@ -46,7 +47,7 @@ function op(originSeq: number, moment: Moment) {
       recordedAtMs: 10 + originSeq,
       operation: moment.delete ? "delete" : moment.rename ? "rename" : "write",
       payloadBeforeBlobSha256: before === undefined ? null : sha256(before),
-      payloadBeforePath: before === undefined ? null : RECOVERED,
+      payloadBeforePath: before === undefined ? null : (moment.beforePath ?? RECOVERED),
       payloadAfterBlobSha256: moment.delete ? null : sha256(moment.text),
       payloadAfterPath: moment.delete ? null : moment.path,
       payloadBeforeContentKind: before === undefined ? null : "text",
@@ -200,6 +201,44 @@ describe("a recovery that a second replica publishes late", () => {
 
     expect(f.projected().files).toEqual([
       { path: NUMBERED, blob_sha256: sha256(FIRST) },
+      { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
+    ]);
+  });
+
+  it("places the numbered copy after two copies found the path taken", async () => {
+    const f = await relay();
+    await f.push("owner-device", [
+      op(0, { momentId: "occupant", objectId: "occupant", path: RECOVERED, text: OCCUPANT }),
+    ]);
+    await f.push("server-copy", [op(0, creation)]);
+    await f.push("second-copy", [op(0, creation)]);
+    await f.push("owner-device", [op(1, { ...creation, path: NUMBERED })]);
+
+    expect(f.projected().files).toEqual([
+      { path: NUMBERED, blob_sha256: sha256(FIRST) },
+      { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
+    ]);
+  });
+
+  it("places the numbered copy and its continuation when the first copy's continuation found the path taken too", async () => {
+    const f = await relay();
+    await f.push("owner-device", [
+      op(0, { momentId: "occupant", objectId: "occupant", path: RECOVERED, text: OCCUPANT }),
+    ]);
+    await f.push("server-copy", [op(0, creation), op(1, continuation)]);
+    await f.push("owner-device", [op(1, { ...creation, path: NUMBERED })]);
+    expect(f.projected().files).toEqual([
+      { path: NUMBERED, blob_sha256: sha256(FIRST) },
+      { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
+    ]);
+    await f.push("owner-device", [
+      op(2, { ...continuation, path: NUMBERED, beforePath: NUMBERED }),
+    ]);
+
+    const projected = f.projected();
+    expect(projected.paths).toEqual([{ path: NUMBERED }]);
+    expect(projected.files).toEqual([
+      { path: NUMBERED, blob_sha256: sha256(SECOND) },
       { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
     ]);
   });
