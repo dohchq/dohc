@@ -453,7 +453,13 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
           showsOnPhone: async () => true,
           catchUp: async (_targetWorkspaceId, signal) => {
             await syncB!.catchUp({ signal });
-            return !signal.aborted && syncB!.snapshot().syncFailure === null;
+            const snap = syncB!.snapshot();
+            return (
+              !signal.aborted &&
+              snap.syncFailure === null &&
+              !snap.authExpired &&
+              !snap.updateRequired
+            );
           },
           relayLiveNotes: async (targetWorkspaceId, signal) => {
             liveNotesChecks += 1;
