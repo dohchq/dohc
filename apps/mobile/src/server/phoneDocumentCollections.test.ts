@@ -202,6 +202,40 @@ describe("phoneDocumentCollections client & validation", () => {
     });
   });
 
+  it("follows >20 documentCollections pages to completion and rejects repeated cursors", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-many/ops/documentCollections", (req) => {
+      const body = (req.body ?? {}) as { afterPath?: string };
+      const idx = body.afterPath ? Number(body.afterPath.slice(2, 4)) + 1 : 1;
+      const key = `C-${String(idx).padStart(2, "0")}`;
+      return ops(
+        {
+          ok: true,
+          collections: [{ path: key, name: key, description: null, status: "valid", fields: [] }],
+          nextPath: idx < 22 ? `${key}/collection.yaml` : null,
+        },
+        `0.${idx}.1`,
+      );
+    });
+    server.on(
+      "POST",
+      "/sync/ws-loop/ops/documentCollections",
+      ops({
+        ok: true,
+        collections: [{ path: "A", name: "A", description: null, status: "valid", fields: [] }],
+        nextPath: "A/collection.yaml",
+      }),
+    );
+    const client = clientOf(server);
+    const all = await readDocumentCollections(client, "ws-many", new AbortController().signal);
+    expect(all.value).toHaveLength(22);
+    expect(all.value.at(-1)?.path).toBe("C-22");
+    expect(all.cursor).toBe("0.1.1");
+    await expect(
+      readDocumentCollections(client, "ws-loop", new AbortController().signal),
+    ).rejects.toThrow();
+  });
+
   it("gates mobile write controls on fileWritesAvailable (false hides writes while keeping reads)", () => {
     const ownerData = { joined: false } as const;
     const joinedData = { joined: true } as const;

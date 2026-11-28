@@ -9,8 +9,6 @@ import { FILE_WRITE_TIMEOUT_MS } from "./fileWrites";
 import type { RecordValue } from "./phoneCollections";
 import { earlierCursor, isCursor, type Read } from "./workspaceReads";
 
-const MAX_COLLECTION_PAGES = 20;
-
 export interface DocumentCollectionSummary {
   readonly path: string;
   readonly name: string;
@@ -167,24 +165,28 @@ export async function readDocumentCollections(
 ): Promise<Read<readonly DocumentCollectionSummary[]>> {
   const all: DocumentCollectionSummary[] = [];
   const seen = new Set<string>();
+  const seenCursors = new Set<string>();
   let cursor = "";
   let afterPath: string | undefined;
-  for (let page = 0; page < MAX_COLLECTION_PAGES; page += 1) {
+  while (true) {
+    const prev = afterPath;
     const next = await opRead(
       client,
       workspaceId,
       "documentCollections",
-      afterPath ? { afterPath } : {},
+      prev ? { afterPath: prev } : {},
       (result) => {
         const answer = okAnswer(result);
         const collections = each(answer?.collections, readSummary);
         if (!answer || !collections) return null;
-        if (
-          answer.nextPath !== undefined &&
-          answer.nextPath !== null &&
-          !text(answer.nextPath, 1024)
-        )
-          return null;
+        if (answer.nextPath !== undefined && answer.nextPath !== null) {
+          if (
+            !text(answer.nextPath, 1024) ||
+            seenCursors.has(answer.nextPath) ||
+            (prev !== undefined && answer.nextPath <= prev)
+          )
+            return null;
+        }
         return { collections, nextPath: answer.nextPath ?? null };
       },
       signal,
@@ -196,7 +198,8 @@ export async function readDocumentCollections(
         all.push(item);
       }
     }
-    if (!next.value.nextPath || next.value.nextPath === afterPath) break;
+    if (!next.value.nextPath) break;
+    seenCursors.add(next.value.nextPath);
     afterPath = next.value.nextPath;
   }
   return { value: all, cursor };

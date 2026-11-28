@@ -544,12 +544,13 @@ export function PropertyEditorSheet(props: {
   readonly field: FieldDefinition | null;
   readonly value: RecordValue;
   readonly saving: boolean;
+  readonly allowDismissWhileSaving?: boolean;
   readonly error: string | null;
   readonly relationLabels?: Readonly<Record<string, string>>;
   readonly onClose: () => void;
   readonly onSave: (value: RecordValue, labels?: Readonly<Record<string, string>>) => void;
 }) {
-  const { open, field, value, saving, error, onClose, onSave } = props;
+  const { open, field, value, saving, allowDismissWhileSaving, error, onClose, onSave } = props;
   const theme = useTheme();
   const { data } = useAccount();
   const signIn = useSignIn();
@@ -622,6 +623,7 @@ export function PropertyEditorSheet(props: {
       open={open && field !== null}
       title={field?.name ?? ""}
       saving={saving}
+      allowDismissWhileSaving={allowDismissWhileSaving}
       savingLabel={collectionWords.saving}
       actionLabel={collectionWords.save}
       onClose={onClose}

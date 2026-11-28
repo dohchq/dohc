@@ -764,10 +764,13 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
         field={editingProp?.field ?? null}
         value={editingProp?.value ?? null}
         saving={propSaving}
+        allowDismissWhileSaving={liveProps}
         error={propError}
         relationLabels={relationLabels}
         onClose={() => {
-          if (!propSaving) {
+          if (!propSaving || liveProps) {
+            pendingPropReq.current = null;
+            setPropSaving(false);
             setEditingProp(null);
             setPropError(null);
           }

@@ -374,6 +374,7 @@ export function SheetModal(props: {
   readonly open: boolean;
   readonly title: string;
   readonly saving: boolean;
+  readonly allowDismissWhileSaving?: boolean;
   readonly savingLabel: string;
   readonly actionLabel: string;
   readonly onClose: () => void;
@@ -382,8 +383,9 @@ export function SheetModal(props: {
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const canDismiss = !props.saving || props.allowDismissWhileSaving === true;
   const close = () => {
-    if (!props.saving) props.onClose();
+    if (canDismiss) props.onClose();
   };
   useBackCloses(props.open, close);
   return (
@@ -407,12 +409,12 @@ export function SheetModal(props: {
           <View style={[styles.header, { borderColor: theme.line }]}>
             <Pressable
               onPress={close}
-              disabled={props.saving}
+              disabled={!canDismiss}
               android_ripple={ripple(theme, true)}
               style={[styles.btn, styles.side]}
               accessibilityRole="button"
             >
-              <Text style={[styles.btnText, { color: props.saving ? theme.subtle : theme.ink }]}>
+              <Text style={[styles.btnText, { color: !canDismiss ? theme.subtle : theme.ink }]}>
                 {confirmWords.cancel}
               </Text>
             </Pressable>
