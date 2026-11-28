@@ -13,7 +13,6 @@ import {
   useState,
   type ComponentProps,
   type CSSProperties,
-  type InputHTMLAttributes,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -341,15 +340,13 @@ export function ProgressBar({
         aria-valuemax={safeMax}
         aria-valuetext={ariaValueText}
       >
-        <div className="kit-progress-fill-wrap">
-          <div
-            className={cx(
-              "kit-progress-fill",
-              resolvedTone !== "neutral" && `kit-progress-fill-${resolvedTone}`,
-            )}
-            style={{ width: `${pct}%` }}
-          />
-        </div>
+        <div
+          className={cx(
+            "kit-progress-fill",
+            resolvedTone !== "neutral" && `kit-progress-fill-${resolvedTone}`,
+          )}
+          style={{ width: `${pct}%` }}
+        />
         {targetPct !== null ? (
           <div
             className="kit-progress-target"
@@ -612,7 +609,7 @@ export function DateField({
   );
 }
 
-export interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
+export interface CheckboxProps extends Omit<ComponentProps<"input">, "type"> {
   readonly label: string;
   readonly description?: string;
 }
@@ -620,12 +617,28 @@ export interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement
 export function Checkbox({ label, description, className, id, ...props }: CheckboxProps) {
   const autoId = useId();
   const fieldId = id ?? autoId;
+  const labelId = description ? `${fieldId}-label` : undefined;
+  const descId = description ? `${fieldId}-desc` : undefined;
+  const describedBy = descId
+    ? [props["aria-describedby"], descId].filter(Boolean).join(" ")
+    : props["aria-describedby"];
   return (
     <label className={cx("kit-checkbox-row", className)} htmlFor={fieldId}>
-      <input {...props} id={fieldId} type="checkbox" className="kit-checkbox" />
+      <input
+        {...props}
+        id={fieldId}
+        type="checkbox"
+        aria-labelledby={props["aria-labelledby"] ?? labelId}
+        aria-describedby={describedBy}
+        className="kit-checkbox"
+      />
       <span className="kit-control-copy">
-        <span>{label}</span>
-        {description ? <span className="kit-control-desc">{description}</span> : null}
+        <span id={labelId}>{label}</span>
+        {description ? (
+          <span id={descId} className="kit-control-desc">
+            {description}
+          </span>
+        ) : null}
       </span>
     </label>
   );
@@ -783,6 +796,7 @@ export function Modal({
             iconOnly
             onClick={() => onCloseRef.current()}
             aria-label="Close"
+            title="Close"
           >
             <Glyph name="x" size={15} />
           </Button>

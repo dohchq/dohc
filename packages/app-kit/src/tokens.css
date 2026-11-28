@@ -3,7 +3,7 @@
   --kit-panel: #fffefa;
   --kit-panel-2: #efede6;
   --kit-line: #e4e1d8;
-  --kit-line-strong: #8c887c;
+  --kit-line-strong: color-mix(in srgb, var(--kit-ink) 52%, var(--kit-panel));
   --kit-ink: #1c1b18;
   --kit-muted: #55524a;
   --kit-subtle: #6e6a5f;
@@ -41,7 +41,7 @@
     --kit-panel: #1b1a18;
     --kit-panel-2: #24221f;
     --kit-line: #2c2a26;
-    --kit-line-strong: #706d64;
+    --kit-line-strong: color-mix(in srgb, var(--kit-ink) 40%, var(--kit-panel));
     --kit-ink: #f6f4ee;
     --kit-muted: #aba79b;
     --kit-subtle: #878377;
@@ -115,7 +115,6 @@
 
 .kit-chart-hover-band {
   fill: var(--kit-hover);
-  pointer-events: none;
 }
 
 .kit-chart-legend {

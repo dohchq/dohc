@@ -176,10 +176,16 @@ describe("dohc/ui", () => {
     expect(wrapper?.getAttribute("aria-invalid")).toBeNull();
   });
 
-  it("renders Badge dot/info, Callout info, ProgressBar info, and Checkbox description", () => {
+  it("renders Badge dot/info, Callout info, ProgressBar info, and Checkbox description without altering accessible name", () => {
+    const checkboxRef = createRef<HTMLInputElement>();
     const { container } = render(
       <Card title="Settings">
-        <Checkbox label="Include pending" description="Show unposted charges" defaultChecked />
+        <Checkbox
+          ref={checkboxRef}
+          label="Include pending"
+          description="Show unposted charges"
+          defaultChecked
+        />
         <Badge tone="info" dot>
           Synced
         </Badge>
@@ -194,11 +200,14 @@ describe("dohc/ui", () => {
         />
       </Card>,
     );
-    const box = screen.getByLabelText(/Include pending/) as HTMLInputElement;
+    const box = screen.getByRole("checkbox", { name: "Include pending" }) as HTMLInputElement;
+    expect(checkboxRef.current).toBe(box);
     expect(box.checked).toBe(true);
+    const descId = box.getAttribute("aria-describedby");
+    expect(descId).toBeTruthy();
+    expect(document.getElementById(descId!)?.textContent).toBe("Show unposted charges");
     fireEvent.click(box);
     expect(box.checked).toBe(false);
-    expect(screen.getByText("Show unposted charges")).toBeTruthy();
     expect(container.querySelector(".kit-badge-dot")).toBeTruthy();
     expect(container.querySelector(".kit-callout.kit-tone-info")).toBeTruthy();
     expect(container.querySelector(".kit-progress-fill-info")).toBeTruthy();
@@ -417,7 +426,6 @@ describe("dohc/charts", () => {
     );
     expect(container.innerHTML).not.toContain("NaN");
     expect(container.innerHTML).not.toContain("Infinity");
-    // Smooth curve emits cubic bezier commands on multi-point segments and breaks across NaN gaps.
     const smoothGroup = screen.getByRole("group", { name: "Smooth gaps" });
     expect(smoothGroup.querySelectorAll('path[fill="none"]').length).toBe(4);
     expect(smoothGroup.innerHTML).toContain(" C ");
@@ -428,7 +436,6 @@ describe("dohc/charts", () => {
       "userSpaceOnUse",
       "userSpaceOnUse",
     ]);
-    // Negative-only area gradient spans full plot height with non-zero stop opacity.
     const negGrad = screen
       .getByRole("group", { name: "Negative area" })
       .getElementsByTagName("linearGradient")[0]!;
@@ -437,7 +444,6 @@ describe("dohc/charts", () => {
       Number(s.getAttribute("stop-opacity")),
     );
     expect(negStops.some((opacity) => opacity > 0)).toBe(true);
-    // Sparse BarChart caps bar width rather than inflating into giant slabs.
     const barRects = [
       ...screen.getByRole("group", { name: "Sparse bars" }).querySelectorAll("rect"),
     ];

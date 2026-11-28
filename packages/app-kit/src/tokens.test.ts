@@ -51,6 +51,16 @@ function contrast(a: Rgb, b: Rgb): number {
   return (l1! + 0.05) / (l2! + 0.05);
 }
 
+function resolveTokenColor(value: string, tokens: Record<string, string>): Rgb {
+  if (/^#[0-9a-f]{6}$/i.test(value)) return parseHex(value);
+  const mix =
+    /^color-mix\(in srgb,\s*var\((--kit-[a-z0-9-]+)\)\s+(\d+)%,\s*var\((--kit-[a-z0-9-]+)\)\)$/.exec(
+      value,
+    );
+  if (!mix) throw new Error(`Unsupported color token format: ${value}`);
+  return blend(parseHex(tokens[mix[1]!]!), parseHex(tokens[mix[3]!]!), Number(mix[2]) / 100);
+}
+
 describe("app-kit design tokens WCAG contrast", () => {
   const source = css ?? "";
   const darkIdx = source.indexOf("@media (prefers-color-scheme: dark)");
@@ -74,7 +84,7 @@ describe("app-kit design tokens WCAG contrast", () => {
       const onAccent = parseHex(tokens["--kit-on-accent"]!);
       const dangerFill = parseHex(tokens["--kit-danger-fill"]!);
       const onDanger = parseHex(tokens["--kit-on-danger"]!);
-      const lineStrong = parseHex(tokens["--kit-line-strong"]!);
+      const lineStrong = resolveTokenColor(tokens["--kit-line-strong"]!, tokens);
 
       for (const surface of [bg, panel, panel2]) {
         expect(contrast(ink, surface), `${themeName} ink`).toBeGreaterThanOrEqual(4.5);

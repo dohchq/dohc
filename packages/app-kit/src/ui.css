@@ -390,21 +390,20 @@ body {
   font: inherit;
   font-size: 13.5px;
   padding: 6px 11px;
-  box-shadow: 0 1px 2px rgba(28, 27, 24, 0.03);
 }
 
 :is(.kit-input, .kit-textarea)::placeholder {
   color: var(--kit-subtle);
 }
 
-:is(.kit-input, .kit-select, .kit-textarea):hover:not(:disabled):not(:focus) {
+:is(.kit-input, .kit-select, .kit-textarea):hover:not(:disabled):not(:focus):not([aria-invalid="true"]) {
   border-color: var(--kit-muted);
 }
 
 :is(.kit-input, .kit-select, .kit-textarea):focus-visible {
+  outline: 2px solid var(--kit-focus);
+  outline-offset: 1px;
   border-color: var(--kit-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kit-focus) 26%, transparent);
-  outline: 2px solid transparent;
 }
 
 :is(.kit-input, .kit-select, .kit-textarea)[aria-invalid="true"] {
@@ -511,11 +510,18 @@ body {
   }
 
   .kit-select {
+    background-image: none;
     padding-right: 11px;
   }
 
   .kit-checkbox::after {
     display: none;
+  }
+
+  .kit-tab[aria-selected="true"] {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
   }
 }
 
@@ -544,12 +550,6 @@ body {
   border-radius: 999px;
   background: var(--kit-panel-2);
   box-shadow: inset 0 0 0 1px var(--kit-line);
-}
-
-.kit-progress-fill-wrap {
-  height: 100%;
-  border-radius: inherit;
-  overflow: hidden;
 }
 
 .kit-progress-fill {
@@ -802,7 +802,7 @@ body {
   border-radius: var(--kit-radius-lg);
   padding: 22px 24px;
   box-shadow: var(--kit-shadow-lg);
-  animation: kit-modal-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  animation: kit-modal-in 120ms ease-out;
 }
 
 .kit-modal:focus {
@@ -820,7 +820,6 @@ body {
 @keyframes kit-modal-in {
   from {
     opacity: 0;
-    transform: translateY(4px) scale(0.985);
   }
 }
 
@@ -855,16 +854,21 @@ body {
 }
 
 @media (prefers-color-scheme: dark) {
-  :is(.kit-tabs-list, .kit-input, .kit-select, .kit-textarea, .kit-checkbox) {
+  .kit-tabs-list,
+  .kit-input,
+  .kit-select,
+  .kit-textarea,
+  .kit-checkbox {
     background-color: var(--kit-bg);
   }
 
-  :is(.kit-tab[aria-selected="true"], .kit-btn-secondary) {
+  .kit-tab[aria-selected="true"],
+  .kit-btn-secondary {
     background-color: var(--kit-panel-2);
   }
 
   .kit-btn-secondary:hover:not(:disabled) {
-    opacity: 0.9;
+    border-color: var(--kit-muted);
   }
 
   .kit-table th {

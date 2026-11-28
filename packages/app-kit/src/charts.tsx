@@ -844,12 +844,11 @@ export function BarChart({
                 setActiveIndex(index);
               }}
             >
-              {selected === index ? (
-                <path
-                  className="kit-chart-hover-band"
-                  d={`M ${groupX + 2},${pad.top} H ${groupX + groupW - 2} V ${pad.top + plotH} H ${groupX + 2} Z`}
-                />
-              ) : null}
+              <path
+                className={selected === index ? "kit-chart-hover-band" : undefined}
+                fill={selected === index ? undefined : "transparent"}
+                d={`M ${groupX + 2},${pad.top} H ${groupX + groupW - 2} V ${pad.top + plotH} H ${groupX + 2} Z`}
+              />
               {series.map((entry, seriesIndex) => {
                 const value = rawValues[seriesIndex]![index]!;
                 if (value === null) return null;
