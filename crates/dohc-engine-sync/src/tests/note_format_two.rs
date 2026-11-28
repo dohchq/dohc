@@ -1939,3 +1939,81 @@ fn a_storage_failure_reading_the_file_proof_stops_the_pass() {
     assert!(matches!(stopped, Err(SyncError::Storage(_))), "{stopped:?}");
     assert_eq!(head(&store, &key), (1, 0));
 }
+
+#[test]
+fn a_save_typed_on_the_replaced_claim_is_history_and_the_owner_pulls_on() {
+    const STALE: &str = "Typed on the old note.\n";
+    let base = base_of(&[NOTE]);
+    let (_scratch, _path, mut store) = open_store();
+    seed_identity(&mut store);
+    let key = seed_note(&mut store, NOTE, "moment-current", Some(&base));
+    assert_eq!(
+        on(|| convert(&mut store, &key, &NoLiveLeases)),
+        FormatTwoConversion::Converted
+    );
+    let carrier = carriers(&store).pop().unwrap();
+    let typed = on(|| {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&base).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, STALE)
+            .unwrap()
+    });
+    let typed = envelope(
+        "joiner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": "object-a", "path": "doc.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": store.put_binary_blob(&typed).unwrap(),
+            "lineageClaimId": predecessor_claim(&carrier), "isBaseState": false
+        }),
+    );
+    let (before, before_at, before_moment): (String, i64, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,updated_at_ms,latest_moment_id FROM snapshots                  WHERE object_id='object-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    let after = put_text(&mut store, STALE);
+    let saved = format!("moment-ydoc-{}", "c".repeat(64));
+    let save = envelope(
+        "joiner",
+        1,
+        "moment.append",
+        json!({
+            "momentId": saved, "versionId": "main", "objectId": "object-a",
+            "objectCreatedAtMs": 1, "path": "doc.md", "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": before, "payloadBeforePath": "doc.md",
+            "payloadAfterBlobSha256": after, "payloadAfterPath": "doc.md",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "present", "beforeObjectId": "object-a", "beforeVersionId": "main",
+            "beforePath": "doc.md", "beforeBlobSha256": before, "beforeContentKind": "text",
+            "beforeUpdatedAtMs": before_at, "beforeLatestMomentId": before_moment,
+            "beforeMetadata": {"origin": "sync"}
+        }),
+    );
+    let outcome = pull(&relay(vec![typed, save]), &mut store, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(2), "{outcome:?}");
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "joiner").unwrap(),
+        1
+    );
+    assert_eq!(claim(&store, &key), Some(successor_claim(&carrier)));
+    assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
+    assert_eq!(text(&mut store), NOTE);
+    let recorded: bool = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE moment_id=?1)",
+                [&saved],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert!(recorded);
+}
