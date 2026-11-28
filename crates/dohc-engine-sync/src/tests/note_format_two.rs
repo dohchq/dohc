@@ -128,7 +128,7 @@ fn convert(store: &mut EngineStore, key: &DocKey, leases: &dyn LeaseProbe) -> Fo
     committed(
         store
             .write_with(&NoFaults, |tx| {
-                convert_note_to_format_two_in_tx(tx, key, leases, 21)
+                convert_note_to_format_two_in_tx(tx, key, leases, &NoLiveLeases, 21)
             })
             .unwrap(),
     )
@@ -603,7 +603,8 @@ fn a_second_call_writes_nothing() {
                         .map_err(SyncError::corrupt)
                 };
                 let before = changes(tx)?;
-                let conversion = convert_note_to_format_two_in_tx(tx, &key, &NoLiveLeases, 22)?;
+                let conversion =
+                    convert_note_to_format_two_in_tx(tx, &key, &NoLiveLeases, &NoLiveLeases, 22)?;
                 Ok::<_, SyncError>((conversion, changes(tx)? - before))
             })
             .unwrap();
@@ -625,7 +626,7 @@ fn a_crash_at_each_commit_converts_once() {
         let faults = ScriptedFaults::crash_at(point);
         let _ = on(|| {
             store.write_with(&*faults, |tx| {
-                convert_note_to_format_two_in_tx(tx, &key, &NoLiveLeases, 21)
+                convert_note_to_format_two_in_tx(tx, &key, &NoLiveLeases, &NoLiveLeases, 21)
             })
         });
         assert!(faults.fired(), "{point:?}");
@@ -670,7 +671,7 @@ fn a_note_waits_while_it_is_live_unsent_or_switched_off() {
     );
     assert_eq!(
         on(|| convert(&mut store, &key, &AlwaysLive)),
-        FormatTwoConversion::NotNow("ydoc-session-live")
+        FormatTwoConversion::NotNow("open-here")
     );
     store
         .write_with(&NoFaults, |tx| {
@@ -1198,9 +1199,19 @@ fn a_peer_with_the_note_open_holds_the_conversion_until_it_closes() {
 
 fn convert_all(
     store: &mut EngineStore,
-    after: Option<&DocKey>,
+    after: Option<&str>,
     budget: usize,
-    live: &dyn LeaseProbe,
+    here: &dyn LeaseProbe,
+) -> FormatTwoPass {
+    convert_all_elsewhere(store, after, budget, here, &NoLiveLeases)
+}
+
+fn convert_all_elsewhere(
+    store: &mut EngineStore,
+    after: Option<&str>,
+    budget: usize,
+    here: &dyn LeaseProbe,
+    elsewhere: &dyn LeaseProbe,
 ) -> FormatTwoPass {
     on(|| {
         convert_notes_to_format_two(
@@ -1208,8 +1219,9 @@ fn convert_all(
             "ws",
             after,
             budget,
-            live,
-            &|_, _| None,
+            here,
+            elsewhere,
+            &|_, _, _| Ok(None),
             &NoFaults,
             21,
         )
@@ -1246,33 +1258,34 @@ fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
             None,
             2,
             &NoLiveLeases,
-            &|_, _| None,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
             &NoFaults,
             21,
         )
     })
     .unwrap();
     assert!(off.off);
-    assert_eq!(off.converted, 0);
+    assert_eq!(off.converted.len(), 0);
     let first = convert_all(&mut store, None, 2, &NoLiveLeases);
     assert_eq!(
-        (first.converted, first.resume_after.as_ref()),
-        (2, Some(&keys[1]))
+        (first.converted.as_slice(), first.resume_after.as_deref()),
+        (&keys[..2], Some("note-2"))
     );
-    let second = convert_all(&mut store, first.resume_after.as_ref(), 2, &NoLiveLeases);
+    let second = convert_all(&mut store, first.resume_after.as_deref(), 2, &NoLiveLeases);
     assert_eq!(
-        (second.converted, second.resume_after.as_ref()),
-        (2, Some(&keys[3]))
+        (second.converted.as_slice(), second.resume_after.as_deref()),
+        (&keys[2..4], Some("note-4"))
     );
-    let third = convert_all(&mut store, second.resume_after.as_ref(), 2, &NoLiveLeases);
-    assert_eq!((third.converted, third.resume_after), (1, None));
+    let third = convert_all(&mut store, second.resume_after.as_deref(), 2, &NoLiveLeases);
+    assert_eq!((third.converted.len(), third.resume_after), (1, None));
     for (n, key) in keys.iter().enumerate() {
         assert_eq!(note(&store, key), (2, format!("Note {}.\n", n + 1)));
     }
     assert_eq!(carriers(&store).len(), 5);
     let before = changes(&store);
     let again = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((again.converted, again.unchanged), (0, 5));
+    assert_eq!((again.converted.len(), again.unchanged), (0, 5));
     assert_eq!(changes(&store), before);
     assert_eq!(carriers(&store).len(), 5);
 }
@@ -1289,15 +1302,15 @@ fn the_pass_skips_an_open_note_and_converts_it_on_the_next_run() {
         Some(&base_of(&[OTHER_NOTE])),
     );
     let held = convert_all(&mut store, None, 10, &OpenNote("object-a"));
-    assert_eq!(held.converted, 1);
+    assert_eq!(held.converted.len(), 1);
     assert_eq!(
         held.skipped,
-        vec![(key.clone(), "doc.md".to_owned(), "ydoc-session-live")]
+        vec![(key.clone(), "doc.md".to_owned(), "open-here")]
     );
     assert_eq!(note(&store, &key).0, 1);
     assert_eq!(note(&store, &other).0, 2);
     let closed = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((closed.converted, closed.unchanged), (1, 1));
+    assert_eq!((closed.converted.len(), closed.unchanged), (1, 1));
     assert!(closed.skipped.is_empty());
     assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
 }
@@ -1329,7 +1342,7 @@ fn the_pass_converts_only_the_main_version() {
     )
     .unwrap();
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((pass.converted, pass.unchanged), (1, 0));
+    assert_eq!((pass.converted.len(), pass.unchanged), (1, 0));
     assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
     assert_eq!(note(&store, &named), (1, NOTE.to_owned()));
 }
@@ -1347,7 +1360,7 @@ fn the_pass_names_a_note_too_large_for_format_two_and_leaves_it() {
     let before = (claim(&store, &key), changes(&store));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!(pass.does_not_fit, vec![(key.clone(), "doc.md".to_owned())]);
-    assert_eq!(pass.converted, 0);
+    assert_eq!(pass.converted.len(), 0);
     assert_eq!((claim(&store, &key), changes(&store)), before);
     assert_eq!(note(&store, &key).0, 1);
     assert!(carriers(&store).is_empty());
@@ -1432,7 +1445,9 @@ fn a_bare_local_marker_in_a_synced_workspace_counts_as_unchanged() {
     let (_scratch, _path, mut store) = open_store();
     let key = settled_local_note(&mut store, NOTE);
     assert_eq!(
-        convert_all(&mut store, None, 10, &NoLiveLeases).converted,
+        convert_all(&mut store, None, 10, &NoLiveLeases)
+            .converted
+            .len(),
         1
     );
     assert_eq!(head(&store, &key), (0, 0));
@@ -1483,7 +1498,8 @@ fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
             None,
             10,
             &NoLiveLeases,
-            &|_, _| Some(settled.clone()),
+            &NoLiveLeases,
+            &|_, _, _| Ok(Some(settled.clone())),
             &NoFaults,
             21,
         )
@@ -1498,7 +1514,7 @@ fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
     let projected = projected(&store, &key);
     settle(&mut store, &projected);
     let settled = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((settled.converted, head(&store, &key)), (1, (0, 0)));
+    assert_eq!((settled.converted.len(), head(&store, &key)), (1, (0, 0)));
 }
 
 #[test]
@@ -1512,7 +1528,7 @@ fn a_settled_local_note_that_keeps_its_files_bytes_drops_its_cache() {
     assert_ne!(projected(&store, &key), file);
     settle(&mut store, file);
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((pass.converted, pass.skipped), (1, Vec::new()));
+    assert_eq!((pass.converted.len(), pass.skipped), (1, Vec::new()));
     assert_eq!(head(&store, &key), (0, 0));
     assert_eq!(text(&mut store), file);
 }
@@ -1540,7 +1556,7 @@ fn a_deleted_local_note_counts_as_unchanged_and_keeps_its_cache() {
         .unwrap();
     let before = head(&store, &key);
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((pass.unchanged, pass.converted), (1, 0));
+    assert_eq!((pass.unchanged, pass.converted.len()), (1, 0));
     assert_eq!(head(&store, &key), before);
 }
 
@@ -1563,7 +1579,7 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
     assert_eq!(note(&store, &key), (1, NOTE.to_owned()));
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
     assert_eq!(pass.skipped, Vec::new());
-    assert_eq!(pass.converted, 1);
+    assert_eq!(pass.converted.len(), 1);
     assert_eq!(head(&store, &key), (0, 0));
     assert_eq!(text(&mut store), NOTE);
     assert!(carriers(&store).is_empty());
@@ -1575,7 +1591,7 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
     assert_eq!(journaled, 0);
     let before = changes(&store);
     let again = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!((again.converted, again.unchanged), (0, 1));
+    assert_eq!((again.converted.len(), again.unchanged), (0, 1));
     assert_eq!(changes(&store), before);
 }
 
@@ -1590,8 +1606,9 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
         vec![(key.clone(), "doc.md".to_owned(), "ydoc-unsettled")]
     );
     assert_eq!(head(&store, &key), (1, 0));
-    let file_proof =
-        |_: &EngineStore, proven: &DocKey| (proven.object_id == "object-a").then(|| source.clone());
+    let file_proof = |_: &EngineStore, proven: &DocKey, path: &str| {
+        Ok((proven.object_id == "object-a" && path == "doc.md").then(|| source.clone()))
+    };
     let proven = on(|| {
         convert_notes_to_format_two(
             &mut store,
@@ -1599,13 +1616,14 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
             None,
             10,
             &NoLiveLeases,
+            &NoLiveLeases,
             &file_proof,
             &NoFaults,
             21,
         )
         .unwrap()
     });
-    assert_eq!((proven.converted, proven.skipped), (1, Vec::new()));
+    assert_eq!((proven.converted.len(), proven.skipped), (1, Vec::new()));
     assert_eq!(head(&store, &key), (0, 0));
     assert_eq!(text(&mut store), NOTE);
 }
@@ -1620,7 +1638,8 @@ fn a_zero_budget_is_refused_and_converts_nothing() {
             None,
             0,
             &NoLiveLeases,
-            &|_, _| None,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
             &NoFaults,
             21,
         )
@@ -1699,16 +1718,205 @@ fn pass_over_a_damaged_note(damaged: &str) {
         })
         .unwrap();
     let pass = convert_all(&mut store, None, 10, &NoLiveLeases);
-    assert_eq!(pass.converted, 2, "{damaged}");
+    assert_eq!(pass.converted.len(), 2, "{damaged}");
     assert_eq!(
         pass.failed
             .iter()
-            .map(|(key, path, _)| (key, path.as_str()))
+            .map(|(object_id, path, _)| (object_id.as_str(), path.as_str()))
             .collect::<Vec<_>>(),
-        vec![(&keys[1], "note-2.md")],
+        vec![(keys[1].object_id.as_str(), "note-2.md")],
         "{damaged}"
     );
     assert_eq!(note(&store, &keys[0]).0, 2);
     assert_eq!(note(&store, &keys[2]).0, 2);
     assert_eq!(pass.resume_after, None);
+}
+
+#[test]
+fn bad_ids_fail_one_by_one_and_the_pass_reaches_the_note_after_them() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    let bad: Vec<String> = (0..10)
+        .map(|n| format!("a{}{n:02}", char::from(1)))
+        .collect();
+    for n in 0..10 {
+        exec(
+            &mut store,
+            &format!(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) \
+                 VALUES('ws','a'||char(1)||'{n:02}',1); \
+                 INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,updated_at_ms) \
+                 VALUES('ws','main','a'||char(1)||'{n:02}','richdoc',1)"
+            ),
+        );
+    }
+    let first = convert_all(&mut store, None, 10, &NoLiveLeases);
+    assert_eq!(
+        first
+            .failed
+            .iter()
+            .map(|(object_id, _, _)| object_id.clone())
+            .collect::<Vec<_>>(),
+        bad
+    );
+    assert!(first.converted.is_empty());
+    assert_eq!(first.resume_after.as_deref(), Some(bad[9].as_str()));
+    let second = convert_all(&mut store, first.resume_after.as_deref(), 10, &NoLiveLeases);
+    assert_eq!(
+        (second.converted, second.resume_after),
+        (vec![key.clone()], None)
+    );
+    assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
+}
+
+#[test]
+fn an_empty_id_in_the_first_batch_fails_and_the_next_batch_resumes_after_it() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    exec(
+        &mut store,
+        "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws','',1); \
+         INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,updated_at_ms) \
+         VALUES('ws','main','','richdoc',1)",
+    );
+    let first = convert_all(&mut store, None, 1, &NoLiveLeases);
+    assert_eq!(
+        first
+            .failed
+            .iter()
+            .map(|(object_id, _, _)| object_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![""]
+    );
+    assert!(first.converted.is_empty());
+    assert_eq!(first.resume_after.as_deref(), Some(""));
+    let second = convert_all(&mut store, first.resume_after.as_deref(), 1, &NoLiveLeases);
+    assert_eq!(
+        (second.converted, second.resume_after),
+        (vec![key.clone()], None)
+    );
+}
+
+#[test]
+fn an_unreadable_path_after_the_batch_does_not_stop_the_notes_before_it() {
+    let (_scratch, _path, mut store) = open_store();
+    let keys: Vec<DocKey> = (1..=3)
+        .map(|n| {
+            let text = format!("Note {n}.\n");
+            let (object, path) = (format!("note-{n}"), format!("note-{n}.md"));
+            seed_at(
+                &mut store,
+                (&object, &path),
+                &text,
+                &format!("moment-{n}"),
+                Some(&base_of(&[&text])),
+            )
+        })
+        .collect();
+    exec(
+        &mut store,
+        "UPDATE snapshots SET path=CAST(X'FF' AS TEXT) WHERE object_id='note-2'",
+    );
+    let first = convert_all(&mut store, None, 1, &NoLiveLeases);
+    assert_eq!(first.converted, vec![keys[0].clone()]);
+    let rest = convert_all(&mut store, first.resume_after.as_deref(), 10, &NoLiveLeases);
+    assert_eq!(
+        rest.failed
+            .iter()
+            .map(|(object_id, _, _)| object_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-2"]
+    );
+    assert_eq!(rest.converted, vec![keys[2].clone()]);
+}
+
+#[test]
+fn a_damaged_unsent_edit_stops_the_pass_instead_of_failing_a_note() {
+    let (_scratch, mut store, _key) = owner(&base_of(&[NOTE]));
+    exec(
+        &mut store,
+        "INSERT INTO replication_log \
+         (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+         VALUES('ws','origin-damaged',1,'collection.update','{',1,0)",
+    );
+    let result = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
+            &NoFaults,
+            21,
+        )
+    });
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
+fn a_note_open_in_this_workspace_folder_is_skipped_as_open_here() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    let registry = dohc_engine_collab::LeaseRegistry::new();
+    let folder = registry.scoped(std::path::Path::new("workspace-folder"));
+    let _open = folder.acquire(&key).unwrap();
+    assert!(!registry.is_live(&key));
+    let pass = convert_all(&mut store, None, 10, &folder);
+    assert_eq!(
+        pass.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "open-here")]
+    );
+    assert_eq!(note(&store, &key).0, 1);
+}
+
+#[test]
+fn a_note_live_on_the_relay_is_skipped_as_open_elsewhere_and_converts_once_it_closes() {
+    let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
+    let other = seed_at(
+        &mut store,
+        OTHER,
+        OTHER_NOTE,
+        "moment-b",
+        Some(&base_of(&[OTHER_NOTE])),
+    );
+    let first = convert_all_elsewhere(&mut store, None, 10, &NoLiveLeases, &OpenNote("object-a"));
+    assert_eq!(
+        first.skipped,
+        vec![(key.clone(), "doc.md".to_owned(), "open-elsewhere")]
+    );
+    assert_eq!(first.converted, vec![other]);
+    let again = convert_all_elsewhere(&mut store, None, 10, &NoLiveLeases, &OpenNote("object-b"));
+    assert_eq!(
+        (again.converted, again.unchanged, again.skipped),
+        (vec![key.clone()], 1, Vec::new())
+    );
+}
+
+#[test]
+fn a_storage_failure_reading_the_file_proof_stops_the_pass() {
+    let (_scratch, _path, mut store) = open_store();
+    let source = hex_sha256(NOTE.as_bytes());
+    let key = local_note(&mut store, NOTE, &base_of(&[NOTE]), Some(&source));
+    let file_proof = |_: &EngineStore, _: &DocKey, _: &str| {
+        Err(dohc_engine_collab::CollabError::Storage(
+            dohc_engine_storage::StorageError::persist_public(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                None,
+            )),
+        ))
+    };
+    let stopped = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &file_proof,
+            &NoFaults,
+            21,
+        )
+    });
+    assert!(matches!(stopped, Err(SyncError::Storage(_))), "{stopped:?}");
+    assert_eq!(head(&store, &key), (1, 0));
 }

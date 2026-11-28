@@ -48,7 +48,8 @@ const WAITS: [(&str, &str); 5] = [
 pub fn convert_note_to_format_two_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
-    leases: &dyn LeaseProbe,
+    here: &dyn LeaseProbe,
+    elsewhere: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
     use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
@@ -62,7 +63,7 @@ pub fn convert_note_to_format_two_in_tx(
         state,
         text,
         text_sha256,
-    } = match ready_to_convert(tx, key, leases)? {
+    } = match ready_to_convert(tx, key, here, elsewhere)? {
         Ok(ready) => ready,
         Err(outcome) => return Ok(outcome),
     };
@@ -174,7 +175,8 @@ struct Ready {
 fn ready_to_convert(
     conn: &rusqlite::Connection,
     key: &DocKey,
-    leases: &dyn LeaseProbe,
+    here: &dyn LeaseProbe,
+    elsewhere: &dyn LeaseProbe,
 ) -> Result<Result<Ready, FormatTwoConversion>, SyncError> {
     use FormatTwoConversion::{NotNow, NothingToConvert};
     let Some(marker) = dohc_engine_collab::read_marker_in(conn, key)
@@ -190,8 +192,11 @@ fn ready_to_convert(
     if doc.note_schema_version() == 2 {
         return Ok(Err(NothingToConvert));
     }
-    if leases.is_live(key) || live_document_bound(conn, key)? {
-        return Ok(Err(NotNow("ydoc-session-live")));
+    if here.is_live(key) {
+        return Ok(Err(NotNow("open-here")));
+    }
+    if elsewhere.is_live(key) || live_document_bound(conn, key)? {
+        return Ok(Err(NotNow("open-elsewhere")));
     }
     if doc.has_pending_dependencies() {
         return Ok(Err(NotNow("ydoc-incomplete-lineage")));
@@ -203,7 +208,7 @@ fn ready_to_convert(
                 params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )
-            .map_err(SyncError::corrupt)?;
+            .map_err(SyncError::persist)?;
         if waits {
             return Ok(Err(NotNow(reason)));
         }
@@ -367,26 +372,31 @@ pub(super) fn received(
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FormatTwoPass {
     pub off: bool,
-    pub converted: usize,
+    pub converted: Vec<DocKey>,
     pub unchanged: usize,
     pub skipped: Vec<(DocKey, String, &'static str)>,
     pub does_not_fit: Vec<(DocKey, String)>,
-    pub failed: Vec<(DocKey, String, String)>,
-    pub resume_after: Option<DocKey>,
+    pub failed: Vec<(String, String, String)>,
+    pub resume_after: Option<String>,
 }
 
-/// Convert up to `budget` of a workspace's main notes after `after` to
-/// format 2, skipping notes `live` holds. `file_proof` names the hash of a
-/// local-only note's file when it still holds what the note's pristine seed
-/// imported. `resume_after` is where the next call starts.
+/// The hash a local-only note's file holds when it still matches what the
+/// note's pristine seed imported, read from the note's stored path.
+pub type FileProof<'a> =
+    &'a dyn Fn(&EngineStore, &DocKey, &str) -> Result<Option<String>, CollabError>;
+
+/// Convert up to `budget` of a workspace's main notes whose object id
+/// follows `after` to format 2, skipping notes open `here` or `elsewhere`.
+/// `resume_after` is the object id the next call starts after.
 #[allow(clippy::too_many_arguments)]
 pub fn convert_notes_to_format_two(
     store: &mut EngineStore,
     workspace_id: &str,
-    after: Option<&DocKey>,
+    after: Option<&str>,
     budget: usize,
-    live: &dyn LeaseProbe,
-    file_proof: &dyn Fn(&EngineStore, &DocKey) -> Option<String>,
+    here: &dyn LeaseProbe,
+    elsewhere: &dyn LeaseProbe,
+    file_proof: FileProof<'_>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoPass, SyncError> {
@@ -401,32 +411,37 @@ pub fn convert_notes_to_format_two(
             reason: "note-format-two-budget-zero",
         });
     }
-    let (version, object) = after.map_or(("", ""), |key| {
-        (key.version_id.as_str(), key.object_id.as_str())
-    });
     let (notes, offline) = store.read_with(|conn| {
         let notes = conn
             .prepare(
-                "SELECT d.version_id, d.object_id, COALESCE(s.path, d.path, d.object_id), \
+                "SELECT d.object_id, COALESCE(s.path, d.path, d.object_id), \
                  d.regime='local-only' AND d.lineage_claim_status='unclaimed' FROM ydoc_docs d \
                  LEFT JOIN snapshots s ON s.workspace_id=d.workspace_id \
                  AND s.version_id=d.version_id AND s.object_id=d.object_id \
                  WHERE d.workspace_id=?1 AND d.version_id='main' AND d.content_kind='richdoc' \
-                 AND (d.version_id, d.object_id) > (?2, ?3) \
-                 ORDER BY d.version_id, d.object_id LIMIT ?4",
+                 AND (?2 IS NULL OR d.object_id > ?2) ORDER BY d.object_id LIMIT ?3",
             )
             .and_then(|mut statement| {
                 statement
                     .query_map(
                         params![
                             workspace_id,
-                            version,
-                            object,
+                            after,
                             i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1)
                         ],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        |row| {
+                            let path = row.get_ref(1)?.as_bytes().map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                            let path = String::from_utf8_lossy(path).into_owned();
+                            Ok((row.get(0)?, path, row.get(2)?))
+                        },
                     )?
-                    .collect::<Result<Vec<(String, String, String, bool)>, _>>()
+                    .collect::<Result<Vec<(String, String, bool)>, _>>()
             })
             .map_err(SyncError::corrupt)?;
         Ok::<_, SyncError>((
@@ -434,15 +449,22 @@ pub fn convert_notes_to_format_two(
             !crate::workspace_replicates_with_relay(conn, workspace_id)?,
         ))
     })?;
-    for (version_id, object_id, path, local) in notes.iter().take(budget) {
-        let key =
-            DocKey::new(workspace_id, version_id, object_id).map_err(map_local_collab_error)?;
+    for (object_id, path, local) in notes.iter().take(budget) {
+        pass.resume_after = Some(object_id.clone());
+        let key = match DocKey::new(workspace_id, "main", object_id) {
+            Ok(key) => key,
+            Err(error) => {
+                pass.failed
+                    .push((object_id.clone(), path.clone(), error.to_string()));
+                continue;
+            }
+        };
         let outcome = if *local && offline {
-            drop_local_format_one(store, &key, live, file_proof, faults, now_ms)
+            drop_local_format_one(store, &key, here, elsewhere, file_proof, faults, now_ms)
         } else {
             store
                 .write_with(faults, |tx| {
-                    convert_note_to_format_two_in_tx(tx, &key, live, now_ms)
+                    convert_note_to_format_two_in_tx(tx, &key, here, elsewhere, now_ms)
                 })
                 .and_then(|outcome| match outcome {
                     TxnOutcome::Committed(outcome) => Ok(outcome),
@@ -450,17 +472,16 @@ pub fn convert_notes_to_format_two(
                 })
         };
         match outcome {
-            Ok(Converted) => pass.converted += 1,
+            Ok(Converted) => pass.converted.push(key.clone()),
             Ok(NothingToConvert) => pass.unchanged += 1,
             Ok(NotNow(reason)) => pass.skipped.push((key.clone(), path.clone(), reason)),
             Ok(DoesNotFit) => pass.does_not_fit.push((key.clone(), path.clone())),
             Err(error) if fails_only_the_note(&error) => {
                 pass.failed
-                    .push((key.clone(), path.clone(), error.to_string()));
+                    .push((object_id.clone(), path.clone(), error.to_string()));
             }
             Err(error) => return Err(error),
         }
-        pass.resume_after = Some(key);
     }
     if notes.len() <= budget {
         pass.resume_after = None;
@@ -529,13 +550,14 @@ fn sqlite_engine_failed(source: &(dyn std::error::Error + 'static)) -> bool {
 fn drop_local_format_one(
     store: &mut EngineStore,
     key: &DocKey,
-    live: &dyn LeaseProbe,
-    file_proof: &dyn Fn(&EngineStore, &DocKey) -> Option<String>,
+    here: &dyn LeaseProbe,
+    elsewhere: &dyn LeaseProbe,
+    file_proof: FileProof<'_>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
     use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
-    let ready = match store.read_with(|conn| ready_to_convert(conn, key, live))? {
+    let ready = match store.read_with(|conn| ready_to_convert(conn, key, here, elsewhere))? {
         Ok(ready) => ready,
         Err(outcome) => return Ok(outcome),
     };
@@ -545,9 +567,13 @@ fn drop_local_format_one(
     let Some(projection) = settled_source(&ready.doc, &ready.text) else {
         return Ok(NotNow("ydoc-unsettled"));
     };
+    let materialized_seed_source_sha256 = match ready.marker.path.as_deref() {
+        Some(path) => file_proof(store, key, path).map_err(map_local_collab_error)?,
+        None => None,
+    };
     let witness = CloseProjection {
         sha256: dohc_engine_storage::hex_sha256(projection.as_bytes()),
-        materialized_seed_source_sha256: file_proof(store, key),
+        materialized_seed_source_sha256,
     };
     match dohc_engine_collab::close_session(store, key, false, Some(&witness), faults, now_ms) {
         Ok(TxnOutcome::Committed(CloseOutcome::Pruned { .. })) => Ok(Converted),
