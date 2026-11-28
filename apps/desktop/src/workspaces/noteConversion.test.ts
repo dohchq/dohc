@@ -7,6 +7,7 @@ import {
 } from "./noteConversion";
 
 type Params = { after?: string; budget: number; relayLive: string[] };
+type Outcome = Record<string, unknown> | Error;
 
 function pass(overrides: Record<string, unknown> = {}) {
   return {
@@ -22,13 +23,40 @@ function pass(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function oneNoteAtATime(outcomes: Outcome[], seen?: string[]) {
+  let index = 0;
+  return vi.fn(async (_params: Params) => {
+    const outcome = outcomes[index];
+    index += 1;
+    seen?.push("note");
+    if (outcome instanceof Error) throw outcome;
+    return pass({
+      ...outcome,
+      resumeAfter: index < outcomes.length ? `n${index}` : null,
+      total: outcomes.length,
+    });
+  });
+}
+
+const converted = (count: number): Outcome[] =>
+  Array.from({ length: count }, () => ({ converted: 1 }));
+
 function relay(overrides: Partial<NoteConversionRelay> = {}) {
   return {
     engineApiMin: vi.fn(async (): Promise<number | undefined> => 2),
     liveNotes: vi.fn(async () => ["live-1"]),
-    pushRecorded: vi.fn(async () => undefined),
+    drainRecorded: vi.fn(async () => undefined),
     ...overrides,
   };
+}
+
+async function failure(promise: Promise<unknown>): Promise<Error> {
+  const error = await promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  if (!(error instanceof Error)) throw new Error("expected the run to fail");
+  return error;
 }
 
 describe("note conversion run", () => {
@@ -43,7 +71,7 @@ describe("note conversion run", () => {
       "dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is 1; it must be 2.",
     );
     expect(convert).not.toHaveBeenCalled();
-    expect(low.pushRecorded).not.toHaveBeenCalled();
+    expect(low.drainRecorded).not.toHaveBeenCalled();
 
     const unset = relay({ engineApiMin: vi.fn(async () => undefined) });
     await expect(
@@ -58,22 +86,19 @@ describe("note conversion run", () => {
   });
 
   it("refuses when the engine reports the format off and returns no result", async () => {
-    const progress = vi.fn();
     const remote = relay();
     await expect(
       createNoteConversion()("ws", {
         relay: remote,
         convert: async () => pass({ off: true, resumeAfter: null }),
         assertCurrent: () => undefined,
-        progress,
       }),
     ).rejects.toThrow(NOTE_CONVERSION_OFF);
-    expect(progress).not.toHaveBeenCalled();
-    expect(remote.pushRecorded).toHaveBeenCalledOnce();
+    expect(remote.drainRecorded).toHaveBeenCalledOnce();
   });
 
   it("skips the floor, the live list and every push for a local-only workspace", async () => {
-    const convert = vi.fn(async (_params: Params) => pass({ converted: 2, unchanged: 1 }));
+    const convert = oneNoteAtATime([{ converted: 1 }, { converted: 1 }, { unchanged: 1 }]);
     await expect(
       createNoteConversion()("ws", { relay: null, convert, assertCurrent: () => undefined }),
     ).resolves.toEqual({
@@ -84,112 +109,161 @@ describe("note conversion run", () => {
       failed: [],
       sent: true,
     });
-    expect(convert).toHaveBeenCalledExactlyOnceWith({ budget: 10, relayLive: [] });
+    expect(convert.mock.calls.map(([params]) => params)).toEqual([
+      { budget: 1, relayLive: [] },
+      { after: "n1", budget: 1, relayLive: [] },
+      { after: "n2", budget: 1, relayLive: [] },
+    ]);
   });
 
-  it("keeps going past a batch of unreadable notes and resumes after each batch", async () => {
+  it("converts one note per call, reads the live list once per batch, and keeps going past unreadable notes", async () => {
     const remote = relay({
       liveNotes: vi
         .fn<() => Promise<string[]>>()
         .mockResolvedValueOnce(["live-1"])
         .mockResolvedValueOnce(["live-2"]),
     });
-    const bad = Array.from({ length: 10 }, (_, index) => ({
-      objectId: `bad-${index}`,
-      path: "",
-      reason: "object_id must be non-empty and bounded",
+    const bad: Outcome[] = Array.from({ length: 10 }, (_, index) => ({
+      failed: [
+        { objectId: `bad-${index}`, path: "", reason: "object_id must be non-empty and bounded" },
+      ],
     }));
-    const convert = vi
-      .fn<(params: Params) => Promise<unknown>>()
-      .mockResolvedValueOnce(pass({ failed: bad, resumeAfter: "bad-9", total: 11 }))
-      .mockResolvedValueOnce(pass({ converted: 1, resumeAfter: null, total: 11 }));
-    const progress = vi.fn();
+    const convert = oneNoteAtATime([...bad, { converted: 1 }]);
 
     const result = await createNoteConversion()("ws", {
       relay: remote,
       convert,
       assertCurrent: () => undefined,
-      progress,
     });
 
-    expect(convert.mock.calls.map(([params]) => params)).toEqual([
-      { budget: 10, relayLive: ["live-1"] },
-      { after: "bad-9", budget: 10, relayLive: ["live-2"] },
-    ]);
+    const calls = convert.mock.calls.map(([params]) => params);
+    expect(calls).toHaveLength(11);
+    expect(calls[0]).toEqual({ budget: 1, relayLive: ["live-1"] });
+    expect(calls[9]).toEqual({ after: "n9", budget: 1, relayLive: ["live-1"] });
+    expect(calls[10]).toEqual({ after: "n10", budget: 1, relayLive: ["live-2"] });
+    expect(remote.liveNotes).toHaveBeenCalledTimes(2);
     expect(result.converted).toBe(1);
     expect(result.failed).toHaveLength(10);
     expect(result.failed[0]).toEqual({
       path: "",
       reason: "object_id must be non-empty and bounded",
     });
-    expect(progress.mock.calls).toEqual([
-      [10, 11],
-      [11, 11],
-    ]);
-    expect(remote.pushRecorded).toHaveBeenCalledTimes(2);
+    expect(remote.drainRecorded).toHaveBeenCalledTimes(2);
   });
 
-  it("pushes between batches that converted notes and once more at the end", async () => {
+  it("drains between batches that converted notes and once more at the end", async () => {
     const order: string[] = [];
     const remote = relay({
-      pushRecorded: vi.fn(async () => void order.push("push")),
+      drainRecorded: vi.fn(async () => void order.push("drain")),
       liveNotes: vi.fn(async () => (order.push("live"), [])),
     });
-    const convert = vi
-      .fn<(params: Params) => Promise<unknown>>()
-      .mockImplementationOnce(
-        async () => (order.push("batch"), pass({ converted: 10, resumeAfter: "a" })),
-      )
-      .mockImplementationOnce(
-        async () => (order.push("batch"), pass({ unchanged: 10, resumeAfter: "b" })),
-      )
-      .mockImplementationOnce(async () => (order.push("batch"), pass({ converted: 1 })));
+    const unchanged: Outcome[] = Array.from({ length: 10 }, () => ({ unchanged: 1 }));
+    const convert = oneNoteAtATime([...converted(10), ...unchanged, { converted: 1 }], order);
 
     await createNoteConversion()("ws", { relay: remote, convert, assertCurrent: () => undefined });
 
+    const notes = (count: number) => Array.from({ length: count }, () => "note");
     expect(order).toEqual([
-      "push",
+      "drain",
       "live",
-      "batch",
-      "push",
+      ...notes(10),
+      "drain",
       "live",
-      "batch",
+      ...notes(10),
       "live",
-      "batch",
-      "push",
+      "note",
+      "drain",
     ]);
   });
 
-  it("reports converted notes it could not send when the last push fails", async () => {
-    const pushRecorded = vi
+  it("reports converted notes it could not send when the last drain fails", async () => {
+    const drainRecorded = vi
       .fn<() => Promise<void>>()
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("relay down"))
       .mockRejectedValueOnce(new Error("relay down"));
-    const convert = vi
-      .fn<(params: Params) => Promise<unknown>>()
-      .mockResolvedValueOnce(pass({ converted: 10, resumeAfter: "a" }))
-      .mockResolvedValueOnce(pass({ converted: 1 }));
+    const convert = oneNoteAtATime(converted(11));
 
     const result = await createNoteConversion()("ws", {
-      relay: relay({ pushRecorded }),
+      relay: relay({ drainRecorded }),
       convert,
       assertCurrent: () => undefined,
     });
 
     expect(result).toMatchObject({ converted: 11, sent: false });
-    expect(convert).toHaveBeenCalledTimes(2);
+    expect(convert).toHaveBeenCalledTimes(11);
+    expect(drainRecorded).toHaveBeenCalledTimes(3);
   });
 
-  it("stops between batches once the window leaves the workspace", async () => {
+  it("refuses to start when what the workspace recorded cannot be drained first", async () => {
+    const convert = vi.fn(async () => pass());
+    await expect(
+      createNoteConversion()("ws", {
+        relay: relay({
+          drainRecorded: vi.fn(async () =>
+            Promise.reject(new Error("dohc could not send changes to your server.")),
+          ),
+        }),
+        convert,
+        assertCurrent: () => undefined,
+      }),
+    ).rejects.toThrow("dohc could not send changes to your server.");
+    expect(convert).not.toHaveBeenCalled();
+  });
+
+  it("says how many notes it converted when a later note fails", async () => {
+    const fatal = new Error("dohc could not read the workspace database.");
+    const convert = oneNoteAtATime([{ converted: 1 }, fatal, { converted: 1 }]);
+
+    const error = await failure(
+      createNoteConversion()("ws", { relay: null, convert, assertCurrent: () => undefined }),
+    );
+
+    expect(error.message).toBe(
+      "dohc could not read the workspace database. dohc converted 1 note before it stopped. Run Convert notes again to finish.",
+    );
+    expect(error.cause).toBe(fatal);
+    expect(convert).toHaveBeenCalledTimes(2);
+
+    const first = await failure(
+      createNoteConversion()("ws", {
+        relay: null,
+        convert: async () => Promise.reject(fatal),
+        assertCurrent: () => undefined,
+      }),
+    );
+    expect(first).toBe(fatal);
+  });
+
+  it("carries the running count into a live list failure after earlier batches", async () => {
+    const convert = oneNoteAtATime(converted(12));
+    const error = await failure(
+      createNoteConversion()("ws", {
+        relay: relay({
+          liveNotes: vi
+            .fn<() => Promise<string[]>>()
+            .mockResolvedValueOnce(["live-1"])
+            .mockRejectedValueOnce(new Error("dohc could not reach your server.")),
+        }),
+        convert,
+        assertCurrent: () => undefined,
+      }),
+    );
+
+    expect(error.message).toBe(
+      "dohc could not reach your server. dohc converted 10 notes before it stopped. Run Convert notes again to finish.",
+    );
+    expect(convert).toHaveBeenCalledTimes(10);
+  });
+
+  it("stops before the next note once the window leaves the workspace, and says what it converted", async () => {
     let current = true;
-    const progress = vi.fn();
     const convert = vi.fn(async () => {
       current = false;
-      return pass({ converted: 10, resumeAfter: "a" });
+      return pass({ converted: 1, resumeAfter: "a" });
     });
 
-    await expect(
+    const error = await failure(
       createNoteConversion()("ws", {
         relay: relay(),
         convert,
@@ -197,11 +271,13 @@ describe("note conversion run", () => {
           if (!current)
             throw new Error("Converting notes stopped because this window changed workspaces.");
         },
-        progress,
       }),
-    ).rejects.toThrow("changed workspaces");
+    );
+
+    expect(error.message).toBe(
+      "Converting notes stopped because this window changed workspaces. dohc converted 1 note before it stopped. Run Convert notes again to finish.",
+    );
     expect(convert).toHaveBeenCalledOnce();
-    expect(progress).toHaveBeenCalledOnce();
   });
 
   it("refuses a second run in the same workspace while one runs, and allows another workspace", async () => {
