@@ -1,4 +1,9 @@
-import { Mark, type Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  Mark,
+  type Fragment,
+  type Node as ProseMirrorNode,
+  type ResolvedPos,
+} from "@tiptap/pm/model";
 import {
   AddMarkStep,
   AttrStep,
@@ -157,6 +162,82 @@ function trimRange(before: ProseMirrorNode, after: ProseMirrorNode, range: Range
   return [oldStart + head, oldEnd - tail, newStart + head, newEnd - tail];
 }
 
+type Leaf = { node: ProseMirrorNode; from: number; to: number };
+
+function leavesBetween(doc: ProseMirrorNode, from: number, to: number): Leaf[] {
+  const leaves: Leaf[] = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!holdsNoBlocks(node)) return true;
+    if (pos >= from && pos + node.nodeSize <= to)
+      leaves.push({ node, from: pos, to: pos + node.nodeSize });
+    return false;
+  });
+  return leaves;
+}
+
+/** prosemirror-tables builds a moved table from the nodes it keeps, so a kept leaf is the same node. */
+function inOrder(was: readonly Leaf[], now: readonly Leaf[]): [number, number][] {
+  const index = new Map(was.map(({ node }, at) => [node, at]));
+  const at = now.map(({ node }) => index.get(node) ?? -1);
+  const ends: number[] = [];
+  const previous = at.map(() => -1);
+  at.forEach((one, other) => {
+    if (one < 0) return;
+    let [low, high] = [0, ends.length];
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (at[ends[middle]!]! < one) low = middle + 1;
+      else high = middle;
+    }
+    previous[other] = ends[low - 1] ?? -1;
+    ends[low] = other;
+  });
+  const pairs: [number, number][] = [];
+  for (let other = ends.at(-1) ?? -1; other >= 0; other = previous[other]!)
+    pairs.unshift([at[other]!, other]);
+  return pairs;
+}
+
+const isTable = (node: ProseMirrorNode | null | undefined) => node?.type.name === "table";
+
+const betweenCells = ($pos: ResolvedPos) =>
+  !$pos.parent.isTextblock &&
+  (isTable($pos.nodeAfter) ||
+    Array.from({ length: $pos.depth }, (_, at) => $pos.node(at + 1)).some(isTable));
+
+function keptInOrder(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  range: Range,
+): Range[] | null {
+  const [start, end] = [before.resolve(range[0]), before.resolve(range[1])];
+  if (range[0] === range[1] || range[2] === range[3] || !betweenCells(start)) return null;
+  if (end.parent.isTextblock) return null;
+  let [oldStart, oldEnd, newStart, newEnd] = trimRange(before, after, range);
+  const [$start, $end] = [before.resolve(oldStart), before.resolve(oldEnd)];
+  const back = $start.parent.isTextblock ? oldStart - $start.before() : 0;
+  const on = $end.parent.isTextblock ? $end.after() - oldEnd : 0;
+  [oldStart, oldEnd, newStart, newEnd] = [
+    oldStart - back,
+    oldEnd + on,
+    newStart - back,
+    newEnd + on,
+  ];
+  const was = leavesBetween(before, oldStart, oldEnd);
+  const now = leavesBetween(after, newStart, newEnd);
+  const kept = inOrder(was, now);
+  if (kept.length === 0) return null;
+  const ranges: Range[] = [];
+  let [lastOne, lastOther] = [-1, -1];
+  for (const [one, other] of [...kept, [was.length, now.length]]) {
+    const [oldTo, newTo] = [was[one]?.from ?? oldEnd, now[other]?.from ?? newEnd];
+    if (one > lastOne + 1 || other > lastOther + 1) ranges.push([oldStart, oldTo, newStart, newTo]);
+    [oldStart, newStart] = [was[one]?.to ?? oldEnd, now[other]?.to ?? newEnd];
+    [lastOne, lastOther] = [one, other];
+  }
+  return ranges.length > 0 ? ranges : null;
+}
+
 function rangesOf(
   before: ProseMirrorNode,
   after: ProseMirrorNode,
@@ -170,7 +251,61 @@ function rangesOf(
       before.slice(oldStart, oldEnd).eq(after.slice(newStart, newEnd));
     if (!same) ranges.push([oldStart, oldEnd, newStart, newEnd]);
   });
-  return trimmed && ranges.length === 1 ? [trimRange(before, after, ranges[0]!)] : ranges;
+  if (!trimmed || ranges.length !== 1) return ranges;
+  return keptInOrder(before, after, ranges[0]!) ?? [trimRange(before, after, ranges[0]!)];
+}
+
+function asOneStep(transaction: Transform, from: number, to: number): Transform | null {
+  const { before, doc } = transaction;
+  const until = before.content.size - (doc.content.size - to);
+  const step = new ReplaceStep(from, until, doc.slice(from, to));
+  if (!keepsPairs(step, before)) return null;
+  const whole = new Transform(before);
+  try {
+    return !whole.maybeStep(step).failed && whole.doc.eq(doc) ? whole : null;
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return null;
+  }
+}
+
+/**
+ * prosemirror-tables deletes a row from under a cell that spans the next row, then puts a copy
+ * of that cell, holding the same nodes, in the next row.
+ */
+function handedOnAsOne(transaction: Transform): Transform | null {
+  const docs = [...transaction.docs, transaction.doc];
+  const deleted = new Set<ProseMirrorNode>();
+  let handedOn = false;
+  for (const [at, step] of transaction.steps.entries()) {
+    if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep)) return null;
+    for (const [oldStart, oldEnd, newStart, newEnd] of rangesOf(
+      docs[at]!,
+      docs[at + 1]!,
+      step.getMap(),
+      false,
+    )) {
+      const ends = [docs[at]!.resolve(oldStart), docs[at]!.resolve(oldEnd)];
+      if (!ends.every(betweenCells)) return null;
+      for (const { node } of leavesBetween(docs[at + 1]!, newStart, newEnd))
+        handedOn ||= deleted.has(node);
+      for (const { node } of leavesBetween(docs[at]!, oldStart, oldEnd)) deleted.add(node);
+    }
+  }
+  const { before, doc } = transaction;
+  const differs = before.content.findDiffStart(doc.content);
+  if (!handedOn || differs === null) return null;
+  const { a, b } = before.content.findDiffEnd(doc.content)!;
+  const $from = before.resolve(differs);
+  const $until = before.resolve(a + Math.max(0, differs - Math.min(a, b)));
+  const from = $from.parent.isTextblock ? $from.before() : differs;
+  const on = ($until.parent.isTextblock ? $until.after() : $until.pos) - a;
+  const was = leavesBetween(before, from, a + on);
+  const now = leavesBetween(doc, from, b + on);
+  const stays = new Set(was.map(({ node }) => node).filter((node) => !deleted.has(node)));
+  const keeps = inOrder(was, now).filter(([one]) => stays.has(was[one]!.node)).length;
+  const kept = now.filter(({ node }) => stays.has(node)).length;
+  return keeps === kept ? asOneStep(transaction, from, b + on) : null;
 }
 
 function tokensBetween(doc: ProseMirrorNode, from: number, to: number): Token[] {
@@ -1128,6 +1263,8 @@ export function writeTransaction(
       afterEachStep?.(transaction.doc) !== false
     );
   }
+  const handedOn = handedOnAsOne(transaction);
+  if (handedOn) return writeTransaction(writing, handedOn, afterEachStep);
   const docs = [...transaction.docs, transaction.doc];
   type Run = { kind: "marks" | "containers" | "inserts"; from: number };
   let run = null as Run | null;
@@ -1178,8 +1315,9 @@ export function writeTransaction(
       if (kind === "inserts") inserts.push([insert![0], at, insert!]);
       continue;
     }
+    const reading = step instanceof ReplaceStep ? writing.reader.reading() : null;
     for (const range of ranges!.reverse())
-      writeRange(writing, after, writing.reader.reading(), ...range);
+      writeRange(writing, after, reading ?? writing.reader.reading(), ...range);
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
     if (afterEachStep?.(after) === false) return false;
   }
@@ -1930,18 +2068,7 @@ function asOneRange(transaction: Transform): Transform | null {
     to = replacing === 0 ? newEnd : Math.max(map.map(to, 1), newEnd);
     replacing += 1;
   }
-  if (replacing < 2) return null;
-  const { before, doc } = transaction;
-  const until = before.content.size - (doc.content.size - to);
-  const step = new ReplaceStep(from, until, doc.slice(from, to));
-  if (!keepsPairs(step, before)) return null;
-  const whole = new Transform(before);
-  try {
-    return !whole.maybeStep(step).failed && whole.doc.eq(doc) ? whole : null;
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-    return null;
-  }
+  return replacing < 2 ? null : asOneStep(transaction, from, to);
 }
 
 /**
