@@ -159,21 +159,23 @@ export function useNoteConversion(input: {
     function settle(result: ConvertNotesResult, quiet = false) {
       last.current = { workspaceId, result };
       const left = leftNoteCount(result);
-      unsent.current = result.sent ? null : { workspaceId, converted: result.converted };
-      show({ status: result.sent ? "done" : "unsent", converted: result.converted, left });
+      const finished = result.sent && !result.stopped;
+      unsent.current = finished ? null : { workspaceId, converted: result.converted };
+      show({ status: finished ? "done" : "unsent", converted: result.converted, left });
+      const notice = noteConversionNotice(result);
       if (result.stopped) {
         report({
           message: `${result.stopped} dohc converted ${countWords(result.converted, "note", "notes")} before it stopped. Try again to finish.`,
           kind: KIND,
           quiet,
           retry: convert,
+          ...(notice?.rows && notice.details ? { rows: notice.rows, details: notice.details } : {}),
         });
         return;
       }
-      const notice = noteConversionNotice(result);
       if (!notice) {
         clear(KIND);
-        success(convertedWords(result.converted), undefined, KIND);
+        if (!quiet) success(convertedWords(result.converted), undefined, KIND);
         return;
       }
       report({
@@ -229,7 +231,10 @@ export function useNoteConversion(input: {
         const shown = last.current;
         if (from !== workspaceId || shown?.workspaceId !== from || inFlight.current.has(from))
           return;
-        settle(withNoteRetried(shown.result, path, result, drained), result.failed.length === 0);
+        settle(
+          withNoteRetried(shown.result, path, result, drained),
+          result.failed.length === 0 && result.sent,
+        );
       }),
     [workspaceId, settle],
   );

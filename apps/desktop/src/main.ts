@@ -871,7 +871,7 @@ import {
   createNoteConversion,
   noteConversionOffered,
   noteConversionReach,
-  stopsOnceSyncStarts,
+  stopsOnceSyncChanges,
   type NoteConversionRelay,
   type NoteConversionRun,
 } from "./workspaces/noteConversion";
@@ -2300,12 +2300,11 @@ async function noteConversionRun(operation: {
   const { workspaceId } = operation.workspace;
   return {
     relay,
-    assertCurrent: relay
-      ? () => operation.assertCurrent()
-      : stopsOnceSyncStarts(
-          () => operation.assertCurrent(),
-          () => Boolean(findWorkspace(workspaceId)?.remote),
-        ),
+    assertCurrent: stopsOnceSyncChanges(
+      () => operation.assertCurrent(),
+      relay !== null,
+      () => Boolean(findWorkspace(workspaceId)?.remote),
+    ),
     progress: (done, total) =>
       sendToWorkspaceWindows(CHANNELS.noteConversionProgress, {
         workspaceId,

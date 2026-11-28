@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
+import { runInKeyedLane } from "../keyedLane";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { localPersonOwnsWorkspace } from "./localPersonOwns";
 import type { RegistryEntry } from "./registryStore";
@@ -88,10 +89,15 @@ export interface NoteConversionRun {
   progress?(done: number, total: number): void;
 }
 
-export function stopsOnceSyncStarts(assertCurrent: () => void, syncing: () => boolean): () => void {
+export function stopsOnceSyncChanges(
+  assertCurrent: () => void,
+  synced: boolean,
+  syncing: () => boolean,
+): () => void {
   return () => {
     assertCurrent();
-    if (syncing()) throw new Error(NOTE_CONVERSION_SYNC_STARTED);
+    if (syncing() !== synced)
+      throw new Error(synced ? NOTE_CONVERSION_PAUSED : NOTE_CONVERSION_SYNC_STARTED);
   };
 }
 
@@ -148,16 +154,16 @@ type Retried = { result: ConvertNotesResult; drained: boolean } | null;
 
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const running = new Set<string>();
-  const turns = new Map<string, Promise<unknown>>();
+  const turns = new Map<string, Promise<void>>();
   const openHere = new Map<string, Map<string, string>>();
-  const inTurn = <T>(workspaceId: string, work: () => Promise<T>): Promise<T> => {
-    const turn = (turns.get(workspaceId) ?? Promise.resolve()).catch(() => undefined).then(work);
-    turns.set(workspaceId, turn);
-    const clean = () => {
-      if (turns.get(workspaceId) === turn) turns.delete(workspaceId);
-    };
-    void turn.then(clean, clean);
-    return turn;
+  const forget = (workspaceId: string, path: string) => {
+    const here = openHere.get(workspaceId);
+    here?.delete(path);
+    if (here?.size === 0) openHere.delete(workspaceId);
+  };
+  const record = (workspaceId: string, here: Map<string, string>) => {
+    if (here.size > 0) openHere.set(workspaceId, here);
+    else openHere.delete(workspaceId);
   };
 
   const closed = (
@@ -165,7 +171,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
     path: string,
     withRun: (use: (run: NoteConversionRun) => Promise<Retried>) => Promise<Retried | undefined>,
   ): Promise<Retried> =>
-    inTurn(workspaceId, async () => {
+    runInKeyedLane(turns, workspaceId, async () => {
       const objectId = openHere.get(workspaceId)?.get(path);
       if (objectId === undefined) return null;
       try {
@@ -179,12 +185,13 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
           if (pass.skipped.some(({ reason }) => reason === "open-here")) return null;
           const result = emptyResult();
           addPass(result, pass);
-          if (pass.failed.length === 0) openHere.get(workspaceId)?.delete(path);
+          if (pass.failed.length === 0) forget(workspaceId, path);
           if (relay && result.converted > 0) result.sent = await sent(relay);
           return { result, drained: result.sent };
         });
         return retried ?? null;
       } catch (error) {
+        forget(workspaceId, path);
         const reason = error instanceof Error ? error.message : String(error);
         return { result: { ...emptyResult(), failed: [{ path, reason }] }, drained: false };
       }
@@ -197,7 +204,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
     if (running.has(workspaceId)) throw new Error(NOTE_CONVERSION_RUNNING);
     running.add(workspaceId);
     try {
-      return await inTurn(workspaceId, () => convertAll(workspaceId, run));
+      return await runInKeyedLane(turns, workspaceId, () => convertAll(workspaceId, run));
     } finally {
       running.delete(workspaceId);
     }
@@ -256,14 +263,14 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
       if (error instanceof Error && error.message === "note-format-two-relay-unchecked")
         throw new Error(NOTE_CONVERSION_SYNCED_BEFORE, { cause: error });
       if (result.converted === 0) throw error;
-      openHere.set(workspaceId, here);
+      record(workspaceId, here);
       return {
         ...result,
         sent: false,
         stopped: error instanceof Error ? error.message : String(error),
       };
     }
-    openHere.set(workspaceId, here);
+    record(workspaceId, here);
     if (relay && result.converted > 0) result.sent = await sent(relay);
     return result;
   }
