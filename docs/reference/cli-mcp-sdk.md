@@ -1051,13 +1051,13 @@ Returns `{ ok: true, path, already?: true, ended?: true } | { ok: false, reason 
 
 ### `dohc_convert_notes`
 
-Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.
+Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. `stopped` says why a run stopped partway; the counts say what it did first, and running it again finishes. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
 No arguments.
 
-Returns `{ ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent } | { ok: false, reason }`.
+Returns `{ ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent, stopped? } | { ok: false, reason }`.
 
 ### `dohc_read_held_change`
 
@@ -1324,7 +1324,7 @@ Convert this workspace's notes to the new format, as Convert notes does in Setti
 
 Prints how many notes it converted, then the paths it left as they were and why. Run it again to convert notes that were open or busy. Every computer and phone must run a dohc that reads the new format first. It cannot be undone.
 
-With `--json`, prints `{ schemaVersion, ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent }`.
+With `--json`, prints `{ schemaVersion, ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent, stopped? }`.
 
 ### `dohc notices`
 

@@ -2308,7 +2308,10 @@ async function convertNotesForOperation(operation: {
         ),
     progress: (done, total) => {
       for (const window of BrowserWindow.getAllWindows())
-        if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId)
+        if (
+          !window.isDestroyed() &&
+          rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId
+        )
           sendIfOpen(window, CHANNELS.noteConversionProgress, { workspaceId, done, total });
     },
     convert: (params) =>

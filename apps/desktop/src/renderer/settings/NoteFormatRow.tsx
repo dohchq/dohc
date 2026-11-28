@@ -24,15 +24,25 @@ export function convertNotesConfirm(workspaceName: string) {
   };
 }
 
+const OFFER_CHECK = "note-conversion-offered";
+const OFFER_UNREAD = "dohc could not check whether this workspace's notes can be converted.";
+
 type RowProps = { conversion: NoteConversion; workspaceName: string; searchMatch?: boolean };
 
 export function OfferedNoteFormatRow(
   props: RowProps & {
     workspaceId: string;
-    onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+    onError?: (
+      message: string,
+      cause?: unknown,
+      retry?: () => Promise<void>,
+      details?: undefined,
+      identity?: string,
+    ) => void;
+    onClearError?: (identity: string) => void;
   },
 ) {
-  const { workspaceId, onError, ...row } = props;
+  const { workspaceId, onError, onClearError, ...row } = props;
   const [account, setAccount] = useState({ generation: 0, ready: true });
   useEffect(
     () =>
@@ -46,18 +56,26 @@ export function OfferedNoteFormatRow(
     manual: !account.ready,
     load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
   });
-  const { error, retry } = offered;
+  const { error, pending, value, retry } = offered;
   useEffect(() => {
-    if (error !== null)
-      onError?.(
-        ipcErrorMessage(
-          error,
-          "dohc could not check whether this workspace's notes can be converted.",
-        ),
-        error,
-        retry,
-      );
-  }, [error, onError, retry]);
+    if (error === null) return;
+    const notice = (cause: unknown) =>
+      onError?.(ipcErrorMessage(cause, OFFER_UNREAD), cause, readAgain, undefined, OFFER_CHECK);
+    async function readAgain() {
+      try {
+        await bridge().readNoteConversionOffered({ workspaceId });
+      } catch (again) {
+        notice(again);
+        return;
+      }
+      onClearError?.(OFFER_CHECK);
+      void retry();
+    }
+    notice(error);
+  }, [error, onError, onClearError, retry, workspaceId]);
+  useEffect(() => {
+    if (!pending && error === null && value !== undefined) onClearError?.(OFFER_CHECK);
+  }, [pending, error, value, onClearError]);
   if (error !== null)
     return (
       <SettingRow

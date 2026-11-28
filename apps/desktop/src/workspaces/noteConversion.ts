@@ -18,6 +18,8 @@ const NOTE_CONVERSION_STUCK =
   "dohc could not convert notes because the engine did not move past the last note it read.";
 export const NOTE_CONVERSION_NOT_OWNER =
   "dohc could not convert notes. Only the person who owns this workspace can convert its notes.";
+export const NOTE_CONVERSION_SIGNED_OUT =
+  "dohc could not convert notes. Sign in to the account that synced this workspace, then try again.";
 export const NOTE_CONVERSION_SHARED_VIEW =
   "This is a shared view. Only the original workspace converts its notes.";
 
@@ -40,6 +42,8 @@ export function noteConversionReach(
   credentials: CloudCredentials | null,
 ): "local" | "relay" {
   if (shareViewIsPresent(workspace.shareView)) throw new Error(NOTE_CONVERSION_SHARED_VIEW);
+  if (credentials === null && (workspace.remote ?? workspace.pausedRemote))
+    throw new Error(NOTE_CONVERSION_SIGNED_OUT);
   if (!localPersonOwnsWorkspace(workspace, credentials)) throw new Error(NOTE_CONVERSION_NOT_OWNER);
   if (workspace.pausedRemote && !workspace.remote) throw new Error(NOTE_CONVERSION_PAUSED);
   return workspace.remote ? "relay" : "local";
@@ -84,16 +88,6 @@ export function stopsOnceSyncStarts(assertCurrent: () => void, syncing: () => bo
 function floorRefusal(found: string): Error {
   return new Error(
     `dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN ${found}; it must be ${RELAY_ENGINE_API_FLOOR}.`,
-  );
-}
-
-function stoppedAfter(error: unknown, converted: number): unknown {
-  if (converted === 0) return error;
-  const words = error instanceof Error ? error.message : String(error);
-  const notes = converted === 1 ? "1 note" : `${converted.toLocaleString("en-US")} notes`;
-  return new Error(
-    `${words} dohc converted ${notes} before it stopped. Run Convert notes again to finish.`,
-    { cause: error },
   );
 }
 
@@ -180,7 +174,12 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
           if (more && relay && result.converted > before) await relay.drainRecorded();
         }
       } catch (error) {
-        throw stoppedAfter(error, result.converted);
+        if (result.converted === 0) throw error;
+        return {
+          ...result,
+          sent: false,
+          stopped: error instanceof Error ? error.message : String(error),
+        };
       }
       if (relay && result.converted > 0)
         result.sent = await relay.drainRecorded().then(

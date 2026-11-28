@@ -430,20 +430,20 @@ describe("note conversion run", () => {
       return answer;
     });
 
-    const error = await failure(
-      createNoteConversion(2)("ws", {
-        relay: null,
-        convert,
-        assertCurrent: stopsOnceSyncStarts(
-          () => undefined,
-          () => syncing,
-        ),
-      }),
-    );
+    const run = await createNoteConversion(2)("ws", {
+      relay: null,
+      convert,
+      assertCurrent: stopsOnceSyncStarts(
+        () => undefined,
+        () => syncing,
+      ),
+    });
 
-    expect(error.message).toBe(
-      "Sync was turned on while dohc converted notes. dohc converted 2 notes before it stopped. Run Convert notes again to finish.",
-    );
+    expect(run).toMatchObject({
+      converted: 2,
+      sent: false,
+      stopped: "Sync was turned on while dohc converted notes.",
+    });
     expect(convert).toHaveBeenCalledTimes(2);
   });
 

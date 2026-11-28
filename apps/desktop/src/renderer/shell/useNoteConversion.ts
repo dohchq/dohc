@@ -111,6 +111,14 @@ export function useNoteConversion(input: {
       const left = leftNoteCount(result);
       unsent.current = result.sent ? null : { workspaceId, converted: result.converted };
       show({ status: result.sent ? "done" : "unsent", converted: result.converted, left });
+      if (result.stopped) {
+        report({
+          message: `${result.stopped} dohc converted ${countWords(result.converted, "note", "notes")} before it stopped. Try again to finish.`,
+          kind: KIND,
+          retry: convert,
+        });
+        return;
+      }
       const notice = noteConversionNotice(result);
       if (!notice) {
         clear(KIND);
