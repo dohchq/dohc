@@ -528,8 +528,8 @@ Agents create the same address with `dohc webhook create Waitlist --collection w
 A website form address works differently from a private one:
 
 - It takes only form-encoded posts of up to 8 KiB.
-- It keeps the fields you listed and drops every other field. It refuses a post with none of them, a field sent twice, a value over 500 characters, or an `email` that isn't an email address.
-- Each network can post 5 times in a burst and 20 times a day. One IPv6 /64 counts as one network.
+- It keeps the fields you listed and drops every other field. It refuses a post with none of them, one of them sent twice, a value over 500 characters, or an `email` that isn't an email address.
+- Each network can post 5 times in a burst and 20 times in any 24 hours. One IPv6 /64 counts as one network.
 - At most 20 responses wait to be written, so a busy form can't hold up the workspace's other webhooks.
 
 The record's title is the webhook name followed by the first of `title`, `subject`, `summary`, `event`, `name`, or `email` that has a value.

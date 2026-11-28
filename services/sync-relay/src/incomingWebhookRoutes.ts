@@ -74,7 +74,7 @@ export function createIncomingWebhookLimiters() {
     admin: new TokenBucketLimiter(ADMIN_BUCKET_CAPACITY, ADMIN_REFILL_PER_SECOND, MAX_TRACKED_KEYS),
     formSender: new TokenBucketLimiter(
       INCOMING_WEBHOOK_FORM_SENDER_BURST,
-      INCOMING_WEBHOOK_FORM_SENDER_DAILY / 86_400,
+      (INCOMING_WEBHOOK_FORM_SENDER_DAILY - INCOMING_WEBHOOK_FORM_SENDER_BURST) / 86_400,
       MAX_TRACKED_KEYS,
     ),
   };
@@ -417,7 +417,7 @@ export function createIncomingWebhookRoutes(options: {
       payloadBytes = new TextEncoder().encode(kept.body);
     }
 
-    const allowedHeaders = extractAllowedIncomingWebhookHeaders(request.headers);
+    const allowedHeaders = form ? {} : extractAllowedIncomingWebhookHeaders(request.headers);
     const payloadSha256 = createHash("sha256").update(payloadBytes).digest("hex");
     const deliveryId = mintIncomingWebhookDeliveryId();
 

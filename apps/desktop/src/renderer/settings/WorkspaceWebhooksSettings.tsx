@@ -47,8 +47,8 @@ function escapeHtml(text: string): string {
 function formatFormExample(endpointUrl: string, form: IncomingWebhookForm): string {
   const inputs = form.fields.map((field) =>
     field === "email"
-      ? `  <input name="email" type="email" required>`
-      : `  <input name="${field}">`,
+      ? `  <label>email <input name="email" type="email" required></label>`
+      : `  <label>${field} <input name="${field}"></label>`,
   );
   return [
     `<form method="post" action="${escapeHtml(endpointUrl)}">`,
@@ -154,7 +154,7 @@ function CreateWebhookDialog(props: {
             New incoming webhook
           </h2>
           <p className="m-0 text-[13px] text-muted">
-            Creates a private POST URL that adds quarantined items into a private Collection.
+            Creates a POST URL that adds quarantined items into a private Collection.
           </p>
         </div>
 

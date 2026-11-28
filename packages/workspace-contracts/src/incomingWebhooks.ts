@@ -128,7 +128,7 @@ export const IncomingWebhookSummary = z
     createdAtMs: z.number().int().nonnegative(),
     updatedAtMs: z.number().int().nonnegative(),
     lastDeliveryAtMs: z.number().int().nonnegative().nullable(),
-    form: IncomingWebhookForm.nullable(),
+    form: IncomingWebhookForm.optional(),
     pendingCount: z.number().int().nonnegative(),
     recentDeliveries: z.array(IncomingWebhookRecentDelivery).max(20),
   })

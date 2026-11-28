@@ -64,7 +64,6 @@ describe("WorkspaceWebhooksSettings", () => {
       createdAtMs: 1_700_000_000_000,
       updatedAtMs: 1_700_000_000_000,
       lastDeliveryAtMs: null,
-      form: null,
       pendingCount: 0,
       recentDeliveries: [],
     };
@@ -205,8 +204,8 @@ describe("WorkspaceWebhooksSettings", () => {
     expect(example).toContain(
       `<form method="post" action="https://sync.example.com/sync/hooks/${token}">`,
     );
-    expect(example).toContain(`<input name="email" type="email" required>`);
-    expect(example).toContain(`<input name="source">`);
+    expect(example).toContain(`<label>email <input name="email" type="email" required></label>`);
+    expect(example).toContain(`<label>source <input name="source"></label>`);
     await user.click(screen.getByTestId("incoming-webhook-reveal-done"));
     expect(screen.getByTestId(`incoming-webhook-row-${formHook.webhookId}`).textContent).toContain(
       "Website form",

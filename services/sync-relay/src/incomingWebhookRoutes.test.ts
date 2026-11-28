@@ -3,6 +3,7 @@ import { INBOX_COLLECTION_YAML, INBOX_SCHEMA_PATH } from "@dohc/workspace-contra
 import {
   INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
   INCOMING_WEBHOOK_FORM_SENDER_BURST,
+  INCOMING_WEBHOOK_FORM_SENDER_DAILY,
   MAX_INCOMING_WEBHOOK_BODY_BYTES,
   MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES,
   MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT,
@@ -318,7 +319,7 @@ describe("incoming webhooks relay routes and drain", () => {
     expect(created.status).toBe(201);
     const { token, webhook } = (await created.json()) as {
       token: string;
-      webhook: { form: unknown };
+      webhook: { webhookId: string; form: unknown };
     };
     expect(webhook.form).toEqual({ fields: ["email", "source"] });
     const plain = (await (
@@ -328,18 +329,48 @@ describe("incoming webhooks relay routes and drain", () => {
           method: "POST",
         }),
       )
-    ).json()) as { token: string };
+    ).json()) as { token: string; webhook: Record<string, unknown> };
+    // An older desktop parses an ordinary webhook's summary strictly.
+    expect(plain.webhook).not.toHaveProperty("form");
+
+    const chargedBytes = () =>
+      inspect(storagePath(storage), (db) =>
+        Number(
+          (
+            db
+              .prepare(
+                "SELECT storage_bytes FROM sync_relay_incoming_webhooks WHERE webhook_id = ?",
+              )
+              .get(webhook.webhookId) as { storage_bytes: number }
+          ).storage_bytes,
+        ),
+      );
+    const createdBytes = chargedBytes();
+    const renamed = await handler(
+      request("owner", `/sync/ws-1/webhooks/${webhook.webhookId}`, {
+        ...jsonBody({ name: "Waitlis2" }),
+        method: "PATCH",
+      }),
+    );
+    expect(renamed.status).toBe(200);
+    expect(chargedBytes()).toBe(createdBytes);
 
     let nextSender = 0;
     const post = (
       body: string,
-      init: { sender?: string; contentType?: string; hook?: string } = {},
+      init: {
+        sender?: string;
+        contentType?: string;
+        hook?: string;
+        headers?: Record<string, string>;
+      } = {},
     ) =>
       handler(
         publicHookRequest(init.hook ?? token, {
           headers: {
             "content-type": init.contentType ?? "application/x-www-form-urlencoded",
             "x-dohc-relay-client-ip": init.sender ?? `198.51.100.${++nextSender}`,
+            ...init.headers,
           },
           body,
         }),
@@ -349,17 +380,22 @@ describe("incoming webhooks relay routes and drain", () => {
       error: ((await response.json()) as { error?: string }).error,
     });
 
-    const kept = await post("email=ada%40example.com&source=site&card=4111111111111111");
+    const kept = await post("email=ada%40example.com&source=site&card=4111111111111111", {
+      headers: { "x-event-type": "Claim your prize", "user-agent": "Claim your prize" },
+    });
     expect(kept.status).toBe(202);
     const { deliveryId } = (await kept.json()) as { deliveryId: string };
     const stored = inspect(storagePath(storage), (db) =>
       db
-        .prepare("SELECT payload_blob FROM sync_relay_webhook_deliveries WHERE delivery_id = ?")
+        .prepare(
+          "SELECT payload_blob, headers_json FROM sync_relay_webhook_deliveries WHERE delivery_id = ?",
+        )
         .get(deliveryId),
-    ) as { payload_blob: Uint8Array };
+    ) as { payload_blob: Uint8Array; headers_json: string };
     expect(Buffer.from(stored.payload_blob).toString("utf8")).toBe(
       "email=ada%40example.com&source=site",
     );
+    expect(JSON.parse(stored.headers_json)).toEqual({});
 
     expect(
       (await post('{"email":"ada@example.com"}', { contentType: "application/json" })).status,
@@ -424,6 +460,40 @@ describe("incoming webhooks relay routes and drain", () => {
       (await post('{"title":"still open"}', { hook: plain.token, contentType: "application/json" }))
         .status,
     ).toBe(202);
+  });
+
+  it("never lets one network past its daily share in any 24 hours", async () => {
+    const { storage, handler, advanceMs } = await setup();
+    const { token } = (await (
+      await handler(
+        request("owner", "/sync/ws-1/webhooks", {
+          ...jsonBody({ name: "Waitlist", collectionPath: "Inbox", form: { fields: ["email"] } }),
+          method: "POST",
+        }),
+      )
+    ).json()) as { token: string };
+    let accepted = 0;
+    for (let minute = 0; minute < 24 * 60; minute += 10) {
+      const response = await handler(
+        publicHookRequest(token, {
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-dohc-relay-client-ip": "203.0.113.50",
+          },
+          body: `email=n${minute}%40example.com`,
+        }),
+      );
+      if (response.status === 202) {
+        accepted += 1;
+        // Settle it, so the form's own queue share never decides the count.
+        const db = inspectDatabase(storagePath(storage));
+        db.exec("UPDATE sync_relay_webhook_deliveries SET state = 'settled', payload_blob = NULL");
+        db.close();
+      }
+      advanceMs(10 * 60_000);
+    }
+    expect(accepted).toBeLessThanOrEqual(INCOMING_WEBHOOK_FORM_SENDER_DAILY);
+    expect(accepted).toBeGreaterThanOrEqual(INCOMING_WEBHOOK_FORM_SENDER_DAILY - 1);
   });
 
   it("adds the form column to a store opened by an older build", async () => {

@@ -585,7 +585,7 @@ function summaryForRow(
     createdAtMs: Number(row.created_at_ms),
     updatedAtMs: Number(row.updated_at_ms),
     lastDeliveryAtMs: row.last_delivery_at_ms == null ? null : Number(row.last_delivery_at_ms),
-    form: storedForm(row.form_json),
+    ...(row.form_json == null ? {} : { form: storedForm(row.form_json)! }),
     pendingCount: Number(pendingRow?.count ?? 0),
     recentDeliveries,
   };
@@ -820,7 +820,7 @@ export function updateIncomingWebhook(
     }
     const existing = storage.db
       .prepare(
-        `SELECT webhook_id, name, collection_path, collection_id, paused, pause_reason, storage_bytes
+        `SELECT webhook_id, name, collection_path, collection_id, paused, pause_reason, storage_bytes, form_json
            FROM sync_relay_incoming_webhooks
            WHERE workspace_id = ? AND webhook_id = ?`,
       )
@@ -864,6 +864,7 @@ export function updateIncomingWebhook(
       Buffer.byteLength(nextName, "utf8") +
       Buffer.byteLength(collectionPath, "utf8") +
       (existing.collection_id ? Buffer.byteLength(String(existing.collection_id), "utf8") : 0) +
+      (existing.form_json ? Buffer.byteLength(String(existing.form_json), "utf8") : 0) +
       128;
     const prevStorageBytes = Number(existing.storage_bytes);
     if (nextStorageBytes > prevStorageBytes) {

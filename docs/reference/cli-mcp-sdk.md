@@ -717,7 +717,7 @@ Only the owner's own agents set up the workspace. Shared profiles do not offer t
 
 No arguments.
 
-Returns `{ kind: "none" } | { kind: "unavailable", message } | { kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form, pendingCount, recentDeliveries }[], limit }`.
+Returns `{ kind: "none" } | { kind: "unavailable", message } | { kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }[], limit }`.
 
 ### `dohc_create_incoming_webhook`
 
@@ -729,7 +729,7 @@ Changes the workspace, so a shared view does not offer it.
 - `collection`: `string`. Required.
 - `form`: `{ fields: string[] }`
 
-Returns `{ ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form, pendingCount, recentDeliveries }, endpointUrl } | { ok: false, reason }`.
+Returns `{ ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }, endpointUrl } | { ok: false, reason }`.
 
 ---
 
@@ -1416,7 +1416,7 @@ dohc webhook list [options]
 
 List this workspace's incoming webhooks and their recent deliveries.
 
-With `--json`, prints `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "unavailable", message }` or `{ schemaVersion, kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form, pendingCount, recentDeliveries }[], limit }`.
+With `--json`, prints `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "unavailable", message }` or `{ schemaVersion, kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }[], limit }`.
 
 #### `dohc webhook create`
 
@@ -1431,7 +1431,7 @@ The address is a secret: anyone who has it can add records. dohc shows it once. 
 - `--collection <path>`: Required. The Collection's folder, relative to the workspace root.
 - `--form-fields <names>`: Make a website form address. Comma-separated field names to keep, such as email,source. dohc drops every other field.
 
-With `--json`, prints `{ schemaVersion, ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form, pendingCount, recentDeliveries }, endpointUrl }`.
+With `--json`, prints `{ schemaVersion, ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }, endpointUrl }`.
 
 ### `dohc member-apps`
 
