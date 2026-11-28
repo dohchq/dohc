@@ -72,6 +72,7 @@ import { allSketchRows, uniqueSketchPath } from "../sketches/sketchList";
 import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
 import { WorkspaceButton } from "../WorkspaceButton";
+import { instanceFailureState } from "../workspace/failureReports";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
 import { useFileLifecycle } from "./FileNameSheet";
@@ -86,7 +87,7 @@ const nothing = () => () => undefined;
 // version sent to the owner's phones, with its versions under it only when it lists several; then its pages, in the
 // folders that hold them, then its sketches, its transactional Collections, and last its other files.
 // A page opens to read; a folder opens in place; an app or its version opens its review; a Collection opens its
-// records. The phone opens no other kind of file yet, so those rows only name it.
+// records; other files open in the binary viewer.
 // The list reads again when the feed reports a file change.
 export function ServerHome() {
   const theme = useTheme();
@@ -101,9 +102,12 @@ export function ServerHome() {
   const [capturing, setCapturing] = useState<boolean | QueuedCapture>(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [uploadFailure, setUploadFailure] = useState<{
+    instance: number;
     problem: ReadProblem | null;
+    body?: string;
     failures: number;
   }>({
+    instance: 0,
     problem: null,
     failures: 0,
   });
@@ -118,8 +122,8 @@ export function ServerHome() {
     uploadAbort.current?.abort();
     uploadAttempt.current = null;
     setUploadingFile(false);
-    setUploadFailure({ problem: null, failures: 0 });
-  }, [data?.workspaceId]);
+    setUploadFailure({ instance: data?.instance ?? 0, problem: null, failures: 0 });
+  }, [data?.workspaceId, data?.instance]);
   const openCreate = () =>
     lifecycle.openCreate((path) =>
       router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
@@ -128,7 +132,11 @@ export function ServerHome() {
     const attempt = uploadAttempt.current;
     if (!data || !canEditFiles || uploadingFile || !attempt) return;
     setUploadingFile(true);
-    setUploadFailure((prev) => ({ problem: null, failures: prev.failures }));
+    setUploadFailure((prev) => ({
+      instance: data.instance,
+      problem: null,
+      failures: prev.instance === data.instance ? prev.failures : 0,
+    }));
     const controller = new AbortController();
     uploadAbort.current = controller;
     try {
@@ -142,29 +150,35 @@ export function ServerHome() {
         data.invalidate(views.files);
         showToast({ tone: "success", title: workspaceWords.fileUploaded(result.path) });
       } else {
-        showToast({
-          tone: "failure",
-          title: workspaceWords.fileUploadFailed,
+        setUploadFailure((prev) => ({
+          instance: data.instance,
+          problem: "refused",
           body: fileWriteRefusalText(result.refusal, result.reason),
-        });
+          failures: (prev.instance === data.instance ? prev.failures : 0) + 1,
+        }));
       }
     } catch (error) {
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
       const problem = shownProblem(error);
       if (problem !== null) {
         if (problem === "refused") uploadAttempt.current = null;
-        setUploadFailure((prev) => ({ problem, failures: prev.failures + 1 }));
+        setUploadFailure((prev) => ({
+          instance: data.instance,
+          problem,
+          failures: (prev.instance === data.instance ? prev.failures : 0) + 1,
+        }));
       }
     } finally {
       if (uploadAbort.current === controller) uploadAbort.current = null;
       setUploadingFile(false);
     }
   }, [canEditFiles, data, showToast, signIn, uploadingFile]);
+  const shownUploadFailure = instanceFailureState(uploadFailure, data?.instance ?? 0);
   useFailureNotice(
     `upload:${data?.workspaceId ?? "none"}:file`,
     workspaceWords.fileUploadFailed,
-    uploadFailure,
-    uploadFailure.problem === "refused" ? null : () => void sendUpload(),
+    shownUploadFailure,
+    shownUploadFailure.problem === "refused" ? null : () => void sendUpload(),
   );
   const startUploadFile = useCallback(async () => {
     if (!data || !canEditFiles || uploadingFile || pickingFile.current) return;

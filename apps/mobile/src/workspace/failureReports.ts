@@ -37,3 +37,13 @@ export function failureStep(
     takeBack: (replaced && reported.failures > 0) || (state.problem === null && counted > 0),
   };
 }
+
+export function instanceFailureState<
+  T extends {
+    readonly instance: number;
+    readonly problem: string | null;
+    readonly failures: number;
+  },
+>(state: T, instance: number): T | { readonly problem: null; readonly failures: 0 } {
+  return state.instance === instance ? state : { problem: null, failures: 0 };
+}
