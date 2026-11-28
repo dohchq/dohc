@@ -37,14 +37,15 @@ export function createPageHost(options: {
       if (mount === state.mount && !state.painted) set({ painted: true });
     },
     /** The mounted web view failed, left the screen, or is replaced. The next one is a new mount. */
-    gone() {
-      state.live?.end();
+    gone(): Promise<void> {
+      const closed = state.live?.end() ?? Promise.resolve();
       set({ mount: state.mount + 1, painted: false, live: null });
+      return closed;
     },
     /** Ends the session, if any, and replaces the web view with a read-only one that opens none. */
     end() {
       if (state.stopped) return;
-      state.live?.end();
+      void state.live?.end();
       set({ mount: state.mount + 1, painted: false, live: null, stopped: true });
     },
     /** Opens the mounted web view's session once it has drawn. */

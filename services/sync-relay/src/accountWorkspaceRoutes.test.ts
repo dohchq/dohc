@@ -76,10 +76,85 @@ describe("the account's workspace list", () => {
     expect(await json(response)).toEqual({
       ok: true,
       workspaces: [
-        { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true, role: "owner" },
-        { workspaceId: "trip", name: null, canOpen: true, showOnPhone: true, role: "owner" },
+        {
+          workspaceId: "notes",
+          name: null,
+          canOpen: false,
+          showOnPhone: true,
+          role: "owner",
+          fileWritesAvailable: false,
+        },
+        {
+          workspaceId: "trip",
+          name: null,
+          canOpen: true,
+          showOnPhone: true,
+          role: "owner",
+          fileWritesAvailable: false,
+        },
       ],
     });
+  });
+
+  it("reports fileWritesAvailable only for owned workspaces when server copies are active", async () => {
+    const storage = (await testStorage()) as StorageContext;
+    const h = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => ({ endHold() {} }) as never,
+    });
+    await claimWorkspace(h, "ana", "trip");
+    await claimWorkspace(h, "ben", "budget");
+    storage.claimWorkspaceIdentity({
+      workspaceId: "trip",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: "trip", role: "owner", fileWritesAvailable: true }),
+    ]);
+    expect((await json(await h(list(account("ben"))))).workspaces).toEqual([
+      expect.objectContaining({
+        workspaceId: "budget",
+        role: "owner",
+        canOpen: false,
+        fileWritesAvailable: false,
+      }),
+      expect.objectContaining({ workspaceId: "trip", role: "member", fileWritesAvailable: false }),
+    ]);
+    expect((await h(patch("trip", account("ana"), { showOnPhone: false }))).status).toBe(200);
+    expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
+      expect.objectContaining({
+        workspaceId: "trip",
+        role: "owner",
+        showOnPhone: false,
+        fileWritesAvailable: false,
+      }),
+    ]);
+    expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
+    expect(
+      storage.setWorkspaceMemberRole({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        role: "admin",
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await json(await h(list(account("ben"))))).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: "trip", role: "admin", fileWritesAvailable: false }),
+    );
   });
 
   it("names each workspace as its owner's computer last named it", async () => {
@@ -93,8 +168,22 @@ describe("the account's workspace list", () => {
     );
     expect(named.status).toBe(200);
     expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
-      { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true, role: "owner" },
-      { workspaceId: "trip", name: "Lisbon trip", canOpen: true, showOnPhone: true, role: "owner" },
+      {
+        workspaceId: "notes",
+        name: null,
+        canOpen: false,
+        showOnPhone: true,
+        role: "owner",
+        fileWritesAvailable: false,
+      },
+      {
+        workspaceId: "trip",
+        name: "Lisbon trip",
+        canOpen: true,
+        showOnPhone: true,
+        role: "owner",
+        fileWritesAvailable: false,
+      },
     ]);
   });
 
@@ -168,6 +257,7 @@ describe("Show on phone", () => {
       canOpen: true,
       showOnPhone: false,
       role: "owner",
+      fileWritesAvailable: false,
     });
     expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
     expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({
@@ -176,6 +266,7 @@ describe("Show on phone", () => {
       canOpen: true,
       showOnPhone: true,
       role: "owner",
+      fileWritesAvailable: false,
     });
   });
 
@@ -259,6 +350,7 @@ describe("Show on phone", () => {
       canOpen: true,
       showOnPhone: true,
       role: "owner",
+      fileWritesAvailable: false,
     });
   });
 });
@@ -285,8 +377,22 @@ describe("Show on phone for a workspace the account joined", () => {
   it("lists a joined workspace after the account's own, with its role", async () => {
     const { storage, h } = await joined();
     expect((await json(await h(list(account("ben"))))).workspaces).toEqual([
-      { workspaceId: "budget", name: null, canOpen: false, showOnPhone: true, role: "owner" },
-      { workspaceId: "trip", name: "Lisbon", canOpen: true, showOnPhone: true, role: "member" },
+      {
+        workspaceId: "budget",
+        name: null,
+        canOpen: false,
+        showOnPhone: true,
+        role: "owner",
+        fileWritesAvailable: false,
+      },
+      {
+        workspaceId: "trip",
+        name: "Lisbon",
+        canOpen: true,
+        showOnPhone: true,
+        role: "member",
+        fileWritesAvailable: false,
+      },
     ]);
     expect(
       storage.setWorkspaceMemberRole({

@@ -700,6 +700,8 @@ function useReport(
   }, [id, title, state, instance, retry, server, showToast, hideToast, add, remove]);
 }
 
+export const useOptionalNotices = (): NoticesState | null => useContext(State);
+
 export function useNotices(): NoticesState {
   const state = useContext(State);
   if (!state) throw new Error("useNotices needs NoticesProvider");

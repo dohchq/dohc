@@ -1,7 +1,13 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
-import { Stack, useIsFocused, useLocalSearchParams, usePreventRemove } from "expo-router";
+import {
+  Stack,
+  useIsFocused,
+  useLocalSearchParams,
+  usePreventRemove,
+  useRouter,
+} from "expo-router";
 import {
   useEffect,
   useMemo,
@@ -18,8 +24,11 @@ import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
+import { useShownWorkspaces } from "../chats/Workspaces";
 import { copyText, useCopiedMark } from "../copy";
+import { useFileLifecycle } from "../home/FileNameSheet";
 import { pageTitle } from "../home/homeModel";
+import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
@@ -97,9 +106,11 @@ const openProblem = (reason: string): ServerProblemKind | null =>
 
 function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const theme = useTheme();
+  const router = useRouter();
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
   const { state, retry } = useView(view);
+  const { current: currentWorkspace } = useShownWorkspaces();
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
@@ -107,6 +118,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const { data, livePages } = useAccount();
   const signIn = useSignIn();
   const web = useRef<ComponentRef<typeof WebView>>(null);
+  const [mutating, setMutating] = useState(false);
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
@@ -132,16 +144,23 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const [early, setEarly] = useState<{
     mount: number;
     markdown: string | null;
+    objectId: string | null;
     script?: string;
   } | null>(null);
-  const given = useRef<{ mount: number; markdown: string } | null>(null);
+  const given = useRef<{ mount: number; markdown: string; objectId: string | null } | null>(null);
   const sentTo = (to: number) =>
     given.current?.mount === to
       ? given.current.markdown
       : early?.mount === to
         ? early.markdown
         : null;
-  useEffect(() => () => host.gone(), [host]);
+  const sentObjectIdTo = (to: number) =>
+    given.current?.mount === to
+      ? given.current.objectId
+      : early?.mount === to
+        ? early.objectId
+        : null;
+  useEffect(() => () => void host.gone(), [host]);
   // The account's teardown reaches the page from the start, before any session opens.
   const workspaceId = data?.workspaceId;
   useEffect(() => {
@@ -164,12 +183,56 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
 
   // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
   // or workspace ended (appTeardown) stays read-only.
-  const editsLive = writesIn(data) && state.value?.kind === "page" && data !== null && !stopped;
+  const editsLive =
+    writesIn(data) && state.value?.kind === "page" && data !== null && !stopped && !mutating;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
   );
   const holding = live !== null && holdsPage(liveState);
+  const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
+  const readObjectId = state.value?.kind === "page" ? (state.value.objectId ?? null) : null;
+  const displayedReadObjectId = holding ? (sentObjectIdTo(mount) ?? readObjectId) : readObjectId;
+  const objectId =
+    live !== null && liveState.shown ? (liveState.objectId ?? null) : displayedReadObjectId;
+  const canEditFiles =
+    canWriteFiles(data, currentWorkspace) &&
+    isLifecycleManagedPath(path) &&
+    !deleted &&
+    objectId !== null &&
+    !mutating;
+  const closeSocketBeforeMutation = async () => {
+    setMutating(true);
+    await host.gone();
+  };
+  const guardUnsent = () => {
+    if (!holdsUnsent(host.state().live?.state() ?? NO_STATE)) return false;
+    Alert.alert(documentWords.unsentTitle, documentWords.unsentBody, [
+      { text: confirmWords.cancel, style: "cancel" },
+    ]);
+    return true;
+  };
+  const startRename = () => {
+    if (!canEditFiles || !objectId || guardUnsent()) return;
+    lifecycle.openRename({
+      path,
+      objectId,
+      before: closeSocketBeforeMutation,
+      onDone: (nextPath) => router.replace({ pathname: "/page", params: { path: nextPath } }),
+      onCancel: () => setMutating(false),
+    });
+  };
+  const startDelete = () => {
+    if (!canEditFiles || !objectId || guardUnsent()) return;
+    lifecycle.confirmDelete({
+      path,
+      objectId,
+      guard: guardUnsent,
+      before: closeSocketBeforeMutation,
+      onDone: () => (router.canGoBack() ? router.back() : router.replace("/")),
+      onCancel: () => setMutating(false),
+    });
+  };
 
   // A page a live session holds keeps the text its editor mounted with. A later read the phone can't show (too large,
   // missing) never takes the editor away, with edits only its provider has.
@@ -181,7 +244,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     setLostPage(false);
     setUri(null);
     setAttempt((value) => value + 1);
-    host.gone();
+    void host.gone();
   };
 
   const markKey: MarkKey = deleted
@@ -222,9 +285,12 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   useEffect(() => {
     const sent = sentTo(mount);
     if (started !== mount || markdown === null || sent === markdown) return;
-    if (sent !== null && live) return host.gone();
+    if (sent !== null && live) {
+      void host.gone();
+      return;
+    }
     if (sent !== null && !painted) return;
-    given.current = { mount, markdown };
+    given.current = { mount, markdown, objectId: displayedReadObjectId };
     web.current?.injectJavaScript(
       sent === null
         ? pageScript(path, markdown, writesIn(data))
@@ -300,13 +366,14 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     setEarly({
       mount,
       markdown,
+      objectId: displayedReadObjectId,
       script: markdown === null ? undefined : pageScript(path, markdown, writesIn(data)),
     });
   useEffect(() => {
-    if (!webShown) host.gone();
+    if (!webShown) void host.gone();
   }, [webShown]);
   useEffect(() => {
-    if (markdown === null && !holding && sentTo(mount) !== null) host.gone();
+    if (markdown === null && !holding && sentTo(mount) !== null) void host.gone();
   }, [markdown, holding, mount]);
   useEffect(() => {
     if (!editsLive || !webShown || !data) return;
@@ -373,7 +440,12 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
                     <HeaderButton
                       icon={copied ? Check : EllipsisVertical}
                       label={documentWords.documentActions}
-                      onPress={() => void documentActions(() => copyMarkdown())}
+                      onPress={() =>
+                        void documentActions({
+                          copyMarkdown: () => copyMarkdown(),
+                          ...(canEditFiles ? { rename: startRename, remove: startDelete } : {}),
+                        })
+                      }
                     />
                   )
               : undefined,
@@ -394,6 +466,16 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
             <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => copyMarkdown()}>
               {documentWords.copyAsMarkdown}
             </Stack.Toolbar.MenuAction>
+            {canEditFiles ? (
+              <Stack.Toolbar.MenuAction icon="pencil" onPress={startRename}>
+                {documentWords.rename}
+              </Stack.Toolbar.MenuAction>
+            ) : null}
+            {canEditFiles ? (
+              <Stack.Toolbar.MenuAction icon="trash" destructive onPress={startDelete}>
+                {confirmWords.delete}
+              </Stack.Toolbar.MenuAction>
+            ) : null}
           </Stack.Toolbar.Menu>
         </Stack.Toolbar>
       )}
@@ -465,6 +547,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
           </View>
         </Pressable>
       ) : null}
+      {lifecycle.sheet}
     </View>
   );
 }

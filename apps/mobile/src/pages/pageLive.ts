@@ -32,6 +32,8 @@ export interface PageLiveState {
   readonly unsent: boolean;
   /** The page shows the live document, not the text the app read. */
   readonly shown: boolean;
+  /** The object identity of the live document opened by `openPage`, once bound. */
+  readonly objectId?: string;
 }
 
 export interface PageLive {
@@ -44,10 +46,11 @@ export interface PageLive {
   /** A message the web view posted. */
   receive(message: unknown): void;
   /** Closes the socket, stops the page's editing, and ignores every later message. */
-  end(): void;
+  end(): Promise<void>;
 }
 
 interface Stream {
+  readonly objectId: string;
   readonly toPage: (body: Body<ToPage>) => void;
   readonly check: (message: FromPage) => "next" | "stale" | "broken";
   readonly window: ReturnType<typeof frameWindow>;
@@ -103,32 +106,45 @@ export function createPageLive(options: {
   };
 
   /** Ends the current open, and tells a connected page so its provider stops taking edits. */
-  function close() {
-    if (!open) return;
+  function close(): Promise<void> {
+    if (!open) return Promise.resolve();
     const { controller, timer, socket, connected } = open;
     open = null;
     controller.abort();
     clearTimeout(timer);
+    let closed = Promise.resolve();
     if (socket) {
       socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+      if (socket.readyState !== 3) {
+        closed = new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(fallback);
+            socket.onclose = socket.onerror = null;
+            resolve();
+          };
+          const fallback = setTimeout(done, 1_000);
+          socket.onclose = socket.onerror = done;
+        });
+      }
       socket.close();
     }
     if (connected) stream?.toPage({ type: "lost" });
+    return closed;
   }
 
   function lose(reason: string) {
     if (state.phase === "ended" || state.phase === "refused") return;
-    close();
+    void close();
     set({ phase: "lost", reason });
   }
 
   function refuse(reason: string) {
-    close();
+    void close();
     set({ phase: "refused", reason });
   }
 
   async function begin() {
-    close();
+    void close();
     const held = { controller: new AbortController() };
     open = held;
     // The last connection's reports say nothing of this one.
@@ -169,6 +185,7 @@ export function createPageLive(options: {
     socket.binaryType = "arraybuffer";
     const frames = answer.limits.provider.frames;
     const next = {
+      objectId: answer.objectId,
       toPage: outgoing<ToPage>(++gen, options.post),
       check: incoming(gen),
       window: frameWindow(frames.maxQueuedFrames, frames.maxQueuedBytes),
@@ -239,7 +256,12 @@ export function createPageLive(options: {
         return;
       case "state": {
         const facts = message.facts;
-        set({ facts, unsent: facts.unsent, shown: state.shown || facts.status === "live" });
+        set({
+          facts,
+          unsent: facts.unsent,
+          shown: state.shown || facts.status === "live",
+          ...(facts.status === "live" ? { objectId: held.objectId } : {}),
+        });
         if (facts.status !== "quarantined") return;
         if (facts.reason === "lineage-replaced" && !facts.unsent && state.phase === "lost")
           void begin();
@@ -262,9 +284,10 @@ export function createPageLive(options: {
     },
     receive,
     end() {
-      close();
+      const closed = close();
       stream = retired = null;
       if (state.phase !== "ended") set({ phase: "ended" });
+      return closed;
     },
   };
 }

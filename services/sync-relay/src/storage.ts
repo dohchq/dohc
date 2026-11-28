@@ -590,6 +590,35 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       targetPath,
     );
   }
+  retireIdleServiceHostEnrollment(
+    input: Parameters<typeof serviceHostEnrollmentStorage.retireIdleServiceHostEnrollment>[1],
+  ) {
+    const result = serviceHostEnrollmentStorage.retireIdleServiceHostEnrollment(this, input);
+    if (result.status === "retired")
+      notifyDesktopReadiness(this, {
+        workspaceId: result.enrollment.workspaceId,
+        path: result.enrollment.path,
+      });
+    return result;
+  }
+  rebindRetiredServiceHostEnrollment(
+    input: Parameters<typeof serviceHostEnrollmentStorage.rebindRetiredServiceHostEnrollment>[1],
+  ) {
+    const result = serviceHostEnrollmentStorage.rebindRetiredServiceHostEnrollment(this, input);
+    if (result.status === "rebound")
+      notifyDesktopReadiness(this, {
+        workspaceId: result.enrollment.workspaceId,
+        path: result.enrollment.path,
+      });
+    return result;
+  }
+  clearDrainedDeletedServiceHostEnrollment(
+    input: Parameters<
+      typeof serviceHostEnrollmentStorage.clearDrainedDeletedServiceHostEnrollment
+    >[1],
+  ) {
+    return serviceHostEnrollmentStorage.clearDrainedDeletedServiceHostEnrollment(this, input);
+  }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);
   }

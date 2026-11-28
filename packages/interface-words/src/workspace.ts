@@ -56,4 +56,7 @@ export const workspaceWords = {
   changesFailed: (workspace: string) => `dohc could not get the latest changes in ${workspace}.`,
   // Notices, for a chat that is gone (dohc-interface).
   chatMissing: "dohc could not find this chat.",
+  newPage: "New page",
+  showAll: (count: number) => `Show all (${count})`,
+  fileActions: (name: string) => `Actions for ${name}`,
 } as const;

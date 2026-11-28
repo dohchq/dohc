@@ -37,5 +37,7 @@ export interface PhoneWorkspace {
   readonly canOpen?: boolean;
   /** The account's role in a server's workspace. A sample workspace has none. */
   readonly role?: "owner" | "admin" | "member";
+  /** Whether the server supports owner file lifecycle writes for this workspace. */
+  readonly fileWritesAvailable?: boolean;
   readonly sections: readonly ChatSection[];
 }

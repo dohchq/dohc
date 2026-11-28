@@ -30,6 +30,7 @@ import { hasServiceHostConflictEffect } from "./serviceHostFeed";
 import { ORDINARY_ACTIVATION_BASES } from "./ordinaryActivationBasis";
 import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
+import { SERVICE_KEPT_EDITS } from "./serviceKeptEdits";
 import {
   listServiceActivationRetirements,
   OPEN_RETIREMENT,
@@ -1007,6 +1008,31 @@ const MOVED = "Service host enrollment document moved from its retained path.";
 const RETRY_MOVED =
   "Live editing is still finishing Stop for this document. Wait a moment, then try again.";
 
+function canRebindPreMutation(
+  storage: StorageContext,
+  enrollment: ServiceHostEnrollment,
+  targetPath: string,
+): boolean {
+  if (
+    hasServiceHostConflictEffect(storage, enrollment) ||
+    hasServiceHostConflictEffect(storage, { ...enrollment, path: targetPath })
+  )
+    return false;
+  const currentLineage = storage.db
+    .prepare(
+      "SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'",
+    )
+    .get(enrollment.workspaceId, enrollment.objectId);
+  return !(
+    currentLineage &&
+    !storage.db
+      .prepare(
+        `SELECT 1 FROM ${ORDINARY_ACTIVATION_BASES} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`,
+      )
+      .get(enrollment.workspaceId, enrollment.objectId, currentLineage.lineage_claim_id)
+  );
+}
+
 function movedEnrollmentRebindState(
   storage: StorageContext,
   enrollment: ServiceHostEnrollment,
@@ -1027,25 +1053,7 @@ function movedEnrollmentRebindState(
   )
     return "refused";
   if (read(storage, enrollment.workspaceId, targetPath) !== null) return "refused";
-  if (
-    hasServiceHostConflictEffect(storage, enrollment) ||
-    hasServiceHostConflictEffect(storage, { ...enrollment, path: targetPath })
-  )
-    return "refused";
-  const currentLineage = storage.db
-    .prepare(
-      "SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'",
-    )
-    .get(enrollment.workspaceId, enrollment.objectId);
-  if (
-    currentLineage &&
-    !storage.db
-      .prepare(
-        `SELECT 1 FROM ${ORDINARY_ACTIVATION_BASES} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`,
-      )
-      .get(enrollment.workspaceId, enrollment.objectId, currentLineage.lineage_claim_id)
-  )
-    return "refused";
+  if (!canRebindPreMutation(storage, enrollment, targetPath)) return "refused";
   if (
     enrollment.hostDrainedAtMs === null ||
     storage.db
@@ -1574,6 +1582,8 @@ function ensureInsideTransaction(
       rebindCandidate = { enrollment: existing, targetPath: path };
     }
     if (rebindCandidate) {
+      if (isMutationFenced(storage, workspaceId, rebindCandidate.enrollment.objectId))
+        throw relayError("conflict", "This document is being changed. Try again.");
       assertCurrent(storage, rebindCandidate.enrollment, ownerUserId);
       const rebind = movedEnrollmentRebindState(
         storage,
@@ -1596,6 +1606,10 @@ function ensureInsideTransaction(
     }
   }
   const objectId = currentMainDocument(storage, { workspaceId, path: effectivePath }, opening);
+  if (isMutationFenced(storage, workspaceId, objectId))
+    throw opening
+      ? new LiveHostingRefusal("document-unavailable")
+      : relayError("conflict", "This document is being changed. Try again.");
   if (current) {
     assertCurrent(storage, current, ownerUserId);
     if (current.objectId !== objectId)
@@ -1993,6 +2007,20 @@ export class ServiceHostRetirementConflict extends Error {
   }
 }
 
+const verifyPreparedRetirement =
+  (prepared: ServiceHostRetirementPreparation | undefined) =>
+  (activation: RetirableServiceActivation) => {
+    if (!prepared) throw relayError("host-not-loaded");
+    if (
+      prepared.activationId !== activation.activationId ||
+      prepared.lineageClaimId !== activation.lineageClaimId
+    )
+      throw relayError("conflict");
+    if (prepared.restoreFenceGeneration !== activation.restoreFenceGeneration)
+      throw new ServiceHostRetirementConflict(activation.restoreFenceGeneration);
+    prepared.assertCurrent();
+  };
+
 export function setServiceHostEnrollmentEnabled(
   storage: StorageContext,
   input: SetServiceHostEnrollmentEnabledInput,
@@ -2049,18 +2077,7 @@ export function setServiceHostEnrollmentEnabled(
         storage,
         { workspaceId, objectId: current.objectId },
         nowMs,
-        (activation) => {
-          const prepared = input.prepared;
-          if (!prepared) throw relayError("host-not-loaded");
-          if (
-            prepared.activationId !== activation.activationId ||
-            prepared.lineageClaimId !== activation.lineageClaimId
-          )
-            throw relayError("conflict");
-          if (prepared.restoreFenceGeneration !== activation.restoreFenceGeneration)
-            throw new ServiceHostRetirementConflict(activation.restoreFenceGeneration);
-          prepared.assertCurrent();
-        },
+        verifyPreparedRetirement(input.prepared),
       );
       const high = retirement
         ? { cursor: retirement.acceptedThrough }
@@ -2107,6 +2124,225 @@ export function setServiceHostEnrollmentEnabled(
       ...(input.retire ? { changed: !current.retired } : {}),
     };
   });
+}
+
+export type RetireIdleServiceHostEnrollmentResult =
+  | { readonly status: "active" }
+  | { readonly status: "unsettled" }
+  | { readonly status: "none"; readonly release: () => void }
+  | {
+      readonly status: "retired";
+      readonly enrollment: ServiceHostEnrollment;
+      readonly release: () => void;
+    };
+
+export type RebindRetiredServiceHostEnrollmentResult =
+  | { readonly status: "none" | "blocked" }
+  | { readonly status: "rebound"; readonly enrollment: ServiceHostEnrollment };
+
+const mutationFences = new WeakMap<object, Map<string, number>>();
+const mutationFenceKey = (workspaceId: string, objectId: string) => `${workspaceId}\0${objectId}`;
+
+function acquireMutationFence(storage: object, workspaceId: string, objectId: string): () => void {
+  let map = mutationFences.get(storage);
+  if (!map) {
+    map = new Map();
+    mutationFences.set(storage, map);
+  }
+  const key = mutationFenceKey(workspaceId, objectId);
+  map.set(key, (map.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = map.get(key) ?? 0;
+    if (count <= 1) map.delete(key);
+    else map.set(key, count - 1);
+    if (map.size === 0) mutationFences.delete(storage);
+  };
+}
+
+function isMutationFenced(storage: object, workspaceId: string, objectId: string): boolean {
+  return (mutationFences.get(storage)?.get(mutationFenceKey(workspaceId, objectId)) ?? 0) > 0;
+}
+
+export function isObjectMutationFenced(
+  storage: object,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  return isMutationFenced(storage, workspaceId, objectId);
+}
+
+function ownedObjectTx<T>(
+  storage: StorageContext,
+  input: { workspaceId: string; objectId: string; ownerUserId: string; guard(): void },
+  work: (workspaceId: string, objectId: string) => T,
+): T {
+  const workspaceId = parseWorkspaceId(input.workspaceId),
+    objectId = parseLiveUpdateIdentifier(input.objectId, "object ID"),
+    standing = storage.captureStanding();
+  return storage.tx(() => {
+    standing();
+    input.guard();
+    if (!storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) throw notFound();
+    return work(workspaceId, objectId);
+  });
+}
+
+function hasPendingLiveState(db: SqliteDb, workspaceId: string, objectId: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
+         UNION ALL SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=?
+         UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND object_id=? LIMIT 1`,
+      )
+      .get(workspaceId, objectId, workspaceId, objectId, workspaceId, objectId) !== undefined
+  );
+}
+
+function clearDrainedDeletedInTx(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  const value = storage.db
+    .prepare(
+      `SELECT accounted_bytes,retired,host_drained_at_ms FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`,
+    )
+    .get(workspaceId, objectId);
+  if (
+    !value ||
+    value.retired !== 1 ||
+    value.host_drained_at_ms === null ||
+    isHostedForLiveEditing(storage, workspaceId, objectId) ||
+    storage.objectMoment({ workspaceId, objectId, versionId: "main" })?.path != null ||
+    hasPendingLiveState(storage.db, workspaceId, objectId)
+  )
+    return false;
+  storage.db
+    .prepare(`DELETE FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
+    .run(workspaceId, objectId);
+  storage.db
+    .prepare(
+      "UPDATE sync_relay_workspace_usage SET usage_bytes=max(0,usage_bytes-?) WHERE workspace_id=?",
+    )
+    .run(Number(value.accounted_bytes), workspaceId);
+  return true;
+}
+
+export function retireIdleServiceHostEnrollment(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    objectId: string;
+    toPath?: string;
+    ownerUserId: string;
+    prepared?: ServiceHostRetirementPreparation;
+    drainNow?: boolean;
+    nowMs: number;
+    guard(): void;
+  },
+): RetireIdleServiceHostEnrollmentResult {
+  const nowMs = timestamp(input.nowMs);
+  const target = input.toPath === undefined ? null : canonicalPath(input.toPath);
+  let release: (() => void) | undefined;
+  try {
+    return ownedObjectTx(storage, input, (workspaceId, objectId) => {
+      if (liveEditors(storage).connected({ workspaceId, objectId })) return { status: "active" };
+      if (hasPendingLiveState(storage.db, workspaceId, objectId)) return { status: "unsettled" };
+      const current = readByObject(storage, workspaceId, objectId);
+      if (current && hasServiceHostConflictEffect(storage, current)) return { status: "unsettled" };
+      if (target !== null) {
+        const occupant = read(storage, workspaceId, target);
+        if (
+          occupant &&
+          occupant.objectId !== objectId &&
+          !clearDrainedDeletedInTx(storage, workspaceId, occupant.objectId)
+        )
+          return { status: "unsettled" };
+        if (current && current.path !== target && !canRebindPreMutation(storage, current, target))
+          return { status: "unsettled" };
+      }
+      if (!current) {
+        release = acquireMutationFence(storage, workspaceId, objectId);
+        return { status: "none", release };
+      }
+      const hosted = isHostedForLiveEditing(storage, workspaceId, objectId);
+      if (!current.retired) {
+        openServiceActivationRetirement(
+          storage,
+          { workspaceId, objectId },
+          nowMs,
+          verifyPreparedRetirement(input.prepared),
+        );
+        endServiceHostRun(storage, current, nowMs);
+        const drainedAt =
+          input.drainNow && !hosted ? (current.hostDrainedAtMs ?? nowMs) : current.hostDrainedAtMs;
+        storage.db
+          .prepare(
+            `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL,host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?),${ACCESS_ENDED} WHERE workspace_id=? AND object_id=?`,
+          )
+          .run(drainedAt, nowMs, nowMs, workspaceId, objectId);
+        forgetIdleServiceHostUploads(storage, workspaceId);
+      } else if (input.drainNow && current.hostDrainedAtMs === null && !hosted) {
+        storage.db
+          .prepare(
+            `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?) WHERE workspace_id=? AND object_id=?`,
+          )
+          .run(nowMs, nowMs, workspaceId, objectId);
+      }
+      release = acquireMutationFence(storage, workspaceId, objectId);
+      return {
+        status: "retired",
+        enrollment: readByObject(storage, workspaceId, objectId)!,
+        release,
+      };
+    });
+  } catch (error) {
+    release?.();
+    throw error;
+  }
+}
+
+export function rebindRetiredServiceHostEnrollment(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    objectId: string;
+    toPath: string;
+    ownerUserId: string;
+    guard(): void;
+  },
+): RebindRetiredServiceHostEnrollmentResult {
+  const target = canonicalPath(input.toPath);
+  return ownedObjectTx(storage, input, (workspaceId, objectId) => {
+    const current = readByObject(storage, workspaceId, objectId);
+    if (!current) return { status: "none" };
+    if (current.path === target) return { status: "rebound", enrollment: current };
+    const occupant = read(storage, workspaceId, target);
+    if (
+      occupant &&
+      occupant.objectId !== objectId &&
+      !clearDrainedDeletedInTx(storage, workspaceId, occupant.objectId)
+    )
+      return { status: "blocked" };
+    if (movedEnrollmentRebindState(storage, current, target) !== "ok") return { status: "blocked" };
+    return {
+      status: "rebound",
+      enrollment: rebindMovedEnrollmentInTransaction(storage, current, target),
+    };
+  });
+}
+
+export function clearDrainedDeletedServiceHostEnrollment(
+  storage: StorageContext,
+  input: { workspaceId: string; objectId: string; ownerUserId: string; guard(): void },
+): boolean {
+  return ownedObjectTx(storage, input, (workspaceId, objectId) =>
+    clearDrainedDeletedInTx(storage, workspaceId, objectId),
+  );
 }
 
 const EDIT_SHARE_COLUMNS = `s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms`;
@@ -2426,6 +2662,7 @@ export function serviceHostDocumentEnabled(
   document: { workspaceId: string; objectId: string },
   nowMs = Date.now(),
 ): boolean {
+  if (isMutationFenced(storage, document.workspaceId, document.objectId)) return false;
   if (serviceActivationRetirementOpen(storage, document)) return false;
   const value = storage.db
     .prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,e.demand_at_ms,e.owner_demand,

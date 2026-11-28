@@ -117,6 +117,7 @@ import {
 } from "./accountOperationRoutes";
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
+import type { AccountFileWriteLiveHost } from "./accountFileWrites";
 import type { PhonePages } from "./phonePages";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
 import type { OwnerLiveSockets } from "./namedLiveRoutes";
@@ -307,6 +308,8 @@ export interface CreateSyncRelayHandlerOptions {
   serverCopies?: () => ServerCopies | undefined;
   // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
   phonePages?: () => PhonePages | undefined;
+  // The self-hosted live host, for retiring idle enrollments on owner file lifecycle mutations.
+  liveHost?: () => AccountFileWriteLiveHost | undefined;
   // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;
   // This server's public HTTPS origin, which issues its accounts' actor keys. The phone's chat writes need it.
@@ -449,6 +452,7 @@ export function createSyncRelayHandler({
   workspaceSecretsChanged = () => undefined,
   serverCopies = () => undefined,
   phonePages,
+  liveHost,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
   relayPublicOrigin,
   onWorkspaceCreated,
@@ -913,6 +917,7 @@ export function createSyncRelayHandler({
         storage,
         resolveAccountSession: resolvePhoneCapableAccountSession,
         sockets: ownerSockets,
+        fileWritesAvailable: () => serverCopies() !== undefined,
         hidden: (userId, workspaceId) => {
           phoneApps.end({ userId, workspaceId });
           serverCopies()?.endHold(workspaceId, userId);
@@ -968,6 +973,8 @@ export function createSyncRelayHandler({
         phoneApps,
         phoneCollections,
         ...(phonePages ? { phonePages } : {}),
+        ...(liveHost ? { liveHost } : {}),
+        liveRooms,
         ...(shareWebOrigin && relayExchangeKeyHash
           ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
           : {}),

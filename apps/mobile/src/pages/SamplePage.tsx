@@ -333,7 +333,7 @@ export function SamplePage() {
                     <HeaderButton
                       icon={copied ? Check : EllipsisVertical}
                       label={documentWords.documentActions}
-                      onPress={() => void documentActions(copyMarkdown)}
+                      onPress={() => void documentActions({ copyMarkdown })}
                     />
                   )
               : undefined,

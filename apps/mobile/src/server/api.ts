@@ -108,6 +108,8 @@ export interface AccountWorkspace {
   readonly showOnPhone: boolean;
   /** The account's role: it owns the workspace, or joined it as an Admin or a Member, which the phone only reads. */
   readonly role: WorkspaceRole;
+  /** Whether the server supports owner file lifecycle writes for this workspace. */
+  readonly fileWritesAvailable?: boolean;
 }
 
 export type WorkspaceRole = "owner" | "admin" | "member";
@@ -129,13 +131,17 @@ export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
   textOrNull(item.name) &&
   typeof item.canOpen === "boolean" &&
   typeof item.showOnPhone === "boolean" &&
-  isRole(item.role)
+  isRole(item.role) &&
+  (item.fileWritesAvailable === undefined || typeof item.fileWritesAvailable === "boolean")
     ? {
         workspaceId: item.workspaceId,
         name: item.name,
         canOpen: item.canOpen,
         showOnPhone: item.showOnPhone,
         role: item.role,
+        ...(item.fileWritesAvailable !== undefined
+          ? { fileWritesAvailable: item.fileWritesAvailable }
+          : {}),
       }
     : null;
 

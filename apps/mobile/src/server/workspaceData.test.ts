@@ -1714,4 +1714,68 @@ describe("prefetching pages", () => {
     expect(maxActive).toBe(PREFETCH_AT_ONCE);
     expect(data.state(views.files)).toMatchObject({ value: null, problem: null, failures: 0 });
   });
+
+  it("invalidate re-reads subscribed views and drops cached unsubscribed views", async () => {
+    const server = testServer();
+    let filesReads = 0;
+    server.on("POST", "/sync/ws-inv/ops/listFiles", () => {
+      filesReads += 1;
+      return ops(
+        filesReads === 1 ? files(["a.md", "obj-a"]) : files(["b.md", "obj-b"]),
+        `0.1.${filesReads}`,
+      );
+    });
+    server.on(
+      "POST",
+      "/sync/ws-inv/ops/documentRead",
+      ops({ ok: true, kind: "page", markdown: "hi" }, "0.1.1"),
+    );
+    server.on("GET", feedPath("ws-inv", "0.1.1"), held);
+    server.on("GET", feedPath("ws-inv", "0.1.2"), held);
+    const { data } = open(server, "ws-inv");
+    data.subscribe(views.files, () => {});
+    const unsubPage = data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => {
+      expect(data.state(views.files).value?.map((f) => f.path)).toEqual(["a.md"]);
+      expect(data.state(views.page("a.md")).value).toMatchObject({ kind: "page", markdown: "hi" });
+    });
+    unsubPage();
+    data.invalidate(views.page("a.md"), true);
+    expect(data.state(views.page("a.md")).value).toBeNull();
+    data.invalidate(views.files);
+    await vi.waitFor(() =>
+      expect(data.state(views.files).value?.map((f) => f.path)).toEqual(["b.md"]),
+    );
+  });
+
+  it("invalidate with drop preserves subscribed listeners and re-reads instead of detaching them", async () => {
+    const server = testServer();
+    let reads = 0;
+    server.on("POST", "/sync/ws-drop-sub/ops/documentRead", () => {
+      reads += 1;
+      return reads === 1
+        ? ops({ ok: true, kind: "page", markdown: "before" }, "0.1.1")
+        : ops({ ok: false, refusal: "missing" }, "0.1.2");
+    });
+    server.on("GET", feedPath("ws-drop-sub", "0.1.1"), held);
+    server.on("GET", feedPath("ws-drop-sub", "0.1.2"), held);
+    const { data } = open(server, "ws-drop-sub");
+    const updates = vi.fn();
+    data.subscribe(views.page("a.md"), updates);
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toMatchObject({
+        kind: "page",
+        markdown: "before",
+      }),
+    );
+    updates.mockClear();
+    data.invalidate(views.page("a.md"), true);
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toMatchObject({
+        kind: "missing",
+        last: "before",
+      }),
+    );
+    expect(updates).toHaveBeenCalled();
+  });
 });

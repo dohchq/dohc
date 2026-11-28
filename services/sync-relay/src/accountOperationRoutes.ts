@@ -1,6 +1,12 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import {
+  isAccountFileWriteOperation,
+  runAccountFileWrite,
+  type AccountFileWriteLiveHost,
+} from "./accountFileWrites";
+import type { LiveRooms } from "./liveRoom";
+import {
   isPhoneWriteOperation,
   parseMarkRead,
   parsePhoneWrite,
@@ -125,6 +131,10 @@ export function createAccountOperationRoute(options: {
   phoneCollections?: PhoneCollections;
   /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
   phonePages?: () => PhonePages | undefined;
+  /** The self-hosted live host, for cleanly retiring idle enrollments on rename/delete. */
+  liveHost?: () => AccountFileWriteLiveHost | undefined;
+  /** Live rooms, so rename/delete saves buffered live edits before retiring idle enrollments. */
+  liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   /** share-web's origin and its exchange key check, with which it forwards the owner's browser to open a page. */
   browser?: { origin: string; hasExchangeKey(request: Request): boolean };
 }) {
@@ -178,8 +188,9 @@ export function createAccountOperationRoute(options: {
     const collection =
       options.phoneCollections !== undefined && isPhoneCollectionOperation(route.operation);
     const sketch = isPhoneSketchOperation(route.operation);
+    const fileWrite = isAccountFileWriteOperation(route.operation);
     // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
-    // and its live host; every other operation needs a copy. Sketch ops check owner reach first so Members always get 404.
+    // and its live host; owner sketch and file-write ops check owner reach first so Members always get 404.
     if (
       !feed &&
       !wakeFeed &&
@@ -187,6 +198,7 @@ export function createAccountOperationRoute(options: {
       !collection &&
       !page &&
       !sketch &&
+      !fileWrite &&
       options.copies() === undefined
     )
       throw copiesUnavailable();
@@ -214,6 +226,7 @@ export function createAccountOperationRoute(options: {
         wakeFeed ||
         app ||
         collection ||
+        fileWrite ||
         write ||
         sketch ||
         mark ||
@@ -226,7 +239,7 @@ export function createAccountOperationRoute(options: {
       owner === null
     )
       throw notFound();
-    if (sketch && options.copies() === undefined) throw copiesUnavailable();
+    if ((sketch || fileWrite) && options.copies() === undefined) throw copiesUnavailable();
     if (caller.userId !== owner)
       await options.refreshAccountEmail?.(caller.userId, readSignal ?? request.signal);
     const member = memberOf(caller.userId);
@@ -389,6 +402,21 @@ export function createAccountOperationRoute(options: {
           args,
           visitor,
           authorize,
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
+    if (isAccountFileWriteOperation(route.operation)) {
+      const { result, cursor } = await runAccountFileWrite(
+        { storage, copies, liveHost: options.liveHost, liveRooms: options.liveRooms },
+        {
+          workspaceId: route.workspaceId,
+          owner,
+          operation: route.operation,
+          args,
+          visitor,
+          authorize,
+          nowMs: () => options.nowMs(),
         },
       );
       return jsonResponse({ ok: true, result, cursor });

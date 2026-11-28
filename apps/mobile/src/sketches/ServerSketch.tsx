@@ -3,16 +3,20 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Crypto from "expo-crypto";
-import { Stack, useLocalSearchParams, usePreventRemove } from "expo-router";
+import { Stack, useLocalSearchParams, usePreventRemove, useRouter } from "expo-router";
+import { EllipsisVertical } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, Alert, Platform, StyleSheet, useColorScheme, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
+import { useShownWorkspaces } from "../chats/Workspaces";
+import { useFileLifecycle } from "../home/FileNameSheet";
 import { isOutOfSpace } from "../pages/editorFile";
 import { LoadingLines, pageStyles, Strip } from "../pages/pageParts";
 import { shownProblem } from "../server/client";
+import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import {
   nextSaveAttempt,
   preserveLostElements,
@@ -66,11 +70,14 @@ export function ServerSketch() {
 
 function SketchScreen({ path }: { path: string }) {
   const theme = useTheme();
+  const router = useRouter();
   const scheme = useColorScheme() === "dark" ? "dark" : "light";
   const reduceMotion = useReducedMotion();
   const problemText = useProblemText();
   const { data } = useAccount();
   const signIn = useSignIn();
+  const { current: currentWorkspace } = useShownWorkspaces();
+  const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const gap = useWorkspaceGap();
   const web = useRef<ComponentRef<typeof WebView>>(null);
 
@@ -81,8 +88,12 @@ function SketchScreen({ path }: { path: string }) {
   const [webPhase, setWebPhase] = useState<"idle" | "started" | "painted">("idle");
   const [edit, setEdit] = useState(CLEAN_EDIT);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const [mutating, setMutating] = useState(false);
+  const mutatingRef = useRef(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = edit.dirty;
   const conflictReadOnly = readState.kind === "ready" && readState.scene.readOnly === true;
-  const editable = writesIn(data) && !conflictReadOnly;
+  const editable = writesIn(data) && !conflictReadOnly && !mutating;
 
   const sceneRef = useRef<SketchScene | null>(null);
   const loadedIntoWeb = useRef(false);
@@ -199,7 +210,15 @@ function SketchScreen({ path }: { path: string }) {
   );
 
   const performSave = useCallback(async (): Promise<boolean> => {
-    if (!data || !editable || edit.saving || !sceneRef.current || !web.current) return false;
+    if (
+      !data ||
+      !editable ||
+      edit.saving ||
+      mutatingRef.current ||
+      !sceneRef.current ||
+      !web.current
+    )
+      return false;
     setEdit((prev) => ({ ...prev, saving: true, error: null, conflicts: 0 }));
     const controller = new AbortController();
     saveAbortRef.current = controller;
@@ -334,6 +353,7 @@ function SketchScreen({ path }: { path: string }) {
     if (msg.kind === "started") setWebPhase((p) => (p === "idle" ? "started" : p));
     else if (msg.kind === "painted") setWebPhase("painted");
     else if (msg.kind === "dirty" && typeof msg.dirty === "boolean") {
+      if (mutatingRef.current) return;
       setEdit((prev) =>
         prev.dirty === msg.dirty ? prev : { ...prev, dirty: msg.dirty as boolean },
       );
@@ -390,6 +410,56 @@ function SketchScreen({ path }: { path: string }) {
       : null,
   ].filter((s): s is NonNullable<typeof s> => s !== null);
 
+  const objectId = readState.kind === "ready" ? readState.scene.objectId : null;
+  const canEditFiles =
+    canWriteFiles(data, currentWorkspace) &&
+    isLifecycleManagedPath(path) &&
+    objectId !== null &&
+    !edit.saving &&
+    !mutating &&
+    lifecycle.deletingPath === null;
+  const guardDirty = () => {
+    if (!dirtyRef.current) return false;
+    Alert.alert(workspaceWords.sketchUnsavedTitle, workspaceWords.sketchUnsavedBody, [
+      { text: confirmWords.cancel, style: "cancel" },
+    ]);
+    return true;
+  };
+  const freezeForMutation = async () => {
+    mutatingRef.current = true;
+    setMutating(true);
+    saveAbortRef.current?.abort();
+    web.current?.injectJavaScript("document.activeElement?.blur?.(); true;");
+  };
+  const unfreezeAfterMutation = () => {
+    mutatingRef.current = false;
+    setMutating(false);
+  };
+  const onRenamed = (nextPath: string) =>
+    router.replace({ pathname: "/sketch", params: { path: nextPath } });
+  const onDeleted = () => (router.canGoBack() ? router.back() : router.replace("/"));
+  const startRename = () => {
+    if (canEditFiles && objectId && !guardDirty())
+      lifecycle.openRename({
+        path,
+        objectId,
+        before: freezeForMutation,
+        onCancel: unfreezeAfterMutation,
+        onDone: onRenamed,
+      });
+  };
+  const startDelete = () => {
+    if (canEditFiles && objectId && !guardDirty())
+      lifecycle.confirmDelete({
+        path,
+        objectId,
+        guard: guardDirty,
+        before: freezeForMutation,
+        onCancel: unfreezeAfterMutation,
+        onDone: onDeleted,
+      });
+  };
+
   return (
     <View style={[pageStyles.screen, { backgroundColor: theme.bg }]}>
       <Stack.Screen
@@ -399,32 +469,67 @@ function SketchScreen({ path }: { path: string }) {
           headerStyle: { backgroundColor: theme.bg },
           headerShadowVisible: false,
           headerRight:
-            Platform.OS === "android" && canSave
-              ? () =>
-                  edit.saving ? (
-                    <View style={styles.spinner}>
-                      <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
-                    </View>
-                  ) : (
-                    <HeaderButton
-                      label={workspaceWords.sketchSave}
-                      onPress={() => void performSave()}
-                    />
-                  )
+            Platform.OS === "android" && (canSave || canEditFiles)
+              ? () => (
+                  <View style={styles.headerRight}>
+                    {canSave ? (
+                      edit.saving ? (
+                        <View style={styles.spinner}>
+                          <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
+                        </View>
+                      ) : (
+                        <HeaderButton
+                          label={workspaceWords.sketchSave}
+                          onPress={() => void performSave()}
+                        />
+                      )
+                    ) : null}
+                    {canEditFiles && objectId ? (
+                      <HeaderButton
+                        icon={EllipsisVertical}
+                        label={documentWords.documentActions}
+                        onPress={() =>
+                          lifecycle.openActions({
+                            title: documentWords.documentActions,
+                            path,
+                            objectId,
+                            guard: guardDirty,
+                            before: freezeForMutation,
+                            onCancel: unfreezeAfterMutation,
+                            onRenamed,
+                            onDeleted,
+                          })
+                        }
+                      />
+                    ) : null}
+                  </View>
+                )
               : undefined,
         }}
       />
-      {Platform.OS === "ios" && canSave ? (
+      {Platform.OS === "ios" && (canSave || canEditFiles) ? (
         <Stack.Toolbar placement="right">
-          {edit.saving ? (
-            <Stack.Toolbar.View>
-              <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
-            </Stack.Toolbar.View>
-          ) : (
-            <Stack.Toolbar.Button variant="done" onPress={() => void performSave()}>
-              {workspaceWords.sketchSave}
-            </Stack.Toolbar.Button>
-          )}
+          {canSave ? (
+            edit.saving ? (
+              <Stack.Toolbar.View>
+                <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
+              </Stack.Toolbar.View>
+            ) : (
+              <Stack.Toolbar.Button variant="done" onPress={() => void performSave()}>
+                {workspaceWords.sketchSave}
+              </Stack.Toolbar.Button>
+            )
+          ) : null}
+          {canEditFiles ? (
+            <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel={documentWords.documentActions}>
+              <Stack.Toolbar.MenuAction icon="pencil" onPress={startRename}>
+                {documentWords.rename}
+              </Stack.Toolbar.MenuAction>
+              <Stack.Toolbar.MenuAction icon="trash" destructive onPress={startDelete}>
+                {confirmWords.delete}
+              </Stack.Toolbar.MenuAction>
+            </Stack.Toolbar.Menu>
+          ) : null}
         </Stack.Toolbar>
       ) : null}
       {failure ?? (
@@ -440,7 +545,7 @@ function SketchScreen({ path }: { path: string }) {
             />
           ))}
           {webShown ? (
-            <View style={pageStyles.web} pointerEvents={edit.saving ? "none" : "auto"}>
+            <View style={pageStyles.web} pointerEvents={edit.saving || mutating ? "none" : "auto"}>
               <WebView
                 ref={web}
                 originWhitelist={["file://*"]}
@@ -462,10 +567,12 @@ function SketchScreen({ path }: { path: string }) {
           )}
         </>
       )}
+      {lifecycle.sheet}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  headerRight: { flexDirection: "row", alignItems: "center" },
   spinner: { minWidth: 48, minHeight: 48, alignItems: "center", justifyContent: "center" },
 });
