@@ -1060,6 +1060,17 @@ export function createWorkspaceActivity(
     await state.entry?.engine?.pushRecorded();
   }
 
+  // Drains everything the workspace recorded so far. Rejects when no engine
+  // runs or the engine cannot confirm nothing is left.
+  async function drainRecorded(state: WorkspaceActivityState): Promise<void> {
+    const engine = state.entry?.engine;
+    if (!engine)
+      throw new Error(
+        "dohc could not send changes to your server because sync is not running for this workspace.",
+      );
+    await engine.drainRecorded();
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -1294,6 +1305,7 @@ export function createWorkspaceActivity(
     syncNow,
     syncSnapshot,
     pushRecorded,
+    drainRecorded,
     queueCloudPull,
     cloudSyncOffline,
     catchUpCloudSync,

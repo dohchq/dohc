@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 
-export const NOTE_CONVERSION_BUDGET = 10;
+export const NOTE_CONVERSION_BATCH = 10;
 export const RELAY_ENGINE_API_FLOOR = 2;
 export const NOTE_CONVERSION_OFF =
   "dohc could not convert notes. This build does not convert notes yet.";
@@ -24,8 +24,8 @@ export interface NoteConversionRelay {
   engineApiMin(): Promise<number | undefined>;
   /** Object ids of the owner's notes the relay holds live. */
   liveNotes(): Promise<string[]>;
-  /** Pulls, then pushes until nothing recorded is left. Rejects when a pass fails. */
-  pushRecorded(): Promise<void>;
+  /** Resolves only once a push reports nothing recorded is left. */
+  drainRecorded(): Promise<void>;
 }
 
 export interface NoteConversionRun {
@@ -34,20 +34,30 @@ export interface NoteConversionRun {
   convert(params: { after?: string; budget: number; relayLive: string[] }): Promise<unknown>;
   /** Throws once the run's workspace is closed or its window switched away. */
   assertCurrent(): void;
-  progress?(done: number, total: number): void;
 }
 
 export function floorRefusal(found: number | undefined): string {
   return `dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is ${found ?? "not set"}; it must be ${RELAY_ENGINE_API_FLOOR}.`;
 }
 
+function stoppedAfter(error: unknown, converted: number): unknown {
+  if (converted === 0) return error;
+  const words = error instanceof Error ? error.message : String(error);
+  const notes = converted === 1 ? "1 note" : `${converted.toLocaleString("en-US")} notes`;
+  return new Error(
+    `${words} dohc converted ${notes} before it stopped. Run Convert notes again to finish.`,
+    { cause: error },
+  );
+}
+
 /**
- * Converts a workspace's notes in batches. Each batch reads which notes are
- * live on the relay first, and converted notes are pushed between batches and
- * at the end. A note the engine leaves or cannot read is listed; only a typed
- * engine error stops the run.
+ * Converts a workspace's notes one at a time, in batches. Each batch reads
+ * which notes are live on the relay first, and converted notes are drained
+ * between batches and at the end. A note the engine leaves or cannot read is
+ * listed; any other failure stops the run and says how many notes it
+ * converted.
  */
-export function createNoteConversion(budget = NOTE_CONVERSION_BUDGET) {
+export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const running = new Set<string>();
   return async function convertNotes(
     workspaceId: string,
@@ -62,7 +72,7 @@ export function createNoteConversion(budget = NOTE_CONVERSION_BUDGET) {
         const floor = await relay.engineApiMin();
         if (floor === undefined || floor < RELAY_ENGINE_API_FLOOR)
           throw new Error(floorRefusal(floor));
-        await relay.pushRecorded();
+        await relay.drainRecorded();
       }
       const result: ConvertNotesResult = {
         converted: 0,
@@ -72,33 +82,39 @@ export function createNoteConversion(budget = NOTE_CONVERSION_BUDGET) {
         failed: [],
         sent: true,
       };
-      let after: string | undefined;
-      for (;;) {
-        run.assertCurrent();
-        const relayLive = relay ? await relay.liveNotes() : [];
-        run.assertCurrent();
-        const pass = EnginePass.parse(
-          await run.convert({ ...(after === undefined ? {} : { after }), budget, relayLive }),
-        );
-        if (pass.off) throw new Error(NOTE_CONVERSION_OFF);
-        result.converted += pass.converted;
-        result.unchanged += pass.unchanged;
-        result.skipped.push(...pass.skipped.map(({ path, reason }) => ({ path, reason })));
-        result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
-        result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
-        const done =
-          result.converted +
-          result.unchanged +
-          result.skipped.length +
-          result.doesNotFit.length +
-          result.failed.length;
-        run.progress?.(done, Math.max(done, pass.total));
-        if (pass.resumeAfter === null) break;
-        after = pass.resumeAfter;
-        if (relay && pass.converted > 0) await relay.pushRecorded().catch(() => undefined);
+      try {
+        let after: string | undefined;
+        let more = true;
+        while (more) {
+          run.assertCurrent();
+          const relayLive = relay ? await relay.liveNotes() : [];
+          const before = result.converted;
+          for (let note = 0; note < batch && more; note += 1) {
+            run.assertCurrent();
+            const pass = EnginePass.parse(
+              await run.convert({
+                ...(after === undefined ? {} : { after }),
+                budget: 1,
+                relayLive,
+              }),
+            );
+            if (pass.off) throw new Error(NOTE_CONVERSION_OFF);
+            result.converted += pass.converted;
+            result.unchanged += pass.unchanged;
+            result.skipped.push(...pass.skipped.map(({ path, reason }) => ({ path, reason })));
+            result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
+            result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
+            if (pass.resumeAfter === null) more = false;
+            else after = pass.resumeAfter;
+          }
+          if (more && relay && result.converted > before)
+            await relay.drainRecorded().catch(() => undefined);
+        }
+      } catch (error) {
+        throw stoppedAfter(error, result.converted);
       }
       if (relay)
-        result.sent = await relay.pushRecorded().then(
+        result.sent = await relay.drainRecorded().then(
           () => true,
           () => false,
         );

@@ -2303,7 +2303,7 @@ async function relayForNoteConversion(
           )
           .notes.map(({ objectId }) => objectId),
       ),
-    pushRecorded: () => activity.pushRecorded(workspace.workspaceId),
+    drainRecorded: () => activity.drainRecorded(workspace.workspaceId),
   };
 }
 
@@ -4273,6 +4273,10 @@ const activity = {
   pushRecorded: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.pushRecorded(lease.state.activity),
+    ),
+  drainRecorded: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.drainRecorded(lease.state.activity),
     ),
   syncSnapshot: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>

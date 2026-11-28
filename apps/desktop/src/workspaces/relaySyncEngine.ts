@@ -142,6 +142,10 @@ export interface CloudSyncEngine {
   // Runs passes until a push leaves nothing behind, so what the workspace
   // recorded before the call is on the relay. Rejects when a pass fails.
   pushRecorded(): Promise<void>;
+  // Like pushRecorded, but resolves only once a push reports nothing left.
+  // Rejects when sync stopped, the sign-in expired, a claim stays refused,
+  // or a pass fails.
+  drainRecorded(): Promise<void>;
   // One pass for a waiting move. It leaves every ordinary timer alone, and
   // once `signal` aborts it skips its pull. It never rejects.
   catchUp(options: { signal: AbortSignal }): Promise<void>;
@@ -543,7 +547,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // renderer then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(
     retryClaim: boolean,
-    pushed?: { hasMore: boolean },
+    pushed?: { ran?: boolean; hasMore: boolean },
     guard?: { signal: AbortSignal },
   ): Promise<boolean> {
     const beforePending = pendingChangeCount;
@@ -563,7 +567,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
-      if (pushed) pushed.hasMore = result.hasMore;
+      if (pushed) {
+        pushed.ran = true;
+        pushed.hasMore = result.hasMore;
+      }
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
@@ -714,7 +721,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     rethrow: boolean,
     quiet = false,
     retry?: { countsAsAttempt: boolean },
-    pushed?: { hasMore: boolean },
+    pushed?: { ran?: boolean; hasMore: boolean },
     // A guard pass never cancels, moves or re-arms ordinary work.
     guard?: { signal: AbortSignal },
   ): Promise<void> {
@@ -829,6 +836,19 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const pushed = { hasMore: false };
         await runPass(true, false, undefined, pushed);
         if (!pushed.hasMore) return;
+      }
+    },
+
+    async drainRecorded() {
+      for (;;) {
+        if (claimRefusal) throw claimRefusal;
+        if (authExpired || stopped)
+          throw new Error(
+            "dohc could not send changes to your server because sync stopped for this workspace.",
+          );
+        const pushed = { ran: false, hasMore: true };
+        await runPass(true, false, undefined, pushed);
+        if (pushed.ran && !pushed.hasMore) return;
       }
     },
 
