@@ -354,14 +354,14 @@ server copy's account reason. A Member or an Admin turning it off hides the
 workspace only on their own phones and never ends the owner's copy, and the
 owner hiding it never hides it from them.
 
-The relay refuses a Member's or an Admin's chat writes, read marks, wake reads
-and retries, conversation contexts, and file, sketch, or Document Collection
-lifecycle writes exactly as it refuses a workspace that does not exist. A phone
-Member or Admin can open a rich page for live editing through `openPage` only
-when their active workspace-share grant gives Edit reach to that non-hidden
-path and the page already has live history. `openPage` enrolls the page via
-`member-open` without touching `ServerCopies`, mints a phone-only named live
-ticket and one-use session discriminator bound to the phone Bearer session,
+The relay refuses a Member's or an Admin's read marks, wake reads and retries,
+conversation contexts, owner-only chat writes, and file, sketch, or Document
+Collection lifecycle writes exactly as it refuses a workspace that does not
+exist. A phone Member or Admin can open a rich page for live editing through
+`openPage` only when their active workspace-share grant gives Edit reach to that
+non-hidden path and the page already has live history. `openPage` enrolls the
+page via `member-open` without touching `ServerCopies`, mints a phone-only named
+live ticket and one-use session discriminator bound to the phone Bearer session,
 grant, share, workspace, and document lineage, and connects on
 `/sync/live/phone`. That socket enforces `Show on phone`, active phone session
 standing, and active Edit reach through upgrade, per-frame checks, and commit,
