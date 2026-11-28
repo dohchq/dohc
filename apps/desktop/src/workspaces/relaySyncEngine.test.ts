@@ -1277,7 +1277,8 @@ describe("relaySyncEngine", () => {
       const sync = engine({ capture: capture() });
       await sync.start();
       pushMock.mockClear();
-      for (let pass = 0; pass < 3; pass += 1) pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      for (let pass = 0; pass < 3; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
       await expect(sync.drainRecorded()).rejects.toThrow(
         "dohc could not send changes to your server. It took none of them and said more were waiting.",
       );

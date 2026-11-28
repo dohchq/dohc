@@ -434,10 +434,8 @@ describe("renderNotices", () => {
 });
 
 it("counts converted notes in the right number and says how to send what could not be sent", () => {
-  const run = { ok: true, skipped: [], doesNotFit: [], failed: [] } as const;
-  expect(
-    renderCliResult("notesConvert", { ...run, converted: 1, unchanged: 1, sent: false }),
-  ).toBe(
+  const run = { ok: true as const, skipped: [], doesNotFit: [], failed: [] };
+  expect(renderCliResult("notesConvert", { ...run, converted: 1, unchanged: 1, sent: false })).toBe(
     "Converted 1 note. 1 was already converted.\ndohc could not send them to the server yet. Run it again to send them.",
   );
   expect(renderCliResult("notesConvert", { ...run, converted: 2, unchanged: 0, sent: true })).toBe(

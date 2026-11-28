@@ -866,7 +866,11 @@ import {
 } from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
-import { createNoteConversion, type NoteConversionRelay } from "./workspaces/noteConversion";
+import {
+  NOTE_CONVERSION_PAUSED,
+  createNoteConversion,
+  type NoteConversionRelay,
+} from "./workspaces/noteConversion";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
 import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
@@ -2257,45 +2261,24 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
 }
 
 const convertNotesInWorkspace = createNoteConversion();
-const RELAY_UNREACHABLE = "dohc could not reach the relay. Check your connection.";
 
 async function relayForNoteConversion(
   workspace: RegistryEntry,
 ): Promise<NoteConversionRelay | null> {
   if (!workspace.remote && !workspace.pausedRemote) return null;
-  if (!workspace.remote)
-    throw new Error(
-      "dohc could not convert notes because sync is paused. Resume sync in Settings, then try again.",
-    );
-  const { credentials } = await remoteForWorkspace(workspace);
-  const reach = async <T>(request: () => Promise<T>): Promise<T> => {
-    try {
-      return await request();
-    } catch (error) {
-      if (error instanceof TypeError || (error instanceof Error && error.name === "TimeoutError"))
-        throw new Error(RELAY_UNREACHABLE);
-      throw error;
-    }
+  const syncing = async () => {
+    const current = findWorkspace(workspace.workspaceId);
+    if (!current?.remote) throw new Error(NOTE_CONVERSION_PAUSED);
+    return (await remoteForWorkspace(current)).credentials;
   };
+  await syncing();
   return {
-    liveNotes: () =>
-      reach(async () => {
-        const live = z
-          .object({
-            engineApiMin: z.number().int().nullish(),
-            notes: z.array(z.object({ objectId: z.string() })),
-          })
-          .parse(
-            await relayShareJsonWithCredentials<unknown>(
-              credentials,
-              `/sync/${encodeURIComponent(workspace.workspaceId)}/live-notes`,
-            ),
-          );
-        return {
-          engineApiMin: live.engineApiMin ?? null,
-          objectIds: live.notes.map(({ objectId }) => objectId),
-        };
-      }),
+    assertSyncAllowed: async () => void (await syncing()),
+    liveNotes: async () =>
+      relayShareJsonWithCredentials<unknown>(
+        await syncing(),
+        `/sync/${encodeURIComponent(workspace.workspaceId)}/live-notes`,
+      ),
     drainRecorded: () => activity.drainRecorded(workspace.workspaceId),
   };
 }

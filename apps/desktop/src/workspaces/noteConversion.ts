@@ -6,6 +6,11 @@ export const RELAY_ENGINE_API_FLOOR = 2;
 export const NOTE_CONVERSION_OFF =
   "dohc could not convert notes. This build does not convert notes yet.";
 export const NOTE_CONVERSION_RUNNING = "dohc is already converting notes in this workspace.";
+export const NOTE_CONVERSION_PAUSED =
+  "dohc could not convert notes because sync is paused. Resume sync in Settings, then try again.";
+export const RELAY_UNREACHABLE = "dohc could not reach the relay. Check your connection.";
+const NOTE_CONVERSION_STUCK =
+  "dohc could not convert notes because the engine did not move past the last note it read.";
 
 const Note = z.object({ objectId: z.string(), path: z.string() });
 const EnginePass = z.object({
@@ -19,8 +24,14 @@ const EnginePass = z.object({
   total: z.number().int().nonnegative(),
 });
 
+const LiveNotes = z.object({
+  engineApiMin: z.unknown().optional(),
+  notes: z.array(z.object({ objectId: z.string() })),
+});
+
 export interface NoteConversionRelay {
-  liveNotes(): Promise<{ engineApiMin: number | null; objectIds: string[] }>;
+  assertSyncAllowed(): Promise<void>;
+  liveNotes(): Promise<unknown>;
   drainRecorded(): Promise<void>;
 }
 
@@ -30,8 +41,10 @@ export interface NoteConversionRun {
   assertCurrent(): void;
 }
 
-export function floorRefusal(found: number | null): string {
-  return `dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is ${found ?? "not set"}; it must be ${RELAY_ENGINE_API_FLOOR}.`;
+function floorRefusal(found: string): Error {
+  return new Error(
+    `dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN ${found}; it must be ${RELAY_ENGINE_API_FLOOR}.`,
+  );
 }
 
 function stoppedAfter(error: unknown, converted: number): unknown {
@@ -45,10 +58,22 @@ function stoppedAfter(error: unknown, converted: number): unknown {
 }
 
 async function liveAboveFloor(relay: NoteConversionRelay): Promise<string[]> {
-  const { engineApiMin, objectIds } = await relay.liveNotes();
-  if (engineApiMin === null || engineApiMin < RELAY_ENGINE_API_FLOOR)
-    throw new Error(floorRefusal(engineApiMin));
-  return objectIds;
+  let answer: unknown;
+  try {
+    answer = await relay.liveNotes();
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof Error && error.name === "TimeoutError"))
+      throw new Error(RELAY_UNREACHABLE, { cause: error });
+    throw error;
+  }
+  const live = LiveNotes.safeParse(answer);
+  if (!live.success) throw new Error("dohc could not read which notes are open on the relay.");
+  const { engineApiMin, notes } = live.data;
+  if (engineApiMin === undefined || engineApiMin === null) throw floorRefusal("is not set");
+  if (typeof engineApiMin !== "number" || !Number.isInteger(engineApiMin))
+    throw floorRefusal("is not a valid number");
+  if (engineApiMin < RELAY_ENGINE_API_FLOOR) throw floorRefusal(`is ${engineApiMin}`);
+  return notes.map(({ objectId }) => objectId);
 }
 
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
@@ -63,6 +88,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
       const { relay } = run;
       run.assertCurrent();
       if (relay) {
+        await liveAboveFloor(relay);
         await relay.drainRecorded();
       }
       const result: ConvertNotesResult = {
@@ -78,6 +104,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
         let more = true;
         while (more) {
           run.assertCurrent();
+          await relay?.assertSyncAllowed();
           const relayLive = relay ? await liveAboveFloor(relay) : [];
           const before = result.converted;
           for (let note = 0; note < batch && more; note += 1) {
@@ -96,15 +123,15 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
             result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
             result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
             if (pass.resumeAfter === null) more = false;
+            else if (pass.resumeAfter === after) throw new Error(NOTE_CONVERSION_STUCK);
             else after = pass.resumeAfter;
           }
-          if (more && relay && result.converted > before)
-            await relay.drainRecorded().catch(() => undefined);
+          if (more && relay && result.converted > before) await relay.drainRecorded();
         }
       } catch (error) {
         throw stoppedAfter(error, result.converted);
       }
-      if (relay)
+      if (relay && result.converted > 0)
         result.sent = await relay.drainRecorded().then(
           () => true,
           () => false,

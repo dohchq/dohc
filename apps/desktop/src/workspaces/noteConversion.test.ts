@@ -77,7 +77,8 @@ describe("note conversion run", () => {
       ["2", "is not a valid number"],
       [2.5, "is not a valid number"],
     ] as const) {
-      const low = relay({ liveNotes: vi.fn(async () => live([], floor)) });
+      const answer = floor === undefined ? { notes: [] } : live([], floor);
+      const low = relay({ liveNotes: vi.fn(async () => answer) });
       await expect(
         run("ws", { relay: low, convert, assertCurrent: () => undefined }),
       ).rejects.toThrow(
@@ -304,6 +305,17 @@ describe("note conversion run", () => {
       );
       expect(error.message).toBe(RELAY_UNREACHABLE);
     }
+  });
+
+  it("says it could not read the relay's open notes when the reply has the wrong shape", async () => {
+    const error = await failure(
+      createNoteConversion()("ws", {
+        relay: relay({ liveNotes: vi.fn(async () => ({ engineApiMin: 2, notes: "none" })) }),
+        convert: async () => pass(),
+        assertCurrent: () => undefined,
+      }),
+    );
+    expect(error.message).toBe("dohc could not read which notes are open on the relay.");
   });
 
   it("stops at the next batch once sync is paused, and says what it converted", async () => {

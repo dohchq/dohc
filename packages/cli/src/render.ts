@@ -610,10 +610,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "notesConvert": {
       const run = result as Extract<CliResultByVerb["notesConvert"], { ok: true }>;
       const lines = [
-        `Converted ${run.converted} notes. ${run.unchanged} were already converted.`,
+        `Converted ${counted(run.converted, "note", "notes")}. ${run.unchanged === 1 ? "1 was" : `${run.unchanged} were`} already converted.`,
         ...(run.sent
           ? []
-          : ["dohc could not send them to the server yet. It sends them on the next sync."]),
+          : ["dohc could not send them to the server yet. Run it again to send them."]),
       ];
       for (const group of leftNoteGroups(run)) {
         lines.push("", `${group.title} (${group.notes.length}):`);
