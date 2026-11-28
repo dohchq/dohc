@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  NOTE_CONVERSION_NOT_OWNER,
   NOTE_CONVERSION_OFF,
   NOTE_CONVERSION_PAUSED,
   NOTE_CONVERSION_RUNNING,
+  NOTE_CONVERSION_SHARED_VIEW,
   RELAY_UNREACHABLE,
+  convertsNotes,
   createNoteConversion,
+  noteConversionReach,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./noteConversion";
@@ -458,5 +462,94 @@ describe("note conversion run", () => {
     await expect(
       run("ws", { relay: null, convert: async () => pass(), assertCurrent: () => undefined }),
     ).resolves.toMatchObject({ sent: true });
+  });
+
+  it("stops without converting when the relay's live list cannot be read", async () => {
+    const convert = vi.fn(async () => pass());
+    await expect(
+      createNoteConversion()("ws", {
+        relay: relay({ liveNotes: vi.fn(async () => Promise.reject(new Error("relay down"))) }),
+        convert,
+        assertCurrent: () => undefined,
+      }),
+    ).rejects.toThrow("relay down");
+    expect(convert).not.toHaveBeenCalled();
+
+    const later = vi
+      .fn<(params: Params) => Promise<unknown>>()
+      .mockResolvedValueOnce(pass({ converted: 10, resumeAfter: "a" }));
+    await expect(
+      createNoteConversion()("ws", {
+        relay: relay({
+          liveNotes: vi
+            .fn<() => Promise<string[]>>()
+            .mockResolvedValueOnce(["live-1"])
+            .mockRejectedValueOnce(new Error("relay down")),
+        }),
+        convert: later,
+        assertCurrent: () => undefined,
+      }),
+    ).rejects.toThrow("relay down");
+    expect(later).toHaveBeenCalledOnce();
+  });
+
+  it("says how many notes it converted when a batch fails, since that batch's count is lost", async () => {
+    const fatal = Object.assign(new Error("dohc could not read the workspace database."), {
+      code: "corrupt",
+    });
+    const convert = vi
+      .fn<(params: Params) => Promise<unknown>>()
+      .mockResolvedValueOnce(pass({ converted: 3, resumeAfter: "a" }))
+      .mockRejectedValueOnce(fatal);
+
+    const failure = await createNoteConversion()("ws", {
+      relay: null,
+      convert,
+      assertCurrent: () => undefined,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "dohc could not read the workspace database. dohc converted at least 3 notes before it stopped. Run Convert notes again to finish.",
+    );
+    expect((failure as Error).cause).toBe(fatal);
+
+    const first = await createNoteConversion()("ws", {
+      relay: null,
+      convert: async () => Promise.reject(fatal),
+      assertCurrent: () => undefined,
+    }).catch((error: unknown) => error);
+    expect((first as Error).message).toBe(
+      "dohc could not read the workspace database. Notes converted before it stopped stay converted. Run Convert notes again to finish.",
+    );
+  });
+});
+
+describe("who converts a workspace's notes", () => {
+  const owner = { serverUrl: "https://relay.example", ownerUserId: "owner" };
+
+  it("runs a local-only workspace without the relay and an owner's synced one through it", () => {
+    expect(noteConversionReach({ sharedView: false }, null)).toBe("local");
+    expect(noteConversionReach({ sharedView: false, remote: owner }, "owner")).toBe("relay");
+  });
+
+  it("refuses a member's own full copy of a synced workspace, a shared view, and paused sync", () => {
+    expect(() => noteConversionReach({ sharedView: false, remote: owner }, "member")).toThrow(
+      NOTE_CONVERSION_NOT_OWNER,
+    );
+    expect(() => noteConversionReach({ sharedView: true, remote: owner }, "owner")).toThrow(
+      NOTE_CONVERSION_SHARED_VIEW,
+    );
+    expect(() => noteConversionReach({ sharedView: false, pausedRemote: owner }, "owner")).toThrow(
+      NOTE_CONVERSION_PAUSED,
+    );
+  });
+
+  it("offers conversion only when the engine reads and writes the new format", () => {
+    const on = { DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1", DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "1" };
+    expect(convertsNotes(on)).toBe(true);
+    expect(convertsNotes({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" })).toBe(false);
+    expect(convertsNotes({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" })).toBe(false);
+    expect(convertsNotes({})).toBe(false);
   });
 });
