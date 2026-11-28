@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   leftNoteCount,
   leftNoteGroups,
@@ -16,11 +16,15 @@ export type NoteConversionState =
   | { status: "idle" }
   | { status: "running"; done: number; total: number }
   | { status: "done"; converted: number }
+  | { status: "unsent"; converted: number }
+  | { status: "sending"; converted: number }
   | { status: "failed" };
 
 export interface NoteConversion {
   state: NoteConversionState;
   start(): void;
+  /** Sends the notes the last run converted but could not send. */
+  send(): void;
 }
 
 const KIND = "note-conversion";
@@ -52,7 +56,7 @@ export function noteConversionNotice(result: ConvertNotesResult): {
     result.converted === 0 ? "No notes were converted." : `${convertedWords(result.converted)}.`;
   const unsent = result.sent
     ? ""
-    : " dohc could not send them to the server yet. It sends them on the next sync.";
+    : " dohc could not send them to the server yet. Try again to send them.";
   if (left === 0) return result.sent ? null : { message: `${converted}${unsent}`, tone: "warning" };
   const groups = leftNoteGroups(result);
   return {
@@ -102,31 +106,56 @@ export function useNoteConversion(input: {
     [workspaceId],
   );
 
-  const start = useCallback(
+  const unsent = useRef<{ workspaceId: string; result: ConvertNotesResult } | null>(null);
+  const run = useMemo(() => {
+    const show = (next: NoteConversionState) => setShown({ workspaceId, state: next });
+
+    function settle(result: ConvertNotesResult, cause?: unknown) {
+      unsent.current = result.sent ? null : { workspaceId, result };
+      show({ status: result.sent ? "done" : "unsent", converted: result.converted });
+      const notice = noteConversionNotice(result);
+      if (!notice) {
+        clear(KIND);
+        success(convertedWords(result.converted), undefined, KIND);
+        return;
+      }
+      report({
+        ...notice,
+        ...(cause === undefined ? {} : { cause }),
+        kind: KIND,
+        retry: result.sent ? null : send,
+        ...(leftNoteCount(result) > 0
+          ? { action: { label: "Convert remaining", run: convert, ends: true } }
+          : {}),
+      });
+    }
+
+    function send() {
+      if (unsent.current?.workspaceId !== workspaceId) return;
+      const { result } = unsent.current;
+      const token = requests.next();
+      show({ status: "sending", converted: result.converted });
+      bridge()
+        .sendConvertedNotes({ workspaceId })
+        .then(
+          () => {
+            if (requests.isCurrent(token)) settle({ ...result, sent: true });
+          },
+          (error: unknown) => {
+            if (requests.isCurrent(token)) settle(result, error);
+          },
+        );
+    }
+
     function convert() {
       const token = requests.next();
-      const show = (next: NoteConversionState) => setShown({ workspaceId, state: next });
+      unsent.current = null;
       show({ status: "running", done: 0, total: 0 });
       bridge()
         .convertNotes({ workspaceId })
         .then(
           (result) => {
-            if (!requests.isCurrent(token)) return;
-            show({ status: "done", converted: result.converted });
-            const notice = noteConversionNotice(result);
-            if (!notice) {
-              clear(KIND);
-              success(convertedWords(result.converted), undefined, KIND);
-              return;
-            }
-            report({
-              ...notice,
-              kind: KIND,
-              retry: null,
-              ...(leftNoteCount(result) > 0
-                ? { action: { label: "Convert remaining", run: convert, ends: true } }
-                : {}),
-            });
+            if (requests.isCurrent(token)) settle(result);
           },
           (error: unknown) => {
             if (!requests.isCurrent(token)) return;
@@ -139,9 +168,10 @@ export function useNoteConversion(input: {
             });
           },
         );
-    },
-    [workspaceId, requests, report, success, clear],
-  );
+    }
 
-  return { state, start };
+    return { convert, send };
+  }, [workspaceId, requests, report, success, clear]);
+
+  return { state, start: run.convert, send: run.send };
 }

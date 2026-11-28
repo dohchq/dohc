@@ -1,8 +1,11 @@
 import { FileText } from "lucide-react";
 import { useState } from "react";
+import { bridge } from "../bridge";
 import { convertedWords, type NoteConversion } from "../shell/useNoteConversion";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { SecondaryButton } from "../ui/controls";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SettingRow } from "./SettingRow";
 
 /** What Convert notes asks before it runs. */
@@ -21,9 +24,21 @@ export function convertNotesConfirm(workspaceName: string) {
   };
 }
 
+type RowProps = { conversion: NoteConversion; workspaceName: string; searchMatch?: boolean };
+
+/** The Note format row, shown only when main offers Convert notes for this workspace. */
+export function NoteFormatSetting(props: RowProps & { workspaceId: string }) {
+  const { workspaceId, ...row } = props;
+  const offered = useWorkspaceQuery(useWorkspaceSession(), {
+    key: workspaceId,
+    load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
+  });
+  return offered.value === true ? <NoteFormatRow {...row} /> : null;
+}
+
 /** Settings › Advanced › Note format: converts the owner's notes to the new format. */
-export function NoteFormatRow(props: { conversion: NoteConversion; workspaceName: string }) {
-  const { state, start } = props.conversion;
+export function NoteFormatRow(props: RowProps) {
+  const { state, start, send } = props.conversion;
   const [confirming, setConfirming] = useState(false);
 
   const description =
@@ -50,6 +65,10 @@ export function NoteFormatRow(props: { conversion: NoteConversion; workspaceName
       )
     ) : state.status === "done" ? (
       convertedWords(state.converted)
+    ) : state.status === "unsent" ? (
+      `${convertedWords(state.converted)}. dohc could not send them to the server yet.`
+    ) : state.status === "sending" ? (
+      `Sending ${state.converted.toLocaleString("en-US")} converted ${state.converted === 1 ? "note" : "notes"}…`
     ) : state.status === "failed" ? (
       "dohc could not convert notes."
     ) : (
@@ -57,9 +76,18 @@ export function NoteFormatRow(props: { conversion: NoteConversion; workspaceName
     );
 
   return (
-    <SettingRow title="Note format" description={description} testId="settings-row-note-format">
+    <SettingRow
+      title="Note format"
+      description={description}
+      testId="settings-row-note-format"
+      searchMatch={props.searchMatch === true}
+    >
       {state.status === "failed" ? (
         <SecondaryButton onClick={start}>Try again</SecondaryButton>
+      ) : state.status === "unsent" || state.status === "sending" ? (
+        <SecondaryButton disabled={state.status === "sending"} onClick={send}>
+          Try again
+        </SecondaryButton>
       ) : (
         <SecondaryButton disabled={state.status === "running"} onClick={() => setConfirming(true)}>
           Convert notes…

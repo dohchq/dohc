@@ -47,7 +47,7 @@ import { KeyboardSettings } from "./KeyboardSettings";
 import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
-import { NoteFormatRow } from "./NoteFormatRow";
+import { NoteFormatSetting } from "./NoteFormatRow";
 import type { NoteConversion } from "../shell/useNoteConversion";
 import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
 import { WorkspaceWebhooksSettings } from "./WorkspaceWebhooksSettings";
@@ -1182,9 +1182,11 @@ export function SettingsDialog(props: {
                 workspaceId={props.workspaceId}
                 {...(props.onError ? { onError: props.onError } : {})}
               />
-              {props.noteConversion && bridge().convertsNotes && !props.sharedView ? (
-                <NoteFormatRow
+              {props.noteConversion ? (
+                <NoteFormatSetting
+                  workspaceId={props.workspaceId}
                   conversion={props.noteConversion}
+                  searchMatch={rowSearchMatch("Note format", "convert notes")}
                   workspaceName={
                     props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
                   }

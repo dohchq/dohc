@@ -44,7 +44,6 @@ import {
 import { datasetOperations } from "./ipc/datasetOperations";
 import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { releaseChannelFromArgv } from "./updates/updateMachine";
-import { convertsNotes } from "./workspaces/noteConversion";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -117,6 +116,7 @@ import {
   setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
+  noteConversionOperations,
   chatDispatchNoticeOperations,
   phoneAppOperations,
   agentRunStateOperations,
@@ -228,7 +228,6 @@ const bridge: DohcDesktopBridge = {
   devTools: devToolsGranted(process.argv),
   releaseChannel: releaseChannelFromArgv(process.argv),
   insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
-  convertsNotes: convertsNotes(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager" ? "manager" : "workspace",
   reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
@@ -630,6 +629,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
   ...operationBridge(noteFormatOperations, invoke),
+  ...operationBridge(noteConversionOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
   ...operationBridge(liveNoteOperations, invoke),
   ...operationBridge(memberAppsReadOperations, invoke),

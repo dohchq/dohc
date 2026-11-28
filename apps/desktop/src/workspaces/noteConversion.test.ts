@@ -480,7 +480,11 @@ describe("note conversion run", () => {
     const progress = vi.fn();
     await createNoteConversion()("ws", {
       relay: null,
-      convert: oneNoteAtATime([{ converted: 1 }, { unchanged: 1 }, { doesNotFit: [{ objectId: "c", path: "c.md" }] }]),
+      convert: oneNoteAtATime([
+        { converted: 1 },
+        { unchanged: 1 },
+        { doesNotFit: [{ objectId: "c", path: "c.md" }] },
+      ]),
       assertCurrent: () => undefined,
       progress,
     });
@@ -530,9 +534,10 @@ describe("who converts a workspace's notes", () => {
     );
     expect(noteConversionOffered(on, { sharedView: true, remote: owner }, "owner")).toBe(false);
 
-    expect(noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, local, null)).toBe(false);
+    expect(
+      noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, local, null),
+    ).toBe(false);
     expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, local, null)).toBe(false);
     expect(noteConversionOffered({}, local, null)).toBe(false);
   });
-
 });

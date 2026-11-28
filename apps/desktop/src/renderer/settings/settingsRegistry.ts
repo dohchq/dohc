@@ -212,6 +212,8 @@ export const SETTINGS_SECTIONS = [
       "schedule",
       "schedules",
       "computer",
+      "note format",
+      "convert notes",
     ],
     Icon: Wrench,
   },

@@ -17,10 +17,32 @@ export const NOTE_CONVERSION_NOT_OWNER =
 export const NOTE_CONVERSION_SHARED_VIEW =
   "This is a shared view. Only the original workspace converts its notes.";
 
-/** True when the engine main starts reads and writes notes in the new format. */
-export function convertsNotes(env: Readonly<Record<string, string | undefined>>): boolean {
+type ConvertingWorkspace = {
+  sharedView: boolean;
+  remote?: { ownerUserId: string };
+  pausedRemote?: { ownerUserId: string };
+};
+
+function ownsNotes(workspace: ConvertingWorkspace, signedInUserId: string | null): boolean {
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  return !remote || signedInUserId === null || remote.ownerUserId === signedInUserId;
+}
+
+/**
+ * Whether Settings offers Convert notes: the engine main starts reads and
+ * writes the new format, and this is not a shared view or another account's
+ * synced workspace.
+ */
+export function noteConversionOffered(
+  env: Readonly<Record<string, string | undefined>>,
+  workspace: ConvertingWorkspace,
+  signedInUserId: string | null,
+): boolean {
   return (
-    env.DOHC_ENGINE_NOTE_BODY_SEQUENCE === "1" && env.DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE === "1"
+    env.DOHC_ENGINE_NOTE_BODY_SEQUENCE === "1" &&
+    env.DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE === "1" &&
+    !workspace.sharedView &&
+    ownsNotes(workspace, signedInUserId)
   );
 }
 
@@ -30,19 +52,13 @@ export function convertsNotes(env: Readonly<Record<string, string | undefined>>)
  * shared view and a paused workspace are refused.
  */
 export function noteConversionReach(
-  workspace: {
-    sharedView: boolean;
-    remote?: { ownerUserId: string };
-    pausedRemote?: { ownerUserId: string };
-  },
+  workspace: ConvertingWorkspace,
   signedInUserId: string | null,
 ): "local" | "relay" {
   if (workspace.sharedView) throw new Error(NOTE_CONVERSION_SHARED_VIEW);
-  if (!workspace.remote && !workspace.pausedRemote) return "local";
-  if (!workspace.remote) throw new Error(NOTE_CONVERSION_PAUSED);
-  if (signedInUserId !== null && workspace.remote.ownerUserId !== signedInUserId)
-    throw new Error(NOTE_CONVERSION_NOT_OWNER);
-  return "relay";
+  if (!ownsNotes(workspace, signedInUserId)) throw new Error(NOTE_CONVERSION_NOT_OWNER);
+  if (workspace.pausedRemote && !workspace.remote) throw new Error(NOTE_CONVERSION_PAUSED);
+  return workspace.remote ? "relay" : "local";
 }
 
 const Note = z.object({ objectId: z.string(), path: z.string() });

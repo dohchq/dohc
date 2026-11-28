@@ -436,6 +436,7 @@ import {
   usageRecordOperations,
   noticeOperations,
   scheduleHostOperations,
+  noteConversionOperations,
   chatDispatchNoticeOperations,
   phoneAppOperations,
   agentRunStateOperations,
@@ -869,6 +870,7 @@ import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   NOTE_CONVERSION_PAUSED,
   createNoteConversion,
+  noteConversionOffered,
   noteConversionReach,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
@@ -11417,6 +11419,23 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveNoteOperations, relayShareHandlers);
   registerOperations(operationBoundary, noteFormatOperations, {
     convertNotes: (_input, { operation }) => convertNotesForOperation(operation),
+  });
+  registerOperations(operationBoundary, noteConversionOperations, {
+    readNoteConversionOffered: async (_input, { operation }) => {
+      await warmCredentialCache();
+      const { workspace } = operation;
+      return {
+        offered: noteConversionOffered(
+          process.env,
+          { ...workspace, sharedView: shareViewIsPresent(workspace.shareView) },
+          cachedCredentials?.userId ?? null,
+        ),
+      };
+    },
+    sendConvertedNotes: async (_input, { operation }) => {
+      await (await relayForNoteConversion(operation.workspace))?.drainRecorded();
+      return null;
+    },
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;

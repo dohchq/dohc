@@ -8369,6 +8369,30 @@ export const NoteConversionProgress = z
   })
   .strict();
 export type NoteConversionProgress = z.infer<typeof NoteConversionProgress>;
+// Settings › Advanced › Note format. Main decides whether this window's
+// workspace offers Convert notes, and sends notes a run converted but could
+// not send.
+export const noteConversionOperations = {
+  readNoteConversionOffered: {
+    capabilityId: "workspace.notes.convert.offer.read",
+    channel: "desktop:read-note-conversion-offered",
+    payload: WorkspaceIdPayload,
+    result: z.object({ offered: z.boolean() }).strict(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "Open this workspace to see whether it can convert its notes.",
+  },
+  sendConvertedNotes: {
+    capabilityId: "workspace.notes.convert.send",
+    channel: "desktop:send-converted-notes",
+    payload: WorkspaceIdPayload,
+    result: z.null(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage:
+      "Sending converted notes stopped because this window changed workspaces. Open the workspace and try again.",
+  },
+} satisfies OperationTable;
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   // The wake reasons are about a message from your phone this computer won or
@@ -9563,6 +9587,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof noteFormatOperations>,
+    OperationBridge<typeof noteConversionOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof liveNoteOperations>,
     OperationBridge<typeof memberAppsReadOperations>,
@@ -9603,9 +9628,6 @@ export interface DohcDesktopBridge
   // Constant: the e2e switch that lets sign-in use a plain http server on
   // this machine. The address field checks with it; main decides again.
   insecureLoopbackServersForTests: boolean;
-  // Constant: whether the engine main starts writes notes in the new format,
-  // so Settings offers Convert notes. The engine still refuses when it does not.
-  convertsNotes: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;
