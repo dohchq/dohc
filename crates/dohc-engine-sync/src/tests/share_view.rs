@@ -4802,7 +4802,7 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
         has_more: false,
     };
     let pull = |served: ShareViewResponse| {
-        let (scratch, path, mut engine) = open_store();
+        let (_scratch, _path, mut engine) = open_store();
         let client = RelaySyncClient::new(
             PagedShareRelay::new([], [(0, served)]).with_view_blobs([(sha.clone(), body.clone())]),
         );
@@ -4819,7 +4819,6 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
             .ok()
             .flatten()
             .map(|snapshot| snapshot.text);
-        drop((scratch, path));
         (outcome, text)
     };
 
@@ -4901,7 +4900,7 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
     // commits the cursor after each page marked to. Answers what each applied,
     // whether a move stopped it, whether the reach changed, and its cursor.
     let pulls = |committed: Option<i64>, pages: Vec<(ShareViewResponse, bool)>| {
-        let (scratch, path, mut engine) = open_store();
+        let (_scratch, _path, mut engine) = open_store();
         let grant = reach_grant("r1", "v1");
         let mut cursor = 0;
         if let Some(committed) = committed {
@@ -4940,7 +4939,6 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
                 cursor = pull.pending_cursor.cursor;
             }
         }
-        drop((scratch, path));
         answers
     };
     let first = |head| (page(false, 0, head, "r1"), true);
