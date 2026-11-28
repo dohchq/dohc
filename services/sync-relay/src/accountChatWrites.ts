@@ -13,11 +13,12 @@ import {
 import type { ChatWakeView } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { accountAuthorName } from "@dohc/workspace-contracts/names";
-import { asRecord } from "@dohc/workspace-core";
+import { asRecord, validateUserReadPath } from "@dohc/workspace-core";
 import {
   CHATS_METHOD,
   ChatsLiveAdapter,
   DaemonRefusalError,
+  VersionedLiveAdapter,
   type JsonValue,
 } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
@@ -49,6 +50,7 @@ import {
 import { badRequest, notFound, RelayError } from "./errors";
 import {
   COULD_NOT_SEND,
+  FILE_CHANGED,
   PUBLICATION_DEADLINE_MS,
   TOO_OLD,
   WORKSPACE_CHANGED,
@@ -61,6 +63,7 @@ import {
   type PublicationStage,
   type RefusalReason,
 } from "./operationPublication";
+import { pathShown } from "./phoneMember";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { OperationRecord } from "./storage/operationRecords";
@@ -159,8 +162,16 @@ type ReactWrite = {
   state: "added" | "removed";
 };
 
+type CommentWrite = ChatMessageContent & {
+  kind: "comment";
+  path: string;
+  objectId: string;
+  threadId: string;
+  messageId: string;
+};
+
 /** A write's resolved targets and derived IDs. A start's thread is a proposal: a running conversation can take its message. */
-export type WriteCommand = StartWrite | ReplyWrite | AnswerWrite | ReactWrite;
+export type WriteCommand = StartWrite | CommentWrite | ReplyWrite | AnswerWrite | ReactWrite;
 
 /** What a write's row keeps as its command: its publication, the write, its author, and the agents its message wakes. */
 export type StoredWrite = {
@@ -220,6 +231,13 @@ class CopyReplaced extends Error {
   constructor() {
     super("This server's copy of the workspace was replaced.");
     this.name = "CopyReplaced";
+  }
+}
+
+class FileChanged extends Error {
+  constructor() {
+    super(FILE_CHANGED);
+    this.name = "FileChanged";
   }
 }
 
@@ -370,6 +388,14 @@ export function publicationStages(
           records: messageRecords(write.threadId, write.messageId, author, write),
         },
       ];
+    case "comment":
+      return [
+        {
+          key: key("post"),
+          role: "post",
+          records: messageRecords(write.threadId, write.messageId, author, write),
+        },
+      ];
     case "reply":
       return [
         {
@@ -437,6 +463,7 @@ export function publicationStages(
 
 const WRITE_KINDS: ReadonlySet<string> = new Set<WriteCommand["kind"]>([
   "start",
+  "comment",
   "reply",
   "answer",
   "react",
@@ -502,6 +529,32 @@ function writeStart(
     threadId: write.threadId,
     messageId: write.messageId,
     ...(write.title ? { title: write.title } : {}),
+    ...contentOf(write),
+    ...humanAuthor(stored.author),
+    idempotencyKey: stageKey(stored, "post"),
+    stageReceipt: true,
+  });
+}
+
+async function writeComment(
+  adapter: ChatsLiveAdapter,
+  workspaceId: string,
+  stored: StoredWrite,
+  write: CommentWrite,
+) {
+  await adapter.request(
+    CHATS_METHOD.threadCreate,
+    {
+      threadId: write.threadId,
+      title: "",
+      linkedFile: { objectId: write.objectId, pathHint: write.path },
+    },
+    { idempotencyKey: `${stageKey(stored, "post")}:thread` },
+  );
+  return await adapter.sendMessage({
+    workspaceId,
+    threadId: write.threadId,
+    messageId: write.messageId,
     ...contentOf(write),
     ...humanAuthor(stored.author),
     idempotencyKey: stageKey(stored, "post"),
@@ -678,6 +731,26 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       }
       return { complete: true, message: newest };
     },
+    async file(
+      path: string,
+      expectedObjectId: string,
+    ): Promise<{ path: string; objectId: string }> {
+      const validated = validateUserReadPath(path, { platform: process.platform });
+      if (!validated.ok || !pathShown(null, validated.normalized))
+        throw new TargetMissing(`No document at ${path}.`);
+      const files = new VersionedLiveAdapter(copy.client, copy.workspace, { workspaceId });
+      const [found] = (
+        await files.resolveFiles({
+          workspaceId,
+          targets: [{ path: validated.normalized }],
+          signal: copy.signal,
+        })
+      ).results;
+      if (found?.status !== "found")
+        throw new TargetMissing(`No document at ${validated.normalized}.`);
+      if (found.objectId !== expectedObjectId) throw new FileChanged();
+      return { path: validated.normalized, objectId: found.objectId };
+    },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {
       if (
@@ -841,7 +914,7 @@ function serverWriteHost(
   targets: Targets,
   session: Session,
   record: () => OperationRecord,
-): ChatWriteHost {
+): ChatWriteHost & { comment(command: CommentWrite): Promise<ChatMessage> } {
   const { storage, copy, nowMs } = context;
   const { workspaceId } = copy;
   const adapter = new ChatsLiveAdapter(copy.client, copy.workspace, { workspaceId });
@@ -892,6 +965,15 @@ function serverWriteHost(
       const started = await stage("post", () => writeStart(adapter, workspaceId, stored, write));
       progress({ threadId: started.thread.id });
       return started;
+    },
+    async comment(command) {
+      if (write.kind !== "comment" || command.threadId !== write.threadId) throw mismatched();
+      await context.authorize();
+      await targets.file(write.path, write.objectId);
+      await targets.unclaimed({ threadId: write.threadId, messageId: write.messageId });
+      const message = await stage("post", () => writeComment(adapter, workspaceId, stored, write));
+      progress({ threadId: message.threadId });
+      return message;
     },
     async reply(command) {
       if (write.kind !== "reply" || command.threadId !== write.threadId) throw mismatched();
@@ -1065,11 +1147,25 @@ async function canonicalWrite(
         state: write.args.state,
       };
     }
+    case "comment": {
+      const file = await targets.file(write.args.path, write.args.expectedObjectId);
+      return {
+        kind: "comment",
+        path: file.path,
+        objectId: file.objectId,
+        threadId: ids.threadId,
+        messageId: ids.messageId("post"),
+        ...content(write.args),
+      };
+    }
   }
 }
 
 // Runs the write's shared command, which checks what it writes and orders an answer's stages.
-async function runCommand(host: ChatWriteHost, stored: StoredWrite): Promise<void> {
+async function runCommand(
+  host: ChatWriteHost & { comment(command: CommentWrite): Promise<ChatMessage> },
+  stored: StoredWrite,
+): Promise<void> {
   const { write } = stored;
   const message = (content: ChatMessageContent) => ({
     body: content.body,
@@ -1089,6 +1185,9 @@ async function runCommand(host: ChatWriteHost, stored: StoredWrite): Promise<voi
       await (write.lane === "posts" ? postToGroup(host, input) : sendToStream(host, input));
       return;
     }
+    case "comment":
+      await host.comment(write);
+      return;
     case "reply":
       await replyInThread(host, {
         threadId: write.threadId,
@@ -1152,7 +1251,7 @@ async function replayStages(
   const { write } = stored;
   // The thread is checked, then access, then the stage started, with nothing awaited between the last two.
   const stage = async <T>(role: Role, run: () => Promise<T>): Promise<T> => {
-    if (write.kind !== "start") await targets.thread(write.threadId);
+    if (write.kind !== "start" && write.kind !== "comment") await targets.thread(write.threadId);
     await context.authorize();
     stillCurrent(context);
     return await runStage(context, record, progress, stageKey(stored, role), run);
@@ -1162,6 +1261,37 @@ async function replayStages(
       if (absent("post")) {
         const started = await stage("post", () => writeStart(adapter, workspaceId, stored, write));
         advance(storage, record, nowMs(), { threadId: started.thread.id });
+      }
+      return;
+    case "comment":
+      if (absent("post")) {
+        const exists = (await adapter.listThreads({ workspaceId })).some(
+          (each) => each.id === write.threadId,
+        );
+        if (!exists) {
+          try {
+            await targets.file(write.path, write.objectId);
+          } catch (error) {
+            if (error instanceof FileChanged || error instanceof TargetMissing) {
+              stillCurrent(context);
+              storage.advanceAccountOperation({
+                accountId: record.accountId,
+                operationId: record.operationId,
+                nowMs: nowMs(),
+                stage: "refused",
+                result: {
+                  threadId: null,
+                  reason: error instanceof FileChanged ? FILE_CHANGED : COULD_NOT_SEND,
+                },
+              });
+            }
+            throw error;
+          }
+        }
+        const message = await stage("post", () =>
+          writeComment(adapter, workspaceId, stored, write),
+        );
+        advance(storage, record, nowMs(), { threadId: message.threadId });
       }
       return;
     case "reply":
@@ -1240,6 +1370,7 @@ function refusalBeforeRecord(error: unknown, signal: AbortSignal | undefined): P
   if (error instanceof OperationError) return missing(error.message);
   if (error instanceof WriteInvalid) throw badRequest(error.message);
   if (error instanceof CopyReplaced) return refused(WORKSPACE_CHANGED);
+  if (error instanceof FileChanged) return refused(FILE_CHANGED);
   if (error instanceof TooManyWakeCandidates) return refused(COULD_NOT_SEND);
   const { reason } = failure(error, COULD_NOT_SEND, "operation-only");
   return refused(isRefusalReason(reason) ? reason : COULD_NOT_SEND);
@@ -1365,6 +1496,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
           await replayStages(context, record, stored);
         } catch (error) {
           if (error instanceof RelayError || signal?.aborted) throw error;
+          if (error instanceof FileChanged) return await answered(refused(FILE_CHANGED));
           if (error instanceof TargetMissing) return await answered(missing(error.reason));
           // A stage still unwritten leaves the write pending; its publication answers.
         }
@@ -1772,7 +1904,12 @@ export async function replayUnfinishedWrites(input: {
     } catch (error) {
       // The copy moved on: the next pass replays against what it pulls.
       if (error instanceof CopyBehind) return false;
-      if (error instanceof RelayError || error instanceof TargetMissing || copy.signal.aborted)
+      if (
+        error instanceof RelayError ||
+        error instanceof FileChanged ||
+        error instanceof TargetMissing ||
+        copy.signal.aborted
+      )
         continue;
       input.onError(error);
       // A stage the engine refused left the write refused, which is done with; anything else stays owed.

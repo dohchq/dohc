@@ -54,6 +54,7 @@ export type DmSource = { complete: true; message: WakeMessage | null } | { compl
 export type WakeWrite =
   | { kind: "react" }
   | { kind: "start"; body: string; lane: ChatThreadLane; channelId: string }
+  | { kind: "comment"; body: string }
   | { kind: "reply"; body: string; threadId: string; parentMessageId?: string }
   | {
       kind: "answer";
@@ -95,8 +96,8 @@ async function answeredMessages(
     if (source.complete) found.push(source.message);
     else unread = true;
   };
-  if (write.kind === "start") {
-    if (write.lane === "chat") await dm(write.channelId);
+  if (write.kind === "start" || write.kind === "comment") {
+    if (write.kind === "start" && write.lane === "chat") await dm(write.channelId);
     return { messages: found.filter(ours), unread };
   }
   const thread = await sources.thread(write.threadId);

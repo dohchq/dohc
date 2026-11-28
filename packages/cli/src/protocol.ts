@@ -494,6 +494,14 @@ export const phoneWriteArgsSchemas = {
       state: z.enum(["added", "removed"]),
     })
     .strict(),
+  comment: z
+    .object({
+      operationId: phoneOperationIdSchema,
+      path: documentPathArg,
+      expectedObjectId: phoneTargetIdSchema,
+      ...phoneMessageFields,
+    })
+    .strict(),
 };
 export type PhoneWriteOperation = keyof typeof phoneWriteArgsSchemas;
 // The phone's read mark: the newest message it showed in a thread. It has no

@@ -1342,3 +1342,202 @@ it.skipIf(engine.missing)(
   },
   120_000,
 );
+
+it.skipIf(engine.missing)(
+  "isolates Member workspace search against 50 hidden hits and syncs Owner and Member file comments end to end",
+  async () => {
+    const { storage, relay, relayUrl, owner, openCopy } = await relayAndOwner((userId) =>
+      userId === "ben" ? "Ben" : "Owner",
+    );
+    await owner.request(
+      "chats.readState.seedAccount",
+      { accountUserId: "owner", seedLocal: true },
+      owner.workspace,
+    );
+    const main = await owner.request("versions.ensureMain", {}, owner.workspace);
+    const writeDoc = async (path: string, text: string) =>
+      await owner.request(
+        "versionedText.write",
+        {
+          versionId: main.id as string,
+          path,
+          text,
+          origin: "api",
+          publish: true,
+          createOnly: true,
+        },
+        owner.workspace,
+      );
+    for (let i = 0; i < 50; i += 1) {
+      await writeDoc(
+        `private/secret-${String(i).padStart(2, "0")}.md`,
+        `# Secret Quartz ${i}\n\nquartz quartz quartz CONFIDENTIAL_${i}\n`,
+      );
+    }
+    await writeDoc(
+      "docs/plan.md",
+      "# Lisbon Plan\n\nMention quartz and @[private/secret-00.md] here.\n",
+    );
+    const ownerChats = new ChatsLiveAdapter(owner.client, owner.workspace, {
+      workspaceId: WORKSPACE,
+    });
+    const privateChannel = await ownerChats.createChannel({
+      workspaceId: WORKSPACE,
+      name: "Owner DM",
+      kind: "dm",
+    });
+    await ownerChats.startChannelThread({
+      workspaceId: WORKSPACE,
+      channelId: privateChannel.channelId,
+      author: { kind: "human", displayName: "Owner" },
+      authorUserId: "owner",
+      authorActorKey: null,
+      body: "Private DM quartz quartz SECRET_CHAT_SENTINEL",
+    });
+    await owner.sync();
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: WORKSPACE,
+        actorUserId: "owner",
+        workspaceName: "Trip",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: WORKSPACE,
+        actorUserId: "owner",
+        change: {
+          kind: "create",
+          folder: "private",
+          rule: parseAccessRule("people:\n  cara@dohc.test: edit\n")!,
+        },
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject({ ok: true });
+    await openCopy();
+
+    const phoneCall = async (
+      userId: string,
+      operation: string,
+      args: Record<string, JsonValue>,
+    ) => {
+      const response = await relay(
+        new Request(`${relayUrl}/sync/${WORKSPACE}/ops/${operation}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer session:${userId}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(args),
+        }),
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      return ((await response.json()) as { result: Record<string, unknown> }).result;
+    };
+
+    const waitReady = async (userId: string) =>
+      await vi.waitFor(
+        async () => {
+          const res = await phoneCall(userId, "searchWorkspace", { query: "quartz", limit: 20 });
+          expect(res.indexBuilding).toBe(false);
+          return res;
+        },
+        { timeout: 15_000, interval: 100 },
+      );
+
+    const ownerSearch = await waitReady("owner");
+    expect((ownerSearch.results as Array<{ path: string }>).length).toBeGreaterThan(0);
+
+    const memberSearch = await waitReady("ben");
+    expect(memberSearch).toMatchObject({
+      ok: true,
+      indexBuilding: false,
+      truncated: false,
+      complete: true,
+      results: [expect.objectContaining({ path: "docs/plan.md" })],
+    });
+    const memberJson = JSON.stringify(memberSearch);
+    expect(memberJson).not.toContain("private/secret");
+    expect(memberJson).not.toContain("CONFIDENTIAL_");
+    expect(memberJson).not.toContain("SECRET_CHAT_SENTINEL");
+
+    const planObjectId = await engineChats(owner.client, owner.workspace).fileObjectId(
+      "docs/plan.md",
+    );
+    expect(planObjectId).toBeTruthy();
+
+    const ownerComment = await phoneCall("owner", "comment", {
+      operationId: "owner-e2e-comment-1",
+      path: "docs/plan.md",
+      expectedObjectId: planObjectId!,
+      body: "Owner review note",
+    });
+    expect(ownerComment).toMatchObject({ ok: true, state: "saved" });
+
+    const memberComment = await phoneCall("ben", "comment", {
+      operationId: "member-e2e-comment-1",
+      path: "docs/plan.md",
+      expectedObjectId: planObjectId!,
+      body: "Ben note @[private/secret-00.md]",
+    });
+    expect(memberComment).toMatchObject({ ok: true, state: "saved" });
+    const memberThreadId = String(memberComment.threadId);
+    const memberReply = await phoneCall("ben", "reply", {
+      operationId: "member-e2e-comment-reply-1",
+      threadId: memberThreadId,
+      parentMessageId: String(memberComment.messageId),
+      body: "Ben reply",
+    });
+    expect(memberReply).toMatchObject({ ok: true, state: "saved", threadId: memberThreadId });
+
+    await owner.sync();
+    const ownerFileChats = await listFileChats(
+      engineChats(owner.client, owner.workspace),
+      "docs/plan.md",
+      process.platform,
+    );
+    expect(ownerFileChats.ok).toBe(true);
+    if (!ownerFileChats.ok) throw new Error(ownerFileChats.reason);
+    expect(ownerFileChats.threads.map((t) => t.id)).toEqual(
+      expect.arrayContaining([String(ownerComment.threadId), memberThreadId]),
+    );
+    const syncedThread = await readChat(engineChats(owner.client, owner.workspace), {
+      threadId: memberThreadId,
+    });
+    expect(syncedThread).toMatchObject({
+      ok: true,
+      messages: [
+        expect.objectContaining({
+          id: String(memberComment.messageId),
+          body: "Ben note (a file not shared here)",
+        }),
+        expect.objectContaining({ id: String(memberReply.messageId), body: "Ben reply" }),
+      ],
+    });
+
+    // Stale expectedObjectId refused cleanly for both Owner and Member.
+    expect(
+      await phoneCall("owner", "comment", {
+        operationId: "owner-e2e-comment-stale",
+        path: "docs/plan.md",
+        expectedObjectId: "object-replaced",
+        body: "Stale",
+      }),
+    ).toEqual({ ok: false, refusal: "refused", reason: "This file changed or was replaced" });
+    expect(
+      await phoneCall("ben", "comment", {
+        operationId: "member-e2e-comment-stale",
+        path: "docs/plan.md",
+        expectedObjectId: "object-replaced",
+        body: "Stale",
+      }),
+    ).toEqual({ ok: false, refusal: "refused", reason: "This file changed or was replaced" });
+  },
+  120_000,
+);

@@ -82,4 +82,11 @@ export const workspaceWords = {
   captureCouldntKeep: "dohc could not save this note on this phone.",
   edit: "Edit",
   discard: "Discard",
+  search: "Search",
+  searchPlaceholder: "Search pages",
+  clearSearch: "Clear search",
+  searchIndexing: "Indexing pages… Some results are not ready yet.",
+  searchIncomplete: "Search could not finish all pages.",
+  noSearchResults: (query: string) => `No pages match "${query}".`,
+  searchFailed: "dohc could not search this workspace.",
 } as const;

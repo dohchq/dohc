@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatWrite } from "../server/chatWrites";
 import type { OutboxState } from "../server/outbox";
 import type { OutboxRecord } from "./conversationWrites";
-import { recoveryRows, streamRows, threadRows } from "./outboxMessages";
+import { fileCommentRows, recoveryRows, streamRows, threadRows } from "./outboxMessages";
 
 const ME = { origin: "https://dohc.example.com", accountId: "u-1" };
 const HERE = { ...ME, workspaceId: "ws-1" };
@@ -324,6 +324,47 @@ describe("replies on this phone", () => {
       ["Saved", true, "thread-9"],
       ["Refused", false, null],
       ["Missing", false, null],
+    ]);
+  });
+
+  it("shows pending file comments until fileChats includes their saved threadId, and exposes filePath in recoveryRows", () => {
+    const comment = (path: string, expectedObjectId: string, body: string) => ({
+      operation: "comment" as const,
+      args: { path, expectedObjectId, body },
+    });
+    const pending = record(comment("docs/plan.md", "obj-1", "Waiting comment"), {
+      target: { kind: "file", id: "obj-1" },
+    });
+    const savedShown = record(comment("docs/plan.md", "obj-1", "Already listed"), {
+      target: { kind: "file", id: "obj-1" },
+      stage: "saved",
+      attempted: true,
+      result: { kind: "saved", threadId: "thread-listed", messageId: "msg-listed" },
+    });
+    const otherFile = record(comment("docs/other.md", "obj-2", "Other file"), {
+      target: { kind: "file", id: "obj-2" },
+    });
+    const all = state([pending, savedShown, otherFile]);
+    expect(
+      fileCommentRows(all, HERE, "docs/plan.md", "obj-1", new Set(["thread-listed"])).map(
+        (r) => r.mark.body,
+      ),
+    ).toEqual(["Waiting comment"]);
+    // A replaced file at the same path with a new expectedObjectId never resurrects old comments.
+    expect(fileCommentRows(all, HERE, "docs/plan.md", "obj-replaced", new Set())).toEqual([]);
+    expect(recoveryRows(all, { origin: HERE.origin, accountId: HERE.accountId }).rows).toEqual([
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        streamId: null,
+        threadId: null,
+        filePath: "docs/plan.md",
+      }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        streamId: null,
+        threadId: null,
+        filePath: "docs/other.md",
+      }),
     ]);
   });
 });

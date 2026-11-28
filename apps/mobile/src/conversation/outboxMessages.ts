@@ -182,6 +182,28 @@ export function threadRows(
   });
 }
 
+export function fileCommentRows(
+  state: OutboxState,
+  scope: OutboxScope & { readonly workspaceId: string },
+  path: string,
+  expectedObjectId: string | null,
+  shownThreadIds: ReadonlySet<string>,
+): LocalRow[] {
+  return state.records.flatMap((record): LocalRow[] => {
+    if (!here(record, scope) || record.write.operation !== "comment") return [];
+    if (
+      expectedObjectId !== null
+        ? record.write.args.expectedObjectId !== expectedObjectId
+        : record.write.args.path !== path
+    )
+      return [];
+    const savedThread = record.result?.kind === "saved" ? record.result.threadId : null;
+    if (savedThread !== null && shownThreadIds.has(savedThread)) return [];
+    const local = row(record, "posts", new Set());
+    return local ? [local] : [];
+  });
+}
+
 /**
  * A record in Messages on this phone, with the stream it was written to when it names one, or for a reply or a
  * reaction, the thread it waits in once that's known.
@@ -190,6 +212,7 @@ export interface RecoveryRow {
   readonly workspaceId: string;
   readonly streamId: string | null;
   readonly threadId: string | null;
+  readonly filePath?: string | null;
   readonly mark: LocalMark;
   /** A saved reaction that a read since shows otherwise, shown with what it asks for and Discard. */
   readonly reaction?: ReactionMark;
@@ -220,12 +243,14 @@ export function recoveryRows(
           : null;
     const threadId =
       streamId === null && record.target?.kind === "thread" ? record.target.id : null;
+    const filePath = write.operation === "comment" ? write.args.path : null;
     const mark = localMark(record);
     return [
       {
         workspaceId: record.workspaceId,
         streamId,
         threadId,
+        ...(filePath ? { filePath } : {}),
         mark,
         ...(doubted && write.operation === "react"
           ? { reaction: { emoji: emojiKey(write.args.emoji), state: write.args.state, mark } }

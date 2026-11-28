@@ -7,6 +7,7 @@ import {
   laterCursor,
   markThreadRead,
   readChats,
+  readFileChats,
   readStream,
   readStreamLanes,
   readThread,
@@ -563,5 +564,54 @@ describe("a joined workspace's cursor", () => {
         access: expect.anything(),
       }),
     ]);
+  });
+
+  it("reads fileChats with optional Member access and parses thread access on readThread", async () => {
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/fileChats",
+      answered({
+        ok: true,
+        path: "docs/plan.md",
+        fileObjectId: "obj-plan",
+        access: "read-write",
+        threads: [{ id: "thread-1", title: "Plan", createdAtMs: 10, updatedAtMs: 20 }],
+      }),
+      answered({ ok: true, path: "docs/missing.md", fileObjectId: null, threads: [] }),
+    );
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/chat",
+      answered({
+        ok: true,
+        thread: { id: "thread-1", title: "Plan", access: "read-write" },
+        messages: [raw({ id: "msg-1", threadId: "thread-1" })],
+      }),
+    );
+    const client = createServerClient({
+      origin: server.origin,
+      token: "tok",
+      fetch: server.fetch,
+      signal: new AbortController().signal,
+    });
+    const signal = new AbortController().signal;
+    expect(await readFileChats(client, "ws-a", "docs/plan.md", signal)).toEqual({
+      value: {
+        fileObjectId: "obj-plan",
+        access: "read-write",
+        threads: [{ id: "thread-1", title: "Plan", updatedAtMs: 20 }],
+      },
+      cursor: "0.1.1",
+    });
+    expect(await readFileChats(client, "ws-a", "docs/missing.md", signal)).toEqual({
+      value: { fileObjectId: null, threads: [] },
+      cursor: "0.1.1",
+    });
+    expect((await readThread(client, "ws-a", "thread-1", signal)).value).toMatchObject({
+      kind: "thread",
+      id: "thread-1",
+      access: "read-write",
+    });
   });
 });

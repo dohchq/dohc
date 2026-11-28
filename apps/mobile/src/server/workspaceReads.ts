@@ -442,10 +442,14 @@ export function readStreamLanes(
   );
 }
 
+const memberAccess = (value: unknown): "read-write" | "read-only" | undefined =>
+  value === "read-write" || value === "read-only" ? value : undefined;
+
 export interface ChatThread {
   readonly kind: "thread";
   readonly id: string;
   readonly title: string;
+  readonly access?: "read-write" | "read-only";
   /** Oldest first. */
   readonly messages: readonly ChatMessage[];
 }
@@ -468,7 +472,57 @@ export function readThread(
       const thread = answer?.thread;
       if (!isFields(thread) || !text(thread.id, 256) || !string(thread.title, 4096)) return null;
       const messages = each(answer?.messages, readMessage);
-      return messages && { kind: "thread", id: thread.id, title: thread.title, messages };
+      const access = memberAccess(thread.access);
+      return (
+        messages && {
+          kind: "thread",
+          id: thread.id,
+          title: thread.title,
+          ...(access ? { access } : {}),
+          messages,
+        }
+      );
+    },
+    signal,
+  );
+}
+
+export interface FileCommentThread {
+  readonly id: string;
+  readonly title: string;
+  readonly updatedAtMs: number;
+}
+
+export interface FileChatsRead {
+  readonly fileObjectId: string | null;
+  readonly access?: "read-write" | "read-only";
+  readonly threads: readonly FileCommentThread[];
+}
+
+export function readFileChats(
+  client: ServerClient,
+  workspaceId: string,
+  path: string,
+  signal: AbortSignal,
+): Promise<Read<FileChatsRead>> {
+  return operation<FileChatsRead>(
+    client,
+    workspaceId,
+    "fileChats",
+    { path },
+    (result) => {
+      const answer = okAnswer(result);
+      if (!answer) return null;
+      const id = answer.fileObjectId;
+      const fileObjectId = id === null ? null : text(id, 256) ? id : undefined;
+      const threads = each(answer.threads, (item) =>
+        isFields(item) && text(item.id, 256) && string(item.title, 4096) && count(item.updatedAtMs)
+          ? { id: item.id, title: item.title, updatedAtMs: item.updatedAtMs }
+          : null,
+      );
+      if (fileObjectId === undefined || threads === null) return null;
+      const access = memberAccess(answer.access);
+      return { fileObjectId, ...(access ? { access } : {}), threads };
     },
     signal,
   );

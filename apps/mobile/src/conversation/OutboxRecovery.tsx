@@ -66,6 +66,12 @@ export function OutboxRecovery() {
           pathname: "/chat/[id]",
           params: { id: threadId, thread: "1", workspace: row.workspaceId },
         });
+    if (row.filePath)
+      return () =>
+        router.push({
+          pathname: "/page",
+          params: { path: row.filePath!, workspace: row.workspaceId },
+        });
     return null;
   };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;

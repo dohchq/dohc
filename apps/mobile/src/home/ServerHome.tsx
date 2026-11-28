@@ -15,6 +15,7 @@ import {
   FolderOpen,
   PenTool,
   Plus,
+  Search,
   ShieldCheck,
   Table2,
 } from "lucide-react-native";
@@ -120,6 +121,13 @@ export function ServerHome() {
             Platform.OS === "android"
               ? () => (
                   <View style={styles.headerRight}>
+                    {current ? (
+                      <HeaderButton
+                        icon={Search}
+                        label={workspaceWords.search}
+                        onPress={() => router.push("/search")}
+                      />
+                    ) : null}
                     {canEditFiles ? (
                       <HeaderButton
                         icon={Plus}
@@ -135,6 +143,13 @@ export function ServerHome() {
       />
       {Platform.OS === "ios" ? (
         <Stack.Toolbar placement="right">
+          {current ? (
+            <Stack.Toolbar.Button
+              icon="magnifyingglass"
+              accessibilityLabel={workspaceWords.search}
+              onPress={() => router.push("/search")}
+            />
+          ) : null}
           {canEditFiles ? (
             <Stack.Toolbar.Menu icon="plus" accessibilityLabel={collectionWords.create}>
               <Stack.Toolbar.MenuAction

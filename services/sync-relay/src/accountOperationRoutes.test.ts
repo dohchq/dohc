@@ -5254,4 +5254,473 @@ describe("a Member's phone reads in a workspace they joined", () => {
     expect(Buffer.byteLength(savedBody)).toBeLessThanOrEqual(64 * 1024);
     expect(savedBody).not.toContain("@[");
   });
+
+  it("supports joined Member file comments, file-thread replies, stale objectId refusal, idempotent retries, and strict reach enforcement without ServerCopies", async () => {
+    const { h, storage, engine } = await joinedChat({ copies: false });
+    const engineCallsBefore = engine.methods().length;
+    let fileSeq = 0;
+    const writeFileMoment = (
+      objectId: string,
+      path: string,
+      overrides: Record<string, unknown> = {},
+    ) =>
+      storage.appendLogBatch({
+        workspaceId: "trip",
+        originId: "owner-file-moments",
+        ops: [
+          {
+            originSeq: fileSeq++,
+            opKind: "moment.append",
+            recordedAtMs: 10 + fileSeq,
+            payloadJson: JSON.stringify({
+              momentId: `moment-${objectId}-${fileSeq}`,
+              versionId: "main",
+              objectId,
+              path,
+              recordedAtMs: 10 + fileSeq,
+              operation: "write",
+              payloadBeforeBlobSha256: null,
+              payloadBeforePath: null,
+              payloadAfterBlobSha256: null,
+              payloadAfterPath: path,
+              metadata: { origin: "user" },
+              beforePresent: "null",
+              ...overrides,
+            }),
+          },
+        ],
+      });
+    writeFileMoment("object-plan", "docs/plan.md");
+    writeFileMoment("object-budget", "private/budget.md");
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const memberRows = () =>
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 200 })
+        .rows.filter((row) => row.originId === memberOrigin);
+
+    const beforeCursor = (await feed(await h(changes("0.0.0", { headers: asBen })))).cursor;
+    const heldFeed = h(changes(String(beforeCursor), { hold: 5000, headers: asBen }));
+    const created = await answer(
+      await h(
+        op(
+          "trip",
+          "comment",
+          {
+            operationId: "op-file-comment-1",
+            path: "docs/plan.md",
+            expectedObjectId: "object-plan",
+            body: "Check @[docs/plan.md] and @[private/budget.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(created).toMatchObject({ ok: true, state: "saved" });
+    const commentThreadId = String(created.threadId);
+    const commentMessageId = String(created.messageId);
+    expect(await feed(await heldFeed)).toMatchObject({
+      changed: { chats: expect.arrayContaining([commentThreadId]) },
+    });
+    expect(memberRows()).toHaveLength(2);
+    expect(JSON.parse(memberRows()[0]!.payloadJson)).toMatchObject({
+      threadId: commentThreadId,
+      linkedObjectId: "object-plan",
+    });
+    expect(JSON.parse(memberRows()[1]!.payloadJson)).toMatchObject({
+      messageId: commentMessageId,
+      threadId: commentThreadId,
+      authorKind: "human",
+      authorUserId: "ben",
+      body: "Check @[docs/plan.md] and (a file not shared here)",
+    });
+
+    const replied = await answer(
+      await h(
+        op(
+          "trip",
+          "reply",
+          {
+            operationId: "op-file-reply-1",
+            threadId: commentThreadId,
+            parentMessageId: commentMessageId,
+            body: "Follow up on @[private/budget.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(replied).toMatchObject({ ok: true, state: "saved", threadId: commentThreadId });
+    expect(memberRows()).toHaveLength(3);
+    expect(JSON.parse(memberRows()[2]!.payloadJson)).toMatchObject({
+      threadId: commentThreadId,
+      parentMessageId: commentMessageId,
+      authorKind: "human",
+      authorUserId: "ben",
+      body: "Follow up on (a file not shared here)",
+    });
+
+    // Renaming the file preserves objectId and idempotent retries of saved Member replies.
+    writeFileMoment("object-plan", "docs/lisbon.md", {
+      operation: "rename",
+      payloadBeforePath: "docs/plan.md",
+      beforePath: "docs/plan.md",
+      payloadAfterPath: "docs/lisbon.md",
+    });
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "reply",
+            {
+              operationId: "op-file-reply-1",
+              threadId: commentThreadId,
+              parentMessageId: commentMessageId,
+              body: "Follow up on @[private/budget.md]",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual(replied);
+    expect(memberRows()).toHaveLength(3);
+    writeFileMoment("object-plan", "docs/plan.md", {
+      operation: "rename",
+      payloadBeforePath: "docs/lisbon.md",
+      beforePath: "docs/lisbon.md",
+      payloadAfterPath: "docs/plan.md",
+    });
+
+    // Hidden/out-of-reach file returns missing identical to absent file (no hidden/missing oracle or 404 outbox poisoning).
+    const hiddenComment = await answer(
+      await h(
+        op(
+          "trip",
+          "comment",
+          {
+            operationId: "op-file-hidden",
+            path: "private/budget.md",
+            expectedObjectId: "object-budget",
+            body: "Nope",
+          },
+          asBen,
+        ),
+      ),
+    );
+    const missingComment = await answer(
+      await h(
+        op(
+          "trip",
+          "comment",
+          {
+            operationId: "op-file-absent",
+            path: "docs/absent.md",
+            expectedObjectId: "object-absent",
+            body: "Nope",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(hiddenComment).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at private/budget.md.",
+    });
+    expect(missingComment).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at docs/absent.md.",
+    });
+
+    // Delete + replace docs/plan.md with a new objectId: stale expectedObjectId is refused and never writes.
+    writeFileMoment("object-plan", "docs/plan.md", {
+      operation: "delete",
+      payloadAfterPath: null,
+    });
+    writeFileMoment("object-plan-v2", "docs/plan.md");
+    const countBeforeStale = memberRows().length;
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "comment",
+            {
+              operationId: "op-file-stale",
+              path: "docs/plan.md",
+              expectedObjectId: "object-plan",
+              body: "Should not attach to v2",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual({ ok: false, refusal: "refused", reason: "This file changed or was replaced" });
+    expect(memberRows()).toHaveLength(countBeforeStale);
+
+    // Identical retry of the earlier saved comment still returns the saved receipt without re-writing.
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "comment",
+            {
+              operationId: "op-file-comment-1",
+              path: "docs/plan.md",
+              expectedObjectId: "object-plan",
+              body: "Check @[docs/plan.md] and @[private/budget.md]",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual(created);
+    expect(memberRows()).toHaveLength(countBeforeStale);
+
+    // Mismatched retry is refused.
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "comment",
+            {
+              operationId: "op-file-comment-1",
+              path: "docs/plan.md",
+              expectedObjectId: "object-plan",
+              body: "Different body",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+
+    // Reply on deleted file's thread returns missing.
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "reply",
+            {
+              operationId: "op-file-deleted-reply",
+              threadId: commentThreadId,
+              body: "After delete",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toMatchObject({ ok: false, refusal: "missing" });
+
+    // View-only folder refuses new comments; hidden phone returns 404.
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: {
+          kind: "create",
+          folder: "docs",
+          rule: parseAccessRule("people:\n  ben@dohc.test: view\n")!,
+        },
+        nowMs: 20,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "comment",
+            {
+              operationId: "op-file-view-only",
+              path: "docs/plan.md",
+              expectedObjectId: "object-plan-v2",
+              body: "Read only",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+
+    storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false });
+    expect(
+      (
+        await h(
+          op(
+            "trip",
+            "comment",
+            {
+              operationId: "op-file-phone-hidden",
+              path: "docs/plan.md",
+              expectedObjectId: "object-plan-v2",
+              body: "Hidden phone",
+            },
+            asBen,
+          ),
+        )
+      ).status,
+    ).toBe(404);
+    expect(engine.methods().slice(engineCallsBefore)).toEqual([]);
+  });
+
+  it("attaches Member access on fileChats and file chat threads without changing hidden/missing parity", async () => {
+    const { h, storage } = await joinedChat();
+    storage.appendLogBatch({
+      workspaceId: "trip",
+      originId: "owner-file-access",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "moment.append",
+          recordedAtMs: 10,
+          payloadJson: JSON.stringify({
+            momentId: "m-plan",
+            versionId: "main",
+            objectId: "object-plan",
+            path: "docs/plan.md",
+            recordedAtMs: 10,
+            operation: "write",
+            payloadBeforeBlobSha256: null,
+            payloadBeforePath: null,
+            payloadAfterBlobSha256: null,
+            payloadAfterPath: "docs/plan.md",
+            metadata: { origin: "user" },
+            beforePresent: "null",
+          }),
+        },
+      ],
+    });
+    expect(
+      await answer(await h(op("trip", "fileChats", { path: "docs/plan.md" }, asBen))),
+    ).toMatchObject({
+      ok: true,
+      fileObjectId: "object-plan",
+      access: "read-write",
+    });
+    const hidden = await answer(
+      await h(op("trip", "fileChats", { path: "private/budget.md" }, asBen)),
+    );
+    const missing = await answer(await h(op("trip", "fileChats", { path: "docs/nope.md" }, asBen)));
+    expect(hidden).not.toHaveProperty("access");
+    expect(missing).not.toHaveProperty("access");
+    expect({ ...hidden, path: "" }).toEqual({ ...missing, path: "" });
+
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: {
+          kind: "create",
+          folder: "docs",
+          rule: parseAccessRule("people:\n  ben@dohc.test: view\n")!,
+        },
+        nowMs: 25,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await answer(await h(op("trip", "fileChats", { path: "docs/plan.md" }, asBen))),
+    ).toMatchObject({
+      ok: true,
+      fileObjectId: "object-plan",
+      access: "read-only",
+    });
+  });
+
+  it("enforces searchWorkspace auth, invalid-arg 400s, showOnPhone 404s, and Member reach isolation over HTTP", async () => {
+    const { h, storage, engine } = await joinedChat();
+    engine.files.seedTextFile({
+      workspace: "trip",
+      path: "docs/plan.md",
+      text: "# Plan @[private/budget.md]\n\nVisible quartz @[private/budget.md]\n",
+      objectId: "object-plan",
+    });
+    vi.spyOn(engine, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "retrieval.query") {
+        const prefix = (request.params as { pathPrefix?: string } | undefined)?.pathPrefix;
+        const hits = [
+          {
+            id: "h-private",
+            kind: "page",
+            title: "Secret Budget",
+            snippet: "CONFIDENTIAL quartz",
+            path: "private/budget.md",
+            objectId: "object-budget",
+            matchedTerms: ["quartz"],
+            related: [
+              {
+                kind: "page",
+                edge: "wikilink",
+                direction: "out",
+                title: "Secret",
+                path: "private/budget.md",
+              },
+            ],
+          },
+          {
+            id: "h-plan",
+            kind: "page",
+            title: "Plan @[private/budget.md]",
+            snippet: "Visible quartz @[private/budget.md]",
+            path: "docs/plan.md",
+            objectId: "object-plan",
+            matchedTerms: ["quartz"],
+            related: [],
+          },
+        ].filter((item) => !prefix || item.path === prefix || item.path.startsWith(`${prefix}/`));
+        return {
+          id: request.id,
+          result: {
+            versionId: "main",
+            results: hits,
+            neighbors: [],
+            complete: true,
+            indexBuilding: false,
+            policyDegraded: false,
+            mountsCovered: true,
+            sharedChannelRowsUncovered: 0,
+            truncated: false,
+          },
+        };
+      }
+      return await Object.getPrototypeOf(engine).sendRequest.call(engine, request);
+    });
+
+    expect((await h(op("trip", "searchWorkspace", { query: "   " }))).status).toBe(400);
+    expect(await answer(await h(op("trip", "searchWorkspace", { query: "quartz" })))).toMatchObject(
+      {
+        ok: true,
+        results: expect.arrayContaining([
+          expect.objectContaining({ path: "private/budget.md" }),
+          expect.objectContaining({ path: "docs/plan.md" }),
+        ]),
+      },
+    );
+
+    const memberRes = await answer(
+      await h(op("trip", "searchWorkspace", { query: "quartz" }, asBen)),
+    );
+    expect(memberRes).toEqual({
+      ok: true,
+      results: [
+        {
+          path: "docs/plan.md",
+          title: "Plan (a file not shared here)",
+          snippet: "Visible quartz (a file not shared here)",
+        },
+      ],
+      indexBuilding: false,
+      truncated: false,
+      complete: true,
+    });
+    expect(JSON.stringify(memberRes)).not.toContain("private/budget");
+    expect(JSON.stringify(memberRes)).not.toContain("CONFIDENTIAL");
+
+    storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false });
+    expect((await h(op("trip", "searchWorkspace", { query: "quartz" }, asBen))).status).toBe(404);
+  });
 });

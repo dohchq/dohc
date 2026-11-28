@@ -45,6 +45,7 @@ import { untilAborted } from "./namedLiveFrameHost";
 import { channelShown, memberChatAnswer, pathShown, type PhoneMember } from "./phoneMember";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
+import { commentFileOf } from "./storage/personalAgentChat";
 
 // The reads an account makes through this server's copy of a workspace it
 // owns or, on a phone, joined. The caller authenticates the account and
@@ -52,9 +53,15 @@ import type { SyncRelayStorage } from "./storage";
 // engine's own failures, every secret file, and whatever a Member's reach
 // hides out of the answer.
 
+type MemberAccess = "read-write" | "read-only";
+type ChatThreadResult = Extract<CliResultByVerb["chat"], { ok: true; thread: unknown }>;
 export type AccountOperationResult =
   | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText" | "groupsFull">]
   | (Extract<CliResultByVerb["documentRead"], { ok: true }> & { objectId: string })
+  | (Extract<CliResultByVerb["fileChats"], { ok: true }> & { access?: MemberAccess })
+  | (Omit<ChatThreadResult, "thread"> & {
+      thread: ChatThreadResult["thread"] & { access?: MemberAccess };
+    })
   | PhoneGroupsResult
   | FileListResult
   | TextReadResult
@@ -209,7 +216,7 @@ export async function runAccountOperation(
             signal,
           ),
         );
-        const result =
+        const memberResult =
           input.member !== null && CHAT_OPERATIONS.has(request.operation)
             ? memberChatAnswer(
                 input.member,
@@ -217,6 +224,16 @@ export async function runAccountOperation(
                 request.operation === "groupsFull"
                   ? server.storage.listChannelCreates(input.workspaceId)
                   : undefined,
+              )
+            : null;
+        const result =
+          memberResult !== null && input.member !== null
+            ? attachMemberFileAccess(
+                server.storage,
+                input.workspaceId,
+                input.member,
+                request.operation,
+                memberResult,
               )
             : request.operation === "groupsFull" && input.visitor.phone && input.member === null
               ? phoneGroups(
@@ -236,6 +253,31 @@ export async function runAccountOperation(
   } finally {
     console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
   }
+}
+
+function attachMemberFileAccess(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  member: PhoneMember,
+  operation: ServerOperation,
+  result: AccountOperationResult,
+): AccountOperationResult {
+  if (!("ok" in result) || !result.ok) return result;
+  const accessAt = (path: string): MemberAccess =>
+    member.selector.reach.levelAt(path) === "view" ? "read-only" : "read-write";
+  if (operation === "fileChats" && "fileObjectId" in result && result.fileObjectId !== null)
+    return { ...result, access: accessAt(result.path) };
+  if (operation === "chat" && "thread" in result) {
+    const file = commentFileOf(storage, workspaceId, result.thread.id);
+    if (file !== null && member.selector.reach.levelAt(file.filePath) !== null) {
+      const active = typeof storage.objectCurrentPath(workspaceId, file.objectId) === "string";
+      return {
+        ...result,
+        thread: { ...result.thread, access: active ? accessAt(file.filePath) : "read-only" },
+      };
+    }
+  }
+  return result;
 }
 
 export async function withAccountReadDeadline<T>(

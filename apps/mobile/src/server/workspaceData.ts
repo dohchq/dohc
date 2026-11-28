@@ -20,6 +20,7 @@ import {
   markThreadRead,
   readChanges,
   readChats,
+  readFileChats,
   readFiles,
   readPage,
   readStream,
@@ -30,6 +31,7 @@ import {
   type ChatThread,
   type FeedAnswer,
   type FeedChanges,
+  type FileChatsRead,
   type GroupStream,
   type MissingChat,
   type PageRead,
@@ -102,6 +104,8 @@ export interface View<T> {
   shownAs?(value: T | null): string | null;
   /** The messages a value shows, so the outbox can tell which of its saved writes a read now shows. */
   messages?(value: T): readonly ChatMessage[];
+  /** The comment thread IDs a value lists, so the outbox can retire saved comment writes. */
+  threads?(value: T): readonly string[];
 }
 
 export const views = {
@@ -190,6 +194,15 @@ export const views = {
     };
   },
 
+  fileChats(path: string): View<FileChatsRead> {
+    return {
+      id: `fileChats:${path}`,
+      read: (client, workspaceId, signal) => readFileChats(client, workspaceId, path, signal),
+      threads: (value) => value.threads.map((thread) => thread.id),
+      affectedBy: (changes) => changes.chats !== undefined || changes.files !== undefined,
+    };
+  },
+
   /**
    * A page: a change to the object at its path, or to any file while the store doesn't know which object that is. A
    * page that goes keeps the last text this store read of it.
@@ -244,6 +257,7 @@ export function viewOf(id: string): View<unknown> | null {
   if (kind === "stream") return views.stream(key);
   if (kind === "lanes") return views.lanes(key);
   if (kind === "thread") return views.thread(key);
+  if (kind === "fileChats") return views.fileChats(key);
   if (kind === "page") return views.page(key);
   return null;
 }
@@ -556,6 +570,8 @@ export function createWorkspaceData(options: {
   readonly reopen?: () => void;
   /** A read from the server that still counts showed these messages. */
   readonly onMessages?: (messages: readonly ChatMessage[]) => void;
+  /** A fileChats read from the server that still counts listed these comment thread IDs. */
+  readonly onThreads?: (threadIds: readonly string[]) => void;
 }): WorkspaceData {
   const { signIn, workspaceId, cache } = options;
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
@@ -744,6 +760,7 @@ export function createWorkspaceData(options: {
         cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
+        if (target.view.threads) options.onThreads?.(target.view.threads(value));
         if (answer.cursor !== null)
           follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
         return value;

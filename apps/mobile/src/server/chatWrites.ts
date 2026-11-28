@@ -40,6 +40,13 @@ export type ChatWrite =
         readonly emoji: string;
         readonly state: "added" | "removed";
       };
+    }
+  | {
+      readonly operation: "comment";
+      readonly args: MessageFields & {
+        readonly path: string;
+        readonly expectedObjectId: string;
+      };
     };
 
 /** The closed list of reasons a refused write gives (services/sync-relay/src/operationPublication.ts). */
@@ -47,12 +54,14 @@ export type RefusalReason =
   | "already answered"
   | "The message it replies to wasn't sent"
   | "This workspace changed on your server"
+  | "This file changed or was replaced"
   | "Couldn't send"
   | "too old";
 const REASONS: ReadonlySet<string> = new Set<RefusalReason>([
   "already answered",
   "The message it replies to wasn't sent",
   "This workspace changed on your server",
+  "This file changed or was replaced",
   "Couldn't send",
   "too old",
 ]);
@@ -240,6 +249,15 @@ export function readChatWrite(value: unknown): ChatWrite | null {
             args: { messageId: args.messageId, emoji: args.emoji, state: args.state },
           }
         : null;
+    case "comment": {
+      const message = messageFields(args);
+      return message && text(args.path) && id(args.expectedObjectId)
+        ? {
+            operation: "comment",
+            args: { ...message, path: args.path, expectedObjectId: args.expectedObjectId },
+          }
+        : null;
+    }
     default:
       return null;
   }

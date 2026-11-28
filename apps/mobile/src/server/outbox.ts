@@ -70,9 +70,9 @@ type OutboxResult =
     }
   | { readonly kind: "missing"; readonly reason: string };
 
-/** The thread or stream a record waits its turn in. */
+/** The thread, stream, or file a record waits its turn in. */
 interface Target {
-  readonly kind: "thread" | "stream";
+  readonly kind: "thread" | "stream" | "file";
   readonly id: string;
 }
 
@@ -221,6 +221,12 @@ export interface Outbox {
     workspaceId: string,
     messages: readonly ChatMessage[],
   ): void;
+  /** A read of a file's comment list showed these threads: saved comment records naming them are deleted. */
+  handoffThreads(
+    account: Pick<SignIn, "origin" | "userId">,
+    workspaceId: string,
+    threadIds: readonly string[],
+  ): void;
   /**
    * Stops sending and deletes `account`'s rows, or the last signed-in account's, its Notice marks and list included, and
    * every other account's Notice list, or a damaged kept.db, in one commit. Then it runs a TRUNCATE checkpoint, calls
@@ -311,6 +317,8 @@ function targetOf(write: ChatWrite, thread: string | undefined): Target | null |
       return write.args.threadId === null ? null : { kind: "thread", id: write.args.threadId };
     case "react":
       return thread === undefined ? undefined : { kind: "thread", id: thread };
+    case "comment":
+      return { kind: "file", id: write.args.expectedObjectId };
   }
 }
 
@@ -398,6 +406,8 @@ export function createOutbox(options: {
   /** The latest messages reads showed, for one account and workspace. */
   let observed: { readonly scope: string; readonly messages: Map<string, ChatMessage> } | null =
     null;
+  /** The latest comment thread IDs fileChats reads showed, for one account and workspace. */
+  let observedThreads: { readonly scope: string; readonly ids: Set<string> } | null = null;
   /** Saved reactions, by sequence, that a read since they were saved shows otherwise. Kept in memory only. */
   const unconfirmed = new Set<number>();
   let changeFailures = 0;
@@ -573,24 +583,30 @@ export function createOutbox(options: {
    * never shows again over the server's state.
    */
   function reconcile() {
-    if (status !== "ready" || !observed) return;
-    const { scope, messages } = observed;
-    const saved = [...records.values()]
-      .filter((record) => record.stage === "saved" && scopeOf(record) === scope)
-      .sort((a, b) => a.sequence - b.sequence);
-    const newest = new Map<string, number>();
-    for (const record of saved) {
-      if (!shows(record, messages)) continue;
-      const key = reactionKey(record);
-      if (key === null) retire([record.sequence]);
-      else newest.set(key, record.sequence);
+    if (status !== "ready" || (!observed && !observedThreads)) return;
+    const scopes = new Set(
+      [observed?.scope, observedThreads?.scope].filter((s): s is string => s !== undefined),
+    );
+    for (const scope of scopes) {
+      const messages = observed?.scope === scope ? observed.messages : null;
+      const threadIds = observedThreads?.scope === scope ? observedThreads.ids : null;
+      const saved = [...records.values()]
+        .filter((record) => record.stage === "saved" && scopeOf(record) === scope)
+        .sort((a, b) => a.sequence - b.sequence);
+      const newest = new Map<string, number>();
+      for (const record of saved) {
+        if (!shows(record, messages, threadIds)) continue;
+        const key = reactionKey(record);
+        if (key === null) retire([record.sequence]);
+        else newest.set(key, record.sequence);
+      }
+      for (const [key, last] of newest)
+        retire(
+          saved
+            .filter((record) => record.sequence <= last && reactionKey(record) === key)
+            .map((record) => record.sequence),
+        );
     }
-    for (const [key, last] of newest)
-      retire(
-        saved
-          .filter((record) => record.sequence <= last && reactionKey(record) === key)
-          .map((record) => record.sequence),
-      );
   }
 
   /**
@@ -1148,13 +1164,29 @@ export function createOutbox(options: {
           !read.has(record.write.args.messageId)
         )
           continue;
-        const contradicts = !shows(record, observed.messages);
+        const contradicts = !shows(record, observed.messages, null);
         if (contradicts === unconfirmed.has(record.sequence)) continue;
         if (contradicts) unconfirmed.add(record.sequence);
         else unconfirmed.delete(record.sequence);
         flagged = true;
       }
       if (flagged) changed();
+      reconcile();
+      pump();
+    },
+
+    handoffThreads(account, workspaceId, threadIds) {
+      const scope = scopeOf({ origin: account.origin, accountId: account.userId, workspaceId });
+      unreachable.delete(scope);
+      if (observedThreads?.scope !== scope) observedThreads = { scope, ids: new Set() };
+      for (const id of threadIds) {
+        observedThreads.ids.delete(id);
+        observedThreads.ids.add(id);
+      }
+      for (const id of observedThreads.ids) {
+        if (observedThreads.ids.size <= OBSERVED_MAX) break;
+        observedThreads.ids.delete(id);
+      }
       reconcile();
       pump();
     },
@@ -1171,6 +1203,7 @@ export function createOutbox(options: {
       for (const [sequence, record] of records)
         if (accounts.some((account) => ownedBy(record, account))) records.delete(sequence);
       observed = null;
+      observedThreads = null;
       unreachable.clear();
       unconfirmed.clear();
       status = "loading";
@@ -1234,6 +1267,7 @@ export function createOutbox(options: {
         session = signIn;
         if (signIn) lastAccount = { origin: signIn.origin, userId: signIn.userId };
         observed = null;
+        observedThreads = null;
         unreachable.clear();
         stopSending();
         changed();
@@ -1261,8 +1295,20 @@ const reactionKey = ({ write }: OutboxRecord) =>
     : null;
 
 /** Whether a read shows a saved record's result: its message by ID, its answer resolved, or its reaction as sent. */
-function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): boolean {
+function shows(
+  record: OutboxRecord,
+  shown: ReadonlyMap<string, ChatMessage> | null,
+  shownThreads: ReadonlySet<string> | null,
+): boolean {
   const { write, result } = record;
+  if (
+    write.operation === "comment" &&
+    result?.kind === "saved" &&
+    result.threadId !== null &&
+    shownThreads?.has(result.threadId)
+  )
+    return true;
+  if (!shown) return false;
   if (write.operation === "react") {
     const target = shown.get(write.args.messageId);
     if (!target) return false;
@@ -1330,7 +1376,9 @@ function readResult(value: unknown): OutboxResult | null | undefined {
 
 function readTarget(value: unknown): Target | null | undefined {
   if (value === null) return null;
-  return isFields(value) && (value.kind === "thread" || value.kind === "stream") && id(value.id)
+  return isFields(value) &&
+    (value.kind === "thread" || value.kind === "stream" || value.kind === "file") &&
+    id(value.id)
     ? { kind: value.kind, id: value.id }
     : undefined;
 }

@@ -1,5 +1,6 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { validateUserReadPath } from "@dohc/workspace-core";
 import {
   isAccountFileWriteOperation,
   runAccountFileWrite,
@@ -34,7 +35,7 @@ import {
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { untilAborted } from "./namedLiveFrameHost";
 import { appendNamedChatMessage } from "./namedRecipientChat";
-import { COULD_NOT_SEND } from "./operationPublication";
+import { COULD_NOT_SEND, FILE_CHANGED } from "./operationPublication";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollections";
@@ -48,15 +49,17 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import type { PhonePages } from "./phonePages";
+import { runPhoneSearch } from "./phoneSearch";
 import {
   isPhoneSketchOperation,
   runPhoneSketchOperation,
   SAVE_SKETCH_MAX_BODY_BYTES,
 } from "./phoneSketches";
-import { phoneMember, type PhoneMember } from "./phoneMember";
+import { pathShown, phoneMember, type PhoneMember } from "./phoneMember";
 import { authorizeShareGrantAction } from "./shareAuthorization";
 import { isWorkspaceSelector } from "./shareFilter";
 import { accountIsFenced } from "./storage/accountDeletion";
+import { commentFileOf, currentFileAt, type CommentFile } from "./storage/personalAgentChat";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
 import { SyncRelayConflictError, type SyncRelayStorage } from "./storage";
@@ -125,11 +128,12 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * when it ran, which its copy may not have pulled, so it never moves a
  * read's starting point.
  */
-class MemberTargetMissing extends Error {
-  readonly reason: string;
-  constructor(reason: string) {
+class MemberWriteRefusal extends Error {
+  constructor(
+    readonly refusal: "missing" | "refused",
+    readonly reason: string,
+  ) {
     super(reason);
-    this.reason = reason;
   }
 }
 
@@ -218,7 +222,9 @@ export function createAccountOperationRoute(options: {
     const docCollectionRead = isPhoneDocumentCollectionReadOperation(route.operation);
     const docCollectionWrite = isPhoneDocumentCollectionWriteOperation(route.operation);
     const write = isPhoneWriteOperation(route.operation);
-    const memberWrite = route.operation === "post" || route.operation === "reply";
+    const search = route.operation === "searchWorkspace";
+    const memberWrite =
+      route.operation === "post" || route.operation === "reply" || route.operation === "comment";
     if (
       !feed &&
       !wakeFeed &&
@@ -234,7 +240,13 @@ export function createAccountOperationRoute(options: {
     )
       throw copiesUnavailable();
     const joinedAllowed =
-      feed || app || collection || page || memberWrite || isAccountOperation(route.operation);
+      feed ||
+      app ||
+      collection ||
+      page ||
+      search ||
+      memberWrite ||
+      isAccountOperation(route.operation);
     const owner = storage.workspaceOwner(route.workspaceId);
     const reaches = (userId: string) => {
       if (browser) return storage.workspaceIsOwnedBy(route.workspaceId, userId);
@@ -260,6 +272,7 @@ export function createAccountOperationRoute(options: {
         docCollectionWrite ||
         fileWrite ||
         write ||
+        search ||
         sketch ||
         mark ||
         retry ||
@@ -414,7 +427,12 @@ export function createAccountOperationRoute(options: {
     if (write) {
       const parsed = parsePhoneWrite(route.operation, args);
       if (member !== null) {
-        if (parsed.operation !== "post" && parsed.operation !== "reply") throw notFound();
+        if (
+          parsed.operation !== "post" &&
+          parsed.operation !== "reply" &&
+          parsed.operation !== "comment"
+        )
+          throw notFound();
         if (
           parsed.args.needsDecision !== undefined ||
           parsed.args.options !== undefined ||
@@ -429,17 +447,36 @@ export function createAccountOperationRoute(options: {
             cursor: currentAccountFeedCursor(storage, route.workspaceId, memberOf(caller.userId)),
           });
         };
-        const channelWireId =
-          parsed.operation === "post"
-            ? parsed.args.groupId
-            : storage.findThreadCreateChannelWireId(route.workspaceId, parsed.args.threadId);
-        if (typeof channelWireId !== "string")
+        let channelWireId: string | null = null;
+        let fileTarget: CommentFile | null = null;
+        if (parsed.operation === "post") {
+          channelWireId = parsed.args.groupId;
+        } else if (parsed.operation === "comment") {
+          const validated = validateUserReadPath(parsed.args.path, { platform: process.platform });
+          if (!validated.ok) throw badRequest("invalid path");
+          if (!pathShown(member, validated.normalized))
+            return await replyAnswer({
+              ok: false,
+              refusal: "missing",
+              reason: `No document at ${validated.normalized}.`,
+            });
+          fileTarget = { objectId: parsed.args.expectedObjectId, filePath: validated.normalized };
+        } else {
+          const found = storage.findThreadCreateChannelWireId(
+            route.workspaceId,
+            parsed.args.threadId,
+          );
+          if (typeof found === "string") channelWireId = found;
+          else if (found === null)
+            fileTarget = commentFileOf(storage, route.workspaceId, parsed.args.threadId);
+        }
+        if (channelWireId === null && fileTarget === null)
           return await replyAnswer({
             ok: false,
             refusal: "missing",
             reason: `chat thread not found: ${parsed.operation === "reply" ? parsed.args.threadId : ""}`,
           });
-        const authorizeMemberGroup = (action: "read" | "append") => {
+        const authorizeMemberWrite = (action: "read" | "append") => {
           const role = storage.phoneRole(caller.userId, route.workspaceId);
           if (
             role === null ||
@@ -454,16 +491,35 @@ export function createAccountOperationRoute(options: {
             fresh.grantId !== member.grantId
           )
             throw notFound();
-          if (
-            !workspaceGroupReachable(fresh.selector, channelWireId, {
-              channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
-            })
-          )
-            throw new MemberTargetMissing(
-              parsed.operation === "post"
-                ? `no such group: ${channelWireId}`
-                : `chat thread not found: ${parsed.args.threadId}`,
-            );
+          let resolvedFile = fileTarget;
+          if (channelWireId !== null) {
+            if (
+              !workspaceGroupReachable(fresh.selector, channelWireId, {
+                channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
+              })
+            )
+              throw new MemberWriteRefusal(
+                "missing",
+                parsed.operation === "post"
+                  ? `no such group: ${channelWireId}`
+                  : `chat thread not found: ${parsed.operation === "reply" ? parsed.args.threadId : ""}`,
+              );
+          } else if (parsed.operation === "comment") {
+            if (!pathShown(fresh, fileTarget!.filePath))
+              throw new MemberWriteRefusal("missing", `No document at ${fileTarget!.filePath}.`);
+          } else if (parsed.operation === "reply") {
+            resolvedFile = commentFileOf(storage, route.workspaceId, parsed.args.threadId);
+            if (
+              resolvedFile === null ||
+              resolvedFile.objectId !== fileTarget!.objectId ||
+              !pathShown(fresh, resolvedFile.filePath) ||
+              !fresh.selector.reach.objectVisible(resolvedFile.objectId)
+            )
+              throw new MemberWriteRefusal(
+                "missing",
+                `chat thread not found: ${parsed.args.threadId}`,
+              );
+          }
           if (action === "read") {
             return {
               share: { shareId: fresh.shareId, workspaceId: route.workspaceId },
@@ -484,15 +540,38 @@ export function createAccountOperationRoute(options: {
             !isWorkspaceSelector(granted.effectiveSelector)
           )
             throw notFound();
-          if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
-            throw relayError("share_read_only");
-          if (
-            parsed.operation === "post" &&
-            storage
-              .listChannelCreates(route.workspaceId)
-              .find((group) => group.channelWireId === channelWireId)?.type === "chat"
-          )
-            throw relayError("share_op_rejected");
+          if (channelWireId !== null) {
+            if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
+              throw relayError("share_read_only");
+            if (
+              parsed.operation === "post" &&
+              storage
+                .listChannelCreates(route.workspaceId)
+                .find((group) => group.channelWireId === channelWireId)?.type === "chat"
+            )
+              throw relayError("share_op_rejected");
+          } else {
+            const missingReason =
+              parsed.operation === "reply"
+                ? `chat thread not found: ${parsed.args.threadId}`
+                : `No document at ${resolvedFile!.filePath}.`;
+            const level = granted.effectiveSelector.reach.levelAt(resolvedFile!.filePath);
+            if (level === null) throw new MemberWriteRefusal("missing", missingReason);
+            if (level === "view") throw relayError("share_read_only");
+            if (parsed.operation === "comment") {
+              const live = currentFileAt(storage, route.workspaceId, resolvedFile!.filePath);
+              if (live === null || !granted.effectiveSelector.reach.objectVisible(live.objectId))
+                throw new MemberWriteRefusal("missing", missingReason);
+              if (live.objectId !== resolvedFile!.objectId)
+                throw new MemberWriteRefusal("refused", FILE_CHANGED);
+            } else if (
+              parsed.operation === "reply" &&
+              typeof storage.objectCurrentPath(route.workspaceId, resolvedFile!.objectId) !==
+                "string"
+            ) {
+              throw new MemberWriteRefusal("missing", missingReason);
+            }
+          }
           return {
             share: { shareId: granted.share.shareId, workspaceId: granted.share.workspaceId },
             effectiveSelector: granted.effectiveSelector,
@@ -509,23 +588,26 @@ export function createAccountOperationRoute(options: {
             redactFileLinks: true,
             bindRequest: true,
             channelWireId,
+            file: fileTarget,
             id: parsed.args.operationId,
             body: parsed.args.body,
             ...(parsed.operation === "post"
               ? { lane: "posts" as const, title: parsed.args.title }
-              : { threadId: parsed.args.threadId, parentMessageId: parsed.args.parentMessageId }),
+              : parsed.operation === "reply"
+                ? { threadId: parsed.args.threadId, parentMessageId: parsed.args.parentMessageId }
+                : {}),
             nowMs: () => options.nowMs(),
             signal: visitor.signal,
             lookupUserDisplayName: options.lookupUserDisplayName,
             refreshMentionAccountNames: options.refreshMentionAccountNames,
             activity: options.activity,
             authorizeRetry: () => {
-              authorizeMemberGroup("read");
+              authorizeMemberWrite("read");
             },
-            authorizeAppend: () => authorizeMemberGroup("append"),
+            authorizeAppend: () => authorizeMemberWrite("append"),
             requireParentMessage: (tid, parentId) => {
               if (!storage.hasThreadMessage(route.workspaceId, tid, parentId))
-                throw new MemberTargetMissing(`chat message not found: ${parentId}`);
+                throw new MemberWriteRefusal("missing", `chat message not found: ${parentId}`);
             },
             afterNameLookup: () => check(false),
           });
@@ -536,8 +618,8 @@ export function createAccountOperationRoute(options: {
             messageId: saved.messageId,
           });
         } catch (error) {
-          if (error instanceof MemberTargetMissing)
-            return await replyAnswer({ ok: false, refusal: "missing", reason: error.reason });
+          if (error instanceof MemberWriteRefusal)
+            return await replyAnswer({ ok: false, refusal: error.refusal, reason: error.reason });
           if (
             error instanceof SyncRelayConflictError ||
             (error instanceof RelayError &&
@@ -654,6 +736,20 @@ export function createAccountOperationRoute(options: {
       );
       return jsonResponse({ ok: true, result, cursor });
     }
+    if (search) {
+      const { result, cursor } = await runPhoneSearch(
+        { storage, copies },
+        {
+          owner,
+          member,
+          workspaceId: route.workspaceId,
+          args,
+          visitor,
+          authorize,
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
     const { result, cursor } = await runAccountOperation(
       { storage, copies },
       {
@@ -673,7 +769,10 @@ export function createAccountOperationRoute(options: {
     request: Request,
     route: AccountOperationRoute,
   ): Promise<Response> {
-    if (request.method === "POST" && isAccountOperation(route.operation))
+    if (
+      request.method === "POST" &&
+      (isAccountOperation(route.operation) || route.operation === "searchWorkspace")
+    )
       return await withAccountReadDeadline(request.signal, (signal) =>
         respond(request, route, signal),
       );

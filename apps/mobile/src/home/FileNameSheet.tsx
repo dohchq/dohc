@@ -449,17 +449,19 @@ export function useFileLifecycle(workspaceName: string) {
 export function SheetModal(props: {
   readonly open: boolean;
   readonly title: string;
-  readonly saving: boolean;
+  readonly closeLabel?: string;
+  readonly saving?: boolean;
   readonly allowDismissWhileSaving?: boolean;
-  readonly savingLabel: string;
-  readonly actionLabel: string;
+  readonly savingLabel?: string;
+  readonly actionLabel?: string;
   readonly onClose: () => void;
-  readonly onAction: () => void;
+  readonly onAction?: () => void;
   readonly children: ReactNode;
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const canDismiss = !props.saving || props.allowDismissWhileSaving === true;
+  const saving = props.saving === true;
+  const canDismiss = !saving || props.allowDismissWhileSaving === true;
   const close = () => {
     if (canDismiss) props.onClose();
   };
@@ -491,17 +493,17 @@ export function SheetModal(props: {
               accessibilityRole="button"
             >
               <Text style={[styles.btnText, { color: !canDismiss ? theme.subtle : theme.ink }]}>
-                {confirmWords.cancel}
+                {props.closeLabel ?? confirmWords.cancel}
               </Text>
             </Pressable>
             <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
               {props.title}
             </Text>
-            {props.saving ? (
+            {saving ? (
               <View style={[styles.btn, styles.side, styles.right]}>
                 <ActivityIndicator accessibilityLabel={props.savingLabel} />
               </View>
-            ) : (
+            ) : props.actionLabel && props.onAction ? (
               <Pressable
                 onPress={props.onAction}
                 android_ripple={ripple(theme, true)}
@@ -512,6 +514,8 @@ export function SheetModal(props: {
                   {props.actionLabel}
                 </Text>
               </Pressable>
+            ) : (
+              <View style={styles.side} />
             )}
           </View>
           {props.children}
