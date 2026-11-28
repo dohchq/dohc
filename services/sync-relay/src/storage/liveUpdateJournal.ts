@@ -62,7 +62,7 @@ import {
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
-import type { RetirementKey } from "./serviceActivationRetirement";
+import { currentIdentity, type RetirementKey } from "./serviceActivationRetirement";
 import type {
   SqliteDb,
   CurrentLiveBindingRequest,
@@ -2163,7 +2163,7 @@ function retiringRead(
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
         AND lineage_claim_id=? AND activation_id=? AND retire_requested_at_ms IS NOT NULL AND retired_at_ms IS NULL
-        AND retire_restore_generation=? AND retire_accepted_cursor=?`)
+        AND retire_restore_generation=? AND retire_accepted_cursor=? AND ${currentIdentity(SERVICE_ACTIVATIONS)}`)
       .get(
         ...documentParams(document),
         key.activationId,

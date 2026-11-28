@@ -758,6 +758,7 @@ export class LiveCommittedDeliveryStore {
     const host = snapshotHostCoordinate(input.host),
       document = journalDocument(input.document);
     const adoptionId = parseLiveUpdateIdentifier(input.adoptionId, "adoption ID");
+    integrity(input.retirement === undefined || input.retirement.activationId === adoptionId);
     const sequence = authorityInteger(input.expectedLocalSequence),
       maxBytes = authorityInteger(input.maxBytes, 1),
       maxEvents = authorityInteger(input.maxEvents, 1);
