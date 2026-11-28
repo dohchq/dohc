@@ -897,6 +897,32 @@ describe("Explorer Home", () => {
     expect(mounted("file-0080.md")).toBe(true);
   });
 
+  it("measures the Pages window again when Collections load above it", () => {
+    const props = explorerProps({
+      ...largeHome(),
+      files: [...PAGE_PATHS, "guests/dataset.json"].map(file),
+      onIncludeArchivedCollections: vi.fn(),
+    });
+    // Each Collection row pushes Pages down, here by an exaggerated 600 px.
+    const view = scrolledHome(
+      props,
+      () => 600 * document.querySelectorAll('[data-home-key^="collections:"]').length,
+    );
+    expect(mounted("file-0080.md")).toBe(false);
+
+    view.rerender(
+      <Explorer
+        {...props}
+        dataCollections={[
+          { datasetId: "d", datasetPath: "guests/dataset.json", tableId: TABLE, name: "Guests" },
+        ]}
+      />,
+    );
+
+    expect(rowLabels("Collections")).toEqual(["Guests"]);
+    expect(mounted("file-0080.md")).toBe(true);
+  });
+
   it("switches to Files to reveal a path", () => {
     const onModeChange = vi.fn();
     render(<Explorer {...explorerProps({ onModeChange, revealPaths: ["budget.csv"] })} />);

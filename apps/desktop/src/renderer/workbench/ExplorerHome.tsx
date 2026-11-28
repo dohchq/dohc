@@ -474,7 +474,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       current.start === next.start && current.end === next.end ? current : next,
     );
   }, [pages.length, scrollerRef, windowed]);
-  // Apps and Pinned sit above Pages, so their rows move it too.
+  // Apps, Pinned, Collections and Sketches sit above Pages, so their rows move it too.
   useLayoutEffect(updateRange, [
     updateRange,
     sectionsKey,
@@ -483,6 +483,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     appRows.length,
     appsStatus,
     pinned.length,
+    collections.length,
+    collectionsUnknown,
+    refusal,
+    sketches.length,
   ]);
   useEffect(() => {
     const scroller = scrollerRef.current;
