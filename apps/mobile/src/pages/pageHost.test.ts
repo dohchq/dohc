@@ -267,4 +267,61 @@ describe("pageMountKey + holdsMount", () => {
       ).key,
     ).toBe("2:notes/other.md");
   });
+
+  it("keeps confirming across Try again until retired reports, and never pins mount on web-view close", async () => {
+    const signIn = {};
+    const t = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready(), {
+      status: 200,
+      body: { ok: true, result: { status: "refused", reason: "read-only" } },
+    });
+    t.painted();
+    t.open();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.latest().open();
+    const live = t.host.state().live!;
+    const fromPage = pageSide(live)(1);
+
+    // Socket closes before any report; user taps Try again immediately, and server refuses read-only.
+    t.latest().close();
+    expect(holdsMount(live.state())).toBe(true);
+    live.retry();
+    expect(live.state()).toMatchObject({ phase: "opening", confirming: true });
+    expect(holdsMount(live.state())).toBe(true);
+    await vi.waitFor(() => expect(live.state().phase).toBe("refused"));
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Retired connection delivers its queued disconnect with unsent edits -> stays held.
+    fromPage({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 1,
+        unsent: true,
+      },
+    });
+    expect(live.state()).toMatchObject({ phase: "refused", unsent: true, confirming: false });
+    expect(holdsMount(live.state())).toBe(true);
+
+    // Separate page where WebView reports disconnected and then close: never sets confirming.
+    const t2 = setup({ signIn, workspaceId: "ws-1" }, createScopedEnds(), ready());
+    t2.painted();
+    t2.open();
+    await vi.waitFor(() => expect(t2.sockets).toHaveLength(1));
+    t2.latest().open();
+    const live2 = t2.host.state().live!;
+    const fromPage2 = pageSide(live2)(1);
+    fromPage2({
+      type: "state",
+      facts: {
+        status: "disconnected",
+        reason: "transport-closed",
+        pendingUpdates: 0,
+        unsent: false,
+      },
+    });
+    fromPage2({ type: "close" });
+    expect(live2.state()).toMatchObject({ phase: "lost", confirming: false, unsent: false });
+    expect(holdsMount(live2.state())).toBe(false);
+  });
 });

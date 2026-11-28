@@ -134,26 +134,36 @@ export function createPageLive(options: {
     return closed;
   }
 
-  function lose(reason: string) {
+  const isSettled = (facts: LiveFacts | null) =>
+    facts?.status === "disconnected" || facts?.status === "quarantined";
+
+  function lose(reason: string, fromPage = false) {
     if (state.phase === "ended" || state.phase === "refused") return;
-    const confirming = Boolean(open?.connected);
+    const confirming =
+      !fromPage &&
+      !isSettled(state.facts) &&
+      (Boolean(open?.connected) || Boolean(state.confirming));
     void close();
     set({ phase: "lost", reason, confirming });
   }
 
   function refuse(reason: string) {
+    const confirming =
+      Boolean(state.confirming) || (Boolean(open?.connected) && !isSettled(state.facts));
     void close();
-    set({ phase: "refused", reason, confirming: false });
+    set({ phase: "refused", reason, confirming });
   }
 
   async function begin() {
+    const confirming =
+      Boolean(state.confirming) || (Boolean(open?.connected) && !isSettled(state.facts));
     void close();
     const held = { controller: new AbortController() };
     open = held;
     // The last connection's reports say nothing of this one.
     retired = stream ?? retired;
     stream = null;
-    set({ phase: "opening", reason: null, facts: null, confirming: false });
+    set({ phase: "opening", reason: null, facts: null, confirming });
     const current = () => open === held;
     let delay = FIRST_RETRY_MS;
     try {
@@ -205,7 +215,7 @@ export function createPageLive(options: {
       if (socket.protocol !== "dohc-live-v1") return refuse("invalid-socket-protocol");
       stream = next;
       held.connected = true;
-      set({ phase: "open", reason: null });
+      set({ phase: "open", reason: null, confirming: false });
       next.toPage({
         type: "connect",
         limits: answer.limits,
@@ -232,8 +242,16 @@ export function createPageLive(options: {
     const held = stream;
     const order = held?.check(message) ?? "stale";
     if (order === "stale") {
-      if (retired?.check(message) === "next" && message.type === "state" && message.facts.unsent)
-        set({ unsent: true });
+      if (retired?.check(message) === "next") {
+        if (message.type === "state") {
+          const settled = isSettled(message.facts);
+          if (message.facts.unsent || (settled && state.confirming))
+            set({
+              ...(message.facts.unsent ? { unsent: true } : {}),
+              ...(settled ? { confirming: false } : {}),
+            });
+        } else if (message.type === "close" && state.confirming) set({ confirming: false });
+      }
       return;
     }
     if (order === "broken" || !held) return lose("bridge-order");
@@ -259,11 +277,11 @@ export function createPageLive(options: {
         return;
       case "close":
         // Only the open connection's: a late one must not end the open Try again started.
-        if (state.phase === "open") lose("connection");
+        if (state.phase === "open") lose("connection", true);
         return;
       case "state": {
         const facts = message.facts;
-        const settled = facts.status === "disconnected" || facts.status === "quarantined";
+        const settled = isSettled(facts);
         set({
           facts,
           unsent: facts.unsent,
