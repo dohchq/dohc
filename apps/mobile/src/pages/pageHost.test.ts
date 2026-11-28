@@ -4,7 +4,7 @@ import { createAccount } from "../server/account";
 import { memoryStore, testServer, type Answer } from "../server/testServer";
 import type { ToPage } from "./liveBridge";
 import { facts, liveServer, OPEN, pageSide, ready } from "./liveFixtures";
-import { createPageHost } from "./pageHost";
+import { createPageHost, createPageMountHold } from "./pageHost";
 import {
   createPageLive,
   createScopedEnds,
@@ -163,5 +163,30 @@ describe("teardown", () => {
       expect(t.host.state().live, when).toBeNull();
       expect(t.opens(), when).toBe(when === "while recovering" ? 1 : 0);
     }
+  });
+});
+
+describe("createPageMountHold", () => {
+  it("preserves the mounted page key across a store replace while unsent edits remain, then advances once cleared", () => {
+    const signIn = {};
+    const hold = createPageMountHold();
+    expect(hold.resolve(signIn, "ws-1", 1, "shared/plan.md")).toBe("1:shared/plan.md");
+    expect(hold.setUnsent("1:shared/plan.md", true)).toBe(false);
+
+    // A feed replace reopens the workspace store with a new instance while typing is unsent.
+    expect(hold.resolve(signIn, "ws-1", 2, "shared/plan.md")).toBe("1:shared/plan.md");
+
+    // Stale keys are ignored; clearing unsent on the active key asks for a catch-up render.
+    expect(hold.setUnsent("0:shared/plan.md", false)).toBe(false);
+    expect(hold.setUnsent("1:shared/plan.md", false)).toBe(true);
+    expect(hold.resolve(signIn, "ws-1", 2, "shared/plan.md")).toBe("2:shared/plan.md");
+
+    // Switching workspace, sign-in, or path always remounts even while unsent is true.
+    hold.setUnsent("2:shared/plan.md", true);
+    expect(hold.resolve(signIn, "ws-2", 3, "shared/plan.md")).toBe("3:shared/plan.md");
+    hold.setUnsent("3:shared/plan.md", true);
+    expect(hold.resolve({}, "ws-2", 4, "shared/plan.md")).toBe("4:shared/plan.md");
+    hold.setUnsent("4:shared/plan.md", true);
+    expect(hold.resolve(signIn, "ws-2", 4, "shared/other.md")).toBe("4:shared/other.md");
   });
 });

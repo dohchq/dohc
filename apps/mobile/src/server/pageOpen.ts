@@ -6,21 +6,17 @@ import type { ServerClient } from "./client";
 // The account operation that opens a page to edit it live. `ready` carries a one-use ticket for the page's live
 // connection: it stays in this answer and the socket's protocols, never in the web view, a URL or a log.
 
-interface ReadyBase {
-  readonly status: "ready";
-  readonly objectId: string;
-  readonly lineageClaimId: string;
-  readonly ticket: string;
-  readonly limits: NamedLiveBrowserLimits;
-}
-
 export type PageOpen =
-  | (ReadyBase & { readonly mode: "owner" })
-  | (ReadyBase & {
-      readonly mode: "named";
-      readonly session: string;
-      readonly liveWorkspaceId: string;
-    })
+  | ({
+      readonly status: "ready";
+      readonly objectId: string;
+      readonly lineageClaimId: string;
+      readonly ticket: string;
+      readonly limits: NamedLiveBrowserLimits;
+    } & (
+      | { readonly mode: "owner" }
+      | { readonly mode: "named"; readonly session: string; readonly liveWorkspaceId: string }
+    ))
   | { readonly status: "preparing" }
   | { readonly status: "refused"; readonly reason: string };
 
@@ -42,7 +38,7 @@ function readOpen(body: unknown): PageOpen | null {
     !limits
   )
     return null;
-  const base = {
+  const ready = {
     status: "ready" as const,
     objectId: result.objectId,
     lineageClaimId: result.lineageClaimId,
@@ -54,13 +50,18 @@ function readOpen(body: unknown): PageOpen | null {
       SESSION_DISCRIMINATOR.test(result.session) &&
       text(result.liveWorkspaceId, 256) &&
       result.liveWorkspaceId.startsWith("named:")
-      ? { ...base, mode: "named", session: result.session, liveWorkspaceId: result.liveWorkspaceId }
+      ? {
+          ...ready,
+          mode: "named",
+          session: result.session,
+          liveWorkspaceId: result.liveWorkspaceId,
+        }
       : null;
   }
   return (result.mode === undefined || result.mode === "owner") &&
     result.session === undefined &&
     result.liveWorkspaceId === undefined
-    ? { ...base, mode: "owner" }
+    ? { ...ready, mode: "owner" }
     : null;
 }
 

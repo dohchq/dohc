@@ -40,7 +40,6 @@ export interface PhoneMemberLiveSession {
   readonly objectId: string;
   readonly lineageClaimId: string;
   readonly path: string;
-  readonly expiresAtMs: number;
 }
 
 export type PhoneMemberLiveSessions = ReturnType<typeof createPhoneMemberLiveSessions>;
@@ -71,25 +70,24 @@ const hashPhoneTicket = (token: string) => createHash("sha256").update(token).di
 export function createPhoneMemberLiveSessions(options: {
   storage: SyncRelayStorage;
   maxSessions: number;
-  maxSessionsPerAccount?: number;
   now?: () => number;
 }) {
   const { storage, maxSessions, now = Date.now } = options;
-  const perAccount = options.maxSessionsPerAccount ?? PHONE_MEMBER_SESSIONS_PER_ACCOUNT;
-  if (
-    !Number.isSafeInteger(maxSessions) ||
-    maxSessions <= 0 ||
-    !Number.isSafeInteger(perAccount) ||
-    perAccount <= 0
-  )
+  if (!Number.isSafeInteger(maxSessions) || maxSessions <= 0)
     throw new TypeError("Invalid phone member session limits.");
   const entries = new Map<
     string,
-    { session: PhoneMemberLiveSession; tokenHash: Buffer; generation: number; access: string }
+    {
+      session: PhoneMemberLiveSession;
+      expiresAtMs: number;
+      tokenHash: Buffer;
+      generation: number;
+      access: string;
+    }
   >();
   const liveEntry = (discriminator: string) => {
     const entry = entries.get(discriminator);
-    if (!entry || entry.session.expiresAtMs <= now()) {
+    if (!entry || entry.expiresAtMs <= now()) {
       if (entry) entries.delete(discriminator);
       return null;
     }
@@ -100,7 +98,9 @@ export function createPhoneMemberLiveSessions(options: {
   };
 
   return {
-    create(input: PhoneMemberLiveSession & { readonly token: string }) {
+    create(
+      input: PhoneMemberLiveSession & { readonly token: string; readonly expiresAtMs: number },
+    ) {
       const grant = memberEditGrant(storage, input);
       const nowMs = now();
       if (!grant || !Number.isSafeInteger(input.expiresAtMs) || input.expiresAtMs <= nowMs)
@@ -108,7 +108,7 @@ export function createPhoneMemberLiveSessions(options: {
       let held = 0,
         oldest: string | undefined;
       for (const [key, entry] of entries) {
-        if (entry.session.expiresAtMs <= nowMs) entries.delete(key);
+        if (entry.expiresAtMs <= nowMs) entries.delete(key);
         else if (entry.session.userId === input.userId) {
           held += 1;
           oldest ??= key;
@@ -116,15 +116,16 @@ export function createPhoneMemberLiveSessions(options: {
       }
       const discriminator = randomBytes(9).toString("base64url");
       if (entries.has(discriminator)) throw new Error("Phone session discriminator collision.");
-      if (held >= perAccount && oldest !== undefined) entries.delete(oldest);
+      if (held >= PHONE_MEMBER_SESSIONS_PER_ACCOUNT && oldest !== undefined) entries.delete(oldest);
       if (entries.size >= maxSessions) return null;
-      const { token, ...session } = input;
+      const { token, expiresAtMs, ...session } = input;
       entries.set(discriminator, {
         session: Object.freeze(session),
+        expiresAtMs,
         tokenHash: hashPhoneTicket(token),
         ...grant,
       });
-      return { discriminator, expiresAtMs: input.expiresAtMs };
+      return { discriminator, expiresAtMs };
     },
     has: (discriminator: string) => liveEntry(discriminator) !== null,
     take(input: { discriminator: string; userId: string; sessionId: string; token: string }) {
@@ -137,12 +138,11 @@ export function createPhoneMemberLiveSessions(options: {
       )
         return null;
       entries.delete(input.discriminator);
-      if (
-        accountIsFenced(storage, input.userId) ||
-        !storage.showsOnPhone(input.userId, entry.session.workspaceId)
-      )
-        return null;
-      const grant = memberEditGrant(storage, entry.session);
+      const grant =
+        !accountIsFenced(storage, input.userId) &&
+        storage.showsOnPhone(input.userId, entry.session.workspaceId)
+          ? memberEditGrant(storage, entry.session)
+          : null;
       return grant && grant.generation === entry.generation && grant.access === entry.access
         ? entry.session
         : null;
@@ -295,13 +295,16 @@ export function createPhonePages(options: {
       const path = parsePath(args);
       const objectId = pageAt(workspaceId, path, member);
       if (objectId === undefined) return refused("missing");
-      if (member) {
-        const deny = memberRefusal(caller.userId, workspaceId, member, path, objectId);
-        if (deny === "missing" || deny === "read-only") return refused(deny);
-        if (!options.supported() || !options.phoneNamedTickets || !options.phoneMemberSessions)
-          return refused("live_hosting_unsupported");
-        if (deny !== null) return refused(deny);
-      } else if (!options.supported()) return refused("live_hosting_unsupported");
+      const deny = member
+        ? memberRefusal(caller.userId, workspaceId, member, path, objectId)
+        : null;
+      if (deny === "missing" || deny === "read-only") return refused(deny);
+      if (
+        !options.supported() ||
+        (member && (!options.phoneNamedTickets || !options.phoneMemberSessions))
+      )
+        return refused("live_hosting_unsupported");
+      if (deny !== null) return refused(deny);
       // Only a page some computer opened live has a lineage to host. The server makes none, so it enrolls nothing here.
       if (!storage.mainLiveLineageExists({ workspaceId, objectId }))
         return refused("live-document-without-lineage");
@@ -352,6 +355,14 @@ export function createPhonePages(options: {
     if (hiddenFile(binding.currentPath)) return refused("missing");
     if (binding.objectId !== row.objectId || binding.currentPath !== row.path)
       return refused("document-unavailable");
+    const memberScope = member
+      ? {
+          userId: caller.userId,
+          workspaceId: row.workspaceId,
+          shareId: member.shareId,
+          grantId: member.grantId,
+        }
+      : null;
     const checkMember = () =>
       member
         ? memberRefusal(caller.userId, row.workspaceId, member, binding.currentPath, row.objectId)
@@ -373,14 +384,8 @@ export function createPhonePages(options: {
     try {
       minted = await (member ? options.phoneNamedTickets! : options.tickets).mint(
         { objectId: row.objectId },
-        member
-          ? {
-              kind: "named",
-              workspaceId: row.workspaceId,
-              shareId: member.shareId,
-              grantId: member.grantId,
-              userId: caller.userId,
-            }
+        memberScope
+          ? { kind: "named", ...memberScope }
           : {
               kind: "owner",
               workspaceId: row.workspaceId,
@@ -421,15 +426,12 @@ export function createPhonePages(options: {
       expiresAtMs: minted.expiresAtMs,
       editorLimits: options.editorLimits,
     };
-    if (!member) return ready;
+    if (!memberScope) return ready;
     const expiresAtMs = Math.min(minted.expiresAtMs, stored.expiresAtMs);
     if (expiresAtMs <= options.nowMs()) throw notFound();
     const created = options.phoneMemberSessions!.create({
-      userId: caller.userId,
+      ...memberScope,
       sessionId: caller.sessionId,
-      workspaceId: row.workspaceId,
-      shareId: member.shareId,
-      grantId: member.grantId,
       objectId: binding.objectId,
       lineageClaimId: binding.lineageClaimId,
       path: binding.currentPath,
@@ -442,7 +444,7 @@ export function createPhonePages(options: {
           ...ready,
           mode: "named",
           session: created.discriminator,
-          liveWorkspaceId: `named:${member.grantId}`,
+          liveWorkspaceId: `named:${memberScope.grantId}`,
           expiresAtMs: created.expiresAtMs,
         };
   }

@@ -307,22 +307,15 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const phone = options.kind === "named" && options.phoneBearer === true;
   const bearerNamed = desktop || phone;
   if (options.kind !== "owner" && options.kind !== "personal") {
-    if (desktop && phone) throw new TypeError("A named live route is desktop or phone, not both.");
-    if (!bearerNamed && (options.resolveAccountSession || options.accountSessions))
-      throw new TypeError("Only desktop or phone live routes check account sessions.");
-    if (desktop && Boolean(options.resolveAccountSession) !== Boolean(options.accountSessions))
-      throw new TypeError(
-        "Desktop live routes require both resolveAccountSession and accountSessions.",
-      );
     if (
-      phone &&
-      (!options.resolveAccountSession || !options.accountSessions || !options.phoneSessions)
+      (desktop && phone) ||
+      (!bearerNamed && (options.resolveAccountSession || options.accountSessions)) ||
+      (desktop && Boolean(options.resolveAccountSession) !== Boolean(options.accountSessions)) ||
+      (phone &&
+        (!options.resolveAccountSession || !options.accountSessions || !options.phoneSessions)) ||
+      (!phone && (!options.sessions || options.phoneSessions))
     )
-      throw new TypeError(
-        "Phone live routes require resolveAccountSession, accountSessions, and phoneSessions.",
-      );
-    if (!phone && (!options.sessions || options.phoneSessions))
-      throw new TypeError("Non-phone live routes require sessions and forbid phoneSessions.");
+      throw new TypeError("Invalid named live route authentication options.");
   }
   const routeKind = phone ? "phone" : desktop ? "desktop" : kind;
   // Browsers reach named (not desktop/phone) and link routes through the share page's
@@ -818,7 +811,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     let sessionExpiry: ReturnType<typeof setTimeout> | undefined;
     let keepalive: ReturnType<typeof setInterval> | undefined;
-    let trackedBearer: { readonly userId: string; readonly session: OwnerSession } | undefined;
+    let trackedDesktop: { readonly userId: string; readonly session: OwnerSession } | undefined;
     async function release() {
       if (opening || !done) return;
       await session?.settled();
@@ -1242,7 +1235,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
             return;
           }
-          trackedBearer = {
+          trackedDesktop = {
             userId: account.userId,
             session: {
               sessionId: account.sessionId,
@@ -1259,7 +1252,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           ? (path = boundPhone.path) => {
               if (
                 done ||
-                Date.now() >= trackedBearer!.session.expiresAtMs ||
+                Date.now() >= trackedDesktop!.session.expiresAtMs ||
                 accountIsFenced(storage, boundPhone.userId) ||
                 !storage.showsOnPhone(boundPhone.userId, boundPhone.workspaceId) ||
                 !memberEditGrant(storage, { ...boundPhone, path })
@@ -1271,12 +1264,12 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         connectionScopes.set(stop, {
           workspaceId: context.workspaceId,
           ...(context.kind === "named" ? { userId: context.userId } : {}),
-          ...(trackedBearer
-            ? { session: trackedBearer.session, recheck: () => host?.assertCurrent() }
+          ...(trackedDesktop
+            ? { session: trackedDesktop.session, recheck: () => host?.assertCurrent() }
             : {}),
         });
-        if (trackedBearer) {
-          const remainingMs = Math.max(0, trackedBearer.session.expiresAtMs - Date.now());
+        if (trackedDesktop) {
+          const remainingMs = Math.max(0, trackedDesktop.session.expiresAtMs - Date.now());
           if (remainingMs <= MAX_TIMER_MS) {
             sessionExpiry = setTimeout(stop, remainingMs);
             sessionExpiry.unref();
@@ -1348,20 +1341,20 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted();
         check();
-        if (trackedBearer) {
+        if (trackedDesktop) {
           const stored = await untilAborted(
-            accountSessions!.read([trackedBearer.session.sessionId]),
+            accountSessions!.read([trackedDesktop.session.sessionId]),
             signal,
           );
           signal.throwIfAborted();
           check();
           if (
             !sessionStands(
-              stored.get(trackedBearer.session.sessionId),
-              trackedBearer.userId,
-              trackedBearer.session,
+              stored.get(trackedDesktop.session.sessionId),
+              trackedDesktop.userId,
+              trackedDesktop.session,
             ) ||
-            accountIsFenced(storage, trackedBearer.userId) ||
+            accountIsFenced(storage, trackedDesktop.userId) ||
             (boundPhone &&
               (!storage.showsOnPhone(boundPhone.userId, boundPhone.workspaceId) ||
                 hiddenFile(ticket.binding.currentPath)))
@@ -1462,9 +1455,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             pendingPing = undefined;
             try {
               if (
-                trackedBearer &&
-                (Date.now() >= trackedBearer.session.expiresAtMs ||
-                  accountIsFenced(storage, trackedBearer.userId))
+                trackedDesktop &&
+                (Date.now() >= trackedDesktop.session.expiresAtMs ||
+                  accountIsFenced(storage, trackedDesktop.userId))
               )
                 throw new Error();
               host!.assertCurrent();

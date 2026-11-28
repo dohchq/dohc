@@ -11,6 +11,7 @@ import {
   useRouter,
 } from "expo-router";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -48,7 +49,7 @@ import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListSt
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
-import { createPageHost } from "./pageHost";
+import { createPageHost, createPageMountHold } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
 import { unwrittenText } from "./pageNotices";
 import { pageTimings, timingOwner } from "./pageTimings";
@@ -98,10 +99,29 @@ const pageScript = (
 // reads the page from another.
 export function ServerPage() {
   const { data } = useAccount();
+  const signIn = useSignIn();
   const { path = "", workspace, t0 } = useLocalSearchParams<PageParams>();
-  if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewherePage />;
+  const [hold] = useState(createPageMountHold);
+  const [, setSync] = useState(0);
+  const onUnsent = useCallback(
+    (forKey: string, next: boolean) => {
+      if (hold.setUnsent(forKey, next)) setSync((value) => value + 1);
+    },
+    [hold],
+  );
+  if (workspace !== undefined && data?.workspaceId !== workspace) {
+    hold.resolve(null, null, 0, "");
+    return <ElsewherePage />;
+  }
+  const key = hold.resolve(signIn, data?.workspaceId ?? null, data?.instance ?? 0, path);
   return (
-    <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} tap={Number(t0) || undefined} />
+    <PageScreen
+      key={key}
+      mountKey={key}
+      path={path}
+      tap={Number(t0) || undefined}
+      onUnsent={onUnsent}
+    />
   );
 }
 
@@ -134,7 +154,13 @@ const openProblem = (reason: string): ServerProblemKind | null =>
       ? reason
       : null;
 
-function PageScreen({ path, tap }: { path: string; tap?: number }) {
+function PageScreen(props: {
+  mountKey: string;
+  path: string;
+  tap?: number;
+  onUnsent: (forKey: string, unsent: boolean) => void;
+}) {
+  const { mountKey, path, tap, onUnsent } = props;
   const theme = useTheme();
   const router = useRouter();
   const name = path.split("/").pop() ?? path;
@@ -255,6 +281,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
   );
+  useEffect(() => {
+    const update = () => onUnsent(mountKey, live !== null && holdsUnsent(live.state()));
+    update();
+    return live?.subscribe(update);
+  }, [live, mountKey, onUnsent]);
   const holding = live !== null && holdsPage(liveState);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const readObjectId = state.value?.kind === "page" ? (state.value.objectId ?? null) : null;
