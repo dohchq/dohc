@@ -1747,4 +1747,35 @@ describe("prefetching pages", () => {
       expect(data.state(views.files).value?.map((f) => f.path)).toEqual(["b.md"]),
     );
   });
+
+  it("invalidate with drop preserves subscribed listeners and re-reads instead of detaching them", async () => {
+    const server = testServer();
+    let reads = 0;
+    server.on("POST", "/sync/ws-drop-sub/ops/documentRead", () => {
+      reads += 1;
+      return reads === 1
+        ? ops({ ok: true, kind: "page", markdown: "before" }, "0.1.1")
+        : ops({ ok: false, refusal: "missing" }, "0.1.2");
+    });
+    server.on("GET", feedPath("ws-drop-sub", "0.1.1"), held);
+    server.on("GET", feedPath("ws-drop-sub", "0.1.2"), held);
+    const { data } = open(server, "ws-drop-sub");
+    const updates = vi.fn();
+    data.subscribe(views.page("a.md"), updates);
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toMatchObject({
+        kind: "page",
+        markdown: "before",
+      }),
+    );
+    updates.mockClear();
+    data.invalidate(views.page("a.md"), true);
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toMatchObject({
+        kind: "missing",
+        last: "before",
+      }),
+    );
+    expect(updates).toHaveBeenCalled();
+  });
 });

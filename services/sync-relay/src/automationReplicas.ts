@@ -540,14 +540,32 @@ export async function startAutomationReplicas(options: {
     };
     const withSyncPaused = <T>(work: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> => {
       if (callerSignal?.aborted) return Promise.reject(callerSignal.reason);
+      let started = false;
       const run = syncChain.then(() => {
         replicaSignal.throwIfAborted();
         callerSignal?.throwIfAborted();
         current();
+        started = true;
         return work();
       });
       syncChain = run.catch(() => undefined);
-      return callerSignal === undefined ? run : untilAborted(run, callerSignal);
+      if (callerSignal === undefined) return run;
+      return new Promise<T>((resolve, reject) => {
+        const onAbort = () => {
+          if (!started) reject(callerSignal.reason);
+        };
+        callerSignal.addEventListener("abort", onAbort, { once: true });
+        void run.then(
+          (value) => {
+            callerSignal.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
+          (error) => {
+            callerSignal.removeEventListener("abort", onAbort);
+            reject(error);
+          },
+        );
+      });
     };
     let closing: Promise<void> | undefined;
     // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their stored

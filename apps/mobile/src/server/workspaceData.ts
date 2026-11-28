@@ -1010,7 +1010,8 @@ export function createWorkspaceData(options: {
       const cached = cache.get(scope, view.id);
       if (cached) cache.set(scope, { ...cached, stale: true });
       if (!target) return;
-      if (!drop && target.listeners.size > 0) {
+      if (target.listeners.size > 0) {
+        if (drop) forget(target);
         target.stale = true;
         if (live()) void read(target);
         return;

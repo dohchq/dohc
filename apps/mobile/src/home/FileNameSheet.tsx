@@ -83,21 +83,20 @@ export function useFileLifecycle(workspaceName: string) {
     [problemText],
   );
 
-  const reportDeleteFailure = useCallback(
-    (path: string, body: string, retry?: () => void) => {
+  const reportFailure = useCallback(
+    (id: string, title: string, body: string, retry?: () => void, alertFallback = true) => {
       if (!notices) {
-        if (!mountedRef.current) return;
-        Alert.alert(documentWords.couldntDelete, body, [
+        if (!alertFallback || !mountedRef.current) return;
+        Alert.alert(title, body, [
           ...(retry ? [{ text: noticesWords.tryAgain, onPress: retry }] : []),
           { text: confirmWords.cancel, style: "cancel" },
         ]);
         return;
       }
-      const id = `delete:${path}`;
       showToast({
         id,
         tone: "failure",
-        title: documentWords.couldntDelete,
+        title,
         body,
         ...(retry ? { action: { label: noticesWords.tryAgain, onPress: retry } } : {}),
       });
@@ -105,7 +104,7 @@ export function useFileLifecycle(workspaceName: string) {
         id,
         senderKind: null,
         senderLabel: "",
-        title: documentWords.couldntDelete,
+        title,
         body,
         minutesAgo: 0,
         atMs: Date.now(),
@@ -118,10 +117,130 @@ export function useFileLifecycle(workspaceName: string) {
     [showToast, notices],
   );
 
+  const runCreate = useCallback(
+    async (
+      active: WorkspaceData,
+      targetPath: string,
+      requestId: string,
+      onCreated: ((path: string) => void) | undefined,
+      fromSheet: boolean,
+    ): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }> => {
+      const noticeId = `create:${targetPath}`;
+      try {
+        const result = await fileWriteOperations(signIn.client, active.workspaceId).createPage({
+          path: targetPath,
+          requestId,
+        });
+        if (!alive(active)) return { ok: true };
+        if (!result.ok) {
+          const msg = fileWriteRefusalText(result.refusal, result.reason);
+          if (!fromSheet) reportFailure(noticeId, documentWords.couldntCreate, msg);
+          return { ok: false, error: msg };
+        }
+        hideToast(noticeId);
+        notices?.dismiss(noticeId);
+        active.invalidate(views.files);
+        active.invalidate(views.page(result.path), true);
+        if (mountedRef.current) {
+          setSheetState(null);
+          if (focusedRef.current) onCreated?.(result.path);
+        }
+        return { ok: true };
+      } catch (error) {
+        if (!alive(active)) return { ok: true };
+        const msg = errorText(error, documentWords.couldntCreate);
+        reportFailure(
+          noticeId,
+          documentWords.couldntCreate,
+          msg,
+          () => {
+            if (!alive(active)) return;
+            void runCreate(
+              active,
+              targetPath,
+              requestId,
+              mountedRef.current ? onCreated : undefined,
+              false,
+            );
+          },
+          !fromSheet,
+        );
+        return { ok: false, error: msg };
+      }
+    },
+    [alive, errorText, hideToast, notices, reportFailure, signIn],
+  );
+
+  const runRename = useCallback(
+    async (
+      active: WorkspaceData,
+      target: FileTarget,
+      targetPath: string,
+      requestId: string,
+      fromSheet: boolean,
+    ): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }> => {
+      const noticeId = `rename:${target.path}`;
+      if (mountedRef.current && target.guard?.())
+        return { ok: false, error: documentWords.couldntRename };
+      try {
+        if (mountedRef.current) await target.before?.();
+        if (!alive(active)) return { ok: true };
+        const result = await fileWriteOperations(signIn.client, active.workspaceId).renameFile({
+          fromPath: target.path,
+          toPath: targetPath,
+          expectedObjectId: target.objectId,
+          requestId,
+        });
+        if (!alive(active)) return { ok: true };
+        if (!result.ok) {
+          const msg = fileWriteRefusalText(result.refusal, result.reason);
+          if (!fromSheet) {
+            reportFailure(noticeId, documentWords.couldntRename, msg);
+            if (mountedRef.current) target.onCancel?.();
+          }
+          return { ok: false, error: msg };
+        }
+        hideToast(noticeId);
+        notices?.dismiss(noticeId);
+        active.invalidate(views.files);
+        active.invalidate(views.page(target.path), true);
+        active.invalidate(views.page(result.path), true);
+        if (mountedRef.current) {
+          setSheetState(null);
+          if (focusedRef.current) target.onDone?.(result.path);
+        }
+        return { ok: true };
+      } catch (error) {
+        if (!alive(active)) return { ok: true };
+        if (!fromSheet && mountedRef.current) target.onCancel?.();
+        const msg = errorText(error, documentWords.couldntRename);
+        reportFailure(
+          noticeId,
+          documentWords.couldntRename,
+          msg,
+          () => {
+            if (!alive(active)) return;
+            void runRename(
+              active,
+              mountedRef.current ? target : { path: target.path, objectId: target.objectId },
+              targetPath,
+              requestId,
+              false,
+            );
+          },
+          !fromSheet,
+        );
+        return { ok: false, error: msg };
+      }
+    },
+    [alive, errorText, hideToast, notices, reportFailure, signIn],
+  );
+
   const runDelete = useCallback(
     async (active: WorkspaceData, target: FileTarget, requestId: string) => {
       if (mountedRef.current && target.guard?.()) return;
       if (mountedRef.current) setDeletingPath(target.path);
+      const noticeId = `delete:${target.path}`;
       try {
         if (mountedRef.current) await target.before?.();
         if (!alive(active)) return;
@@ -132,11 +251,14 @@ export function useFileLifecycle(workspaceName: string) {
         });
         if (!alive(active)) return;
         if (!result.ok) {
-          reportDeleteFailure(target.path, fileWriteRefusalText(result.refusal, result.reason));
+          reportFailure(
+            noticeId,
+            documentWords.couldntDelete,
+            fileWriteRefusalText(result.refusal, result.reason),
+          );
           if (mountedRef.current) target.onCancel?.();
           return;
         }
-        const noticeId = `delete:${target.path}`;
         hideToast(noticeId);
         notices?.dismiss(noticeId);
         active.invalidate(views.files);
@@ -145,19 +267,24 @@ export function useFileLifecycle(workspaceName: string) {
       } catch (error) {
         if (!alive(active)) return;
         if (mountedRef.current) target.onCancel?.();
-        reportDeleteFailure(target.path, errorText(error, documentWords.couldntDelete), () => {
-          if (!alive(active)) return;
-          void runDelete(
-            active,
-            mountedRef.current ? target : { path: target.path, objectId: target.objectId },
-            requestId,
-          );
-        });
+        reportFailure(
+          noticeId,
+          documentWords.couldntDelete,
+          errorText(error, documentWords.couldntDelete),
+          () => {
+            if (!alive(active)) return;
+            void runDelete(
+              active,
+              mountedRef.current ? target : { path: target.path, objectId: target.objectId },
+              requestId,
+            );
+          },
+        );
       } finally {
         if (mountedRef.current) setDeletingPath((cur) => (cur === target.path ? null : cur));
       }
     },
-    [alive, errorText, hideToast, notices, reportDeleteFailure, signIn],
+    [alive, errorText, hideToast, notices, reportFailure, signIn],
   );
 
   const confirmDelete = useCallback(
@@ -233,46 +360,9 @@ export function useFileLifecycle(workspaceName: string) {
       }}
       onSubmit={async (targetPath, requestId) => {
         if (!data || !sheetState) return { ok: false, error: documentWords.couldntCreate };
-        const active = data;
-        const ops = fileWriteOperations(signIn.client, active.workspaceId);
-        try {
-          if (sheetState.mode === "rename") {
-            await sheetState.before?.();
-            if (!alive(active)) return { ok: true };
-          }
-          const result =
-            sheetState.mode === "create"
-              ? await ops.createPage({ path: targetPath, requestId })
-              : await ops.renameFile({
-                  fromPath: sheetState.path,
-                  toPath: targetPath,
-                  expectedObjectId: sheetState.objectId,
-                  requestId,
-                });
-          if (!alive(active)) return { ok: true };
-          if (!result.ok)
-            return { ok: false, error: fileWriteRefusalText(result.refusal, result.reason) };
-          active.invalidate(views.files);
-          if (sheetState.mode === "rename") active.invalidate(views.page(sheetState.path), true);
-          active.invalidate(views.page(result.path), true);
-          if (mountedRef.current) {
-            setSheetState(null);
-            if (sheetState.mode === "create") sheetState.onCreated(result.path);
-            else sheetState.onDone?.(result.path);
-          }
-          return { ok: true };
-        } catch (error) {
-          if (!alive(active)) return { ok: true };
-          return {
-            ok: false,
-            error: errorText(
-              error,
-              sheetState.mode === "create"
-                ? documentWords.couldntCreate
-                : documentWords.couldntRename,
-            ),
-          };
-        }
+        return sheetState.mode === "create"
+          ? await runCreate(data, targetPath, requestId, sheetState.onCreated, true)
+          : await runRename(data, sheetState, targetPath, requestId, true);
       }}
     />
   );
