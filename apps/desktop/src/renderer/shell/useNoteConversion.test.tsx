@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge, NoteConversionProgress } from "../../ipc/bridgeContract";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { noteConversionNotice, useNoteConversion, type NoteConversion } from "./useNoteConversion";
 
 const clean: ConvertNotesResult = {
@@ -14,10 +15,24 @@ const clean: ConvertNotesResult = {
   sent: true,
 };
 
+type CloudSessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 let progress: ((event: NoteConversionProgress) => void) | null = null;
-function install(convertNotes: DohcDesktopBridge["convertNotes"]) {
+let accounts: CloudSessionListener[] = [];
+function install(
+  convertNotes: DohcDesktopBridge["convertNotes"],
+  readNoteConversionOffered: DohcDesktopBridge["readNoteConversionOffered"] = async () => ({
+    offered: false,
+  }),
+) {
   window.dohcDesktop = {
     convertNotes,
+    readNoteConversionOffered,
+    onCloudSessionChanged: (listener: CloudSessionListener) => {
+      accounts.push(listener);
+      return () => {
+        accounts = accounts.filter((each) => each !== listener);
+      };
+    },
     onNoteConversionProgress: (listener: (event: NoteConversionProgress) => void) => {
       progress = listener;
       return () => {
@@ -44,19 +59,25 @@ function mount(workspaceId = "ws-a") {
     latest = useNoteConversion({ workspaceId: props.workspaceId, report, success, clear });
     return null;
   }
-  const view = render(<Probe workspaceId={workspaceId} />);
+  const shown = (id: string) => (
+    <WorkspaceSessionProvider workspaceId={id}>
+      <Probe workspaceId={id} />
+    </WorkspaceSessionProvider>
+  );
+  const view = render(shown(workspaceId));
   return {
     report,
     success,
     clear,
     conversion: () => latest,
-    switchTo: (next: string) => view.rerender(<Probe workspaceId={next} />),
+    switchTo: (next: string) => view.rerender(shown(next)),
   };
 }
 
 afterEach(() => {
   cleanup();
   progress = null;
+  accounts = [];
   delete window.dohcDesktop;
 });
 
@@ -340,6 +361,76 @@ describe("converting notes from this window", () => {
     expect(shell.conversion().state).toEqual({ status: "idle" });
     expect(shell.report).not.toHaveBeenCalled();
     expect(shell.success).not.toHaveBeenCalled();
-    expect(shell.clear).not.toHaveBeenCalled();
+    expect(shell.clear).not.toHaveBeenCalledWith("note-conversion");
+  });
+});
+
+describe("whether Settings offers Convert notes", () => {
+  it("asks main for this workspace and keeps its answer", async () => {
+    const offered = vi.fn(async () => ({ offered: true }));
+    install(vi.fn(), offered);
+    const shell = mount("ws-a");
+
+    await waitFor(() => expect(shell.conversion().offer.value).toBe(true));
+    expect(offered).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+    expect(shell.conversion().offer.failed).toBe(false);
+  });
+
+  it("files a notice when main could not say, and its Try again asks again and clears it", async () => {
+    const lost = new Error("dohc could not reach the engine.");
+    const offered = vi
+      .fn<DohcDesktopBridge["readNoteConversionOffered"]>()
+      .mockRejectedValueOnce(lost)
+      .mockResolvedValueOnce({ offered: true });
+    install(vi.fn(), offered);
+    const shell = mount("ws-a");
+
+    await waitFor(() => expect(shell.conversion().offer.failed).toBe(true));
+    expect(shell.report).toHaveBeenCalledExactlyOnceWith({
+      message: "dohc could not reach the engine.",
+      cause: lost,
+      retry: expect.any(Function),
+      kind: "note-conversion-offered",
+    });
+    const retry = shell.report.mock.calls[0]![0].retry as () => void;
+    await act(async () => retry());
+
+    expect(shell.conversion().offer).toMatchObject({ value: true, failed: false });
+    expect(offered).toHaveBeenCalledTimes(2);
+    expect(shell.clear).toHaveBeenCalledWith("note-conversion-offered");
+  });
+
+  it("forgets the answer while the account changes, and asks again once it is ready", async () => {
+    const offered = vi.fn(async () => ({ offered: true }));
+    install(vi.fn(), offered);
+    const shell = mount("ws-a");
+    await waitFor(() => expect(shell.conversion().offer.value).toBe(true));
+
+    act(() => accounts.forEach((listener) => listener({ sessionKey: null, phase: "changing" })));
+    expect(shell.conversion().offer.value).toBeUndefined();
+    expect(offered).toHaveBeenCalledOnce();
+
+    act(() => accounts.forEach((listener) => listener({ sessionKey: "b", phase: "ready" })));
+    await waitFor(() => expect(shell.conversion().offer.value).toBe(true));
+    expect(offered).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no answer from workspace A once the window moves to workspace B", async () => {
+    let answerA!: (answer: { offered: boolean }) => void;
+    const offered = vi.fn(({ workspaceId }: { workspaceId: string }) =>
+      workspaceId === "ws-a"
+        ? new Promise<{ offered: boolean }>((resolve) => (answerA = resolve))
+        : Promise.resolve({ offered: false }),
+    );
+    install(vi.fn(), offered);
+    const shell = mount("ws-a");
+    await waitFor(() => expect(offered).toHaveBeenCalledWith({ workspaceId: "ws-a" }));
+
+    shell.switchTo("ws-b");
+    await waitFor(() => expect(shell.conversion().offer.value).toBe(false));
+    await act(async () => answerA({ offered: true }));
+
+    expect(shell.conversion().offer.value).toBe(false);
+    expect(shell.report).not.toHaveBeenCalled();
   });
 });
