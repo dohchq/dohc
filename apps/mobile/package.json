@@ -7,13 +7,15 @@
     "start": "expo start --dev-client",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "typecheck": "node scripts/build-editor.mjs && tsc --noEmit -p tsconfig.json && tsc --noEmit -p editor/tsconfig.json",
-    "build:editor": "node scripts/build-editor.mjs",
+    "typecheck": "node scripts/build-editor.mjs && node scripts/build-sketch.mjs && tsc --noEmit -p tsconfig.json && tsc --noEmit -p editor/tsconfig.json && tsc --noEmit -p sketch/tsconfig.json",
+    "build:editor": "node scripts/build-editor.mjs && node scripts/build-sketch.mjs",
+    "build:sketch": "node scripts/build-sketch.mjs",
     "test": "vitest run src",
-    "eas-build-post-install": "node scripts/build-editor.mjs"
+    "eas-build-post-install": "node scripts/build-editor.mjs && node scripts/build-sketch.mjs"
   },
   "dependencies": {
     "@dohc/brand": "workspace:*",
+    "@dohc/excalidraw-scene": "workspace:*",
     "@dohc/interface-words": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
@@ -23,6 +25,7 @@
     "@legendapp/list": "3.3.11",
     "@react-native-community/datetimepicker": "9.2.1",
     "expo": "~58.0.22",
+    "expo-asset": "~58.0.20",
     "expo-camera": "~58.0.14",
     "expo-constants": "~58.0.15",
     "expo-crypto": "~58.0.7",
@@ -52,8 +55,11 @@
     "yjs": "13.6.30"
   },
   "devDependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
     "@types/react": "~19.2.0",
+    "@types/react-dom": "~19.2.0",
     "esbuild": "0.28.1",
+    "react-dom": "19.3.0",
     "typescript": "^7.0.2"
   }
 }

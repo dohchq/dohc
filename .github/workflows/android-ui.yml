@@ -56,6 +56,7 @@ jobs:
           cd apps/mobile
           pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
           node scripts/build-editor.mjs
+          node scripts/build-sketch.mjs
           cd android
           EXPO_PUBLIC_DOHC_SAMPLE=1 ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon --console=plain
       - name: Enable KVM

@@ -80,6 +80,7 @@ export default function RootLayout() {
             <Stack.Screen name="collection-field" options={{ presentation: "modal" }} />
             {/* The app runs under its own name, without the swipe back that the app's own swipes would meet. */}
             <Stack.Screen name="app-run" options={{ gestureEnabled: false }} />
+            <Stack.Screen name="sketch" options={{ gestureEnabled: false }} />
             <Stack.Screen
               name="workspaces"
               options={{

@@ -1,0 +1,1160 @@
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { afterEach, expect, it } from "vitest";
+import {
+  foldScene,
+  insertElementRevision,
+  stableJson,
+  type ElementSnapshot,
+} from "@dohc/excalidraw-scene";
+import { serveFetchHandler } from "@dohc/service-http";
+import {
+  UnauthorizedError,
+  type ResolveAccountSession,
+  type ResolveActor,
+} from "@dohc/workspace-auth/session";
+import {
+  VersionedLiveAdapter,
+  openEngineYdocProviderSession,
+  type JsonValue,
+} from "@dohc/workspace-engine-client";
+import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
+import * as Y from "yjs";
+import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+import {
+  AUTOMATION_REPLICA_BEARER_PREFIX,
+  authorizeAutomationReplication,
+  deriveAutomationReplicaBearer,
+} from "./automationReplicaCredential";
+import type { AutomationReplica } from "./automationReplicas";
+import { DiscussionActivityHub } from "./discussionActivity";
+import { createSyncRelayHandler, streamsRequestBody } from "./server";
+import { startServerCopies, type ServerCopies } from "./serverCopies";
+import { createServiceHostReplication } from "./serviceHostReplication";
+import {
+  ServiceOrdinaryReplication,
+  type ServiceOrdinaryReplicationConfig,
+} from "./serviceOrdinaryReplication";
+import type { StorageContext } from "./storage/context";
+import { closeTestStorages, tempRoot, testStorage } from "./testing";
+
+const engine = requireEngineBinaryOrSkip();
+const WORKSPACE = "workspace-sketches";
+const DEADLINE_MS = 30_000;
+const RELAY_ORIGIN = "https://relay.example.test";
+const PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const PNG_BYTES = Buffer.from(PNG_BASE64, "base64");
+const PNG_SHA256 = createHash("sha256").update(PNG_BYTES).digest("hex");
+const PNG_DATA_URL = `data:image/png;base64,${PNG_BASE64}`;
+
+const cleanup: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
+  await closeTestStorages();
+});
+
+const testActor: ResolveActor = (request, workspaceId) => {
+  const match = /^Bearer test:([A-Za-z0-9_.:-]+)$/u.exec(
+    request.headers.get("authorization") ?? "",
+  );
+  if (!match) throw new UnauthorizedError();
+  return { userId: match[1]!, workspaceId };
+};
+
+const resolveAccountSession: ResolveAccountSession = async (request) => {
+  const match = /^Bearer session:([\w-]+)$/u.exec(request.headers.get("authorization") ?? "");
+  if (!match) throw new UnauthorizedError();
+  return {
+    userId: match[1]!,
+    sessionId: `phone-${match[1]!}`,
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: "phone",
+  };
+};
+
+function rect(
+  id: string,
+  version: number,
+  versionNonce: number,
+  extra: Partial<ElementSnapshot> = {},
+): ElementSnapshot {
+  return {
+    id,
+    type: "rectangle",
+    x: 10,
+    y: 20,
+    width: 120,
+    height: 80,
+    angle: 0,
+    strokeColor: "#1e1e1e",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    roughness: 1,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    index: "a0",
+    roundness: null,
+    seed: 101,
+    version,
+    versionNonce,
+    isDeleted: false,
+    boundElements: null,
+    updated: 1_700_000_000_000 + version,
+    link: null,
+    locked: false,
+    ...extra,
+  };
+}
+
+async function computer(input: {
+  root: string;
+  relayUrl: string;
+  bearerToken: string;
+  identity: ServiceOrdinaryReplicationConfig["identity"];
+}) {
+  await mkdir(input.root, { recursive: true });
+  const client = await createEngineClient({
+    command: engine.require(),
+    authToken: randomBytes(32).toString("base64url"),
+    protocolVersion: 2,
+    capabilities: ["blobs"],
+    connectTimeoutMs: DEADLINE_MS,
+  });
+  let requestId = 0;
+  const nextRequestId = () => ++requestId;
+  const request = async (
+    method: string,
+    params: { [key: string]: JsonValue },
+    workspace?: string,
+  ) =>
+    (
+      await client.sendRequest({
+        id: nextRequestId(),
+        method,
+        params,
+        ...(workspace ? { workspace } : {}),
+        deadlineMs: DEADLINE_MS,
+      })
+    ).result as { [key: string]: JsonValue };
+  const opened = await request("workspace.open", {
+    rootDir: input.root,
+    workspaceId: WORKSPACE,
+    captureMode: "none",
+    reconcileCollections: true,
+    relay: {
+      baseUrl: input.relayUrl,
+      bearerToken: input.bearerToken,
+      allowInsecureLoopbackForTests: true,
+    },
+  });
+  const workspace = opened.workspace as string;
+  const main = await request("versions.ensureMain", { workspaceId: WORKSPACE }, workspace);
+  const lifetime = new AbortController();
+  const replication = new ServiceOrdinaryReplication(
+    {
+      client,
+      workspace,
+      workspaceId: WORKSPACE,
+      nextRequestId,
+      deadlineMs: DEADLINE_MS,
+      signal: lifetime.signal,
+      assertCurrent: () => undefined,
+    },
+    {
+      relay: { baseUrl: RELAY_ORIGIN, bearerToken: input.bearerToken },
+      identity: input.identity,
+      maxPagesPerPull: 8,
+    },
+  );
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    lifetime.abort();
+    await request("workspace.close", {}, workspace).catch(() => undefined);
+    client.close();
+    await client.waitForExit();
+  };
+  cleanup.push(close);
+  return {
+    client,
+    workspace,
+    versionId: main.id as string,
+    lifetime: lifetime.signal,
+    request,
+    nextRequestId,
+    files: new VersionedLiveAdapter(client, workspace, { workspaceId: WORKSPACE }),
+    async sync(): Promise<void> {
+      for (let more = true; more;) more = (await replication.push()).hasMore;
+      for (let more = true; more;) more = (await replication.pull()).hasMore;
+    },
+  };
+}
+
+async function setupE2E() {
+  const root = await tempRoot("phone-sketches-e2e");
+  const storage = await testStorage();
+  const key = new Uint8Array(32).fill(9);
+  const namespace = "phone-sketches-e2e";
+  let copies: ServerCopies | undefined;
+  const relay = createSyncRelayHandler({
+    storage,
+    resolveActor: testActor,
+    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
+    serverCopies: () => copies,
+    relayPublicOrigin: RELAY_ORIGIN,
+  });
+  const replicas = createServiceHostReplication({
+    activity: new DiscussionActivityHub(),
+    storage,
+    prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+    authorize: (credential) =>
+      authorizeAutomationReplication(storage, { key, namespace, ...credential }),
+  });
+  const http = serveFetchHandler({
+    handler: (request) =>
+      request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)
+        ? replicas(request)
+        : relay(request),
+    streamBody: streamsRequestBody,
+    maxBodyBytes: () => 21 * 1024 * 1024,
+    oversized: () => new Response(null, { status: 413 }),
+    failure: () => new Response(null, { status: 500 }),
+  });
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  cleanup.push(async () => {
+    http.closeAllConnections();
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+  });
+  const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  const owner = await computer({
+    root: join(root, "owner"),
+    relayUrl,
+    bearerToken: "test:owner",
+    identity: { kind: "claim" },
+  });
+  await owner.sync();
+
+  let beforeCopySync: (() => Promise<void>) | null = null;
+  let failCopyRpc: string | null = null;
+  let lane: Promise<void> = Promise.resolve();
+  const row = storage.joinAutomationWorkspace({
+    workspaceId: WORKSPACE,
+    nowMs: Date.now(),
+    reasons: ["account"],
+  });
+  if (!row) throw new Error("Failed to join automation workspace.");
+  const copy = await computer({
+    root: join(root, "server", "workspace"),
+    relayUrl,
+    bearerToken: deriveAutomationReplicaBearer(row, { key, namespace }),
+    identity: {
+      kind: "join",
+      replicationEpoch: row.replicationEpoch,
+      streamIdentity: row.streamIdentity,
+    },
+  });
+  const baseSendRequest = copy.client.sendRequest.bind(copy.client);
+  const copyClient = Object.assign(Object.create(Object.getPrototypeOf(copy.client)), copy.client, {
+    sendRequest(
+      request: Parameters<typeof baseSendRequest>[0],
+      options?: Parameters<typeof baseSendRequest>[1],
+    ) {
+      if (failCopyRpc && request.method.includes(failCopyRpc)) {
+        failCopyRpc = null;
+        return Promise.reject(new Error(`injected fault on ${request.method}`));
+      }
+      return baseSendRequest(request, options);
+    },
+  }) as typeof copy.client;
+  const sync = () => {
+    const run = lane.then(async () => {
+      if (beforeCopySync) {
+        const hook = beforeCopySync;
+        beforeCopySync = null;
+        await hook();
+      }
+      await copy.sync();
+    });
+    lane = run.catch(() => undefined);
+    return run;
+  };
+  const replica: AutomationReplica = {
+    workspaceId: WORKSPACE,
+    ownerUserId: "owner",
+    incarnation: row.incarnation,
+    reasons: row.reasons,
+    startedAtMs: row.startedAtMs,
+    pulledHead: 0,
+    root: join(root, "server", "workspace"),
+    metadataDir: join(root, "server", "metadata"),
+    client: copyClient,
+    workspace: copy.workspace,
+    signal: copy.lifetime,
+    nextRequestId: copy.nextRequestId,
+    withRecordWork: (work) => work(),
+    busy: () => false,
+    sync,
+    step: async () => {
+      await sync();
+      return true;
+    },
+  };
+  const started = await startServerCopies({
+    storage,
+    root: join(root, "server"),
+    engineExecutable: engine.require(),
+    relayOrigin: RELAY_ORIGIN,
+    key,
+    namespace,
+    startReplicas: async () => ({
+      unavailable: false,
+      replica: (id) => (id === WORKSPACE ? replica : undefined),
+      reconcile: () => undefined,
+      deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(),
+      settled: async () => undefined,
+      close: async () => undefined,
+    }),
+  });
+  copies = started;
+  cleanup.push(() => started.close());
+
+  const call = async (operation: string, args: unknown, user = "owner") => {
+    const response = await relay(
+      new Request(`${relayUrl}/sync/${WORKSPACE}/ops/${operation}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer session:${user}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(args),
+      }),
+    );
+    return {
+      status: response.status,
+      body: (await response.json().catch(() => null)) as Record<string, unknown> | null,
+    };
+  };
+
+  const op = async (operation: string, args: unknown) => {
+    const res = await call(operation, args, "owner");
+    expect(res.status, `${operation}: ${JSON.stringify(res.body)}`).toBe(200);
+    return res.body!.result as Record<string, unknown>;
+  };
+
+  return {
+    storage,
+    owner,
+    copy,
+    call,
+    op,
+    onNextCopySync(hook: () => Promise<void>) {
+      beforeCopySync = hook;
+    },
+    failNextCopyRpc(methodFragment: string) {
+      failCopyRpc = methodFragment;
+    },
+  };
+}
+
+it.skipIf(engine.missing)(
+  "creates a sketch on phone, saves drawn elements idempotently, and syncs them to desktop",
+  async () => {
+    const { owner, op, call, failNextCopyRpc } = await setupE2E();
+
+    const created = await op("createSketch", {
+      path: "Trip Map.excalidraw",
+      requestId: "req-create-trip",
+    });
+    expect(created).toMatchObject({
+      ok: true,
+      path: "Trip Map.excalidraw",
+      objectId: expect.any(String),
+    });
+    const objectId = created.objectId as string;
+
+    // Retrying with the same requestId replays cleanly; a new requestId reports exists.
+    expect(
+      await op("createSketch", { path: "Trip Map.excalidraw", requestId: "req-create-trip" }),
+    ).toEqual(created);
+    expect(
+      await op("createSketch", { path: "Trip Map.excalidraw", requestId: "req-create-dup" }),
+    ).toMatchObject({ ok: false, refusal: "exists" });
+
+    expect(await op("readSketch", { path: "Trip Map.excalidraw" })).toEqual({
+      ok: true,
+      path: "Trip Map.excalidraw",
+      objectId,
+      elements: [],
+      appState: { gridSize: null, viewBackgroundColor: "#ffffff" },
+      files: {},
+      missingAssets: 0,
+    });
+
+    const box = rect("rect-1", 1, 100);
+    const saved = await op("saveSketch", {
+      path: "Trip Map.excalidraw",
+      objectId,
+      requestId: "req-save-1",
+      elements: [box],
+    });
+    expect(saved).toMatchObject({
+      ok: true,
+      path: "Trip Map.excalidraw",
+      objectId,
+      lostElementIds: [],
+      appState: { gridSize: null, viewBackgroundColor: "#ffffff" },
+      missingAssets: 0,
+    });
+    expect(saved.elements).toEqual([box]);
+
+    // Retrying the same save requestId is idempotent.
+    expect(
+      await op("saveSketch", {
+        path: "Trip Map.excalidraw",
+        objectId,
+        requestId: "req-save-1",
+        elements: [box],
+      }),
+    ).toEqual(saved);
+
+    // If settle fails after applying a local update, retrying with the same elements still settles cleanly.
+    const box2 = rect("rect-2", 1, 200, { index: "a1" });
+    failNextCopyRpc("ydoc.settle");
+    expect(
+      (
+        await call("saveSketch", {
+          path: "Trip Map.excalidraw",
+          objectId,
+          requestId: "req-save-2",
+          elements: [box2],
+        })
+      ).status,
+    ).toBe(500);
+    const settledRetry = await op("saveSketch", {
+      path: "Trip Map.excalidraw",
+      objectId,
+      requestId: "req-save-2",
+      elements: [box2],
+    });
+    expect(settledRetry).toMatchObject({ ok: true, lostElementIds: [] });
+
+    await owner.sync();
+    const provider = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "Trip Map.excalidraw",
+      expectedObjectId: objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(provider.lineage).toBe("existing");
+      expect(provider.unsettled).toBe(false);
+      const scene = foldScene(provider.doc);
+      expect(scene.elements).toEqual([box, box2]);
+      expect(scene.appState).toEqual({ gridSize: null, viewBackgroundColor: "#ffffff" });
+    } finally {
+      await provider.evict().catch(() => undefined);
+    }
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "hydrates desktop-managed image assets on read and preserves them intact on save",
+  async () => {
+    const { owner, op, call } = await setupE2E();
+    const fileId = "img-asset-1";
+    const imageEl: ElementSnapshot = {
+      ...rect("img-el-1", 1, 50),
+      type: "image",
+      fileId,
+      status: "saved",
+      scale: [1, 1],
+    };
+    const docJson = JSON.stringify(
+      {
+        type: "excalidraw",
+        version: 2,
+        source: "https://excalidraw.com",
+        elements: [JSON.parse(stableJson(imageEl))],
+        appState: { viewBackgroundColor: "#ffffff" },
+        files: {
+          [fileId]: {
+            created: 1_700_000_000_000,
+            dataURL: PNG_DATA_URL,
+            id: fileId,
+            mimeType: "image/png",
+          },
+        },
+      },
+      null,
+      2,
+    );
+    const written = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "WithPhoto.excalidraw",
+      text: docJson,
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed photo sketch" },
+    });
+    const objectId = written.moment.objectId;
+
+    // Desktop opens and settles the sketch so the engine converts the embedded image into a SceneAsset + binary blob.
+    const desktopSeed = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "WithPhoto.excalidraw",
+      expectedObjectId: objectId,
+      contentKind: "scene",
+      seedAbsentLineage: true,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      await desktopSeed.settleNow({ summary: "Seed photo sketch" });
+      expect(desktopSeed.artifactAssets).toContainEqual(
+        expect.objectContaining({ id: fileId, mimeType: "image/png", sha256: PNG_SHA256 }),
+      );
+      await desktopSeed.close({ settle: false });
+    } catch (error) {
+      await desktopSeed.evict().catch(() => undefined);
+      throw error;
+    }
+    await owner.sync();
+
+    const read = await op("readSketch", { path: "WithPhoto.excalidraw" });
+    expect(read).toMatchObject({
+      ok: true,
+      objectId,
+      missingAssets: 0,
+      files: {
+        [fileId]: {
+          id: fileId,
+          mimeType: "image/png",
+          dataURL: PNG_DATA_URL,
+          created: 1_700_000_000_000,
+        },
+      },
+    });
+    expect(read.elements).toHaveLength(1);
+
+    // Phone refuses a brand-new image element whose fileId is not in existing assets.
+    const badImage = await call("saveSketch", {
+      path: "WithPhoto.excalidraw",
+      objectId,
+      requestId: "req-bad-img",
+      elements: [
+        {
+          ...rect("img-new", 1, 10),
+          type: "image",
+          fileId: "unknown-file",
+          status: "saved",
+          scale: [1, 1],
+        },
+      ],
+    });
+    expect(badImage.status).toBe(400);
+
+    // Phone adds a rectangle; untouched desktop-managed SceneAsset and binary blob stay intact.
+    const annotation = rect("rect-note", 1, 200, { index: "a1" });
+    const saved = await op("saveSketch", {
+      path: "WithPhoto.excalidraw",
+      objectId,
+      requestId: "req-add-note",
+      elements: [annotation],
+    });
+    expect(saved).toMatchObject({
+      ok: true,
+      lostElementIds: [],
+      missingAssets: 0,
+      files: { [fileId]: expect.objectContaining({ dataURL: PNG_DATA_URL }) },
+    });
+    expect((saved.elements as ElementSnapshot[]).map((e) => e.id).sort()).toEqual([
+      "img-el-1",
+      "rect-note",
+    ]);
+
+    await owner.sync();
+    const after = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "WithPhoto.excalidraw",
+      expectedObjectId: objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      const scene = foldScene(after.doc);
+      expect(scene.elements.map((e) => e.id).sort()).toEqual(["img-el-1", "rect-note"]);
+      expect(scene.assets[fileId]).toMatchObject({ id: fileId, sha256: PNG_SHA256 });
+      const blob = await owner.files.readBinaryBlob({ workspaceId: WORKSPACE, sha256: PNG_SHA256 });
+      expect(blob ? Buffer.from(blob) : null).toEqual(PNG_BYTES);
+    } finally {
+      await after.evict().catch(() => undefined);
+    }
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "detects concurrent desktop edits on the same element against post-publication relay state",
+  async () => {
+    const { owner, op, onNextCopySync } = await setupE2E();
+    const created = await op("createSketch", {
+      path: "Race.excalidraw",
+      requestId: "req-race-create",
+    });
+    const objectId = created.objectId as string;
+
+    const initial = rect("el-shared", 1, 500, { x: 10 });
+    await op("saveSketch", {
+      path: "Race.excalidraw",
+      objectId,
+      requestId: "req-race-init",
+      elements: [initial],
+    });
+    await owner.sync();
+
+    // Helper: desktop edits el-shared to a winning revision and pushes to relay.
+    const desktopEdit = async (el: ElementSnapshot) => {
+      const provider = await openEngineYdocProviderSession({
+        transport: owner.client,
+        workspace: owner.workspace,
+        versionId: owner.versionId,
+        path: "Race.excalidraw",
+        expectedObjectId: objectId,
+        contentKind: "scene",
+        seedAbsentLineage: false,
+        onRemoteUpdate: () => undefined,
+      });
+      try {
+        const before = Y.encodeStateVector(provider.doc);
+        insertElementRevision(provider.doc, el);
+        await provider.applyLocalUpdate(Y.encodeStateAsUpdate(provider.doc, before), {
+          idempotencyKey: `desktop-${el.version}-${el.versionNonce}`,
+          attribution: { actorKind: "human" },
+          armSettle: false,
+        });
+        await provider.settleNow({ summary: "Desktop edit" });
+        await provider.close({ settle: false });
+      } catch (error) {
+        await provider.evict().catch(() => undefined);
+        throw error;
+      }
+      await owner.sync();
+    };
+
+    // Mid-flight race: the pre-save sync passes first; then BEFORE the post-save sync publishes,
+    // desktop pushes a higher-version revision of el-shared to the relay.
+    let syncCount = 0;
+    const desktopWinner = rect("el-shared", 4, 10, { x: 400 });
+    const armSecondSync = () =>
+      onNextCopySync(async () => {
+        syncCount += 1;
+        if (syncCount === 1) armSecondSync();
+        else await desktopEdit(desktopWinner);
+      });
+    armSecondSync();
+
+    const phoneLoser = rect("el-shared", 2, 900, { x: 99 });
+    const saved = await op("saveSketch", {
+      path: "Race.excalidraw",
+      objectId,
+      requestId: "req-race-lose",
+      elements: [phoneLoser],
+    });
+    expect(syncCount).toBe(2);
+    expect(saved).toMatchObject({
+      ok: true,
+      lostElementIds: ["el-shared"],
+      lostVersions: { "el-shared": 4 },
+    });
+    expect(saved.elements).toEqual([desktopWinner]);
+
+    // Re-saving the kept draft bumped above the winning version with a fresh requestId wins cleanly.
+    const phoneRetry = rect("el-shared", 5, 777, { x: 99 });
+    const retried = await op("saveSketch", {
+      path: "Race.excalidraw",
+      objectId,
+      requestId: "req-race-win",
+      elements: [phoneRetry],
+    });
+    expect(retried).toMatchObject({ ok: true, lostElementIds: [] });
+    expect(retried.elements).toEqual([phoneRetry]);
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "reads a never-opened sketch without mutating relay state, then seeds and saves edits cleanly, while denying Members 404",
+  async () => {
+    const { storage, owner, op, call, failNextCopyRpc } = await setupE2E();
+    const fileId = "raw-img-1";
+    const shape = rect("raw-rect", 1, 11);
+    const imgEl: ElementSnapshot = {
+      ...rect("raw-img-el", 1, 12, { index: "a1" }),
+      type: "image",
+      fileId,
+      status: "saved",
+      scale: [1, 1],
+    };
+    const originalText = JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      elements: [shape, imgEl],
+      appState: { gridModeEnabled: true },
+      files: {
+        [fileId]: {
+          id: fileId,
+          mimeType: "image/png",
+          dataURL: PNG_DATA_URL,
+          created: 1_700_000_000_000,
+        },
+      },
+    });
+    const written = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "NeverOpened.excalidraw",
+      text: originalText,
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed never-opened sketch" },
+    });
+    const objectId = written.moment.objectId;
+    await owner.sync();
+
+    const db = (storage as StorageContext).db;
+    const logCount = () =>
+      Number(
+        db
+          .prepare("SELECT COUNT(*) AS n FROM sync_relay_log WHERE workspace_id = ?")
+          .get(WORKSPACE)!.n,
+      );
+    const beforeRead = logCount();
+
+    const read = await op("readSketch", { path: "NeverOpened.excalidraw" });
+    expect(read).toMatchObject({
+      ok: true,
+      objectId,
+      appState: { gridModeEnabled: true },
+      missingAssets: 0,
+      files: { [fileId]: expect.objectContaining({ dataURL: PNG_DATA_URL }) },
+    });
+    expect((read.elements as ElementSnapshot[]).map((e) => e.id)).toEqual([
+      "raw-rect",
+      "raw-img-el",
+    ]);
+    expect(logCount(), "reading a never-opened sketch must not publish anything").toBe(beforeRead);
+
+    // A refused first save must not rewrite or seed the original never-opened sketch.
+    const refusedFirstSave = await call("saveSketch", {
+      path: "NeverOpened.excalidraw",
+      objectId,
+      requestId: "req-never-opened-bad-img",
+      elements: [
+        {
+          ...rect("img-forbidden", 1, 20),
+          type: "image",
+          fileId: "forbidden-new-img",
+          status: "saved",
+          scale: [1, 1],
+        },
+      ],
+    });
+    expect(refusedFirstSave.status).toBe(400);
+    expect(logCount(), "refused first save must not publish anything").toBe(beforeRead);
+    await owner.sync();
+    const untouched = await owner.files.readTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "NeverOpened.excalidraw",
+    });
+    expect(untouched?.text).toBe(originalText);
+
+    // Legacy portable sketches with null elements/appState/files open cleanly as empty sketches.
+    await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LegacyNull.excalidraw",
+      text: JSON.stringify({ type: "excalidraw", elements: null, appState: null, files: null }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed legacy null sketch" },
+    });
+    await owner.sync();
+    expect(await op("readSketch", { path: "LegacyNull.excalidraw" })).toMatchObject({
+      ok: true,
+      elements: [],
+      appState: {},
+      files: {},
+      missingAssets: 0,
+    });
+
+    // Even with a transient blob-read failure during first save, seeding preserves the embedded
+    // image intact in storage and a fresh read still sees it with zero missing assets.
+    failNextCopyRpc("readBlob");
+    const added = rect("phone-added", 1, 33, { index: "a2" });
+    const saved = await op("saveSketch", {
+      path: "NeverOpened.excalidraw",
+      objectId,
+      requestId: "req-never-opened-save",
+      elements: [added],
+    });
+    expect(saved).toMatchObject({
+      ok: true,
+      lostElementIds: [],
+      missingAssets: 1,
+    });
+    expect((saved.elements as ElementSnapshot[]).map((e) => e.id).sort()).toEqual([
+      "phone-added",
+      "raw-img-el",
+      "raw-rect",
+    ]);
+    expect(await op("readSketch", { path: "NeverOpened.excalidraw" })).toMatchObject({
+      ok: true,
+      missingAssets: 0,
+      files: { [fileId]: expect.objectContaining({ dataURL: PNG_DATA_URL }) },
+    });
+
+    await owner.sync();
+    const after = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "NeverOpened.excalidraw",
+      expectedObjectId: objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      const scene = foldScene(after.doc);
+      expect(scene.elements.map((e) => e.id).sort()).toEqual([
+        "phone-added",
+        "raw-img-el",
+        "raw-rect",
+      ]);
+      expect(scene.assets[fileId]).toMatchObject({ id: fileId, sha256: PNG_SHA256 });
+    } finally {
+      await after.evict().catch(() => undefined);
+    }
+
+    // Never-opened legacy sketch with missing and out-of-order indices preserves source order and
+    // syncs cleanly to desktop with zero conflict.
+    const zNoIdx = { ...rect("z", 1, 1), index: undefined };
+    const aNoIdx = { ...rect("a", 1, 2), index: null };
+    const cHigh = rect("c", 1, 3, { index: "a1" });
+    const dLow = rect("d", 1, 4, { index: "a0" });
+    const legacyOrderWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LegacyOrder.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [zNoIdx, aNoIdx, cHigh, dLow],
+        appState: {},
+        files: {},
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed legacy unindexed sketch" },
+    });
+    await owner.sync();
+    const tail = rect("tail", 1, 5, { index: "a9" });
+    expect(
+      await op("saveSketch", {
+        path: "LegacyOrder.excalidraw",
+        objectId: legacyOrderWrite.moment.objectId,
+        requestId: "req-legacy-order-save",
+        elements: [tail],
+      }),
+    ).toMatchObject({ ok: true, lostElementIds: [] });
+    await owner.sync();
+    const afterOrder = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "LegacyOrder.excalidraw",
+      expectedObjectId: legacyOrderWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterOrder.doc).elements.map((e) => e.id)).toEqual([
+        "z",
+        "a",
+        "c",
+        "d",
+        "tail",
+      ]);
+    } finally {
+      await afterOrder.evict().catch(() => undefined);
+    }
+
+    // Never-opened sketch with a malformed referenced image entry (missing mimeType or non-canonical
+    // base64 with nonzero trailing bits like "gh==") is refused before rewriting so bytes stay intact.
+    for (const [name, badFile] of [
+      ["BadAsset.excalidraw", { id: "bad-f", dataURL: PNG_DATA_URL, created: 1_700_000_000_000 }],
+      [
+        "BadBase64.excalidraw",
+        {
+          id: "bad-f",
+          mimeType: "image/png",
+          dataURL: "data:image/png;base64,gh==",
+          created: 1_700_000_000_000,
+        },
+      ],
+    ] as const) {
+      const badAssetText = JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          {
+            ...rect("img-bad", 1, 1),
+            type: "image",
+            fileId: "bad-f",
+            status: "saved",
+            scale: [1, 1],
+          },
+        ],
+        appState: {},
+        files: { "bad-f": badFile },
+      });
+      const badAssetWrite = await owner.files.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: owner.versionId,
+        path: name,
+        text: badAssetText,
+        publish: true,
+        createOnly: true,
+        metadata: { origin: "api", summary: `Seed ${name}` },
+      });
+      await owner.sync();
+      const beforeBadSave = logCount();
+      expect(
+        await op("saveSketch", {
+          path: name,
+          objectId: badAssetWrite.moment.objectId,
+          requestId: `req-bad-${name}`,
+          elements: [rect("new-box", 1, 9, { index: "a1" })],
+        }),
+        name,
+      ).toMatchObject({ ok: false, refusal: "invalid" });
+      expect(logCount(), name).toBe(beforeBadSave);
+      await owner.sync();
+      expect(
+        (
+          await owner.files.readTextFile({
+            workspaceId: WORKSPACE,
+            versionId: owner.versionId,
+            path: name,
+          })
+        )?.text,
+        name,
+      ).toBe(badAssetText);
+    }
+
+    // Never-opened sketch with [a9, null, "z".repeat(2048)] fills the missing key as aA without
+    // falsely rebasing, so moving the first shape preserves stacking order.
+    const longTail = "z".repeat(2048);
+    const shortGapWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "ShortGap.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          rect("first", 1, 1, { index: "a9" }),
+          { ...rect("middle", 1, 2), index: null },
+          rect("tail", 1, 3, { index: longTail }),
+        ],
+        appState: {},
+        files: {},
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed short-gap long-tail sketch" },
+    });
+    await owner.sync();
+    expect(
+      await op("saveSketch", {
+        path: "ShortGap.excalidraw",
+        objectId: shortGapWrite.moment.objectId,
+        requestId: "req-short-gap-move",
+        elements: [rect("first", 2, 11, { index: "a9", x: 99 })],
+      }),
+    ).toMatchObject({ ok: true, lostElementIds: [] });
+    await owner.sync();
+    const afterShortGap = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "ShortGap.excalidraw",
+      expectedObjectId: shortGapWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterShortGap.doc).elements.map((e) => [e.id, e.index])).toEqual([
+        ["first", "a9"],
+        ["middle", "aA"],
+        ["tail", longTail],
+      ]);
+    } finally {
+      await afterShortGap.evict().catch(() => undefined);
+    }
+
+    // Never-opened legacy sketch with a 256 KiB anchor followed by an unindexed element rebases
+    // compactly on read and save so moving the first shape preserves stacking order.
+    const longAnchor = `${"z".repeat(27)}${"z".repeat(256 * 1024)}`;
+    const longWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LongAnchor.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          rect("anchor", 1, 1, { index: longAnchor }),
+          { ...rect("unindexed", 1, 2), index: undefined },
+        ],
+        appState: {},
+        files: {},
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed long-anchor sketch" },
+    });
+    await owner.sync();
+    const readLong = (await op("readSketch", { path: "LongAnchor.excalidraw" })) as {
+      ok: true;
+      elements: { id: string; index?: string }[];
+    };
+    expect(readLong.ok).toBe(true);
+    const readAnchorIndex = readLong.elements[0]?.index;
+    expect(typeof readAnchorIndex).toBe("string");
+    expect(readAnchorIndex!.length).toBeLessThan(8);
+    expect(
+      await op("saveSketch", {
+        path: "LongAnchor.excalidraw",
+        objectId: longWrite.moment.objectId,
+        requestId: "req-long-anchor-save",
+        elements: [
+          rect("anchor", 2, 12, { index: readAnchorIndex, x: 42 }),
+          rect("after-long", 1, 3, { index: "a9" }),
+        ],
+      }),
+    ).toMatchObject({ ok: true, lostElementIds: [] });
+    await owner.sync();
+    const afterLong = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "LongAnchor.excalidraw",
+      expectedObjectId: longWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterLong.doc).elements.map((e) => e.id)).toEqual([
+        "anchor",
+        "unindexed",
+        "after-long",
+      ]);
+    } finally {
+      await afterLong.evict().catch(() => undefined);
+    }
+
+    // A valid 4 MiB base64 payload parses cleanly without regex stack overflow on Node 24.
+    const fourMbDataUrl = `data:image/png;base64,${Buffer.alloc(4 * 1024 * 1024, 0x42).toString("base64")}`;
+    await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LargePng.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          {
+            ...rect("img-4mb", 1, 1),
+            type: "image",
+            fileId: "f-4mb",
+            status: "saved",
+            scale: [1, 1],
+          },
+        ],
+        appState: {},
+        files: {
+          "f-4mb": {
+            id: "f-4mb",
+            mimeType: "image/png",
+            dataURL: fourMbDataUrl,
+            created: 1_700_000_000_000,
+          },
+        },
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed 4 MiB PNG sketch" },
+    });
+    await owner.sync();
+    expect(await op("readSketch", { path: "LargePng.excalidraw" })).toMatchObject({
+      ok: true,
+      missingAssets: 0,
+      files: { "f-4mb": { id: "f-4mb", mimeType: "image/png", dataURL: fourMbDataUrl } },
+    });
+
+    // Joined Member gets 404 on every sketch op.
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: WORKSPACE,
+        actorUserId: "owner",
+        workspaceName: "Sketches",
+        email: "member@dohc.test",
+        recipientUserId: "member",
+        newMemberId: () => "mem-1",
+        newGrantId: () => "grant-1",
+        newShareId: () => "share-1",
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await call("readSketch", { path: "NeverOpened.excalidraw" }, "member")).status).toBe(
+      404,
+    );
+    expect(
+      (await call("createSketch", { path: "X.excalidraw", requestId: "req-m" }, "member")).status,
+    ).toBe(404);
+    expect(
+      (
+        await call(
+          "saveSketch",
+          { path: "NeverOpened.excalidraw", objectId, requestId: "req-ms", elements: [] },
+          "member",
+        )
+      ).status,
+    ).toBe(404);
+  },
+  120_000,
+);

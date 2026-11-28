@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { EXCALIDRAW_EXPORTABLE_APP_STATE, foldScene } from "@dohc/excalidraw-scene";
+import {
+  EXCALIDRAW_EXPORTABLE_APP_STATE,
+  foldScene,
+  lostElementRevisions,
+} from "@dohc/excalidraw-scene";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   planDrawingEdit,
@@ -65,11 +69,7 @@ export async function editDrawing(
         }
         warning = DOCUMENT_EDIT_PENDING_WARNING;
       }
-      const winners = new Map(foldScene(provider.doc).elements.map((each) => [each.id, each]));
-      const lost = plan.written.filter(({ id, version, versionNonce }) => {
-        const winner = winners.get(id);
-        return winner?.version !== version || winner.versionNonce !== versionNonce;
-      });
+      const lost = lostElementRevisions(provider.doc, plan.written);
       if (lost.length > 0) {
         throw new LiveDocumentEditAppliedError(
           `Someone changed ${lost.map(({ id }) => id).join(", ")} at the same moment, so that part of this edit is not in ${path}. Read the drawing again and redo what is missing.`,

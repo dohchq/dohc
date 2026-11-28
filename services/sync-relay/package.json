@@ -26,6 +26,7 @@
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/automation-executor": "workspace:*",
     "@dohc/cli": "workspace:*",
+    "@dohc/excalidraw-scene": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",

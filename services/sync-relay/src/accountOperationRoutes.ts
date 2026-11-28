@@ -29,6 +29,11 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import type { PhonePages } from "./phonePages";
+import {
+  isPhoneSketchOperation,
+  runPhoneSketchOperation,
+  SAVE_SKETCH_MAX_BODY_BYTES,
+} from "./phoneSketches";
 import { phoneMember, type PhoneMember } from "./phoneMember";
 import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
@@ -45,6 +50,7 @@ export type AccountOperationRoute = {
 const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;
+const SAVE_SKETCH_BODY_RECEIPT_MS = 30_000;
 
 /**
  * The answer while this server has no copies to read from, as when it is still starting. It is the copies' own refusal
@@ -171,9 +177,18 @@ export function createAccountOperationRoute(options: {
     const app = options.phoneApps !== undefined && isPhoneAppOperation(route.operation);
     const collection =
       options.phoneCollections !== undefined && isPhoneCollectionOperation(route.operation);
+    const sketch = isPhoneSketchOperation(route.operation);
     // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
-    // and its live host; every other operation needs a copy.
-    if (!feed && !wakeFeed && !app && !collection && !page && options.copies() === undefined)
+    // and its live host; every other operation needs a copy. Sketch ops check owner reach first so Members always get 404.
+    if (
+      !feed &&
+      !wakeFeed &&
+      !app &&
+      !collection &&
+      !page &&
+      !sketch &&
+      options.copies() === undefined
+    )
       throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone. Signing in is the browser's only gate.
     const joinedReads = feed || app || collection || isAccountOperation(route.operation);
@@ -200,6 +215,7 @@ export function createAccountOperationRoute(options: {
         app ||
         collection ||
         write ||
+        sketch ||
         mark ||
         retry ||
         context ||
@@ -210,6 +226,7 @@ export function createAccountOperationRoute(options: {
       owner === null
     )
       throw notFound();
+    if (sketch && options.copies() === undefined) throw copiesUnavailable();
     if (caller.userId !== owner)
       await options.refreshAccountEmail?.(caller.userId, readSignal ?? request.signal);
     const member = memberOf(caller.userId);
@@ -271,12 +288,18 @@ export function createAccountOperationRoute(options: {
       });
       return jsonResponse({ ok: true, ...answer });
     }
+    const maxBodyBytes =
+      route.operation === "saveSketch"
+        ? SAVE_SKETCH_MAX_BODY_BYTES
+        : ACCOUNT_OPERATION_MAX_BODY_BYTES;
+    const bodyReceiptMs =
+      route.operation === "saveSketch" ? SAVE_SKETCH_BODY_RECEIPT_MS : BODY_RECEIPT_MS;
     let args: unknown;
     try {
       args = await readBoundedJson(
         request,
-        ACCOUNT_OPERATION_MAX_BODY_BYTES,
-        AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
+        maxBodyBytes,
+        AbortSignal.any([request.signal, AbortSignal.timeout(bodyReceiptMs)]),
       );
     } catch (error) {
       throw error instanceof RangeError
@@ -356,6 +379,20 @@ export function createAccountOperationRoute(options: {
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
+    if (isPhoneSketchOperation(route.operation)) {
+      const { result, cursor } = await runPhoneSketchOperation(
+        { storage, copies },
+        {
+          owner,
+          workspaceId: route.workspaceId,
+          operation: route.operation,
+          args,
+          visitor,
+          authorize,
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
     if (context) {
       const { result, cursor } = await runAccountChatContext(
         { storage, copies },

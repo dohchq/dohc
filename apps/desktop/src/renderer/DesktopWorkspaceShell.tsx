@@ -6271,7 +6271,7 @@ function WorkspaceShell(props: {
       await refreshFiles();
       openFile(result.path);
     } catch (error) {
-      reportShellError("dohc could not create a drawing.", error);
+      reportShellError("dohc could not create a sketch.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   const creatingApp = useRef(false);

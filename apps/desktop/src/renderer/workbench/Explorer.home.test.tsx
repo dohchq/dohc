@@ -260,7 +260,7 @@ describe("Explorer Files", () => {
 });
 
 describe("Explorer Home", () => {
-  it("orders its sections Open editors, Apps, Pinned, Pages, Drawings, Collections, Other files", () => {
+  it("orders its sections Open editors, Apps, Pinned, Pages, Sketches, Collections, Other files", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
@@ -269,7 +269,7 @@ describe("Explorer Home", () => {
       "Apps",
       "Pinned",
       "Pages",
-      "Drawings",
+      "Sketches",
       "Collections",
       "Other files",
     ]);
@@ -354,7 +354,7 @@ describe("Explorer Home", () => {
     );
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "Drawings" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Sketches" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     expect(rowLabels("Pages")).toEqual([]);
     await user.click(within(section("Pages")).getByRole("button", { name: "New page" }));
@@ -690,19 +690,19 @@ describe("Explorer Home", () => {
     expect(onModeChange).toHaveBeenCalledWith("files");
   });
 
-  it("lists Excalidraw files under Drawings, not Other files, and opens one from its row", async () => {
+  it("lists Excalidraw files under Sketches, not Other files, and opens one from its row", async () => {
     const onModeChange = vi.fn();
     const onOpenFile = vi.fn();
     const user = userEvent.setup();
     const view = render(<Explorer {...explorerProps({ onModeChange, onOpenFile })} />);
-    expect(rowLabels("Drawings")).toEqual(["board.excalidraw"]);
+    expect(rowLabels("Sketches")).toEqual(["board.excalidraw"]);
     expect(
-      within(section("Drawings")).getByRole("button", { name: /^board\.excalidraw/ }).textContent,
+      within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }).textContent,
     ).toBe("board.excalidrawplans");
-    expect(screen.getByLabelText("1 drawing").textContent).toBe("1");
+    expect(screen.getByLabelText("1 sketch").textContent).toBe("1");
     expect(rowLabels("Other files")).not.toContain("board.excalidraw");
     await user.click(
-      within(section("Drawings")).getByRole("button", { name: /^board\.excalidraw/ }),
+      within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }),
     );
     expect(onOpenFile).toHaveBeenCalledWith("plans/board.excalidraw");
     expect(screen.queryByTestId("sketches-show-all")).toBeNull();
@@ -713,8 +713,8 @@ describe("Explorer Home", () => {
     view.rerender(
       <Explorer {...explorerProps({ onModeChange, files: many, folders: ["ideas"] })} />,
     );
-    expect(rowLabels("Drawings")).toHaveLength(FILES_SHOWN);
-    expect(screen.getByLabelText(`${FILES_SHOWN + 2} drawings`).textContent).toBe(
+    expect(rowLabels("Sketches")).toHaveLength(FILES_SHOWN);
+    expect(screen.getByLabelText(`${FILES_SHOWN + 2} sketches`).textContent).toBe(
       String(FILES_SHOWN + 2),
     );
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();

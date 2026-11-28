@@ -459,7 +459,7 @@ describe("GraphView", () => {
     );
     await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("4"));
     fireEvent.click(screen.getByTestId("graph-settings-toggle"));
-    fireEvent.click(screen.getByRole("switch", { name: "Show drawing nodes" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Show sketch nodes" }));
     await waitFor(() =>
       expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 of 4 items"),
     );

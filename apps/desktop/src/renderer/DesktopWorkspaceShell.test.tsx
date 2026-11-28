@@ -695,7 +695,7 @@ describe("collection folders", () => {
     for (const label of [
       "New page",
       "New file…",
-      "New drawing",
+      "New sketch",
       "New folder",
       "New Collection",
       "Import files",
