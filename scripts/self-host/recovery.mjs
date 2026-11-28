@@ -183,16 +183,11 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     );
     return;
   }
-  // Every deployment volume must exist; a missing one fails here before anything stops.
-  const volumeNames = Object.values(config.volumes ?? {}).map((volume) => volume.name);
-  const volumes = volumeNames.length ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [];
-  const keys = options.action === "archive" ? apnsKeysInStorage(config, volumes) : [];
-  if (keys.length)
-    throw new Error(
-      `The APNs auth key ${keys.join(", ")} is inside the deployment's storage, which an archive copies. ` +
-        "Move it out and update DOHC_RELAY_APNS_KEY_FILE, then try again.",
-    );
   if (options.action === "snapshot") {
+    const required = Object.entries(config.volumes ?? {})
+      .filter(([key]) => key !== "dohc_self_host_snapshots")
+      .map(([, volume]) => volume.name);
+    if (required.length) run(["volume", "inspect", ...required]);
     // Online: the snapshot container reads the relay database read-only while services keep running.
     log(
       run([
@@ -215,6 +210,15 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     );
     return;
   }
+  // Every deployment volume must exist; a missing one fails here before anything stops.
+  const volumeNames = Object.values(config.volumes ?? {}).map((volume) => volume.name);
+  const volumes = volumeNames.length ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [];
+  const keys = options.action === "archive" ? apnsKeysInStorage(config, volumes) : [];
+  if (keys.length)
+    throw new Error(
+      `The APNs auth key ${keys.join(", ")} is inside the deployment's storage, which an archive copies. ` +
+        "Move it out and update DOHC_RELAY_APNS_KEY_FILE, then try again.",
+    );
   const writers = storageWriters(config, volumes, run);
   const current = run([...compose, "ps", "--services", "--filter", "status=running"])
     .trim()

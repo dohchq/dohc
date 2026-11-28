@@ -237,6 +237,31 @@ test("snapshot runs online and never stops, restarts or deletes anything", async
     "/backup/offsite",
   ]);
   assert.ok(run.includes(`${root}:/backup`));
+  const inspected = mock.calls.find((args) => args[0] === "volume" && args[1] === "inspect");
+  assert.deepEqual(inspected, ["volume", "inspect", "recovery_data"]);
+});
+
+test("snapshot succeeds even when the snapshots volume has not been created yet", async (t) => {
+  const root = await fixture(t),
+    envFile = join(root, "env");
+  await writeFile(envFile, "DOHC_SNAPSHOT_KEY=key-from-env\n");
+  const mock = runner({
+    served: {
+      ...config,
+      volumes: {
+        ...config.volumes,
+        dohc_self_host_snapshots: { name: "recovery_snapshots" },
+      },
+    },
+  });
+  await runRecovery(
+    parseRecoveryArguments(["snapshot", join(root, "offsite"), "--env-path", envFile]),
+    mock.run,
+    () => {},
+    ["compose"],
+  );
+  const inspected = mock.calls.find((args) => args[0] === "volume" && args[1] === "inspect");
+  assert.deepEqual(inspected, ["volume", "inspect", "recovery_data"]);
 });
 
 test("verify mounts no deployment volume and passes only the snapshot key", async (t) => {

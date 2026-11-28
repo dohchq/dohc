@@ -271,10 +271,18 @@ Keep both keys out of evidence, logs, and public text.
 
 ### Choose who can sign up
 
-Drive keeps sign-up private. `drive.mjs` refuses an empty `DOHC_SIGN_UP_EMAILS`.
+Drive keeps sign-up private. `drive.mjs` refuses an empty `DOHC_SIGN_UP_EMAILS` list or an invalid email address.
 The server also accepts an address that has a pending share invite, as [Choose who can create an account](../how-to/self-host.md#choose-who-can-create-an-account) describes.
 
-**Approval:** Each change to `DOHC_SIGN_UP_EMAILS` needs approval. Stop and start the deployment to apply it.
+**Approval:** Each change to `DOHC_SIGN_UP_EMAILS` needs approval.
+Edit `DOHC_SIGN_UP_EMAILS` in `/etc/dohc/drive.env`, then apply it without stopping the server:
+
+```sh
+sudo node /srv/dohc-drive/tools/drive/drive.mjs start --bundle /srv/dohc-release --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid>
+```
+
+Compose recreates only `workspace-api` while `gateway`, `sync-relay`, and `share-web` keep running.
+The gateway holds sign-in and account requests while `workspace-api` restarts.
 Then replace the password manager copy of `/etc/dohc/drive.env`.
 
 ## Publish DNS and TLS
@@ -571,11 +579,19 @@ Salvage the files from the latest snapshot:
 **Approval:** Each update needs approval.
 
 1. **Operator:** Run `drive.mjs check` with the current bundle. Update only a server that passes it.
-2. **Operator:** Build the new release and copy the Drive recipe from the same commit, as in [Build and copy the release](#build-and-copy-the-release).
-3. **Provider:** If the new bundle's `tools/self-host/cloudflare-proxies.caddy` changed, update the Cloud Firewall's Cloudflare ranges to match.
-4. **Operator:** Follow [Upgrade the server](../how-to/self-host.md#upgrade-the-server), using `--env-path /etc/dohc/drive.env`.
-5. **Operator:** Run `drive.mjs check` with the new bundle.
-6. **Operator:** Replace the password manager copy of `/etc/dohc/drive.env`. The upgrade changes `DOHC_IMAGE`.
+2. **Operator:** Save an online relay snapshot before changing the bundle. Neon keeps point-in-time backups for accounts:
+
+   ```sh
+   cd /srv/dohc-release
+   sudo install -d -o 1000 -g 1000 -m 0700 /srv/dohc-backups
+   sudo node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/relay-before-upgrade --env-path /etc/dohc/drive.env
+   ```
+
+3. **Operator:** Build the new release and copy the Drive recipe from the same commit, as in [Build and copy the release](#build-and-copy-the-release).
+4. **Provider:** If the new bundle's `tools/self-host/cloudflare-proxies.caddy` changed, update the Cloud Firewall's Cloudflare ranges to match.
+5. **Operator:** Follow [Upgrade the server](../how-to/self-host.md#upgrade-the-server), using `--env-path /etc/dohc/drive.env`. Do not stop the deployment first.
+6. **Operator:** Run `drive.mjs check` with the new bundle.
+7. **Operator:** Replace the password manager copy of `/etc/dohc/drive.env`. The upgrade changes `DOHC_IMAGE`.
 
 ## Clean up
 

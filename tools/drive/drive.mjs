@@ -230,7 +230,7 @@ function checkSettings(options, settings, release, config) {
     errors.push(
       "Drive keeps accounts in Neon. Set DOHC_POSTGRES_HOST and the other external database settings.",
     );
-  if (!settings.DOHC_SIGN_UP_EMAILS?.trim())
+  if (config.parseSignUpEmails(settings.DOHC_SIGN_UP_EMAILS).length === 0)
     errors.push("Drive keeps sign-up private. List the approved addresses in DOHC_SIGN_UP_EMAILS.");
   if (!settings.DOHC_SNAPSHOT_S3_BUCKET || !settings.DOHC_SNAPSHOT_HEARTBEAT_URL) {
     errors.push(

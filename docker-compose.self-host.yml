@@ -57,6 +57,7 @@ services:
   workspace-api:
     <<: *service
     command: [workspace-api]
+    stop_grace_period: 15s
     logging: {driver: json-file, options: {max-size: 2m, max-file: "5"}}
     environment:
       <<: *auth
@@ -88,6 +89,7 @@ services:
   sync-relay:
     <<: *service
     command: [sync-relay]
+    stop_grace_period: 45s
     # A validation process that runs out of heap aborts. No core file may keep its documents or secrets.
     ulimits: {core: 0}
     environment:
@@ -209,6 +211,7 @@ services:
     logging: *logging
     environment:
       DOHC_PUBLIC_HOST: ${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST}
+      DOHC_GATEWAY_CONFIG_HASH: ${DOHC_GATEWAY_CONFIG_HASH:-}
     # The relay reaches itself through this gateway before it reports ready, so the gateway never waits for a healthy relay.
     depends_on:
       workspace-api: {condition: service_healthy}

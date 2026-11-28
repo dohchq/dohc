@@ -247,7 +247,8 @@ Share links need no account, so closed sign-up does not change them.
 The server checks eligibility when it creates the account.
 Removing an address from the list later does not remove its account.
 Revoking an invite after its account exists does not remove that account either.
-Stop and start the deployment to apply a changed list.
+Run `node tools/self-host/bootstrap.mjs start` to apply a changed list without stopping the server.
+Compose recreates only `workspace-api` while `gateway`, `sync-relay`, and `share-web` keep running, and the gateway holds requests during that restart.
 Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
 
 `workspace-api` asks `sync-relay` about pending invites over the internal Docker network.
@@ -389,10 +390,9 @@ node scripts/self-host/refresh-cloudflare-ranges.mjs
 ```
 
 Update the origin firewall to match the refreshed ranges.
-Restart the deployment to apply them:
+Apply the updated trust file to the gateway:
 
 ```sh
-node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
@@ -440,7 +440,7 @@ Use the app domain only for published apps. Serve nothing else on it, including 
    ```
 
 5. Bypass the cache and turn off bot challenges for the app hosts, as for the server's own host.
-6. Stop and start the deployment.
+6. Run `sudo node tools/self-host/bootstrap.mjs start` to apply the updated settings (with `sudo` so the command can read the root-owned certificate and key files).
 
 To check the setup, publish an app from a connected desktop and open its share link in a browser.
 The app opens on a host under your app domain.
@@ -460,7 +460,7 @@ The server's own host still gets its certificate from Caddy's automatic HTTPS.
 Only Cloudflare trusts an Origin CA certificate. Browsers do not.
 Keep the wildcard record proxied.
 Never turn off certificate checks in a client to reach the origin directly.
-To replace the certificate, install the new files at the same paths, then stop and start the deployment.
+To replace the certificate, install the new files at the same paths, then run `sudo node tools/self-host/bootstrap.mjs start` (so the command can read the root-owned certificate and key files).
 
 ## Use your own proxy
 
@@ -532,10 +532,9 @@ Save a private deployment archive first if you need that history.
 The bundle cannot restore or view archived run history.
 
 Set `DOHC_RELAY_AUTOMATIONS=0` in `.env.self-host`.
-Stop and start the deployment to apply the setting:
+Apply the setting without stopping the rest of the deployment:
 
 ```sh
-node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
@@ -585,7 +584,7 @@ APNs delivers alerts for the phone app only when they are signed with an APNs au
    | `DOHC_RELAY_APNS_KEY_ID` | The key's 10-character Key ID, which Apple shows with the key. |
    | `DOHC_RELAY_APNS_TEAM_ID` | The Apple Developer team's 10-character Team ID, which Apple shows under Membership details. |
 
-5. Stop and start the deployment.
+5. Run `node tools/self-host/bootstrap.mjs start` to apply the updated settings.
 
 With any APNs setting set, the setup and recovery commands add the APNs Compose overlay.
 They refuse to run unless all five are set in the formats above and the key file exists.
@@ -597,8 +596,8 @@ The relay refuses to start when the file is not a P-256 private key.
 To check the setup, open **Settings** in the phone app while signed in to this server.
 **Alerts** offers a switch. On a server without APNs, it says the server isn't set up to send alerts.
 
-To turn alerts off, clear all five settings, then stop and start the deployment.
-To replace the key, install the new file at the same path, update `DOHC_RELAY_APNS_KEY_ID`, then stop and start the deployment.
+To turn alerts off, clear all five settings, then run `node tools/self-host/bootstrap.mjs start`.
+To replace the key, install the new file at the same path, update `DOHC_RELAY_APNS_KEY_ID`, then run `node tools/self-host/bootstrap.mjs start`.
 
 ## Replace the Markdown reader
 
@@ -683,7 +682,7 @@ The first key seals new secrets. Every listed key, and `DOHC_RELAY_LINK_KEY`, op
    DOHC_RELAY_SECRET_KEYS=secrets-2026-12:NEW_KEY,secrets-2026-06:OLD_KEY
    ```
 
-3. Stop and start the deployment.
+3. Run `node tools/self-host/bootstrap.mjs start`.
    At startup the relay reseals every secret under the first key and logs a line like this:
 
    ```text
@@ -705,22 +704,29 @@ Raise it to 2 and restart only once every desktop that uses the server is update
 An older desktop then stops syncing and asks its user to update dohc. Its changes stay on that computer.
 Phones and share pages keep working. `GET /ready` reports the setting as `engineApiMin`.
 
-An upgrade needs one stop.
-Stop the deployment first, then save a relay snapshot and a private archive:
+Save an encrypted relay snapshot online while the deployment keeps running:
 
 ```sh
-node tools/self-host/bootstrap.mjs stop
-node scripts/self-host/recovery.mjs backup /srv/dohc-backups/relay-before-upgrade
-node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-upgrade
+sudo install -d -o 1000 -g 1000 -m 0700 /srv/dohc-backups
+node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/relay-before-upgrade
 ```
 
-Both recovery commands leave a stopped deployment stopped.
-If the deployment is running, each of them stops it and starts it again, so the server goes away three times instead of once.
+If you use the bundled Postgres database, also save an online database dump before upgrading:
+
+```sh
+(umask 077 && install -d -m 0700 /srv/dohc-backups && \
+  docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T postgres \
+    sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > /srv/dohc-backups/postgres-before-upgrade.sql.tmp && \
+  mv /srv/dohc-backups/postgres-before-upgrade.sql.tmp /srv/dohc-backups/postgres-before-upgrade.sql)
+```
+
+An online snapshot covers offline file salvage, not an in-place relay `restore`.
+If you want a stopped continuity-matched backup and full volume archive instead, run `bootstrap.mjs stop`, `recovery.mjs backup`, and `recovery.mjs archive` before upgrading.
 
 Update the Compose files and scripts (`git pull` in a repository checkout, or copy the new release bundle).
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
 Do not rerun `init`.
-Pull or load the new image, then select it:
+Pull or load the new image, then upgrade in place (prefix with `sudo` if your gateway TLS files belong to root):
 
 ```sh
 docker pull ghcr.io/dohchq/dohc-self-host:latest
@@ -729,11 +735,16 @@ node tools/self-host/bootstrap.mjs upgrade --image ghcr.io/dohchq/dohc-self-host
 
 If you built the image from source or pinned a specific tag, pass that image name instead.
 
-The upgrade starts the deployment and checks readiness.
-It preserves volumes and secrets and saves the previous configuration privately.
+The upgrade checks that the image is loaded, saves the previous configuration privately, updates `DOHC_IMAGE`, and runs the deployment check without stopping unchanged services.
+If the release changed a gateway Caddyfile, Cloudflare trust file, or app certificate (or on the first upgrade from a release before gateway config hashing), it recreates `gateway` first (a brief interruption on ports 80 and 443).
+Otherwise `gateway` and `postgres` keep running untouched.
+Database migrations run before the application containers recreate; if a release includes a schema change incompatible with the older API, sign-in can fail briefly until `workspace-api` finishes recreating.
+Compose then recreates only the services whose image or settings changed (`workspace-api` and `sync-relay`, then `share-web`).
+The gateway holds and retries incoming requests for up to 30 s while a backend restarts, and internal calls from `share-web` and `workspace-api` retry connection errors across the handover.
+Because `sync-relay` is a single SQLite writer, its restart or SQLite migration has a brief handover of a few seconds (or longer if a release builds an index over a large relay log).
+Live editing connections reconnect once the new relay listens.
 If the configuration has no `DOHC_SHARE_WEB_SESSION_SEAL_KEY`, the upgrade adds one. With it, open share pages go on working when the server restarts.
-It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
-On a large relay log, the first start after an upgrade can take several minutes.
+If the upgrade fails, preserve the data and follow the recovery procedure.
 
 ### Request logs
 

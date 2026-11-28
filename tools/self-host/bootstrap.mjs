@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isDeepStrictEqual, parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
-import { composeArgs, readSettings, validateSettings } from "./config.mjs";
+import { composeArgs, gatewayConfigHash, readSettings, validateSettings } from "./config.mjs";
 
 export function initialSettings({
   origin,
@@ -132,6 +132,14 @@ function main() {
         throw new Error("Use upgrade --image RELEASE_IMAGE.");
       const errors = validateSettings({ ...settings, DOHC_IMAGE: values.image });
       if (errors.length) throw new Error(errors.join("\n"));
+      gatewayConfigHash({ ...settings, DOHC_IMAGE: values.image });
+      const inspected = spawnSync("docker", ["image", "inspect", values.image], {
+        stdio: "ignore",
+      });
+      if (inspected.error || inspected.status !== 0)
+        throw new Error(
+          `Docker has no image ${values.image}. Pull or load the release image before upgrading.`,
+        );
       const original = readFileSync(envFile, "utf8");
       const updated = addSessionSealKey(updateImageSetting(original, values.image));
       const previous = `${envFile}.previous-${Date.now()}`;
@@ -142,11 +150,6 @@ function main() {
       console.log(
         "Upgrade can apply database migrations. This configuration copy is not a data rollback.",
       );
-      const stopped = spawnSync("docker", composeArgs(envFile, settings, "stop"), {
-        stdio: "inherit",
-      });
-      if (stopped.error || stopped.status !== 0)
-        throw new Error("Could not stop the deployment. Its configuration was not changed.");
       writeFileSync(envFile, updated, { mode: 0o600 });
     }
     const result =

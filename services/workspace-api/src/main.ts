@@ -1,3 +1,4 @@
+import { installShutdown, parseGracePeriodMs, withConnectRetry } from "@dohc/service-http";
 import { createServiceAnalyticsClient } from "@dohc/service-http/telemetry";
 import {
   createWorkspaceAuth,
@@ -68,6 +69,7 @@ const accountDeletion = createAccountDeletion({
   secret: config.secret,
   serverOrigin: config.baseURL,
   relayUrl: config.internalRelayUrl,
+  fetch: withConnectRetry(fetch),
   ...(analytics ? { onDeleted: () => analytics.track("drive_account_deleted") } : {}),
 });
 const auth = createWorkspaceAuth({
@@ -90,6 +92,7 @@ const auth = createWorkspaceAuth({
         admitAccount: createSignUpAdmission({
           ...config.signUp,
           key: signUpInviteKey(config.secret),
+          fetch: withConnectRetry(fetch),
         }),
       }
     : {}),
@@ -199,10 +202,18 @@ server.listen(config.port, config.bindHost, () => {
     );
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    server.close(() => {
-      void Promise.allSettled([analytics?.flush(), pool.end()]).finally(() => process.exit(0));
-    });
-  });
-}
+installShutdown(server, {
+  gracePeriodMs: parseGracePeriodMs(
+    process.env.NODE_ENV === "test"
+      ? process.env.DOHC_WORKSPACE_API_TEST_SHUTDOWN_GRACE_PERIOD_MS
+      : undefined,
+    10_000,
+  ),
+  onClosed: async () => {
+    try {
+      await Promise.allSettled([analytics?.flush(), pool.end()]);
+    } finally {
+      process.exit(0);
+    }
+  },
+});

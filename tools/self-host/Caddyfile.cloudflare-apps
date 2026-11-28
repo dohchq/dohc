@@ -8,6 +8,7 @@ import /etc/caddy/Caddyfile.cloudflare
   }
   handle {
     reverse_proxy share-web:1790 {
+      lb_try_duration 30s
       header_up X-Forwarded-For {client_ip}
       header_up X-Forwarded-Host {host}
       header_up X-Forwarded-Proto https

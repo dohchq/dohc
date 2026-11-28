@@ -16,6 +16,7 @@
   @account path /account /account/* /device /api/auth/* /.well-known/dohc-server
   handle @account {
     reverse_proxy workspace-api:1786 {
+      lb_try_duration 30s
       header_up X-Forwarded-For {client_ip}
       header_up X-Forwarded-Host {host}
       header_up X-Forwarded-Proto https
@@ -34,6 +35,7 @@
       max_size 28MiB
     }
     reverse_proxy sync-relay:1788 {
+      lb_try_duration 30s
       header_up X-Forwarded-For {client_ip}
       header_up X-Forwarded-Host {host}
       header_up X-Forwarded-Proto https
@@ -41,6 +43,7 @@
   }
   handle {
     reverse_proxy share-web:1790 {
+      lb_try_duration 30s
       header_up X-Forwarded-For {client_ip}
       header_up X-Forwarded-Host {host}
       header_up X-Forwarded-Proto https

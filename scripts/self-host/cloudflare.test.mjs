@@ -168,7 +168,7 @@ test("gateway reads only the static Cloudflare trust file and CF-Connecting-IP, 
   );
   const proxies = [
     ...caddy.matchAll(
-      /reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+header_up X-Forwarded-Host {host}\s+header_up X-Forwarded-Proto https\s+}/g,
+      /reverse_proxy (\S+) {\s+lb_try_duration 30s\s+header_up X-Forwarded-For {client_ip}\s+header_up X-Forwarded-Host {host}\s+header_up X-Forwarded-Proto https\s+}/g,
     ),
   ].map((match) => match[1]);
   assert.deepEqual(proxies, ["workspace-api:1786", "sync-relay:1788", "share-web:1790"]);
@@ -178,11 +178,25 @@ test("gateway reads only the static Cloudflare trust file and CF-Connecting-IP, 
     caddy
       .replace(/  servers {[^}]+}\n/, "")
       .replace(
-        /reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+header_up X-Forwarded-Host {host}\s+header_up X-Forwarded-Proto https\s+}/g,
-        "reverse_proxy $1",
+        /(\s+lb_try_duration 30s)\n\s+header_up X-Forwarded-For {client_ip}\n\s+header_up X-Forwarded-Host {host}\n\s+header_up X-Forwarded-Proto https/g,
+        "$1",
       ),
     read("tools/self-host/Caddyfile"),
   );
+  for (const file of [
+    "tools/self-host/Caddyfile",
+    "tools/self-host/Caddyfile.private",
+    "tools/self-host/Caddyfile.cloudflare",
+    "tools/self-host/Caddyfile.cloudflare-apps",
+  ]) {
+    const content = read(file);
+    assert.equal(
+      (content.match(/lb_try_duration 30s/g) ?? []).length,
+      (content.match(/reverse_proxy /g) ?? []).length,
+      file,
+    );
+    assert.doesNotMatch(content, /fail_duration/, file);
+  }
 });
 
 test("shipped trust file parses as one static directive with valid IPv4 and IPv6 CIDRs, never all addresses", () => {
@@ -556,7 +570,7 @@ test("the app route imports the Cloudflare gateway first, sends only app hosts t
   assert.ok(caddy.indexOf("handle @internal") < caddy.indexOf("handle {"));
   const proxies = [
     ...caddy.matchAll(
-      /reverse_proxy (\S+) \{\s+header_up X-Forwarded-For \{client_ip\}\s+header_up X-Forwarded-Host \{host\}\s+header_up X-Forwarded-Proto https\s+\}/g,
+      /reverse_proxy (\S+) \{\s+lb_try_duration 30s\s+header_up X-Forwarded-For \{client_ip\}\s+header_up X-Forwarded-Host \{host\}\s+header_up X-Forwarded-Proto https\s+\}/g,
     ),
   ].map((match) => match[1]);
   assert.deepEqual(proxies, ["share-web:1790"]);
