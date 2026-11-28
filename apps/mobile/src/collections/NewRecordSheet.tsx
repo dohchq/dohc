@@ -88,6 +88,7 @@ export function NewRecordSheet(props: {
   const upload = useAttachmentUpload({ store: collections, tableId: table.tableId, onUploaded });
   const locked = saving || failed || upload.uploadingField !== null;
   useEffect(() => {
+    upload.reset();
     if (!open) return;
     setDrafts(initialDrafts(table.createFields, pendingValues));
     setErrors({});
@@ -95,7 +96,6 @@ export function NewRecordSheet(props: {
       setLabels({});
       setFileNames({});
     }
-    upload.reset();
     setPickingId(null);
   }, [open, table.tableId]);
 
@@ -296,7 +296,10 @@ export function NewRecordSheet(props: {
                     }
                     onClearAttachment={
                       field.type === "attachment" && !field.required
-                        ? () => setField(field.fieldId, "")
+                        ? () => {
+                            upload.clearField(field.fieldId);
+                            setField(field.fieldId, "");
+                          }
                         : null
                     }
                     onRetryAttachment={

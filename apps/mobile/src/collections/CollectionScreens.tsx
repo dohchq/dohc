@@ -627,6 +627,7 @@ export function RecordScreen() {
                   field={field}
                   record={shown}
                   files={pending?.fileNames ? { ...files, ...pending.fileNames } : files}
+                  pendingAttachment={pending !== undefined}
                   relationLabels={
                     pending?.relationLabels
                       ? { ...relations[field.fieldId], ...pending.relationLabels }
@@ -725,6 +726,7 @@ function FieldValue(props: {
   field: CollectionField;
   record: CollectionRecord;
   files: Readonly<Record<string, string>>;
+  pendingAttachment?: boolean;
   relationLabels?: Readonly<Record<string, string>>;
 }) {
   const theme = useTheme();
@@ -748,7 +750,16 @@ function FieldValue(props: {
     );
   }
   if (shown.kind === "empty") return <Text style={[styles.value, { color: theme.subtle }]}>—</Text>;
-  if (shown.kind === "attachment")
+  if (shown.kind === "attachment") {
+    if (props.pendingAttachment)
+      return (
+        <View style={styles.attachmentLink}>
+          <Paperclip size={16} color={theme.muted} strokeWidth={2} />
+          <Text style={[styles.value, { color: theme.muted }]} numberOfLines={2}>
+            {shown.name}
+          </Text>
+        </View>
+      );
     return (
       <Pressable
         style={styles.attachmentLink}
@@ -775,6 +786,7 @@ function FieldValue(props: {
         </Text>
       </Pressable>
     );
+  }
   if (shown.kind === "link") {
     const allowed = outsideLink(shown.url, origin);
     if (allowed)

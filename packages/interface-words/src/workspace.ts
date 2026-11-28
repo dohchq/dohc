@@ -83,7 +83,6 @@ export const workspaceWords = {
   edit: "Edit",
   discard: "Discard",
   uploadFile: "Upload file",
-  uploadingFile: "Uploading file…",
   fileUploaded: (name: string) => `Uploaded ${name}`,
   fileUploadFailed: "dohc could not upload this file.",
   fileTooLarge: "Files can be up to 5 MiB. Choose a smaller file.",

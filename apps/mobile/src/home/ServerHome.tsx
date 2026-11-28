@@ -108,6 +108,7 @@ export function ServerHome() {
     failures: 0,
   });
   const uploadAbort = useRef<AbortController | null>(null);
+  const pickingFile = useRef(false);
   const uploadAttempt = useRef<{ path: string; requestId: string; bytesBase64: string } | null>(
     null,
   );
@@ -150,7 +151,12 @@ export function ServerHome() {
     } catch (error) {
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
       const problem = shownProblem(error);
-      if (problem !== null) setUploadFailure((prev) => ({ problem, failures: prev.failures + 1 }));
+      if (problem === "refused") {
+        uploadAttempt.current = null;
+        showToast({ tone: "failure", title: workspaceWords.fileUploadFailed });
+      } else if (problem !== null) {
+        setUploadFailure((prev) => ({ problem, failures: prev.failures + 1 }));
+      }
     } finally {
       if (uploadAbort.current === controller) uploadAbort.current = null;
       setUploadingFile(false);
@@ -163,32 +169,39 @@ export function ServerHome() {
     () => void sendUpload(),
   );
   const startUploadFile = useCallback(async () => {
-    if (!canEditFiles || uploadingFile) return;
-    const picked = await pickDocument(MAX_WORKSPACE_UPLOAD_BYTES);
-    if (!picked.ok) {
-      const title =
-        picked.reason === "too-large"
-          ? workspaceWords.fileTooLarge
-          : picked.reason === "empty"
-            ? workspaceWords.fileEmpty
-            : picked.reason === "unreadable"
-              ? workspaceWords.fileUploadFailed
-              : null;
-      if (title) showToast({ tone: "failure", title });
-      return;
+    if (!data || !canEditFiles || uploadingFile || pickingFile.current) return;
+    pickingFile.current = true;
+    const workspaceId = data.workspaceId;
+    try {
+      const picked = await pickDocument(MAX_WORKSPACE_UPLOAD_BYTES);
+      if (!signIn.isCurrent() || !data.isOpen() || data.workspaceId !== workspaceId) return;
+      if (!picked.ok) {
+        const title =
+          picked.reason === "too-large"
+            ? workspaceWords.fileTooLarge
+            : picked.reason === "empty"
+              ? workspaceWords.fileEmpty
+              : picked.reason === "unreadable"
+                ? workspaceWords.fileUploadFailed
+                : null;
+        if (title) showToast({ tone: "failure", title });
+        return;
+      }
+      const safePath = sanitizeUploadFileName(picked.name);
+      if (!safePath) {
+        showToast({ tone: "failure", title: workspaceWords.filePathNotAllowed });
+        return;
+      }
+      uploadAttempt.current = {
+        path: safePath,
+        requestId: newFileRequestId(),
+        bytesBase64: encodeBase64(picked.bytes),
+      };
+      await sendUpload();
+    } finally {
+      pickingFile.current = false;
     }
-    const safePath = sanitizeUploadFileName(picked.name);
-    if (!safePath) {
-      showToast({ tone: "failure", title: workspaceWords.filePathNotAllowed });
-      return;
-    }
-    uploadAttempt.current = {
-      path: safePath,
-      requestId: newFileRequestId(),
-      bytesBase64: encodeBase64(picked.bytes),
-    };
-    await sendUpload();
-  }, [canEditFiles, sendUpload, showToast, uploadingFile]);
+  }, [canEditFiles, data, sendUpload, showToast, signIn, uploadingFile]);
   const openCreateMenu = () =>
     void choose({
       title: workspaceWords.pages,

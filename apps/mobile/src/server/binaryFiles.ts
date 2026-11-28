@@ -32,12 +32,7 @@ export type FilePreview =
   | { readonly kind: "other"; readonly reason?: "too-large" };
 
 export const isPdfMagic = (b: Uint8Array): boolean =>
-  b.byteLength >= 5 &&
-  b[0] === 0x25 &&
-  b[1] === 0x50 &&
-  b[2] === 0x44 &&
-  b[3] === 0x46 &&
-  b[4] === 0x2d;
+  b.byteLength >= 5 && appBackendFileSignatureMatches("application/pdf", b);
 
 const extensionOf = (name: string): string => {
   const dot = name.lastIndexOf(".");
@@ -95,8 +90,10 @@ export function formatByteSize(bytes: number): string {
 }
 
 export const cacheDirectory = () => new Directory(Paths.cache, BINARY_CACHE_DIR);
+let cacheGeneration = 0;
 
 export function clearBinaryFileCache(): void {
+  cacheGeneration += 1;
   try {
     const dir = cacheDirectory();
     if (dir.exists) dir.delete();
@@ -119,7 +116,11 @@ export function clearBinaryCacheOnSignInChange(
   });
 }
 
-export async function writeCachedBinary(name: string, bytes: Uint8Array) {
+export async function writeCachedBinary(
+  name: string,
+  bytes: Uint8Array,
+): Promise<{ readonly uri: string; readonly file: File } | null> {
+  const gen = cacheGeneration;
   const dir = cacheDirectory();
   dir.create({ idempotent: true, intermediates: true });
   const ext = extensionOf(name);
@@ -128,7 +129,13 @@ export async function writeCachedBinary(name: string, bytes: Uint8Array) {
     `${newFileRequestId()}${/^[a-z0-9]{1,10}$/.test(ext) ? `.${ext}` : ""}`,
   );
   await file.write(bytes);
-  return { uri: file.uri, dirUri: dir.uri, file };
+  if (cacheGeneration !== gen) {
+    try {
+      if (file.exists) file.delete();
+    } catch {}
+    return null;
+  }
+  return { uri: file.uri, file };
 }
 
 export const downloadWorkspaceFile = (
@@ -172,15 +179,17 @@ export type PickedDocument =
   | { readonly ok: false; readonly reason: "canceled" | "too-large" | "empty" | "unreadable" };
 
 export async function pickDocument(maxBytes: number): Promise<PickedDocument> {
-  const result = await DocumentPicker.getDocumentAsync({
-    copyToCacheDirectory: true,
-    multiple: false,
-  });
-  if (result.canceled || !result.assets?.[0]) return { ok: false, reason: "canceled" };
-  const asset = result.assets[0];
-  const temp = new File(asset.uri);
+  let temp: File | null = null;
   try {
-    if (typeof asset.size === "number" && asset.size > maxBytes)
+    const result = await DocumentPicker.getDocumentAsync({
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+    if (result.canceled || !result.assets?.[0]) return { ok: false, reason: "canceled" };
+    const asset = result.assets[0];
+    temp = new File(asset.uri);
+    const knownSize = typeof asset.size === "number" ? asset.size : temp.size;
+    if (typeof knownSize === "number" && knownSize > maxBytes)
       return { ok: false, reason: "too-large" };
     const bytes = await temp.bytes();
     if (bytes.byteLength === 0) return { ok: false, reason: "empty" };
@@ -195,7 +204,7 @@ export async function pickDocument(maxBytes: number): Promise<PickedDocument> {
     return { ok: false, reason: "unreadable" };
   } finally {
     try {
-      if (temp.exists) temp.delete();
+      if (temp?.exists) temp.delete();
     } catch {}
   }
 }

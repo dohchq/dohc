@@ -31,7 +31,7 @@ import { ripple, TOUCH } from "../touch";
 import { ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
 
-type Loaded = { uri: string; dirUri: string; file: File; size: number; preview: FilePreview };
+type Loaded = { uri: string; file: File; size: number; preview: FilePreview };
 type State =
   | { status: "loading" }
   | { status: "ready"; loaded: Loaded }
@@ -76,6 +76,13 @@ export function FileViewerScreen() {
       return;
     }
     const controller = new AbortController();
+    let activeFile: File | null = null;
+    const remove = (file: File | null) => {
+      if (!file) return;
+      try {
+        if (file.exists) file.delete();
+      } catch {}
+    };
     setState({ status: "loading" });
     void (async () => {
       try {
@@ -90,7 +97,11 @@ export function FileViewerScreen() {
         if (controller.signal.aborted || !signIn.isCurrent()) return;
         const preview = classifyFilePreview(title, bytes);
         const cached = await writeCachedBinary(title, bytes);
-        if (controller.signal.aborted || !signIn.isCurrent()) return;
+        if (!cached || controller.signal.aborted || !signIn.isCurrent()) {
+          remove(cached?.file ?? null);
+          return;
+        }
+        activeFile = cached.file;
         setState({ status: "ready", loaded: { ...cached, size: bytes.byteLength, preview } });
       } catch (error) {
         if (controller.signal.aborted || !signIn.isCurrent()) return;
@@ -102,7 +113,11 @@ export function FileViewerScreen() {
         if (cause !== null) setState({ status: "failed", cause });
       }
     })();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      remove(activeFile);
+      activeFile = null;
+    };
   }, [
     workspaceId,
     filePath,
@@ -119,12 +134,22 @@ export function FileViewerScreen() {
   const openExternal = useCallback(
     async (loaded: Loaded) => {
       try {
-        if (Platform.OS === "ios") await Share.share({ url: loaded.uri, title });
-        else
-          await loaded.file.preview({
-            title,
-            mimeType: loaded.preview.kind === "pdf" ? "application/pdf" : undefined,
-          });
+        if (Platform.OS === "ios") {
+          await Share.share({ url: loaded.uri, title });
+        } else {
+          const mimeType =
+            loaded.preview.kind === "pdf"
+              ? "application/pdf"
+              : loaded.preview.kind === "text"
+                ? "text/plain"
+                : undefined;
+          try {
+            await loaded.file.preview({ title, ...(mimeType ? { mimeType } : {}) });
+          } catch {
+            if (mimeType) throw new Error("preview failed");
+            await loaded.file.preview({ title, mimeType: "application/octet-stream" });
+          }
+        }
       } catch {
         showToast({ tone: "failure", title: workspaceWords.fileOpenFailed });
       }
@@ -178,8 +203,9 @@ export function FileViewerScreen() {
       ) : state.loaded.preview.kind === "pdf" && Platform.OS === "ios" ? (
         <WebView
           source={{ uri: state.loaded.uri }}
-          allowingReadAccessToURL={state.loaded.dirUri}
-          originWhitelist={["file://*"]}
+          allowingReadAccessToURL={state.loaded.uri}
+          // Keep every URL inside onShouldStartLoadWithRequest; a narrow originWhitelist triggers Linking.openURL first.
+          originWhitelist={["*"]}
           javaScriptEnabled={false}
           onShouldStartLoadWithRequest={(req) => req.url === state.loaded.uri}
           style={styles.flex}

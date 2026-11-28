@@ -182,7 +182,14 @@ function Editor(props: {
         attachmentName={typeof draft === "string" && draft ? (files[draft] ?? null) : null}
         uploadingAttachment={upload.uploadingField === field.fieldId}
         onPickAttachment={kind === "attachment" ? () => void upload.pick(field.fieldId) : undefined}
-        onClearAttachment={kind === "attachment" ? () => setDraft("") : null}
+        onClearAttachment={
+          kind === "attachment"
+            ? () => {
+                upload.clearField(field.fieldId);
+                setDraft("");
+              }
+            : null
+        }
         onRetryAttachment={upload.retryable ? upload.retry : null}
         onOpenAttachment={
           kind === "attachment" &&

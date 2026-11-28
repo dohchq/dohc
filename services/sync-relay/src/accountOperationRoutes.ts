@@ -76,6 +76,16 @@ export type AccountOperationRoute = {
 };
 
 const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
+
+export function accountOperationMaxBodyBytes(operation: string): number {
+  return operation === "collectionAttachmentUpload"
+    ? APP_BACKEND_UPLOAD_REQUEST_BYTES
+    : operation === "uploadFile"
+      ? UPLOAD_FILE_MAX_BODY_BYTES
+      : operation === "saveSketch"
+        ? SAVE_SKETCH_MAX_BODY_BYTES
+        : ACCOUNT_OPERATION_MAX_BODY_BYTES;
+}
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;
 const SAVE_SKETCH_BODY_RECEIPT_MS = 30_000;
@@ -431,14 +441,7 @@ export function createAccountOperationRoute(options: {
         if (!streamed) releaseBytes();
       }
     }
-    const maxBodyBytes =
-      route.operation === "collectionAttachmentUpload"
-        ? APP_BACKEND_UPLOAD_REQUEST_BYTES
-        : route.operation === "uploadFile"
-          ? UPLOAD_FILE_MAX_BODY_BYTES
-          : route.operation === "saveSketch"
-            ? SAVE_SKETCH_MAX_BODY_BYTES
-            : ACCOUNT_OPERATION_MAX_BODY_BYTES;
+    const maxBodyBytes = accountOperationMaxBodyBytes(route.operation);
     const bodyReceiptMs =
       route.operation === "collectionAttachmentUpload" || route.operation === "uploadFile"
         ? UPLOAD_BODY_RECEIPT_MS

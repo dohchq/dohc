@@ -47,9 +47,18 @@ export function useAttachmentUpload(options: {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [retryable, setRetryable] = useState<PendingAttachment | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => abortRef.current?.abort(), []);
+  const genRef = useRef(0);
+  const pickingRef = useRef(false);
+  useEffect(
+    () => () => {
+      genRef.current += 1;
+      abortRef.current?.abort();
+    },
+    [],
+  );
   const send = useCallback(
-    async (payload: PendingAttachment) => {
+    async (payload: PendingAttachment, gen: number) => {
+      if (genRef.current !== gen) return;
       setUploadingField(payload.fieldId);
       setErrors((cur) => {
         const next = { ...cur };
@@ -72,7 +81,7 @@ export function useAttachmentUpload(options: {
           },
           controller.signal,
         );
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || genRef.current !== gen) return;
         setRetryable(null);
         if (answer.kind === "uploaded") {
           onUploaded(payload.fieldId, answer.file.fileId, answer.file.name);
@@ -86,10 +95,10 @@ export function useAttachmentUpload(options: {
           }));
         }
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || genRef.current !== gen) return;
         const problem = shownProblem(error);
         if (problem !== null) {
-          setRetryable(payload);
+          setRetryable(problem === "refused" ? null : payload);
           setErrors((cur) => ({
             ...cur,
             [payload.fieldId]: `${collectionWords.attachmentUploadFailed} ${problemText(problem)}`,
@@ -97,34 +106,46 @@ export function useAttachmentUpload(options: {
         }
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
-        setUploadingField(null);
+        if (genRef.current === gen) setUploadingField(null);
       }
     },
     [onUploaded, problemText, revision, revisionSha256, store, tableId],
   );
   const pick = useCallback(
     async (fieldId: string) => {
-      if (uploadingField !== null) return;
-      const picked = await pickDocument(MAX_ATTACHMENT_UPLOAD_BYTES);
-      if (!picked.ok) {
-        const msg =
-          picked.reason === "too-large"
-            ? collectionWords.attachmentTooLarge
-            : picked.reason === "empty"
-              ? collectionWords.attachmentEmpty
-              : picked.reason === "unreadable"
-                ? collectionWords.attachmentUploadFailed
-                : null;
-        if (msg) setErrors((cur) => ({ ...cur, [fieldId]: msg }));
-        return;
+      if (uploadingField !== null || pickingRef.current) return;
+      pickingRef.current = true;
+      const gen = genRef.current;
+      try {
+        const picked = await pickDocument(MAX_ATTACHMENT_UPLOAD_BYTES);
+        if (genRef.current !== gen) return;
+        if (!picked.ok) {
+          if (picked.reason !== "canceled") {
+            setRetryable((cur) => (cur?.fieldId === fieldId ? null : cur));
+            const msg =
+              picked.reason === "too-large"
+                ? collectionWords.attachmentTooLarge
+                : picked.reason === "empty"
+                  ? collectionWords.attachmentEmpty
+                  : collectionWords.attachmentUploadFailed;
+            setErrors((cur) => ({ ...cur, [fieldId]: msg }));
+          }
+          return;
+        }
+        setRetryable(null);
+        await send(
+          {
+            fieldId,
+            idempotencyKey: Crypto.randomUUID(),
+            name: picked.name,
+            contentType: picked.mimeType,
+            bytesBase64: encodeBase64(picked.bytes),
+          },
+          gen,
+        );
+      } finally {
+        pickingRef.current = false;
       }
-      await send({
-        fieldId,
-        idempotencyKey: Crypto.randomUUID(),
-        name: picked.name,
-        contentType: picked.mimeType,
-        bytesBase64: encodeBase64(picked.bytes),
-      });
     },
     [send, uploadingField],
   );
@@ -134,9 +155,20 @@ export function useAttachmentUpload(options: {
     retryable,
     pick,
     retry: () => {
-      if (retryable && uploadingField === null) void send(retryable);
+      if (retryable && uploadingField === null && !pickingRef.current)
+        void send(retryable, genRef.current);
+    },
+    clearField: (fieldId: string) => {
+      setRetryable((cur) => (cur?.fieldId === fieldId ? null : cur));
+      setErrors((cur) => {
+        if (!Object.hasOwn(cur, fieldId)) return cur;
+        const next = { ...cur };
+        delete next[fieldId];
+        return next;
+      });
     },
     reset: () => {
+      genRef.current += 1;
       abortRef.current?.abort();
       setUploadingField(null);
       setErrors({});

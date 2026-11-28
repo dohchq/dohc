@@ -8,6 +8,9 @@ import { memoryStore, serveSessionEnd, testServer } from "./testServer";
 const files = new Map<string, Uint8Array>();
 const dirs = new Set<string>();
 const deletedDirs: string[] = [];
+let beforeFileWrite: (() => void) | null = null;
+let mockFileSizeOverride: number | undefined;
+let bytesReadCount = 0;
 
 vi.mock("expo-file-system", () => {
   class MockFile {
@@ -19,10 +22,15 @@ vi.mock("expo-file-system", () => {
     get exists() {
       return files.has(this.uri);
     }
-    write(bytes: Uint8Array) {
+    get size() {
+      return mockFileSizeOverride ?? files.get(this.uri)?.byteLength ?? 0;
+    }
+    async write(bytes: Uint8Array) {
+      beforeFileWrite?.();
       files.set(this.uri, new Uint8Array(bytes));
     }
     async bytes() {
+      bytesReadCount += 1;
       const data = files.get(this.uri);
       if (!data) throw new Error("missing");
       return new Uint8Array(data);
@@ -61,6 +69,7 @@ vi.mock("expo-document-picker", () => ({
   getDocumentAsync: vi.fn(),
 }));
 
+import * as DocumentPicker from "expo-document-picker";
 import {
   BINARY_CACHE_DIR,
   classifyFilePreview,
@@ -71,6 +80,7 @@ import {
   encodeBase64,
   isPdfMagic,
   MAX_TEXT_PREVIEW_BYTES,
+  pickDocument,
   safeUploadContentType,
   sanitizeUploadFileName,
   writeCachedBinary,
@@ -80,6 +90,9 @@ beforeEach(() => {
   files.clear();
   dirs.clear();
   deletedDirs.length = 0;
+  beforeFileWrite = null;
+  mockFileSizeOverride = undefined;
+  bytesReadCount = 0;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -170,10 +183,11 @@ describe("binary preview classification and safety", () => {
 });
 
 describe("binary cache hygiene on Sign out and sign-in changes", () => {
-  it("wipes the scoped cache directory on Sign out and on 401 sign-in end", async () => {
+  it("wipes the scoped cache directory on Sign out and on 401 sign-in end, and discards late writes racing clear", async () => {
     const cached = await writeCachedBinary("receipt.pdf", new Uint8Array([1, 2, 3]));
-    expect(cached.uri).toMatch(new RegExp(`^file:///cache/${BINARY_CACHE_DIR}/.*\\.pdf$`));
-    expect(files.has(cached.uri)).toBe(true);
+    expect(cached).not.toBeNull();
+    expect(cached!.uri).toMatch(new RegExp(`^file:///cache/${BINARY_CACHE_DIR}/.*\\.pdf$`));
+    expect(files.has(cached!.uri)).toBe(true);
 
     const server = testServer();
     serveSessionEnd(server);
@@ -202,7 +216,8 @@ describe("binary cache hygiene on Sign out and sign-in changes", () => {
     }
 
     const second = await writeCachedBinary("diagram.png", new Uint8Array([4, 5, 6]));
-    expect(files.has(second.uri)).toBe(true);
+    expect(second).not.toBeNull();
+    expect(files.has(second!.uri)).toBe(true);
     let state: AccountState = {
       status: "signed-in",
       signIn: {
@@ -232,6 +247,31 @@ describe("binary cache hygiene on Sign out and sign-in changes", () => {
     for (const fn of listeners) fn();
     unsub();
     expect(files.size).toBe(0);
+
+    beforeFileWrite = () => {
+      beforeFileWrite = null;
+      clearBinaryFileCache();
+    };
+    const raced = await writeCachedBinary("secret.pdf", new Uint8Array([9, 9, 9]));
+    expect(raced).toBeNull();
+    expect(files.size).toBe(0);
+  });
+
+  it("catches native document picker rejections and checks local file size before reading bytes", async () => {
+    vi.mocked(DocumentPicker.getDocumentAsync).mockRejectedValueOnce(
+      new Error("File provider failed to copy file"),
+    );
+    await expect(pickDocument(1024)).resolves.toEqual({ ok: false, reason: "unreadable" });
+
+    files.set("file:///cache/picked.bin", new Uint8Array([1, 2, 3]));
+    mockFileSizeOverride = 2048;
+    vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({
+      canceled: false,
+      assets: [{ name: "picked.bin", uri: "file:///cache/picked.bin", lastModified: 1 }],
+    });
+    await expect(pickDocument(1024)).resolves.toEqual({ ok: false, reason: "too-large" });
+    expect(bytesReadCount).toBe(0);
+    expect(files.has("file:///cache/picked.bin")).toBe(false);
   });
 });
 
