@@ -41,8 +41,11 @@ export interface LeftNoteGroup {
 /** The notes a run left as they were, grouped as Notices and the CLI list them. */
 export function leftNoteGroups(result: ConvertNotesResult): LeftNoteGroup[] {
   const groups = new Map<string, LeftNoteGroup["notes"]>();
-  const add = (title: string, note: LeftNoteGroup["notes"][number]) =>
-    groups.set(title, [...(groups.get(title) ?? []), note]);
+  const add = (title: string, note: LeftNoteGroup["notes"][number]) => {
+    const notes = groups.get(title);
+    if (notes) notes.push(note);
+    else groups.set(title, [note]);
+  };
   for (const { path, reason } of result.skipped) {
     const title = Object.hasOwn(SKIPPED_NOTE_GROUPS, reason) ? SKIPPED_NOTE_GROUPS[reason] : null;
     if (title) add(title, { path });
