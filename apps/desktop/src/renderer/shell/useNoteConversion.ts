@@ -91,6 +91,7 @@ export function noteConversionNotice(result: ConvertNotesResult): {
 
 function useNoteConversionOffer(
   workspaceId: string,
+  ready: boolean,
   report: Shell["reportShellFailure"],
   clear: Shell["clearKind"],
 ): NoteConversionOffer {
@@ -103,8 +104,8 @@ function useNoteConversionOffer(
     [],
   );
   const { value, pending, error, retry } = useWorkspaceQuery(useWorkspaceSession(), {
-    key: `${workspaceId}:${account.generation}`,
-    manual: !account.ready,
+    key: `${workspaceId}:${account.generation}:${ready}`,
+    manual: !ready || !account.ready,
     load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
   });
   useEffect(() => {
@@ -124,12 +125,13 @@ function useNoteConversionOffer(
 
 export function useNoteConversion(input: {
   workspaceId: string;
+  ready: boolean;
   report: Shell["reportShellFailure"];
   success: Shell["showSuccessNotice"];
   clear: Shell["clearKind"];
 }): NoteConversion {
-  const { workspaceId, report, success, clear } = input;
-  const offer = useNoteConversionOffer(workspaceId, report, clear);
+  const { workspaceId, ready, report, success, clear } = input;
+  const offer = useNoteConversionOffer(workspaceId, ready, report, clear);
   const requests = useRequestSequence([workspaceId]);
   const [shown, setShown] = useState({ workspaceId, state: IDLE });
   const state = shown.workspaceId === workspaceId ? shown.state : IDLE;

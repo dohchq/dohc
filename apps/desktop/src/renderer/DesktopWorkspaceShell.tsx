@@ -1217,6 +1217,7 @@ function WorkspaceShell(props: {
   });
   const noteConversion = useNoteConversion({
     workspaceId,
+    ready: workspaceIsReady,
     report: reportShellFailure,
     success: showSuccessNotice,
     clear: clearKind,
