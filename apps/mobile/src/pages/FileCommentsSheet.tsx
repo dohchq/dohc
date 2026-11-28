@@ -3,14 +3,24 @@ import { chatWords, noticesWords, relativeTime } from "@dohc/interface-words/not
 import { useRouter } from "expo-router";
 import { ChevronRight, MessageSquare } from "lucide-react-native";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useAccountName } from "../account/useAccountName";
+import { Composer, outboxProblem } from "../conversation/Composer";
 import {
   blockedBy,
-  canStartFileComment,
   createWriteScope,
+  fileCommentSendState,
   fileCommentWrite,
+  type Lanes,
 } from "../conversation/conversationWrites";
 import { MessageRow } from "../conversation/MessageRow";
 import { fileCommentRows } from "../conversation/outboxMessages";
@@ -24,6 +34,8 @@ import { useTheme, workspaceMarkFills } from "../theme";
 import { ripple, TOUCH } from "../touch";
 import { EmptyLine, HoldRow, RetryRow } from "../workspace/ListStates";
 import { useView } from "../workspace/useView";
+
+const COMMENT_LANES: Lanes = { post: false, send: true };
 
 export function FileCommentsSheet(props: {
   readonly open: boolean;
@@ -50,14 +62,16 @@ export function FileCommentsSheet(props: {
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = outboxState ? blockedBy(outboxState, phoneWrites) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
+  const problem = useMemo(
+    () => outboxProblem(outboxState, blocked, () => outbox.wake()),
+    [outboxState, blocked, outbox],
+  );
   const accountName = useAccountName(signIn);
   const you = useMemo(() => localAuthor(accountName, workspaceMarkFills), [accountName]);
-  const [draft, setDraft] = useState("");
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [draftObjectId, setDraftObjectId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open) setSubmitError(null);
+    if (!open) setDraftObjectId(null);
   }, [open, path, workspaceId]);
 
   const threads = useMemo(
@@ -88,14 +102,14 @@ export function FileCommentsSheet(props: {
     prevSaved.current = savedKey;
   }, [open, savedKey, data, path]);
 
-  const canComment =
-    data !== null &&
-    canStartFileComment({
-      enabled: phoneWrites,
-      joined: data.joined,
-      objectId,
-      access: state.value?.access,
-    });
+  const sendState = fileCommentSendState({
+    enabled: data !== null && phoneWrites,
+    joined: data?.joined === true,
+    objectId,
+    readObjectId: state.value ? state.value.fileObjectId : undefined,
+    draftObjectId,
+    access: state.value?.access,
+  });
   const openThread = (threadId: string) => {
     if (!workspaceId) return;
     onClose();
@@ -104,18 +118,23 @@ export function FileCommentsSheet(props: {
       params: { id: threadId, thread: "1", workspace: workspaceId },
     });
   };
-  const submit = async () => {
-    if (!canComment || !workspaceId || !objectId || submitting) return;
-    const write = fileCommentWrite(path, objectId, draft);
-    if (!write) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    const outcome = await writes.submit(workspaceId, write);
-    setSubmitting(false);
-    if (outcome.kind === "kept" || outcome.kind === "withheld") setDraft("");
-    else if (outcome.kind === "not-kept") setSubmitError(chatWords.notKept);
-  };
-  const sendDisabled = draft.trim() === "" || submitting || blocked !== null;
+  const onText = useCallback(
+    (next: string) => {
+      if (next.trim() === "") setDraftObjectId(null);
+      else setDraftObjectId((prev) => prev ?? objectId);
+    },
+    [objectId],
+  );
+  const submit = useCallback(
+    async (_kind: "send" | "post" | "reply", body: string) => {
+      const targetObjectId = draftObjectId ?? objectId;
+      if (!sendState.canSend || !workspaceId || !targetObjectId)
+        return { kind: "blocked" as const };
+      const write = fileCommentWrite(path, targetObjectId, body);
+      return write ? await writes.submit(workspaceId, write) : { kind: "blocked" as const };
+    },
+    [draftObjectId, objectId, sendState.canSend, workspaceId, path, writes],
+  );
 
   return (
     <SheetModal
@@ -124,113 +143,91 @@ export function FileCommentsSheet(props: {
       closeLabel={documentWords.close}
       onClose={onClose}
     >
-      <ScrollView
-        keyboardShouldPersistTaps="handled"
-        automaticallyAdjustKeyboardInsets
-        contentContainerStyle={styles.list}
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        {state.value === null ? (
-          state.problem ? (
-            <RetryRow label={documentWords.commentsFailed} onRetry={retry} />
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.list}>
+          {state.value === null ? (
+            state.problem ? (
+              <RetryRow label={documentWords.commentsFailed} onRetry={retry} />
+            ) : (
+              <HoldRow />
+            )
+          ) : threads.length === 0 && pendingRows.length === 0 ? (
+            <EmptyLine text={documentWords.noComments} />
           ) : (
-            <HoldRow />
-          )
-        ) : threads.length === 0 && pendingRows.length === 0 ? (
-          <EmptyLine text={documentWords.noComments} />
-        ) : (
-          <>
-            {threads.map((thread) => (
-              <Pressable
-                key={thread.id}
-                onPress={() => openThread(thread.id)}
-                android_ripple={ripple(theme)}
-                style={({ pressed }) => [
-                  styles.row,
-                  pressed ? { backgroundColor: theme.panel2 } : null,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={thread.title || documentWords.commentThread}
-              >
-                <MessageSquare size={18} color={theme.ink} strokeWidth={1.9} />
-                <View style={styles.rowText}>
-                  <Text style={[styles.rowTitle, { color: theme.ink }]} numberOfLines={2}>
-                    {thread.title || documentWords.commentThread}
-                  </Text>
-                  <Text style={[styles.meta, { color: theme.subtle }]}>
-                    {relativeTime(thread.updatedAtMs)}
-                  </Text>
-                </View>
-                <ChevronRight size={16} color={theme.subtle} strokeWidth={2} />
-              </Pressable>
-            ))}
-            {pendingRows.map((row) => (
-              <View key={row.mark.operationId}>
-                <MessageRow
-                  message={localMessage(row, you)}
-                  continued={false}
-                  afterExtras={false}
-                  actions={actions}
-                />
-                {row.threadId ? (
-                  <View style={styles.open}>
-                    <ActionPill
-                      label={noticesWords.open}
-                      onPress={() => openThread(row.threadId!)}
-                    />
+            <>
+              {threads.map((thread) => (
+                <Pressable
+                  key={thread.id}
+                  onPress={() => openThread(thread.id)}
+                  android_ripple={ripple(theme)}
+                  style={({ pressed }) => [
+                    styles.row,
+                    pressed ? { backgroundColor: theme.panel2 } : null,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={thread.title || documentWords.commentThread}
+                >
+                  <MessageSquare size={18} color={theme.ink} strokeWidth={1.9} />
+                  <View style={styles.rowText}>
+                    <Text style={[styles.rowTitle, { color: theme.ink }]} numberOfLines={2}>
+                      {thread.title || documentWords.commentThread}
+                    </Text>
+                    <Text style={[styles.meta, { color: theme.subtle }]}>
+                      {relativeTime(thread.updatedAtMs)}
+                    </Text>
                   </View>
-                ) : null}
-              </View>
-            ))}
-          </>
-        )}
-      </ScrollView>
-      {canComment ? (
-        <View style={[styles.composer, { borderColor: theme.line, backgroundColor: theme.bg }]}>
-          {submitError ? (
-            <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert">
-              {submitError}
-            </Text>
-          ) : null}
-          <View style={styles.composerRow}>
-            <TextInput
-              value={draft}
-              onChangeText={(next) => {
-                setDraft(next);
-                setSubmitError(null);
-              }}
+                  <ChevronRight size={16} color={theme.subtle} strokeWidth={2} />
+                </Pressable>
+              ))}
+              {pendingRows.map((row) => (
+                <View key={row.mark.operationId}>
+                  <MessageRow
+                    message={localMessage(row, you)}
+                    continued={false}
+                    afterExtras={false}
+                    actions={actions}
+                  />
+                  {row.threadId ? (
+                    <View style={styles.open}>
+                      <ActionPill
+                        label={noticesWords.open}
+                        onPress={() => openThread(row.threadId!)}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              ))}
+            </>
+          )}
+        </ScrollView>
+        {sendState.canShow ? (
+          <View style={[styles.composer, { borderColor: theme.line, backgroundColor: theme.bg }]}>
+            <Composer
+              key={`${workspaceId ?? ""}:${path}`}
               placeholder={documentWords.commentPlaceholder}
-              placeholderTextColor={theme.subtle}
-              editable={!submitting && blocked === null}
-              multiline
-              accessibilityLabel={documentWords.commentPlaceholder}
-              style={[
-                styles.input,
-                { color: theme.ink, backgroundColor: theme.panel, borderColor: theme.line },
-              ]}
+              lanes={COMMENT_LANES}
+              blocked={blocked ?? (!sendState.canSend && !sendState.replaced ? "loading" : null)}
+              problem={problem}
+              closed={
+                sendState.replaced ? chatWords.refused("This file changed or was replaced") : null
+              }
+              docked={false}
+              onText={onText}
+              onCleared={() => setDraftObjectId(null)}
+              onSubmit={submit}
             />
-            <Pressable
-              disabled={sendDisabled}
-              onPress={() => void submit()}
-              android_ripple={ripple(theme, true)}
-              style={[
-                styles.sendBtn,
-                { backgroundColor: sendDisabled ? theme.panel2 : theme.accent },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel={documentWords.commentAction}
-            >
-              <Text style={[styles.sendText, { color: sendDisabled ? theme.subtle : theme.bg }]}>
-                {documentWords.commentAction}
-              </Text>
-            </Pressable>
           </View>
-        </View>
-      ) : null}
+        ) : null}
+      </KeyboardAvoidingView>
     </SheetModal>
   );
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
   list: { paddingVertical: 8, paddingBottom: 32 },
   row: {
     flexDirection: "row",
@@ -244,25 +241,5 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 17, lineHeight: 22 },
   meta: { fontSize: 13, lineHeight: 18 },
   open: { flexDirection: "row", paddingLeft: 62, paddingTop: 6 },
-  composer: { borderTopWidth: StyleSheet.hairlineWidth, padding: 12, gap: 6 },
-  composerRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
-  input: {
-    flex: 1,
-    fontSize: 17,
-    minHeight: TOUCH,
-    maxHeight: 120,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  sendBtn: {
-    minHeight: TOUCH,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  sendText: { fontSize: 15, fontWeight: "600" },
-  error: { fontSize: 14, lineHeight: 20 },
+  composer: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, paddingVertical: 8 },
 });

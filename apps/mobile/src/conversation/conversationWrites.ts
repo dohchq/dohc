@@ -440,15 +440,25 @@ export function createConversationWrites(options: {
   };
 }
 
-export function canStartFileComment(input: {
+export function fileCommentSendState(input: {
   readonly enabled: boolean;
   readonly joined: boolean;
   readonly objectId: string | null;
+  readonly readObjectId: string | null | undefined;
+  readonly draftObjectId: string | null;
   readonly access?: "read-write" | "read-only";
-}): boolean {
-  return (
-    input.enabled && input.objectId !== null && (!input.joined || input.access === "read-write")
-  );
+}): { readonly canShow: boolean; readonly canSend: boolean; readonly replaced: boolean } {
+  const canShow =
+    input.enabled && input.objectId !== null && (!input.joined || input.access === "read-write");
+  const replaced =
+    input.draftObjectId !== null &&
+    (input.objectId !== input.draftObjectId ||
+      (input.readObjectId !== undefined && input.readObjectId !== input.draftObjectId));
+  const matches =
+    input.objectId !== null &&
+    input.readObjectId === input.objectId &&
+    (input.draftObjectId === null || input.draftObjectId === input.objectId);
+  return { canShow, canSend: canShow && matches && !replaced, replaced };
 }
 
 export function fileCommentWrite(

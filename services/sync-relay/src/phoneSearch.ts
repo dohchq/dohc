@@ -1,5 +1,8 @@
-import { asRecord } from "@dohc/workspace-core";
+import { posix } from "node:path";
+import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { WorkspaceSearchResult } from "@dohc/workspace-contracts/retrieval";
+import { asRecord } from "@dohc/workspace-core";
 import { DaemonRefusalError, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import { currentAccountFeedCursor } from "./accountFeed";
@@ -14,13 +17,16 @@ import { workspaceFileReach } from "./workspaceReach";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
-const MAX_PREFIXES = 32;
+const MAX_PREFIXES = 512;
+const PREFIX_BUDGET_MS = 8_000;
+const MD_LINK_RE = /!?\[[^\]]*\]\(\s*(?:<([^>\r\n]+)>|([^)\s\r\n]+))(?:\s+[^)\r\n]*)?\)/gu;
+const WIKI_LINK_RE = /!?\[\[([^\]\r\n]+)\]\]/gu;
+const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/u;
 
 export interface PhoneSearchHit {
   readonly path: string;
   readonly title: string;
   readonly snippet: string;
-  readonly objectId?: string;
 }
 
 export interface PhoneSearchResult {
@@ -53,21 +59,79 @@ const isInvalidQuery = (e: unknown) =>
 const hasFolderRules = (m: PhoneMember) =>
   m.selector.reach.folderLevel("") === null || m.selector.reach.evaluated.rules.length > 0;
 
-function visiblePrefixes(paths: readonly string[], member: PhoneMember, query: string): string[] {
-  const ruled = member.selector.reach.evaluated.rules
-    .map(([f]) => pathCollisionKey(f))
-    .filter(Boolean);
+const isMarkdownPage = (path: string) => liveDocumentKindForPath(path) === "richdoc";
+const pageShown = (member: PhoneMember | null, path: string) =>
+  isMarkdownPage(path) && pathShown(member, path);
+
+function stemOf(path: string): string {
+  const base = posix.basename(path).toLowerCase();
+  return base.replace(/\.(md|markdown)$/iu, "");
+}
+
+function normalizeLinkTarget(raw: string): string {
+  const clean = raw.split(/[?#]/u, 1)[0]?.trim() ?? "";
+  try {
+    return decodeURIComponent(clean);
+  } catch {
+    return clean;
+  }
+}
+
+function linkAllowed(
+  member: PhoneMember,
+  fromPath: string,
+  rawTarget: string,
+  wiki: boolean,
+  hiddenStems: ReadonlySet<string>,
+  visibleStems: ReadonlySet<string>,
+): boolean {
+  const target = normalizeLinkTarget(rawTarget);
+  if (!target || URL_SCHEME_RE.test(target)) return true;
+  const dir = posix.dirname(fromPath);
+  const candidates: string[] = [];
+  if (target.startsWith("/")) {
+    candidates.push(posix.normalize(target.replace(/^\/+/u, "")));
+  } else if (!wiki || target.startsWith(".")) {
+    candidates.push(posix.normalize(dir === "." ? target : posix.join(dir, target)));
+  } else if (target.includes("/")) {
+    candidates.push(posix.normalize(target));
+    if (dir !== ".") candidates.push(posix.normalize(posix.join(dir, target)));
+  } else {
+    const key = stemOf(target);
+    if (hiddenStems.has(key) && !visibleStems.has(key)) return false;
+    candidates.push(posix.normalize(target));
+  }
+  const allowedPath = (p: string) => {
+    if (!p || p === "." || p.startsWith("..") || !pathShown(member, p)) return false;
+    if (member.selector.reach.folderLevel(p) === null) return false;
+    return p.includes(".") || pathShown(member, `${p}.md`);
+  };
+  return candidates.every(allowedPath);
+}
+
+function visiblePrefixes(
+  allPaths: readonly string[],
+  visiblePages: readonly string[],
+  member: PhoneMember | null,
+  query: string,
+): string[] {
+  const ruled = member
+    ? member.selector.reach.evaluated.rules.map(([f]) => pathCollisionKey(f)).filter(Boolean)
+    : [];
+  const nonMdDirs = allPaths.filter((p) => !isMarkdownPage(p)).map((p) => pathCollisionKey(p));
   const folders = new Set<string>();
   const files = new Set<string>();
-  for (const path of paths) {
+  for (const path of visiblePages) {
     const parts = path.split("/");
     let clean: string | null = null;
     for (let i = 1; i < parts.length; i += 1) {
       const dir = parts.slice(0, i).join("/");
       const folded = pathCollisionKey(dir);
+      const prefix = `${folded}/`;
       if (
-        member.selector.reach.folderLevel(dir) !== null &&
-        !ruled.some((r) => r.startsWith(`${folded}/`))
+        (member === null || member.selector.reach.folderLevel(dir) !== null) &&
+        !ruled.some((r) => r.startsWith(prefix)) &&
+        !nonMdDirs.some((p) => p.startsWith(prefix))
       ) {
         clean = dir;
         break;
@@ -110,11 +174,35 @@ export async function searchWorkspacePages(
     limit: number;
     member: PhoneMember | null;
     signal: AbortSignal;
+    nowMs?: () => number;
   },
 ): Promise<PhoneSearchResult> {
   const { workspaceId, query, limit, member, signal } = input;
+  const nowMs = input.nowMs ?? Date.now;
+  const startedMs = nowMs();
   const reach = member ? workspaceFileReach(member.selector) : null;
-  const redact = (text: string) => (reach ? withheldLinkText(text, reach) : text);
+  const queryTokens = query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length >= 2);
+  let hiddenStems = new Set<string>();
+  let visibleStems = new Set<string>();
+  const redact = (text: string, fromPath: string) => {
+    if (!member || !reach) return text;
+    let out = withheldLinkText(text, reach);
+    out = out.replace(MD_LINK_RE, (full, angled?: string, bare?: string) =>
+      linkAllowed(member, fromPath, angled ?? bare ?? "", false, hiddenStems, visibleStems)
+        ? full
+        : CHAT_FILE_LINK_WITHHELD,
+    );
+    out = out.replace(WIKI_LINK_RE, (full, inner: string) => {
+      const target = inner.split("|", 1)[0] ?? "";
+      return linkAllowed(member, fromPath, target, true, hiddenStems, visibleStems)
+        ? full
+        : CHAT_FILE_LINK_WITHHELD;
+    });
+    return out;
+  };
   const run = async (pathPrefix?: string): Promise<WorkspaceSearchResult | null> => {
     signal.throwIfAborted();
     try {
@@ -135,29 +223,44 @@ export async function searchWorkspacePages(
     anyTruncated = false,
     allComplete = true,
     prefixCapped = false,
-    dropped = false;
+    dropped = false,
+    droppedNonMd = false;
   const collect = (raw: WorkspaceSearchResult | null) => {
     if (!raw) return;
     indexBuilding ||= raw.indexBuilding;
     anyTruncated ||= raw.truncated;
     allComplete &&= raw.complete;
     for (const [rank, hit] of raw.results.entries()) {
-      if (
-        hit.kind !== "page" ||
-        typeof hit.path !== "string" ||
-        hit.path === "" ||
-        !pathShown(member, hit.path)
-      ) {
+      if (hit.kind !== "page" || typeof hit.path !== "string" || hit.path === "") {
         dropped = true;
         continue;
       }
+      if (!isMarkdownPage(hit.path)) {
+        dropped = true;
+        droppedNonMd = true;
+        continue;
+      }
+      if (!pathShown(member, hit.path)) {
+        dropped = true;
+        continue;
+      }
+      const title = redact(hit.title, hit.path);
+      const snippet = redact(hit.snippet, hit.path);
+      if (
+        member !== null &&
+        (title !== hit.title || snippet !== hit.snippet) &&
+        queryTokens.length > 0
+      ) {
+        const visibleText = `${hit.path}\n${title}\n${snippet}`
+          .replaceAll(CHAT_FILE_LINK_WITHHELD, " ")
+          .toLowerCase();
+        if (!queryTokens.some((token) => visibleText.includes(token))) {
+          dropped = true;
+          continue;
+        }
+      }
       const next = {
-        hit: {
-          path: hit.path,
-          title: redact(hit.title),
-          snippet: redact(hit.snippet),
-          ...(typeof hit.objectId === "string" && hit.objectId ? { objectId: hit.objectId } : {}),
-        },
+        hit: { path: hit.path, title, snippet },
         terms: hit.matchedTerms.length,
         rank,
       };
@@ -166,23 +269,53 @@ export async function searchWorkspacePages(
         byPath.set(hit.path, next);
     }
   };
+  const runScoped = async (allPaths: readonly string[], visible: readonly string[]) => {
+    const prefixes = visiblePrefixes(allPaths, visible, member, query);
+    let ran = 0;
+    for (const prefix of prefixes) {
+      if (ran >= MAX_PREFIXES || nowMs() - startedMs >= PREFIX_BUDGET_MS) {
+        prefixCapped = true;
+        break;
+      }
+      collect(await run(prefix));
+      ran += 1;
+    }
+  };
   const restricted = member !== null && hasFolderRules(member);
+  let scoped = restricted;
   if (restricted) {
     const version = await files.getActiveVersion({ workspaceId });
-    const visible = version
-      ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id }))
-          .map((f) => f.path)
-          .filter((p) => pathShown(member, p))
+    const allPaths = version
+      ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id })).map(
+          (f) => f.path,
+        )
       : [];
+    const visible = allPaths.filter((p) => pageShown(member, p));
+    hiddenStems = new Set(allPaths.filter((p) => !pathShown(member, p)).map(stemOf));
+    visibleStems = new Set(visible.map(stemOf));
     if (visible.length === 0)
       return { ok: true, results: [], indexBuilding: false, truncated: false, complete: true };
-    const prefixes = visiblePrefixes(visible, member, query);
-    prefixCapped = prefixes.length > MAX_PREFIXES;
-    for (const prefix of prefixes.slice(0, MAX_PREFIXES)) collect(await run(prefix));
+    await runScoped(allPaths, visible);
   } else {
-    collect(await run());
+    const raw = await run();
+    collect(raw);
+    if (raw?.truncated && droppedNonMd && byPath.size < limit) {
+      const version = await files.getActiveVersion({ workspaceId });
+      const allPaths = version
+        ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id })).map(
+            (f) => f.path,
+          )
+        : [];
+      const visible = allPaths.filter((p) => pageShown(member, p));
+      if (visible.length > 0) {
+        scoped = true;
+        anyTruncated = false;
+        allComplete = true;
+        await runScoped(allPaths, visible);
+      }
+    }
   }
-  const ordered = restricted
+  const ordered = scoped
     ? [...byPath.values()].sort(
         (a, b) => b.terms - a.terms || a.rank - b.rank || a.hit.path.localeCompare(b.hit.path),
       )

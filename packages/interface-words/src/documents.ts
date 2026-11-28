@@ -117,7 +117,6 @@ export const documentWords = {
   noComments: "No comments yet.",
   commentsFailed: "dohc could not read comments for this file.",
   commentPlaceholder: "Add a comment",
-  commentAction: "Comment",
   commentThread: "Comment",
   close: "Close",
   toolbar: {

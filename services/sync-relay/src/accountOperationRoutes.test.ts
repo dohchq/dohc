@@ -5359,6 +5359,38 @@ describe("a Member's phone reads in a workspace they joined", () => {
       body: "Follow up on (a file not shared here)",
     });
 
+    // Renaming the file preserves objectId and idempotent retries of saved Member replies.
+    writeFileMoment("object-plan", "docs/lisbon.md", {
+      operation: "rename",
+      payloadBeforePath: "docs/plan.md",
+      beforePath: "docs/plan.md",
+      payloadAfterPath: "docs/lisbon.md",
+    });
+    expect(
+      await answer(
+        await h(
+          op(
+            "trip",
+            "reply",
+            {
+              operationId: "op-file-reply-1",
+              threadId: commentThreadId,
+              parentMessageId: commentMessageId,
+              body: "Follow up on @[private/budget.md]",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toEqual(replied);
+    expect(memberRows()).toHaveLength(3);
+    writeFileMoment("object-plan", "docs/plan.md", {
+      operation: "rename",
+      payloadBeforePath: "docs/lisbon.md",
+      beforePath: "docs/lisbon.md",
+      payloadAfterPath: "docs/plan.md",
+    });
+
     // Hidden/out-of-reach file returns 404.
     expect(
       (
@@ -5650,7 +5682,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
           path: "docs/plan.md",
           title: "Plan (a file not shared here)",
           snippet: "Visible quartz (a file not shared here)",
-          objectId: "object-plan",
         },
       ],
       indexBuilding: false,

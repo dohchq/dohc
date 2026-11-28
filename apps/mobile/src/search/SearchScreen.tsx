@@ -20,7 +20,7 @@ import { requestGenerations, shownProblem } from "../server/client";
 import {
   deriveSearchUiState,
   searchWorkspace,
-  type SearchAnswer,
+  type MatchedSearchAnswer,
   type SearchHit,
 } from "../server/search";
 import { views } from "../server/workspaceData";
@@ -36,7 +36,7 @@ export function SearchScreen() {
   const workspaceId = data?.workspaceId ?? null;
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
-  const [answer, setAnswer] = useState<SearchAnswer | null>(null);
+  const [matched, setMatched] = useState<MatchedSearchAnswer | null>(null);
   const [problem, setProblem] = useState<ServerProblemKind | null>(null);
   const [generations] = useState(requestGenerations);
   const abortRef = useRef<AbortController | null>(null);
@@ -49,7 +49,7 @@ export function SearchScreen() {
       if (!trimmed || !data || !workspaceId) {
         generations.next();
         setLoading(false);
-        setAnswer(null);
+        setMatched(null);
         setProblem(null);
         return;
       }
@@ -66,7 +66,7 @@ export function SearchScreen() {
       void searchWorkspace(signIn.client, workspaceId, trimmed, controller.signal).then(
         (found) => {
           if (stale()) return;
-          setAnswer(found);
+          setMatched({ workspaceId, query: trimmed, answer: found });
           setLoading(false);
           setProblem(null);
         },
@@ -82,7 +82,7 @@ export function SearchScreen() {
   );
 
   useEffect(() => {
-    setAnswer(null);
+    setMatched(null);
     setProblem(null);
     setLoading(false);
     abortRef.current?.abort();
@@ -95,7 +95,7 @@ export function SearchScreen() {
   }, [query, runSearch]);
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const ui = deriveSearchUiState({ query, loading, answer, problem });
+  const ui = deriveSearchUiState({ workspaceId, query, loading, matched, problem });
   const renderHits = (hits: readonly SearchHit[]) =>
     hits.map((hit) => {
       const folder = hit.path.includes("/") ? hit.path.slice(0, hit.path.lastIndexOf("/")) : "";
@@ -176,6 +176,9 @@ export function SearchScreen() {
             ) : null}
             {ui.kind === "error" ? (
               <RetryRow label={workspaceWords.searchFailed} onRetry={() => runSearch(query)} />
+            ) : null}
+            {ui.kind === "incomplete" ? (
+              <RetryRow label={workspaceWords.searchIncomplete} onRetry={() => runSearch(query)} />
             ) : null}
             {ui.kind === "indexing" ? (
               <>

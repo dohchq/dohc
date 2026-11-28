@@ -86,6 +86,7 @@ export const workspaceWords = {
   searchPlaceholder: "Search pages",
   clearSearch: "Clear search",
   searchIndexing: "Indexing pages… Some results are not ready yet.",
+  searchIncomplete: "Search could not finish all pages.",
   noSearchResults: (query: string) => `No pages match "${query}".`,
   searchFailed: "dohc could not search this workspace.",
 } as const;

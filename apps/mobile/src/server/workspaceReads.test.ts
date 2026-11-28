@@ -600,7 +600,7 @@ describe("a joined workspace's cursor", () => {
       value: {
         fileObjectId: "obj-plan",
         access: "read-write",
-        threads: [{ id: "thread-1", title: "Plan", createdAtMs: 10, updatedAtMs: 20 }],
+        threads: [{ id: "thread-1", title: "Plan", updatedAtMs: 20 }],
       },
       cursor: "0.1.1",
     });

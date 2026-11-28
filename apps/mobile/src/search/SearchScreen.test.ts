@@ -11,7 +11,7 @@ describe("searchWorkspace client and parser", () => {
         result: {
           ok: true,
           results: [
-            { path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama", objectId: "obj-1" },
+            { path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama" },
             { path: "README.md", title: "", snippet: "" },
           ],
           indexBuilding: false,
@@ -22,7 +22,7 @@ describe("searchWorkspace client and parser", () => {
       }),
     ).toEqual({
       results: [
-        { path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama", objectId: "obj-1" },
+        { path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama" },
         { path: "README.md", title: "", snippet: "" },
       ],
       indexBuilding: false,
@@ -45,7 +45,13 @@ describe("searchWorkspace client and parser", () => {
       },
       {
         ok: true,
-        result: { ok: true, results: [], indexBuilding: "yes", truncated: false, complete: true },
+        result: {
+          ok: true,
+          results: [],
+          indexBuilding: "yes",
+          truncated: false,
+          complete: true,
+        },
       },
     ]) {
       expect(readSearchAnswer(bad)).toBeNull();
@@ -88,38 +94,111 @@ describe("searchWorkspace client and parser", () => {
 
 describe("deriveSearchUiState", () => {
   const hit = { path: "docs/plan.md", title: "Plan", snippet: "Alfama" };
+  const matched = (
+    query: string,
+    answer: {
+      results: readonly (typeof hit)[];
+      indexBuilding: boolean;
+      truncated: boolean;
+      complete: boolean;
+    },
+    workspaceId = "ws-1",
+  ) => ({ workspaceId, query, answer });
 
-  it("derives idle, loading, error, indexing, empty, and results states", () => {
+  it("derives idle, loading, error, indexing, incomplete, empty, and results states and ignores stale answers", () => {
     expect(
-      deriveSearchUiState({ query: "   ", loading: true, answer: null, problem: null }),
+      deriveSearchUiState({
+        workspaceId: "ws-1",
+        query: "   ",
+        loading: true,
+        matched: null,
+        problem: null,
+      }),
     ).toEqual({ kind: "idle" });
     expect(
-      deriveSearchUiState({ query: "plan", loading: true, answer: null, problem: null }),
+      deriveSearchUiState({
+        workspaceId: "ws-1",
+        query: "plan",
+        loading: true,
+        matched: null,
+        problem: null,
+      }),
     ).toEqual({ kind: "loading" });
+
+    // A failed query shows retry instead of an earlier query's or workspace's results.
+    const quartz = matched("Quartz", {
+      results: [hit],
+      indexBuilding: false,
+      truncated: false,
+      complete: true,
+    });
     expect(
-      deriveSearchUiState({ query: "plan", loading: false, answer: null, problem: "offline" }),
+      deriveSearchUiState({
+        workspaceId: "ws-1",
+        query: "Lisbon",
+        loading: false,
+        matched: quartz,
+        problem: "offline",
+      }),
     ).toEqual({ kind: "error", problem: "offline" });
     expect(
       deriveSearchUiState({
+        workspaceId: "ws-2",
+        query: "Quartz",
+        loading: true,
+        matched: quartz,
+        problem: null,
+      }),
+    ).toEqual({ kind: "loading" });
+
+    expect(
+      deriveSearchUiState({
+        workspaceId: "ws-1",
         query: "plan",
         loading: false,
-        answer: { results: [hit], indexBuilding: true, truncated: false, complete: false },
+        matched: matched("plan", {
+          results: [hit],
+          indexBuilding: true,
+          truncated: false,
+          complete: false,
+        }),
         problem: null,
       }),
     ).toEqual({ kind: "indexing", results: [hit] });
     expect(
       deriveSearchUiState({
+        workspaceId: "ws-1",
+        query: "plan",
+        loading: false,
+        matched: matched("plan", {
+          results: [],
+          indexBuilding: false,
+          truncated: true,
+          complete: false,
+        }),
+        problem: null,
+      }),
+    ).toEqual({ kind: "incomplete" });
+    expect(
+      deriveSearchUiState({
+        workspaceId: "ws-1",
         query: "  plan ",
         loading: false,
-        answer: { results: [], indexBuilding: false, truncated: false, complete: true },
+        matched: matched("plan", {
+          results: [],
+          indexBuilding: false,
+          truncated: false,
+          complete: true,
+        }),
         problem: null,
       }),
     ).toEqual({ kind: "empty", query: "plan" });
     expect(
       deriveSearchUiState({
-        query: "plan",
+        workspaceId: "ws-1",
+        query: "Quartz",
         loading: false,
-        answer: { results: [hit], indexBuilding: false, truncated: false, complete: true },
+        matched: quartz,
         problem: null,
       }),
     ).toEqual({ kind: "results", results: [hit] });

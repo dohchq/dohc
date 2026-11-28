@@ -492,7 +492,7 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
         JSON.stringify([
           replying ? "reply" : file ? "comment" : "post",
           channelWireId ?? "",
-          ...(file ? [file.objectId, file.filePath] : []),
+          ...(file ? (replying ? [file.objectId] : [file.objectId, file.filePath]) : []),
           requestedThreadId ?? "",
           parentMessageId ?? null,
           rawTitle,

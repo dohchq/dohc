@@ -126,11 +126,12 @@ describe("parsePhoneSearchArgs", () => {
 });
 
 describe("searchWorkspacePages", () => {
-  it("queries pages only with includeNeighbors:false and strips related/neighbor metadata for owners", async () => {
-    const files = mockFiles(["docs/plan.md", ".env"], () =>
+  it("queries pages only with includeNeighbors:false, excludes non-Markdown drawings, and strips related metadata", async () => {
+    const files = mockFiles(["docs/plan.md", "docs/sketch.excalidraw", ".env"], () =>
       searchResult({
         results: [
           hit({ path: ".env", title: "Secrets", snippet: "TOKEN=1" }),
+          hit({ path: "docs/sketch.excalidraw", title: "Sketch", snippet: "alfama" }),
           hit({
             path: "docs/plan.md",
             title: "Plan",
@@ -161,15 +162,13 @@ describe("searchWorkspacePages", () => {
     ]);
     expect(result).toEqual({
       ok: true,
-      results: [
-        { path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama", objectId: "obj-1" },
-      ],
+      results: [{ path: "docs/plan.md", title: "Plan", snippet: "Stay in Alfama" }],
       indexBuilding: false,
       truncated: false,
       complete: true,
     });
     expect(result.results[0]).not.toHaveProperty("related");
-    expect(result).not.toHaveProperty("neighbors");
+    expect(result.results[0]).not.toHaveProperty("objectId");
   });
 
   it("prevents 50 hidden-file or private chat hits from leaking or crowding out a visible page for a joined Member", async () => {
@@ -203,7 +202,8 @@ describe("searchWorkspacePages", () => {
         id: "visible-doc",
         path: "docs/plan.md",
         title: "Trip @[private/secret-00.md]",
-        snippet: "See @[docs/plan.md] and @[private/secret-01.md] for quartz",
+        snippet:
+          "See @[docs/plan.md], [Budget](../private/secret-00.md), [[private/secret-01|Secret]], and https://example.com for quartz",
         objectId: "obj-plan",
         matchedTerms: ["quartz"],
       }),
@@ -244,8 +244,8 @@ describe("searchWorkspacePages", () => {
         {
           path: "docs/plan.md",
           title: "Trip (a file not shared here)",
-          snippet: "See @[docs/plan.md] and (a file not shared here) for quartz",
-          objectId: "obj-plan",
+          snippet:
+            "See @[docs/plan.md], (a file not shared here), (a file not shared here), and https://example.com for quartz",
         },
       ],
       indexBuilding: false,
@@ -257,6 +257,134 @@ describe("searchWorkspacePages", () => {
     expect(serialized).not.toContain("CONFIDENTIAL");
     expect(serialized).not.toContain("Private DM");
     expect(serialized).not.toContain("Secret thread");
+  });
+
+  it("drops hits whose only match was inside a redacted Markdown link or wikilink, while keeping visible links", async () => {
+    const member = await memberFixture([
+      { folder: "private", yaml: "people:\n  cara@dohc.test: edit\n" },
+    ]);
+    const files = mockFiles(["private/budget.md", "docs/plan.md", "docs/notes.md"], (input) =>
+      searchResult({
+        results:
+          input.pathPrefix === "docs"
+            ? [
+                hit({
+                  id: "oracle",
+                  path: "docs/plan.md",
+                  title: "Plan",
+                  snippet: "See [Budget](../private/budget.md) and [[budget]]",
+                  matchedTerms: ["budget"],
+                }),
+                hit({
+                  id: "real",
+                  path: "docs/notes.md",
+                  title: "Notes",
+                  snippet: "Visible [Plan](./plan.md) mentions budget",
+                  matchedTerms: ["budget"],
+                }),
+              ]
+            : [],
+      }),
+    );
+    const result = await searchWorkspacePages(files, {
+      workspaceId: "trip",
+      query: "budget",
+      limit: 20,
+      member,
+      signal: new AbortController().signal,
+    });
+    expect(result.results).toEqual([
+      {
+        path: "docs/notes.md",
+        title: "Notes",
+        snippet: "Visible [Plan](./plan.md) mentions budget",
+      },
+    ]);
+  });
+
+  it("searches beyond 32 root pages when a folder rule exists and marks incomplete when time budget expires", async () => {
+    const member = await memberFixture([
+      { folder: "private", yaml: "people:\n  cara@dohc.test: edit\n" },
+    ]);
+    const rootPages = Array.from({ length: 35 }, (_, i) => `page-${String(i).padStart(2, "0")}.md`);
+    const files = mockFiles(["private/secret.md", ...rootPages], (input) =>
+      searchResult({
+        results:
+          input.pathPrefix === "page-34.md"
+            ? [hit({ path: "page-34.md", title: "Last", snippet: "Unique quartz match" })]
+            : [],
+      }),
+    );
+    const found = await searchWorkspacePages(files, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member,
+      signal: new AbortController().signal,
+    });
+    expect(found).toEqual({
+      ok: true,
+      results: [{ path: "page-34.md", title: "Last", snippet: "Unique quartz match" }],
+      indexBuilding: false,
+      truncated: false,
+      complete: true,
+    });
+
+    let clock = 0;
+    const timedOut = await searchWorkspacePages(files, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member,
+      signal: new AbortController().signal,
+      nowMs: () => {
+        const current = clock;
+        clock += 5_000;
+        return current;
+      },
+    });
+    expect(timedOut).toEqual({
+      ok: true,
+      results: [],
+      indexBuilding: false,
+      truncated: true,
+      complete: false,
+    });
+  });
+
+  it("recovers Markdown pages when 50 Excalidraw drawings crowd out an unscoped Owner search", async () => {
+    const drawings = Array.from({ length: 50 }, (_, i) => `drawings/d-${i}.excalidraw`);
+    const files = mockFiles([...drawings, "docs/plan.md"], (input) => {
+      if (!input.pathPrefix) {
+        return searchResult({
+          results: drawings.map((p, i) =>
+            hit({ id: `d-${i}`, path: p, title: `Drawing ${i}`, snippet: "quartz" }),
+          ),
+          truncated: true,
+          complete: false,
+        });
+      }
+      return searchResult({
+        results:
+          input.pathPrefix === "docs"
+            ? [hit({ path: "docs/plan.md", title: "Plan", snippet: "Markdown quartz" })]
+            : [],
+      });
+    });
+    const result = await searchWorkspacePages(files, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member: null,
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual({
+      ok: true,
+      results: [{ path: "docs/plan.md", title: "Plan", snippet: "Markdown quartz" }],
+      indexBuilding: false,
+      truncated: false,
+      complete: true,
+    });
   });
 
   it("drops path:undefined hits and normalizes truncated/complete when a Member without folder rules drops leaked hits", async () => {
@@ -282,7 +410,7 @@ describe("searchWorkspacePages", () => {
     });
     expect(result).toEqual({
       ok: true,
-      results: [{ path: "docs/plan.md", title: "Plan", snippet: "Open", objectId: "object-plan" }],
+      results: [{ path: "docs/plan.md", title: "Plan", snippet: "Open" }],
       indexBuilding: false,
       truncated: false,
       complete: true,

@@ -490,7 +490,6 @@ export function readThread(
 export interface FileCommentThread {
   readonly id: string;
   readonly title: string;
-  readonly createdAtMs: number;
   readonly updatedAtMs: number;
 }
 
@@ -517,17 +516,8 @@ export function readFileChats(
       const id = answer.fileObjectId;
       const fileObjectId = id === null ? null : text(id, 256) ? id : undefined;
       const threads = each(answer.threads, (item) =>
-        isFields(item) &&
-        text(item.id, 256) &&
-        string(item.title, 4096) &&
-        count(item.createdAtMs) &&
-        count(item.updatedAtMs)
-          ? {
-              id: item.id,
-              title: item.title,
-              createdAtMs: item.createdAtMs,
-              updatedAtMs: item.updatedAtMs,
-            }
+        isFields(item) && text(item.id, 256) && string(item.title, 4096) && count(item.updatedAtMs)
+          ? { id: item.id, title: item.title, updatedAtMs: item.updatedAtMs }
           : null,
       );
       if (fileObjectId === undefined || threads === null) return null;
