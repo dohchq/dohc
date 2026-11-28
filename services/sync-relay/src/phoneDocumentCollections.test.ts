@@ -457,4 +457,136 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("replays captureInboxItem against current path after rename and original path after delete without SQL error or revival", async () => {
+    const storage = (await testStorage()) as StorageContext;
+    vi.spyOn(storage, "mainLiveLineageExists").mockReturnValue(true);
+    let writeCalls = 0;
+    const replica = {
+      workspace: "/tmp/unused",
+      withRecordWork: async <T>(work: () => Promise<T>) => work(),
+      sync: async () => undefined,
+      client: {
+        sendRequest: async (req: {
+          id: number;
+          method: string;
+          params?: Record<string, unknown>;
+        }) => {
+          if (req.method === "versions.ensureMain")
+            return {
+              type: "response",
+              id: req.id,
+              ok: true,
+              result: {
+                id: "main",
+                workspaceId: "cap",
+                kind: "main",
+                name: "main",
+                createdAtMs: 1,
+              },
+            };
+          if (req.method === "files.resolve") {
+            const targets = Array.isArray(req.params?.targets) ? req.params.targets : [];
+            return {
+              type: "response",
+              id: req.id,
+              ok: true,
+              result: {
+                versionId: "main",
+                results: targets.map(() => ({ status: "absent" })),
+              },
+            };
+          }
+          writeCalls += 1;
+          throw new Error(`unexpected write call: ${req.method}`);
+        },
+        close() {},
+      },
+    };
+    const h = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () =>
+        ({
+          withServerCopy: async (
+            _owner: string,
+            _ws: string,
+            _visitor: unknown,
+            work: (r: typeof replica) => Promise<unknown>,
+          ) => work(replica),
+          hold() {},
+          endHold() {},
+        }) as never,
+    });
+    await claimWorkspace(h, "ana", "cap");
+    const originalPath = "Inbox/2026-11-28-flight-receipts-abc123.md";
+    const renamedPath = "Inbox/renamed.md";
+    const text = "---\nTitle: Flight receipts\n---\n\nCheck boarding pass\n";
+    await putBlob(h, "ana", "cap", text);
+    await appendLog(h, "ana", "cap", [
+      moment(originalPath, text, {
+        objectId: "obj-cap-1",
+        payload: { metadata: { origin: "user", correlationId: "phone-inbox-capture:req-cap-1" } },
+      }),
+    ]);
+
+    const replayLive = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayLive.status).toBe(200);
+    expect((await replayLive.json()).result).toMatchObject({
+      ok: true,
+      path: originalPath,
+      objectId: "obj-cap-1",
+    });
+
+    await appendLog(h, "ana", "cap", [
+      moment(renamedPath, text, {
+        objectId: "obj-cap-1",
+        operation: "rename",
+        beforePath: originalPath,
+        beforeContent: text,
+      }),
+    ]);
+    const replayRenamed = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayRenamed.status).toBe(200);
+    expect((await replayRenamed.json()).result).toMatchObject({
+      ok: true,
+      path: renamedPath,
+      objectId: "obj-cap-1",
+    });
+
+    await appendLog(h, "ana", "cap", [
+      moment(renamedPath, text, {
+        objectId: "obj-cap-1",
+        operation: "delete",
+        beforePath: renamedPath,
+        beforeContent: text,
+        afterContent: null,
+      }),
+    ]);
+    const replayDeleted = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayDeleted.status).toBe(200);
+    expect((await replayDeleted.json()).result).toMatchObject({
+      ok: true,
+      path: originalPath,
+      objectId: "obj-cap-1",
+    });
+    expect(writeCalls).toBe(0);
+  });
 });

@@ -383,13 +383,18 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
         requestId: draftRequestId,
       }),
     ).rejects.toThrow("Injected uncertain commit failure");
-    // Sign-out count sees the withheld row, and pump never sends it.
+    // Sign-out count and recovery UI see the withheld row, and pump never sends it.
     expect(q1.signOutCount()).toBe(1);
-    expect(q1.state().items).toEqual([]);
+    expect(q1.state().items).toHaveLength(1);
+    expect(q1.state().items[0]).toMatchObject({
+      requestId: draftRequestId,
+      stage: "withheld",
+      title: "Superseded draft",
+    });
     await new Promise<void>((r) => setTimeout(r, 25));
     expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(0);
 
-    // Relaunch before user retries still never sends the withheld draft, while Sign-out counts it.
+    // Relaunch before user retries still never sends the withheld draft, while exposing it for Edit/Discard.
     stop1();
     const qMid = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
     const stopMid = qMid.follow(account);
@@ -397,6 +402,11 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     await new Promise<void>((r) => setTimeout(r, 25));
     expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(0);
     expect(qMid.signOutCount()).toBe(1);
+    expect(qMid.state().items).toHaveLength(1);
+    expect(qMid.state().items[0]).toMatchObject({
+      requestId: draftRequestId,
+      stage: "withheld",
+    });
 
     // Editing and re-submitting with the same draft requestId replaces the withheld draft in place.
     await qMid.enqueue({
@@ -407,7 +417,29 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
       requestId: draftRequestId,
     });
     await waitFor(() => qMid.state().items.length === 0 && qMid.signOutCount() === 0);
+
+    // A withheld draft can also be discarded directly through the recovery control.
+    disk.sql(
+      "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason) VALUES (?, ?, ?, ?, ?, 'withheld', NULL)",
+      ORIGIN,
+      "u-1",
+      "ws-1",
+      "withheld-discard-1",
+      JSON.stringify({ title: "Discard me", kind: "note" }),
+    );
     stopMid();
+    const qDiscard = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
+    const stopDiscard = qDiscard.follow(account);
+    await waitFor(() => qDiscard.state().status === "ready");
+    expect(qDiscard.state().items).toHaveLength(1);
+    expect(qDiscard.state().items[0]).toMatchObject({
+      requestId: "withheld-discard-1",
+      stage: "withheld",
+    });
+    await qDiscard.discard("withheld-discard-1");
+    expect(qDiscard.state().items).toEqual([]);
+    expect(qDiscard.signOutCount()).toBe(0);
+    stopDiscard();
 
     const q2 = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
     const stop2 = q2.follow(account);

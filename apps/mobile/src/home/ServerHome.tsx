@@ -241,8 +241,12 @@ function Files({
       ),
     [captureState.items, signIn.origin, signIn.userId, workspaceId],
   );
-  const pendingCaptures = workspaceCaptures.filter((i) => i.stage !== "refused");
-  const refusedCaptures = workspaceCaptures.filter((i) => i.stage === "refused");
+  const pendingCaptures = workspaceCaptures.filter(
+    (i) => i.stage === "queued" || i.stage === "sending",
+  );
+  const refusedCaptures = workspaceCaptures.filter(
+    (i) => i.stage === "refused" || i.stage === "withheld",
+  );
   const { state: docCollectionsState, retry: retryDocCollections } = useView(
     views.documentCollections,
   );
@@ -468,7 +472,8 @@ function Files({
           style={[styles.captureRow, { backgroundColor: theme.panel, borderColor: theme.line }]}
         >
           <Text style={[styles.captureText, { color: theme.danger }]} numberOfLines={2}>
-            {workspaceWords.captureFailed(defaultInboxCaptureTitle(item))} {item.reason ?? ""}
+            {workspaceWords.captureFailed(defaultInboxCaptureTitle(item))}{" "}
+            {item.stage === "withheld" ? workspaceWords.captureCouldntKeep : (item.reason ?? "")}
           </Text>
           {canEditFiles ? (
             <Pressable

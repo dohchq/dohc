@@ -769,7 +769,15 @@ export async function runPhoneDocumentCollectionWrite(
         const currentPath = ctx.readTx(() => {
           const row = ctx.db
             .prepare(
-              "SELECT path FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND object_id=? LIMIT 1",
+              `SELECT f.path
+               FROM sync_relay_object_moments m
+               JOIN sync_relay_current_files f
+                 ON f.workspace_id = m.workspace_id
+                AND f.version_id = m.version_id
+                AND f.path = m.path
+                AND f.state_relay_seq = m.relay_seq
+               WHERE m.workspace_id = ? AND m.version_id = 'main' AND m.object_id = ?
+               ORDER BY m.relay_seq DESC LIMIT 1`,
             )
             .get(workspaceId, prior.objectId);
           return typeof row?.path === "string" ? row.path : null;

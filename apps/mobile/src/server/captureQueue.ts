@@ -160,10 +160,7 @@ export function createCaptureQueue(options: {
     return out;
   };
   const isHeld = () => signingOut || held();
-  const visible = () =>
-    [...items.values()]
-      .filter((item) => item.stage !== "withheld")
-      .sort((a, b) => a.sequence - b.sequence);
+  const sorted = () => [...items.values()].sort((a, b) => a.sequence - b.sequence);
   const changed = () => {
     snapshot = null;
     for (const fn of listeners) fn();
@@ -231,9 +228,10 @@ export function createCaptureQueue(options: {
   function pump() {
     if (!sends || status !== "ready" || isHeld() || !session?.isCurrent()) return;
     const seen = new Set<string>();
-    for (const item of visible()) {
+    for (const item of sorted()) {
       if (
         item.stage === "refused" ||
+        item.stage === "withheld" ||
         item.origin !== session.origin ||
         item.accountId !== session.userId ||
         seen.has(item.workspaceId)
@@ -360,7 +358,7 @@ export function createCaptureQueue(options: {
   };
 
   return {
-    state: () => (snapshot ??= { status, items: visible(), lastEvent }),
+    state: () => (snapshot ??= { status, items: sorted(), lastEvent }),
     subscribe: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
     enqueue(input) {
       const signIn = session;

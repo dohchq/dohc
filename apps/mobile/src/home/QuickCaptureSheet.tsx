@@ -34,8 +34,10 @@ export function QuickCaptureSheet(props: {
     setTitle(draft?.title ?? "");
     setLink(draft?.url ?? "");
     setSaving(false);
-    setError(draft?.reason ?? null);
-    requestId.current = null;
+    setError(
+      draft?.stage === "withheld" ? workspaceWords.captureCouldntKeep : (draft?.reason ?? null),
+    );
+    requestId.current = draft?.stage === "withheld" ? draft.requestId : null;
   }, [open, draft]);
 
   const edit = (set: (next: string) => void) => (next: string) => {
@@ -73,12 +75,12 @@ export function QuickCaptureSheet(props: {
       capturePayloadBytes(payload) > CAPTURE_MAX_BODY_BYTES
     )
       return fail(workspaceWords.captureTooLarge);
-    requestId.current ??= newFileRequestId();
+    const sentId = (requestId.current ??= newFileRequestId());
     setSaving(true);
     setError(null);
     try {
-      await captureQueue.enqueue({ ...payload, requestId: requestId.current });
-      if (draft) void captureQueue.discard(draft.requestId);
+      await captureQueue.enqueue({ ...payload, requestId: sentId });
+      if (draft && draft.requestId !== sentId) void captureQueue.discard(draft.requestId);
       requestId.current = null;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       onClose();

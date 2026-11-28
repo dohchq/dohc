@@ -11,7 +11,7 @@ export const INBOX_SOURCES = ["drop", "capture", "webhook", "cli", "agent"] as c
 export const INBOX_KINDS = ["note", "file", "image", "link", "webhook"] as const;
 
 export const MAX_INBOX_TITLE_CHARS = 240;
-export const MAX_INBOX_URL_CHARS = 2048;
+const MAX_INBOX_URL_CHARS = 2048;
 export const MAX_INBOX_BODY_BYTES = 256 * 1024;
 export const MAX_INBOX_PATH_CHARS = 4096;
 export const MAX_INBOX_MOVE_ATTACHMENTS = 5000;
