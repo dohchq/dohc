@@ -553,10 +553,8 @@ describe("a retirement reading the journal of the note its resolve closed", () =
   async function retiring() {
     const note = await sharedNote();
     expect(await activate(note, validation())).toMatchObject({ replayed: false });
-    resolveTypedNote(
-      note,
-      successor(note.document, note.path, "Merged on the owner's desktop\n", 3),
-    );
+    const next = successor(note.document, note.path, "Merged on the owner's desktop\n", 3);
+    resolveTypedNote(note, next);
     const storage = note.deployment.storage as unknown as StorageContext;
     const open = readServiceActivationRetirement(storage, note.document)!;
     const key: RetirementKey = {
@@ -568,7 +566,7 @@ describe("a retirement reading the journal of the note its resolve closed", () =
     };
     const read = (change: Partial<RetirementKey> = {}) =>
       liveJournalCut(storage, note.document, { ...key, ...change }).kind;
-    return { note, key, read };
+    return { note, key, read, next };
   }
 
   it("reads it for the open retirement it names", async () => {
@@ -584,6 +582,15 @@ describe("a retirement reading the journal of the note its resolve closed", () =
   ])("refuses a retirement with another %s", async (_, change) => {
     const { key, read } = await retiring();
     expect(read(change(key))).toBe("refused");
+  });
+
+  it("reads it after the resolve also moved the note", async () => {
+    const { note, read, next } = await retiring();
+    note.appendRename(note.path, "notes/moved.md", {
+      projectedMarkdownSha256: sha256(next.markdown),
+      projectedMarkdownByteLength: next.markdown.length,
+    });
+    expect(read()).toBe("cut");
   });
 
   it("refuses once the retirement completed", async () => {
