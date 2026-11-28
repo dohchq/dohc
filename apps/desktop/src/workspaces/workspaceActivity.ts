@@ -1060,8 +1060,6 @@ export function createWorkspaceActivity(
     await state.entry?.engine?.pushRecorded();
   }
 
-  // Drains everything the workspace recorded so far. Rejects when no engine
-  // runs or the engine cannot confirm nothing is left.
   async function drainRecorded(state: WorkspaceActivityState): Promise<void> {
     const engine = state.entry?.engine;
     if (!engine)

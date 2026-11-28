@@ -142,9 +142,6 @@ export interface CloudSyncEngine {
   // Runs passes until a push leaves nothing behind, so what the workspace
   // recorded before the call is on the relay. Rejects when a pass fails.
   pushRecorded(): Promise<void>;
-  // Like pushRecorded, but resolves only once a push reports nothing left.
-  // Rejects when sync stopped, the sign-in expired, a claim stays refused,
-  // or a pass fails.
   drainRecorded(): Promise<void>;
   // One pass for a waiting move. It leaves every ordinary timer alone, and
   // once `signal` aborts it skips its pull. It never rejects.

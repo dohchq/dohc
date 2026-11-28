@@ -20,19 +20,14 @@ const EnginePass = z.object({
 });
 
 export interface NoteConversionRelay {
-  /** The relay's `/ready` floor, or undefined when it names none. */
   engineApiMin(): Promise<number | undefined>;
-  /** Object ids of the owner's notes the relay holds live. */
   liveNotes(): Promise<string[]>;
-  /** Resolves only once a push reports nothing recorded is left. */
   drainRecorded(): Promise<void>;
 }
 
 export interface NoteConversionRun {
-  /** Null for a local-only workspace. */
   relay: NoteConversionRelay | null;
   convert(params: { after?: string; budget: number; relayLive: string[] }): Promise<unknown>;
-  /** Throws once the run's workspace is closed or its window switched away. */
   assertCurrent(): void;
 }
 
@@ -50,13 +45,6 @@ function stoppedAfter(error: unknown, converted: number): unknown {
   );
 }
 
-/**
- * Converts a workspace's notes one at a time, in batches. Each batch reads
- * which notes are live on the relay first, and converted notes are drained
- * between batches and at the end. A note the engine leaves or cannot read is
- * listed; any other failure stops the run and says how many notes it
- * converted.
- */
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const running = new Set<string>();
   return async function convertNotes(

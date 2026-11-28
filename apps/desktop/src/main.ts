@@ -2307,8 +2307,6 @@ async function relayForNoteConversion(
   };
 }
 
-// The owner's Convert notes, from Settings or the socket. A window's run
-// stops between batches once that window leaves the workspace.
 async function convertNotesForOperation(operation: {
   workspace: PhysicalWorkspace<RegistryEntry>;
   assertCurrent(): void;

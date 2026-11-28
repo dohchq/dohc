@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { leftNoteCount, leftNoteGroups } from "./noteFormat";
 
-// Every reason crates/dohc-engine-sync/src/conflict_resolve_v1/note_format_two.rs
-// skips a note for, apart from the format being off, which refuses the run.
-const PASS_REASONS = {
+const ENGINE_SKIP_REASONS = {
   "open-here": "Open on this computer",
   "open-elsewhere": "Open elsewhere",
   held: "Held",
@@ -20,7 +18,7 @@ const empty = { converted: 0, unchanged: 0, skipped: [], doesNotFit: [], failed:
 
 describe("notes a conversion left", () => {
   it("lists every reason the pass returns under its own group", () => {
-    for (const [reason, title] of Object.entries(PASS_REASONS)) {
+    for (const [reason, title] of Object.entries(ENGINE_SKIP_REASONS)) {
       expect(leftNoteGroups({ ...empty, skipped: [{ path: "a.md", reason }] })).toEqual([
         { title, notes: [{ path: "a.md" }] },
       ]);

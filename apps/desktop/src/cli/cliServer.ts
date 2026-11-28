@@ -744,7 +744,6 @@ export interface CliServerOptions {
       input: { name: string; collectionPath: string },
     ): Promise<IncomingWebhookCreatedResult>;
   };
-  /** Converts the owner workspace's notes, as Convert notes in Settings does. */
   noteConversion?: { convert(workspaceId: string): Promise<ConvertNotesResult> };
   // The app's reader for each declared verb. A verb without one is unavailable.
   reads?: Partial<DeclaredReaders<CliRegistryWorkspace>>;

@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-/** How long the CLI and MCP wait for a conversion run. */
 export const NOTE_CONVERSION_DEADLINE_MS = 600_000;
 
 const LeftNote = z.object({ path: z.string(), reason: z.string() }).strict();
@@ -19,7 +18,6 @@ export type ConvertNotesResult = z.output<typeof ConvertNotesResult>;
 
 const HISTORY_INCOMPLETE = "History incomplete";
 
-/** The group each reason the conversion pass skips a note for is listed under. */
 export const SKIPPED_NOTE_GROUPS: Readonly<Record<string, string>> = {
   "open-here": "Open on this computer",
   "open-elsewhere": "Open elsewhere",
@@ -38,7 +36,6 @@ export interface LeftNoteGroup {
   notes: { path: string; reason?: string }[];
 }
 
-/** The notes a run left as they were, grouped as Notices and the CLI list them. */
 export function leftNoteGroups(result: ConvertNotesResult): LeftNoteGroup[] {
   const groups = new Map<string, LeftNoteGroup["notes"]>();
   const add = (title: string, note: LeftNoteGroup["notes"][number]) => {
