@@ -6,7 +6,7 @@ import type { StorageContext } from "./storage/context.js";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
 import { pauseLiveRoom } from "./storage/liveRoomPauses.js";
-import { releaseRetiredLiveDelivery } from "./storage/liveDeliveryReservations.js";
+import { readServiceActivationRetirement } from "./storage/serviceActivationRetirement.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import {
   markdownToYDoc,
@@ -209,18 +209,60 @@ const liveDocumentRows = (note: Note) =>
     )
     .all();
 
-function hostRetires(note: Note) {
+async function sharedNote() {
+  const note = await typedRelayNote();
   note.raw
     .prepare(
-      `UPDATE ${SERVICE_ACTIVATIONS} SET retired_at_ms=retire_requested_at_ms,retired_boundary_json='null',state_bytes=NULL
-        WHERE retire_requested_at_ms IS NOT NULL AND retired_at_ms IS NULL`,
+      "INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)",
     )
-    .run();
-  releaseRetiredLiveDelivery(
+    .run(JSON.stringify({ paths: ["notes"], versionId: null }));
+  note.raw.exec(
+    "INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)",
+  );
+  note.deployment.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: "workspace",
+    path: note.path,
+    shareId: "share",
+    ownerUserId: "owner",
+    nowMs: 2,
+    guard() {},
+  });
+  return note;
+}
+
+const enrolment = (note: Note) =>
+  note.raw.prepare("SELECT state,retired FROM sync_relay_service_host_enrollments").all();
+
+function hostRetires(note: Note) {
+  const open = readServiceActivationRetirement(
     note.deployment.storage as unknown as StorageContext,
     note.document,
-    note.host.hostId,
-  );
+  )!;
+  expect(
+    note.deployment.storage
+      .createServiceActivationStore(note.deployment.history)
+      .completeRetirement({
+        workspaceId: "workspace",
+        key: {
+          objectId: open.objectId,
+          lineageClaimId: open.lineageClaimId,
+          activationId: open.activationId,
+          restoreFenceGeneration: open.restoreFenceGeneration,
+          acceptedThrough: open.acceptedThrough,
+        },
+        boundary: null,
+        host: note.host,
+        registeredAtMs: 30,
+        nowMs: 30,
+        guard() {},
+      }),
+  ).toEqual({ status: "retired", replayed: false });
+  note.deployment.storage.releaseServiceHostEnrollment({
+    workspaceId: "workspace",
+    objectId: note.document.objectId,
+    nowMs: 31,
+  });
 }
 
 it("accepting a replacement closes an open session's claim, so the next save on it is refused as stale", () => {
@@ -260,7 +302,7 @@ it("accepting a replacement closes an open session's claim, so the next save on 
 });
 
 it("a successor registers after its predecessor's resolve, while a pause is left on the old claim", async () => {
-  const note = await typedRelayNote();
+  const note = await sharedNote();
   const validate = validation();
   expect(await activate(note, validate)).toMatchObject({ replayed: false });
   pauseLiveRoom(note.deployment.storage as unknown as StorageContext, {
@@ -309,8 +351,40 @@ it("a successor registers after its predecessor's resolve, while a pause is left
   ]);
 });
 
+it("a successor takes over a note an Edit share keeps live, once its predecessor retired", async () => {
+  const note = await sharedNote();
+  const validate = validation();
+  expect(await activate(note, validate)).toMatchObject({ replayed: false });
+  expect(
+    note.deployment.storage.moveLiveNote({
+      workspaceId: "workspace",
+      objectId: note.document.objectId,
+      move: "started",
+      generation: 1,
+      nowMs: 4,
+    }),
+  ).toMatchObject({ moved: true });
+  const next = successor(note.document, note.path, "Merged on the owner's desktop\n", 3);
+  const { baseRelaySeq } = resolveTypedNote(note, next);
+  hostRetires(note);
+  expect(enrolment(note)).toEqual([{ state: "live", retired: 0 }]);
+
+  const capture = captureOf(note, next, {
+    baseOriginId: "owner-desktop",
+    baseOriginSeq: 0,
+    baseRelaySeq,
+  });
+  expect(await activate(note, validate, capture)).toEqual({
+    document: next.document,
+    replayed: false,
+    completed: false,
+  });
+  expect(liveDocumentRows(note).map((row) => row.lineage_state)).toEqual(["retired", "current"]);
+  expect(enrolment(note)).toEqual([{ state: "live", retired: 0 }]);
+});
+
 it("a claim the resolve did not name can't register against the retired row", async () => {
-  const note = await typedRelayNote();
+  const note = await sharedNote();
   const validate = validation();
   expect(await activate(note, validate)).toMatchObject({ replayed: false });
   resolveTypedNote(note, successor(note.document, note.path, "Merged on the owner's desktop\n", 3));
