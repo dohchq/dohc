@@ -492,7 +492,7 @@ export function markThreadRead(
  * editor limit, which the server refuses before reading it.
  */
 export type PageRead =
-  | { readonly kind: "page"; readonly markdown: string }
+  | { readonly kind: "page"; readonly markdown: string; readonly objectId?: string }
   | { readonly kind: "missing"; readonly last?: string }
   | { readonly kind: "too-large" };
 
@@ -510,10 +510,15 @@ export function readPage(
     (result) => {
       if (!isFields(result)) return null;
       // A page is at most the editor's limit in UTF-8 bytes, so in UTF-16 units too.
-      if (result.ok === true)
-        return string(result.markdown, LIVE_MARKDOWN_MAX_BYTES)
-          ? { kind: "page", markdown: result.markdown }
-          : null;
+      if (result.ok === true) {
+        if (!string(result.markdown, LIVE_MARKDOWN_MAX_BYTES)) return null;
+        if (result.objectId !== undefined && !text(result.objectId, 256)) return null;
+        return {
+          kind: "page",
+          markdown: result.markdown,
+          ...(result.objectId !== undefined ? { objectId: result.objectId } : {}),
+        };
+      }
       if (result.refusal === "too-large") return { kind: "too-large" };
       return result.refusal === "missing" ? { kind: "missing" } : null;
     },

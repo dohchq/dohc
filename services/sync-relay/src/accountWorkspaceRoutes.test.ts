@@ -100,7 +100,7 @@ describe("the account's workspace list", () => {
     const storage = (await testStorage()) as StorageContext;
     const h = testHandler(storage, {
       resolvePhoneCapableAccountSession: resolveAccountSession,
-      serverCopies: () => ({}) as never,
+      serverCopies: () => ({ endHold() {} }) as never,
     });
     await claimWorkspace(h, "ana", "trip");
     await claimWorkspace(h, "ben", "budget");
@@ -126,9 +126,24 @@ describe("the account's workspace list", () => {
       expect.objectContaining({ workspaceId: "trip", role: "owner", fileWritesAvailable: true }),
     ]);
     expect((await json(await h(list(account("ben"))))).workspaces).toEqual([
-      expect.objectContaining({ workspaceId: "budget", role: "owner", fileWritesAvailable: true }),
+      expect.objectContaining({
+        workspaceId: "budget",
+        role: "owner",
+        canOpen: false,
+        fileWritesAvailable: false,
+      }),
       expect.objectContaining({ workspaceId: "trip", role: "member", fileWritesAvailable: false }),
     ]);
+    expect((await h(patch("trip", account("ana"), { showOnPhone: false }))).status).toBe(200);
+    expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
+      expect.objectContaining({
+        workspaceId: "trip",
+        role: "owner",
+        showOnPhone: false,
+        fileWritesAvailable: false,
+      }),
+    ]);
+    expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
     expect(
       storage.setWorkspaceMemberRole({
         workspaceId: "trip",

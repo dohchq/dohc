@@ -449,6 +449,7 @@ describe("an account's reads through the server's copy", () => {
       ok: true,
       path: "docs/plan.md",
       markdown: "# Plan\n\nStay in Alfama.\n",
+      objectId: expect.any(String),
     });
 
     expect(syncs, "a page read on a caught-up copy skips the sync").toHaveLength(8);
@@ -619,7 +620,12 @@ describe("a page read on a caught-up copy", () => {
     expect(response.status).toBe(200);
     expect(await json(response)).toEqual({
       ok: true,
-      result: { ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" },
+      result: {
+        ok: true,
+        path: "docs/plan.md",
+        markdown: "# Plan\n\nStay in Alfama.\n",
+        objectId: "object-plan",
+      },
       cursor: currentAccountFeedCursor(storage, "trip"),
     });
     expect(syncs).toEqual([]);
@@ -1120,7 +1126,12 @@ describe("pages the relay hosts live", () => {
       ).toBe("accepted");
     return { f, engine, read, edit };
   }
-  const edited = { ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello\n" };
+  const edited = {
+    ok: true,
+    path: "docs/a.md",
+    markdown: "---\ntitle: Lisbon\n---\n\nHello\n",
+    objectId: "object",
+  };
 
   it("reads an edit the relay accepted before it settles, and writes nothing", async () => {
     const { f, engine, read, edit } = await livePage();
@@ -1128,6 +1139,7 @@ describe("pages the relay hosts live", () => {
       ok: true,
       path: "docs/a.md",
       markdown: "Hello\n",
+      objectId: "object",
     });
     edit();
     const journal = f.journalRows().journal.length;

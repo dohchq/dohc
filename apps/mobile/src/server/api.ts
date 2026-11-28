@@ -140,7 +140,7 @@ export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
         showOnPhone: item.showOnPhone,
         role: item.role,
         ...(item.fileWritesAvailable !== undefined
-          ? { fileWritesAvailable: item.fileWritesAvailable && item.role === "owner" }
+          ? { fileWritesAvailable: item.fileWritesAvailable }
           : {}),
       }
     : null;

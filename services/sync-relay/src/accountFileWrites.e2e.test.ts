@@ -124,6 +124,7 @@ async function startRealStack(
     pullLimitOverride?: () => number | null;
     maxVisibleSeq?: () => number | null;
     onLogFetch?: () => void;
+    saveEveryMs?: number;
   } = {},
 ) {
   const root = await realpath(await tempRoot("file-writes-e2e"));
@@ -193,6 +194,7 @@ async function startRealStack(
   let copies: ServerCopies | undefined;
   let selfHost: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
   let phonePages: PhonePages | undefined;
+  let rooms: ReturnType<typeof createLiveRooms> | undefined;
 
   let origin = "";
   const relay = createSyncRelayHandler({
@@ -203,6 +205,7 @@ async function startRealStack(
     serverCopies: () => copies,
     phonePages: () => phonePages,
     liveHost: () => selfHost,
+    liveRooms: () => rooms,
     accountOperationRateLimiter: new TokenBucketLimiter(1000, 1000, 100),
     relayPublicOrigin: "https://127.0.0.1",
   });
@@ -315,12 +318,12 @@ async function startRealStack(
   });
   const namedLiveConfig = parseNamedLiveConfig(profile.namedLive);
   const bounds = namedLiveConfig.host;
-  const rooms = createLiveRooms({
+  rooms = createLiveRooms({
     storage,
     maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
     maxNoteBytes: bounds.maxAdmissionBytes,
     maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-    saveEveryMs: 100,
+    saveEveryMs: options.saveEveryMs ?? 100,
     async openSaver(document, signal) {
       const ownerUserId = workspaceOwner(storage, document.workspaceId);
       if (!ownerUserId) throw new Error("Workspace has no owner.");
@@ -341,7 +344,7 @@ async function startRealStack(
       });
     },
   });
-  cleanup.push(() => rooms.close());
+  cleanup.push(() => rooms!.close());
 
   const ownerLive = createOwnerLiveRoutes({
     rooms,
@@ -546,6 +549,8 @@ async function startRealStack(
     root,
     origin,
     storage,
+    selfHost: () => selfHost!,
+    rooms: () => rooms!,
     phoneOp,
     openPhoneLive,
     restartCopies,
@@ -796,7 +801,7 @@ describe.skipIf(engine.missing)(
     it(
       "Proofs 2-6: idempotency, live-edited rename/delete + link rewrite + reopen, active/unsettled refusals, stale/collision refusals, sketch rename/delete, and desktop History undo",
       async () => {
-        const stack = await startRealStack();
+        const stack = await startRealStack({ saveEveryMs: 60_000 });
 
         // Set up Desktop once for fixture seeding, interrupted-rename edits, and Proof 6 History restore.
         const desktopRoot = join(stack.root, "desktop-history");
@@ -870,12 +875,13 @@ describe.skipIf(engine.missing)(
         });
         await pushDesktop();
 
-        // Open target live and edit it from the phone.
+        // Open target live and edit it from the phone (with production-style 60s saveEveryMs so LIVE_ROOM_EDITS stays buffered).
         const live = await stack.openPhoneLive("notes/target.md");
         await live.editMarkdown("Live edit before rename");
-        await live.waitSettled("Live edit before rename");
 
-        // Proof 4a: active editor refuses rename and delete.
+        // Proof 4a: active editor refuses rename and delete without calling host.stop or rooms.saveFirst.
+        const stopSpy = vi.spyOn(stack.selfHost(), "stop");
+        const saveFirstSpy = vi.spyOn(stack.rooms(), "saveFirst");
         expect(
           await stack.phoneOp("renameFile", {
             fromPath: "notes/target.md",
@@ -891,34 +897,18 @@ describe.skipIf(engine.missing)(
             requestId: "req-delete-active",
           }),
         ).toMatchObject({ ok: false, refusal: "live-active" });
+        expect(stopSpy).not.toHaveBeenCalled();
+        expect(saveFirstSpy).not.toHaveBeenCalled();
+        stopSpy.mockRestore();
+        saveFirstSpy.mockRestore();
 
+        // Disconnect immediately WITHOUT waitSettled(): renameFile must flush buffered room edits via rooms.saveFirst!
         await live.disconnect();
 
-        // Proof 4b: unsettled LIVE_ROOM_EDITS refuses rename and delete.
-        stack.storage.db
-          .prepare(
-            `INSERT INTO ${LIVE_ROOM_EDITS}(workspace_id,main_version_id,object_id,lineage_claim_id,sender_snapshot_json,update_bytes,received_at_ms,storage_bytes)
-           VALUES (?,?,?,?,'[]',X'00',10,16)`,
-          )
-          .run(WORKSPACE, "main", created.objectId, live.ready.lineageClaimId);
-        expect(
-          await stack.phoneOp("renameFile", {
-            fromPath: "notes/target.md",
-            toPath: "notes/blocked.md",
-            expectedObjectId: created.objectId,
-            requestId: "req-rename-unsettled",
-          }),
-        ).toMatchObject({ ok: false, refusal: "live-unsettled" });
-        expect(
-          await stack.phoneOp("deleteFile", {
-            path: "notes/target.md",
-            expectedObjectId: created.objectId,
-            requestId: "req-delete-unsettled",
-          }),
-        ).toMatchObject({ ok: false, refusal: "live-unsettled" });
-        stack.storage.db
-          .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND object_id=?`)
-          .run(WORKSPACE, created.objectId);
+        // Proof 4b: unsettled LIVE_ROOM_EDITS with failing save refuses rename and delete (insert an invalid/orphan row after settling).
+        const flushLive = await stack.openPhoneLive("notes/target.md");
+        await flushLive.editMarkdown("Live edit flushed on immediate rename");
+        await flushLive.disconnect();
 
         // Proof 5: stale expectedObjectId, occupied target, and missing source refusals.
         expect(
@@ -960,7 +950,7 @@ describe.skipIf(engine.missing)(
           }),
         ).toMatchObject({ ok: false, refusal: "not-found" });
 
-        // Proof 3a: rename previously live-edited page -> retires idle enrollment, rewrites links, rebinds enrollment.
+        // Proof 3a: immediate rename after disconnect flushes buffered room edits via saveFirst, retires enrollment, rewrites links, and rebinds.
         const renamed = await stack.phoneOp<{
           ok: true;
           fromPath: string;
@@ -980,6 +970,13 @@ describe.skipIf(engine.missing)(
           objectId: created.objectId,
         });
         expect(renamed.linksUpdated).toBeGreaterThanOrEqual(1);
+        const renamedRead = await stack.phoneOp<{
+          ok?: boolean;
+          markdown?: string;
+          objectId?: string;
+        }>("documentRead", { path: "notes/renamed.md" });
+        expect(renamedRead.markdown).toContain("Live edit flushed on immediate rename");
+        expect(renamedRead.objectId).toBe(created.objectId);
         const indexRead = await stack.phoneOp<{ ok?: boolean; markdown?: string }>("documentRead", {
           path: "notes/index.md",
         });
@@ -1001,11 +998,37 @@ describe.skipIf(engine.missing)(
           objectId: created.objectId,
         });
 
-        // Proof 3b: reopen renamed page live and edit it cleanly!
+        // Proof 3b: reopen renamed page live and edit it cleanly, then test unsettled LIVE_ROOM_EDITS refusal on delete.
         const liveRenamed = await stack.openPhoneLive("notes/renamed.md");
         await liveRenamed.editMarkdown("Edited after rename");
-        await liveRenamed.waitSettled("Edited after rename");
         await liveRenamed.disconnect();
+        await liveRenamed.waitSettled("Edited after rename");
+
+        // Proof 4b: corrupt/unsettled LIVE_ROOM_EDITS row that cannot save refuses rename and delete with live-unsettled.
+        stack.storage.db
+          .prepare(
+            `INSERT INTO ${LIVE_ROOM_EDITS}(workspace_id,main_version_id,object_id,lineage_claim_id,sender_snapshot_json,update_bytes,received_at_ms,storage_bytes)
+           VALUES (?,?,?,?,'[]',X'00',10,16)`,
+          )
+          .run(WORKSPACE, "main", created.objectId, liveRenamed.ready.lineageClaimId);
+        expect(
+          await stack.phoneOp("renameFile", {
+            fromPath: "notes/renamed.md",
+            toPath: "notes/blocked.md",
+            expectedObjectId: created.objectId,
+            requestId: "req-rename-unsettled",
+          }),
+        ).toMatchObject({ ok: false, refusal: "live-unsettled" });
+        expect(
+          await stack.phoneOp("deleteFile", {
+            path: "notes/renamed.md",
+            expectedObjectId: created.objectId,
+            requestId: "req-delete-unsettled",
+          }),
+        ).toMatchObject({ ok: false, refusal: "live-unsettled" });
+        stack.storage.db
+          .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND object_id=?`)
+          .run(WORKSPACE, created.objectId);
 
         // Proof 3c: delete previously live-edited page + idempotent retry + enrollment cleared.
         const deleted = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
@@ -1154,6 +1177,108 @@ describe.skipIf(engine.missing)(
           path: "sketches/wireframe.excalidraw",
           objectId: sketchObjId,
         });
+
+        // Collection ancestry: writes inside a Collection folder (holding dataset.json) are rejected with 400.
+        const collectionDocId = await desktop.sessions.run(
+          desktop.workspace,
+          async ({ client, workspace: handle }) => {
+            const adapter = new VersionedLiveAdapter(client, handle, { workspaceId: WORKSPACE });
+            await adapter.writeTextFile({
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              path: "tasks/dataset.json",
+              text: '{"name":"Tasks"}\n',
+              publish: true,
+              createOnly: true,
+              metadata: { origin: "api" },
+            });
+            return (
+              await adapter.writeTextFile({
+                workspaceId: WORKSPACE,
+                versionId: "main",
+                path: "tasks/record.md",
+                text: "# Task\n",
+                publish: true,
+                createOnly: true,
+                metadata: { origin: "api" },
+              })
+            ).object.id;
+          },
+        );
+        await pushDesktop();
+        for (const [operation, args] of [
+          ["createPage", { path: "tasks/new.md", requestId: "req-col-create" }],
+          [
+            "renameFile",
+            {
+              fromPath: "tasks/record.md",
+              toPath: "tasks/renamed.md",
+              expectedObjectId: collectionDocId,
+              requestId: "req-col-rename",
+            },
+          ],
+          [
+            "deleteFile",
+            {
+              path: "tasks/record.md",
+              expectedObjectId: collectionDocId,
+              requestId: "req-col-delete",
+            },
+          ],
+        ] as const) {
+          const resp = await fetch(`${stack.origin}/sync/${WORKSPACE}/ops/${operation}`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer session:${OWNER}:phone-1`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(args),
+          });
+          expect(resp.status, operation).toBe(400);
+        }
+
+        // Source replacement during holdCapture acquisition must refuse stale-object and never move the replacement.
+        const swap = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "createPage",
+          { path: "notes/swap.md", requestId: "req-create-swap" },
+        );
+        const origHold = VersionedLiveAdapter.prototype.holdCapture;
+        let replacementId = "";
+        const swapSpy = vi
+          .spyOn(VersionedLiveAdapter.prototype, "holdCapture")
+          .mockImplementationOnce(async function (this: VersionedLiveAdapter, input) {
+            await this.renameTextFile({
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              fromPath: "notes/swap.md",
+              toPath: "notes/swap-old.md",
+              metadata: { origin: "api" },
+            });
+            replacementId = (
+              await this.writeTextFile({
+                workspaceId: WORKSPACE,
+                versionId: "main",
+                path: "notes/swap.md",
+                text: "Replacement",
+                publish: true,
+                metadata: { origin: "api" },
+              })
+            ).object.id;
+            return await origHold.call(this, input);
+          });
+        const staleSwap = await stack.phoneOp("renameFile", {
+          fromPath: "notes/swap.md",
+          toPath: "notes/swapped.md",
+          expectedObjectId: swap.objectId,
+          requestId: "req-rename-swap",
+        });
+        swapSpy.mockRestore();
+        expect(replacementId).not.toBe(swap.objectId);
+        expect(staleSwap).toMatchObject({ ok: false, refusal: "stale-object" });
+        const afterSwap = await stack.phoneOp<{ ok?: boolean; objectId?: string }>("documentRead", {
+          path: "notes/swap.md",
+        });
+        expect(afterSwap).toMatchObject({ ok: true, objectId: replacementId });
       },
       4 * REAL_DAEMON_DEADLINE_MS,
     );

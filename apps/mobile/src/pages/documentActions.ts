@@ -9,8 +9,7 @@ export interface DocumentActionsInput {
 }
 
 /** Android's document menu, in the platform's sheet. iOS shows the same actions in the bar's menu. */
-export async function documentActions(input: (() => void) | DocumentActionsInput): Promise<void> {
-  const actions = typeof input === "function" ? { copyMarkdown: input } : input;
+export async function documentActions(actions: DocumentActionsInput): Promise<void> {
   const items: Array<{ choice: Choice; run: () => void }> = [
     { choice: { label: documentWords.copyAsMarkdown }, run: actions.copyMarkdown },
     ...(actions.rename ? [{ choice: { label: documentWords.rename }, run: actions.rename }] : []),

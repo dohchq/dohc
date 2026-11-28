@@ -110,7 +110,6 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
   const { state, retry } = useView(view);
-  const { state: filesState } = useView(views.files);
   const { current: currentWorkspace } = useShownWorkspaces();
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
@@ -185,7 +184,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   );
   const holding = live !== null && holdsPage(liveState);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
-  const objectId = filesState.value?.find((file) => file.path === path)?.objectId ?? null;
+  const objectId = holding
+    ? (liveState.objectId ?? null)
+    : state.value?.kind === "page"
+      ? (state.value.objectId ?? null)
+      : null;
   const canEditFiles =
     canWriteFiles(data, currentWorkspace) &&
     isLifecycleManagedPath(path) &&
@@ -197,7 +200,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     await host.gone();
   };
   const guardUnsent = () => {
-    if (!holdsUnsent(liveState)) return false;
+    if (!holdsUnsent(host.state().live?.state() ?? NO_STATE)) return false;
     Alert.alert(documentWords.unsentTitle, documentWords.unsentBody, [
       { text: confirmWords.cancel, style: "cancel" },
     ]);
@@ -218,6 +221,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     lifecycle.confirmDelete({
       path,
       objectId,
+      guard: guardUnsent,
       before: closeSocketBeforeMutation,
       onDone: () => (router.canGoBack() ? router.back() : router.replace("/")),
       onCancel: () => setMutating(false),

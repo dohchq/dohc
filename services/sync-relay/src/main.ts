@@ -1,4 +1,5 @@
 import { parsePublicEditRelease } from "@dohc/security-contract";
+import type { AccountFileWriteLiveHost } from "./accountFileWrites";
 import {
   accountDisplayName,
   backfillUnnamedAccounts,
@@ -766,11 +767,7 @@ const presence = new PresenceHub();
 let liveRooms: LiveRooms | undefined;
 let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
-let liveHost: Parameters<typeof createSyncRelayHandler>[0]["liveHost"] extends
-  | (() => infer Host)
-  | undefined
-  ? Host
-  : undefined;
+let liveHost: AccountFileWriteLiveHost | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ...(analytics ? { onWorkspaceCreated: () => analytics.track("sync_workspace_activated") } : {}),

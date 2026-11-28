@@ -5,6 +5,7 @@ import {
   runAccountFileWrite,
   type AccountFileWriteLiveHost,
 } from "./accountFileWrites";
+import type { LiveRooms } from "./liveRoom";
 import {
   isPhoneWriteOperation,
   parseMarkRead,
@@ -132,6 +133,8 @@ export function createAccountOperationRoute(options: {
   phonePages?: () => PhonePages | undefined;
   /** The self-hosted live host, for cleanly retiring idle enrollments on rename/delete. */
   liveHost?: () => AccountFileWriteLiveHost | undefined;
+  /** Live rooms, so rename/delete saves buffered live edits before retiring idle enrollments. */
+  liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   /** share-web's origin and its exchange key check, with which it forwards the owner's browser to open a page. */
   browser?: { origin: string; hasExchangeKey(request: Request): boolean };
 }) {
@@ -405,7 +408,7 @@ export function createAccountOperationRoute(options: {
     }
     if (isAccountFileWriteOperation(route.operation)) {
       const { result, cursor } = await runAccountFileWrite(
-        { storage, copies, liveHost: options.liveHost },
+        { storage, copies, liveHost: options.liveHost, liveRooms: options.liveRooms },
         {
           workspaceId: route.workspaceId,
           owner,

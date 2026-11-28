@@ -1,7 +1,10 @@
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import {
+  workspaceDestinationError,
+  workspaceNameError,
+} from "@dohc/workspace-contracts/workspace-paths";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   DaemonRefusalError,
@@ -11,6 +14,8 @@ import {
 } from "@dohc/workspace-engine-client";
 import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { badRequest, RelayError } from "./errors";
+import { liveEditors } from "./liveEditors";
+import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 import { untilAborted } from "./namedLiveFrameHost";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
@@ -67,6 +72,7 @@ const UNSETTLED_CODES = new Set([
 ]);
 const UNSETTLED_MSG =
   "Recent live edits have not finished saving yet. Wait a moment, then try again.";
+const ACTIVE_MSG = "Someone is editing this page right now. Close it everywhere, then try again.";
 const parentDir = (path: string) =>
   path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const refuse = (refusal: AccountFileWriteRefusal, reason: string): AccountFileWriteResult => ({
@@ -74,6 +80,17 @@ const refuse = (refusal: AccountFileWriteRefusal, reason: string): AccountFileWr
   refusal,
   reason,
 });
+
+function collectionMarkerPaths(path: string): string[] {
+  const segments = path.split("/");
+  const markers: string[] = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const prefix = segments.slice(0, i).join("/");
+    markers.push(prefix ? `${prefix}/dataset.json` : "dataset.json");
+    markers.push(prefix ? `${prefix}/collection.yaml` : "collection.yaml");
+  }
+  return markers;
+}
 
 function parseFields(args: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (
@@ -98,7 +115,7 @@ const parseObjectId = (v: unknown) => {
 
 export function validateAllowedFileWritePath(
   value: unknown,
-  options: { readonly allowSketch: boolean; readonly checkDestination: boolean },
+  options: { readonly allowSketch: boolean; readonly checkDestination: boolean | "name" },
 ): { readonly path: string; readonly kind: "page" | "sketch" } {
   if (
     typeof value !== "string" ||
@@ -120,11 +137,11 @@ export function validateAllowedFileWritePath(
       : /\.excalidraw$/i.test(base) && base.length > 11
         ? "sketch"
         : null;
-  if (
-    kind === null ||
-    (!options.allowSketch && kind !== "page") ||
-    (options.checkDestination && workspaceDestinationError(value, "win32") !== null)
-  )
+  const badDestination =
+    options.checkDestination === "name"
+      ? workspaceNameError(base, "win32") !== null
+      : options.checkDestination && workspaceDestinationError(value, "win32") !== null;
+  if (kind === null || (!options.allowSketch && kind !== "page") || badDestination)
     throw badRequest("This path cannot be changed here.");
   return { path: value, kind };
 }
@@ -146,7 +163,7 @@ export function parseAccountFileWrite(operation: AccountFileWriteOperation, args
     });
     const to = validateAllowedFileWritePath(body.toPath, {
       allowSketch: true,
-      checkDestination: true,
+      checkDestination: "name",
     });
     if (
       from.kind !== to.kind ||
@@ -221,15 +238,25 @@ async function waitForDrain(
 }
 
 async function prepareLiveMutation(
-  deps: { storage: SyncRelayStorage; liveHost?: () => AccountFileWriteLiveHost | undefined },
+  deps: {
+    storage: SyncRelayStorage;
+    liveHost?: () => AccountFileWriteLiveHost | undefined;
+    liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
+  },
   workspaceId: string,
   objectId: string,
   toPath: string | undefined,
   ownerUserId: string,
   nowMs: () => number,
   signal: AbortSignal,
-): Promise<AccountFileWriteResult | null> {
+): Promise<
+  | { readonly blocked: AccountFileWriteResult }
+  | { readonly blocked: null; readonly release: () => void }
+> {
+  if (liveEditors(deps.storage).connected({ workspaceId, objectId }))
+    return { blocked: refuse("live-active", ACTIVE_MSG) };
   const host = deps.liveHost?.();
+  const rooms = deps.liveRooms?.();
   const fence = (
     prepared?: ServiceHostRetirementPreparation,
   ): RetireIdleServiceHostEnrollmentResult =>
@@ -243,32 +270,44 @@ async function prepareLiveMutation(
       nowMs: nowMs(),
       guard: () => signal.throwIfAborted(),
     });
+  const stop = async (): Promise<RetireIdleServiceHostEnrollmentResult | "waiting"> => {
+    const enrolled = deps.storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId);
+    return enrolled && host ? await host.stop({ workspaceId, objectId }, fence, signal) : fence();
+  };
   let outcome: RetireIdleServiceHostEnrollmentResult | "waiting";
   try {
-    const enrolled = deps.storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId);
-    outcome =
-      enrolled && host ? await host.stop({ workspaceId, objectId }, fence, signal) : fence();
+    outcome = rooms
+      ? await rooms
+          .saveFirst({ workspaceId, objectId }, stop, signal, { whileHosted: true })
+          .catch((error: unknown) => {
+            if (error instanceof LiveRoomUnsavedError) return "waiting" as const;
+            throw error;
+          })
+      : await stop();
   } catch (error) {
     if (
       error instanceof ServiceHostRetirementConflict ||
       (error instanceof RelayError && UNSETTLED_CODES.has(error.code))
     )
-      return refuse("live-unsettled", UNSETTLED_MSG);
+      return { blocked: refuse("live-unsettled", UNSETTLED_MSG) };
     throw error;
   }
   if (outcome === "waiting" || outcome.status === "unsettled")
-    return refuse("live-unsettled", UNSETTLED_MSG);
-  if (outcome.status === "active")
-    return refuse(
-      "live-active",
-      "Someone is editing this page right now. Close it everywhere, then try again.",
-    );
+    return { blocked: refuse("live-unsettled", UNSETTLED_MSG) };
+  if (outcome.status === "active") return { blocked: refuse("live-active", ACTIVE_MSG) };
   if (outcome.status === "retired" && host) {
     host.reconcile();
-    if (!(await waitForDrain(deps.storage, workspaceId, objectId, signal)))
-      return refuse("live-unsettled", UNSETTLED_MSG);
+    try {
+      if (!(await waitForDrain(deps.storage, workspaceId, objectId, signal))) {
+        outcome.release();
+        return { blocked: refuse("live-unsettled", UNSETTLED_MSG) };
+      }
+    } catch (error) {
+      outcome.release();
+      throw error;
+    }
   }
-  return null;
+  return { blocked: null, release: outcome.release };
 }
 
 export async function runAccountFileWrite(
@@ -276,6 +315,7 @@ export async function runAccountFileWrite(
     storage: SyncRelayStorage;
     copies: ServerCopies;
     liveHost?: () => AccountFileWriteLiveHost | undefined;
+    liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   },
   input: {
     workspaceId: string;
@@ -311,6 +351,12 @@ export async function runAccountFileWrite(
 
       if (parsed.operation === "createPage") {
         await files.ensureMainVersion({ workspaceId });
+        const markers = await files.resolveFiles({
+          workspaceId,
+          targets: collectionMarkerPaths(parsed.path).map((path) => ({ path })),
+        });
+        if (markers.results.some((entry) => entry.status === "found"))
+          throw badRequest("This path cannot be changed here.");
         const correlationId = `phone-create:${parsed.requestId}`;
         let objectId: string;
         try {
@@ -372,10 +418,16 @@ export async function runAccountFileWrite(
       const dstPath = isRename ? parsed.toPath : null;
       const caseOnly = dstPath !== null && srcPath.toLowerCase() === dstPath.toLowerCase();
       const rich = liveDocumentKindForPath(srcPath) === "richdoc";
+      const markerTargets = collectionMarkerPaths(srcPath).map((path) => ({ path }));
       const resolve = async () => {
-        const targets = dstPath ? [{ path: srcPath }, { path: dstPath }] : [{ path: srcPath }];
+        const targets = dstPath
+          ? [{ path: srcPath }, { path: dstPath }, ...markerTargets]
+          : [{ path: srcPath }, ...markerTargets];
         const { versionId, results } = await files.resolveFiles({ workspaceId, targets });
-        return { versionId, from: results[0], to: results[1] };
+        const markerOffset = dstPath ? 2 : 1;
+        if (results.slice(markerOffset).some((entry) => entry.status === "found"))
+          throw badRequest("This path cannot be changed here.");
+        return { versionId, from: results[0], to: dstPath ? results[1] : undefined };
       };
       const blockedTarget = (to: Awaited<ReturnType<typeof resolve>>["to"]) =>
         to?.status === "found" && (!caseOnly || to.objectId !== parsed.expectedObjectId);
@@ -463,30 +515,32 @@ export async function runAccountFileWrite(
           : refuse("not-found", "This file is no longer here.");
       }
       if (blockedTarget(to)) return refuse("path-exists", "A file with this name already exists.");
-      if (rich) {
-        const blocked = await prepareLiveMutation(
-          deps,
-          workspaceId,
-          parsed.expectedObjectId,
-          dstPath ?? undefined,
-          owner,
-          input.nowMs,
-          signal,
-        );
-        if (blocked) return blocked;
-        await replica.sync(signal);
-        await authorize();
-        ({ from, to } = await resolve());
-        if (from?.status !== "found" || from.objectId !== parsed.expectedObjectId) return stale();
-        if (blockedTarget(to))
-          return refuse("path-exists", "A file with this name already exists.");
-      }
-      let mutatedObjectId = parsed.expectedObjectId;
-      const hold = await files.holdCapture({ operationId });
+      let releaseLiveFence: (() => void) | undefined;
       try {
-        if (dstPath !== null) {
-          mutatedObjectId = (
-            await files.renameTextFile({
+        if (rich) {
+          const prepared = await prepareLiveMutation(
+            deps,
+            workspaceId,
+            parsed.expectedObjectId,
+            dstPath ?? undefined,
+            owner,
+            input.nowMs,
+            signal,
+          );
+          if (prepared.blocked) return prepared.blocked;
+          releaseLiveFence = prepared.release;
+          await replica.sync(signal);
+          await authorize();
+        }
+        const hold = await files.holdCapture({ operationId });
+        try {
+          ({ from, to } = await resolve());
+          if (from?.status !== "found") return refuse("not-found", "This file is no longer here.");
+          if (from.objectId !== parsed.expectedObjectId) return stale();
+          if (blockedTarget(to))
+            return refuse("path-exists", "A file with this name already exists.");
+          if (dstPath !== null) {
+            const renamed = await files.renameTextFile({
               workspaceId,
               versionId: "main",
               fromPath: srcPath,
@@ -495,24 +549,27 @@ export async function runAccountFileWrite(
               captureHoldId: hold.holdId,
               metadata: { origin: "api" },
               author,
-            })
-          ).object.id;
-        } else {
-          await files.deleteTextFile({
-            workspaceId,
-            versionId: "main",
-            path: srcPath,
-            expectedObjectId: parsed.expectedObjectId,
-            requestId: parsed.requestId,
-            captureHoldId: hold.holdId,
-            metadata: { origin: "api" },
-            author,
-          });
+            });
+            if (renamed.object.id !== parsed.expectedObjectId) throw unconfirmed("the rename");
+          } else {
+            await files.deleteTextFile({
+              workspaceId,
+              versionId: "main",
+              path: srcPath,
+              expectedObjectId: parsed.expectedObjectId,
+              requestId: parsed.requestId,
+              captureHoldId: hold.holdId,
+              metadata: { origin: "api" },
+              author,
+            });
+          }
+        } finally {
+          await files.releaseCapture(hold.holdId).catch(() => undefined);
         }
+        return await finish(parsed.expectedObjectId);
       } finally {
-        await files.releaseCapture(hold.holdId).catch(() => undefined);
+        releaseLiveFence?.();
       }
-      return await finish(mutatedObjectId);
     }),
   );
   return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };

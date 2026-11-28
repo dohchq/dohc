@@ -29,7 +29,7 @@ import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
-import { useProblemText, useView } from "../workspace/useView";
+import { useProblemText } from "../workspace/useView";
 import { sketchFolderUri, sketchHtmlUri } from "./sketchFile";
 import { sketchTitle } from "./sketchList";
 
@@ -77,7 +77,6 @@ function SketchScreen({ path }: { path: string }) {
   const { data } = useAccount();
   const signIn = useSignIn();
   const { current: currentWorkspace } = useShownWorkspaces();
-  const { state: filesState } = useView(views.files);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const gap = useWorkspaceGap();
   const web = useRef<ComponentRef<typeof WebView>>(null);
@@ -91,6 +90,8 @@ function SketchScreen({ path }: { path: string }) {
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
   const [mutating, setMutating] = useState(false);
   const mutatingRef = useRef(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = edit.dirty;
   const conflictReadOnly = readState.kind === "ready" && readState.scene.readOnly === true;
   const editable = writesIn(data) && !conflictReadOnly && !mutating;
 
@@ -409,10 +410,7 @@ function SketchScreen({ path }: { path: string }) {
       : null,
   ].filter((s): s is NonNullable<typeof s> => s !== null);
 
-  const objectId =
-    readState.kind === "ready"
-      ? readState.scene.objectId
-      : (filesState.value?.find((file) => file.path === path)?.objectId ?? null);
+  const objectId = readState.kind === "ready" ? readState.scene.objectId : null;
   const canEditFiles =
     canWriteFiles(data, currentWorkspace) &&
     isLifecycleManagedPath(path) &&
@@ -421,7 +419,7 @@ function SketchScreen({ path }: { path: string }) {
     !mutating &&
     lifecycle.deletingPath === null;
   const guardDirty = () => {
-    if (!edit.dirty) return false;
+    if (!dirtyRef.current) return false;
     Alert.alert(workspaceWords.sketchUnsavedTitle, workspaceWords.sketchUnsavedBody, [
       { text: confirmWords.cancel, style: "cancel" },
     ]);
@@ -455,6 +453,7 @@ function SketchScreen({ path }: { path: string }) {
       lifecycle.confirmDelete({
         path,
         objectId,
+        guard: guardDirty,
         before: freezeForMutation,
         onCancel: unfreezeAfterMutation,
         onDone: onDeleted,

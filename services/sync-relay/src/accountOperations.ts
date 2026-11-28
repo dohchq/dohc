@@ -54,6 +54,7 @@ import type { SyncRelayStorage } from "./storage";
 
 export type AccountOperationResult =
   | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText" | "groupsFull">]
+  | (Extract<CliResultByVerb["documentRead"], { ok: true }> & { objectId: string })
   | PhoneGroupsResult
   | FileListResult
   | TextReadResult
@@ -305,12 +306,17 @@ async function answer(
         const shown = await showChat(chats, request.args);
         return "stream" in shown ? shown : shown.thread;
       }
-      case "documentRead":
-        return await readDocument(
-          serverDocuments(storage, replica, workspaceId, member),
+      case "documentRead": {
+        let objectId: string | undefined;
+        const result = await readDocument(
+          serverDocuments(storage, replica, workspaceId, member, (id) => {
+            objectId = id;
+          }),
           request.args.path,
           PLATFORM,
         );
+        return result.ok && objectId !== undefined ? { ...result, objectId } : result;
+      }
     }
   } catch (error) {
     if (error instanceof RelayError) throw error;
@@ -586,6 +592,7 @@ function serverDocuments(
   replica: AutomationReplica,
   workspaceId: string,
   member: PhoneMember | null,
+  onObjectId?: (objectId: string) => void,
 ): DocumentsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   return {
@@ -610,6 +617,7 @@ function serverDocuments(
       )
         throw new PageTooLarge();
       if (file?.contentKind !== "text" || typeof file.text !== "string") throw missing;
+      onObjectId?.(file.objectId);
       if (isLossyMarkdown(file.text)) return { path, markdown: file.text };
       const live =
         version?.kind === "main"

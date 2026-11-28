@@ -2,6 +2,7 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
+import { useIsFocused } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -19,7 +20,7 @@ import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useBackCloses } from "../backCloses";
 import { choose, confirm } from "../confirm";
 import { useOptionalNotices } from "../notices/NoticesState";
-import { useShowToast } from "../notices/Toast";
+import { useHideToast, useShowToast } from "../notices/Toast";
 import { shownProblem } from "../server/client";
 import {
   buildTargetPath,
@@ -38,6 +39,7 @@ import { useProblemText } from "../workspace/useView";
 export interface FileTarget {
   readonly path: string;
   readonly objectId: string;
+  readonly guard?: () => boolean;
   readonly before?: () => Promise<void>;
   readonly onDone?: (path: string) => void;
   readonly onCancel?: () => void;
@@ -51,10 +53,24 @@ export function useFileLifecycle(workspaceName: string) {
   const { data } = useAccount();
   const signIn = useSignIn();
   const showToast = useShowToast();
+  const hideToast = useHideToast();
   const notices = useOptionalNotices();
   const problemText = useProblemText();
+  const focused = useIsFocused();
   const [sheetState, setSheetState] = useState<SheetState | null>(null);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    setSheetState(null);
+  }, [data?.workspaceId]);
   const alive = useCallback(
     (active: WorkspaceData) => signIn.isCurrent() && active.isOpen(),
     [signIn],
@@ -70,6 +86,7 @@ export function useFileLifecycle(workspaceName: string) {
   const reportDeleteFailure = useCallback(
     (path: string, body: string, retry?: () => void) => {
       if (!notices) {
+        if (!mountedRef.current) return;
         Alert.alert(documentWords.couldntDelete, body, [
           ...(retry ? [{ text: noticesWords.tryAgain, onPress: retry }] : []),
           { text: confirmWords.cancel, style: "cancel" },
@@ -103,9 +120,10 @@ export function useFileLifecycle(workspaceName: string) {
 
   const runDelete = useCallback(
     async (active: WorkspaceData, target: FileTarget, requestId: string) => {
-      setDeletingPath(target.path);
+      if (mountedRef.current && target.guard?.()) return;
+      if (mountedRef.current) setDeletingPath(target.path);
       try {
-        await target.before?.();
+        if (mountedRef.current) await target.before?.();
         if (!alive(active)) return;
         const result = await fileWriteOperations(signIn.client, active.workspaceId).deleteFile({
           path: target.path,
@@ -115,23 +133,31 @@ export function useFileLifecycle(workspaceName: string) {
         if (!alive(active)) return;
         if (!result.ok) {
           reportDeleteFailure(target.path, fileWriteRefusalText(result.refusal, result.reason));
-          target.onCancel?.();
+          if (mountedRef.current) target.onCancel?.();
           return;
         }
+        const noticeId = `delete:${target.path}`;
+        hideToast(noticeId);
+        notices?.dismiss(noticeId);
         active.invalidate(views.files);
         active.invalidate(views.page(target.path), true);
-        target.onDone?.(target.path);
+        if (mountedRef.current && focusedRef.current) target.onDone?.(target.path);
       } catch (error) {
         if (!alive(active)) return;
+        if (mountedRef.current) target.onCancel?.();
         reportDeleteFailure(target.path, errorText(error, documentWords.couldntDelete), () => {
-          if (alive(active)) void runDelete(active, target, requestId);
+          if (!alive(active)) return;
+          void runDelete(
+            active,
+            mountedRef.current ? target : { path: target.path, objectId: target.objectId },
+            requestId,
+          );
         });
-        target.onCancel?.();
       } finally {
-        setDeletingPath((cur) => (cur === target.path ? null : cur));
+        if (mountedRef.current) setDeletingPath((cur) => (cur === target.path ? null : cur));
       }
     },
-    [alive, errorText, reportDeleteFailure, signIn],
+    [alive, errorText, hideToast, notices, reportDeleteFailure, signIn],
   );
 
   const confirmDelete = useCallback(
@@ -181,6 +207,7 @@ export function useFileLifecycle(workspaceName: string) {
         const shared = {
           path: target.path,
           objectId: target.objectId,
+          guard: target.guard,
           before: target.before,
           onCancel: target.onCancel,
         };
@@ -228,9 +255,11 @@ export function useFileLifecycle(workspaceName: string) {
           active.invalidate(views.files);
           if (sheetState.mode === "rename") active.invalidate(views.page(sheetState.path), true);
           active.invalidate(views.page(result.path), true);
-          setSheetState(null);
-          if (sheetState.mode === "create") sheetState.onCreated(result.path);
-          else sheetState.onDone?.(result.path);
+          if (mountedRef.current) {
+            setSheetState(null);
+            if (sheetState.mode === "create") sheetState.onCreated(result.path);
+            else sheetState.onDone?.(result.path);
+          }
           return { ok: true };
         } catch (error) {
           if (!alive(active)) return { ok: true };

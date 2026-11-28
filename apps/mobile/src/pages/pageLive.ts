@@ -32,6 +32,8 @@ export interface PageLiveState {
   readonly unsent: boolean;
   /** The page shows the live document, not the text the app read. */
   readonly shown: boolean;
+  /** The object identity of the live document opened by `openPage`, once bound. */
+  readonly objectId?: string;
 }
 
 export interface PageLive {
@@ -173,6 +175,7 @@ export function createPageLive(options: {
 
   function connect(answer: Extract<PageOpen, { status: "ready" }>) {
     const held = open!;
+    set({ objectId: answer.objectId });
     const query = `objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
     const socket = options.client.liveSocket(
       `/sync/workspaces/${segment(options.workspaceId)}/live/owner?${query}`,

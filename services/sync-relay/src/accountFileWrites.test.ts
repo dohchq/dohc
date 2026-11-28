@@ -330,6 +330,28 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       status: "retired",
       enrollment: { retired: true, enabled: false, ownerStop: null, hostDrainedAtMs: 10 },
     });
+    if (retired.status !== "retired") throw new Error("expected retired");
+
+    // While fenced, a concurrent owner-open cannot restart the retired enrollment.
+    let fencedRefusal: unknown;
+    try {
+      storage.ensureOwnedLiveDocument({
+        intent: "owner-open",
+        workspaceId: "trip",
+        path: "notes/old.md",
+        ownerUserId: "ana",
+        nowMs: 12,
+        guard() {},
+      });
+    } catch (error) {
+      fencedRefusal = error;
+    }
+    expect(fencedRefusal).toBeInstanceOf(LiveHostingRefusal);
+    expect((fencedRefusal as LiveHostingRefusal).reason).toBe("document-unavailable");
+    expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-1")).toMatchObject({
+      retired: true,
+      enabled: false,
+    });
 
     storage.db
       .prepare(
@@ -347,6 +369,30 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       status: "rebound",
       enrollment: { path: "notes/new.md", retired: true },
     });
+    retired.release();
+
+    // Once released, opening at the new path succeeds cleanly.
+    expect(
+      storage.ensureOwnedLiveDocument({
+        intent: "owner-open",
+        workspaceId: "trip",
+        path: "notes/new.md",
+        ownerUserId: "ana",
+        nowMs: 15,
+        guard() {},
+      }),
+    ).toMatchObject({ path: "notes/new.md", enabled: true, retired: false });
+
+    const retiredForDelete = storage.retireIdleServiceHostEnrollment({
+      workspaceId: "trip",
+      objectId: "obj-1",
+      ownerUserId: "ana",
+      drainNow: true,
+      nowMs: 16,
+      guard() {},
+    });
+    expect(retiredForDelete.status).toBe("retired");
+    if (retiredForDelete.status === "retired") retiredForDelete.release();
 
     storage.db
       .prepare(
@@ -362,6 +408,46 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       }),
     ).toBe(true);
     expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-1")).toBeNull();
+  });
+
+  it("refuses delete retirement when the source has a retained conflict effect", async () => {
+    const storage = await enrolledStorage();
+    const parentPayload = JSON.stringify({
+      conflictId: "c-1",
+      targetVersionId: "main",
+      sourceVersionId: "main",
+      paths: ["notes/old.md", "notes/other.md"],
+      current: { present: true, objectId: "obj-1", contentKind: "text", pathRef: 0 },
+      result: { present: true, objectId: "obj-1", contentKind: "text", pathRef: 0 },
+      effects: [{ kind: "write", momentId: "m-effect" }],
+      lineageTransition: null,
+    });
+    const effectPayload = JSON.stringify({
+      momentId: "m-effect",
+      versionId: "main",
+      objectId: "obj-1",
+      path: "notes/old.md",
+      conflictId: "c-1",
+      conflictEffectIndex: 0,
+    });
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms)
+         VALUES ('trip','origin-1',1,'conflict.resolve',?,2),
+                ('trip','origin-1',2,'moment.append',?,3)`,
+      )
+      .run(parentPayload, effectPayload);
+
+    expect(
+      storage.retireIdleServiceHostEnrollment({
+        workspaceId: "trip",
+        objectId: "obj-1",
+        ownerUserId: "ana",
+        drainNow: true,
+        nowMs: 10,
+        guard() {},
+      }),
+    ).toEqual({ status: "unsettled" });
   });
 
   it("preserves owner Pause across retirement and rebind so opening still refuses as paused", async () => {
@@ -396,6 +482,7 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
         note: { state: "off", reason: "paused", changedBy: "person:ana" },
       },
     });
+    if (retired.status === "retired") retired.release();
 
     storage.db
       .prepare(
@@ -483,17 +570,17 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
         `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=5 WHERE workspace_id='trip' AND object_id='obj-old'`,
       )
       .run();
-    expect(
-      storage.retireIdleServiceHostEnrollment({
-        workspaceId: "trip",
-        objectId: "obj-1",
-        toPath: "notes/new.md",
-        ownerUserId: "ana",
-        drainNow: true,
-        nowMs: 10,
-        guard() {},
-      }),
-    ).toMatchObject({ status: "retired" });
+    const cleared = storage.retireIdleServiceHostEnrollment({
+      workspaceId: "trip",
+      objectId: "obj-1",
+      toPath: "notes/new.md",
+      ownerUserId: "ana",
+      drainNow: true,
+      nowMs: 10,
+      guard() {},
+    });
+    expect(cleared).toMatchObject({ status: "retired" });
+    if (cleared.status === "retired") cleared.release();
     expect(storage.readServiceHostEnrollmentByObjectId("trip", "obj-old")).toBeNull();
 
     storage.db

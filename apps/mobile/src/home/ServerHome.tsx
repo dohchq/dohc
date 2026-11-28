@@ -72,10 +72,15 @@ const nothing = () => () => undefined;
 // The list reads again when the feed reports a file change.
 export function ServerHome() {
   const theme = useTheme();
+  const router = useRouter();
   const { current } = useWorkspaces();
   const { data } = useAccount();
   const canEditFiles = canWriteFiles(data, current);
-  const openCreateRef = useRef<(() => void) | null>(null);
+  const lifecycle = useFileLifecycle(current?.name ?? "");
+  const openCreate = () =>
+    lifecycle.openCreate((path) =>
+      router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
+    );
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -95,7 +100,7 @@ export function ServerHome() {
                       <HeaderButton
                         icon={Plus}
                         label={workspaceWords.newPage}
-                        onPress={() => openCreateRef.current?.()}
+                        onPress={openCreate}
                       />
                     ) : null}
                     <SettingsButton />
@@ -110,7 +115,7 @@ export function ServerHome() {
             <Stack.Toolbar.Button
               icon="plus"
               accessibilityLabel={workspaceWords.newPage}
-              onPress={() => openCreateRef.current?.()}
+              onPress={openCreate}
             />
           ) : null}
           <Stack.Toolbar.View hidesSharedBackground>
@@ -125,9 +130,11 @@ export function ServerHome() {
           workspaceId={current.id}
           workspace={current.name}
           canEditFiles={canEditFiles}
-          openCreateRef={openCreateRef}
+          deletingPath={lifecycle.deletingPath}
+          openActions={lifecycle.openActions}
         />
       ) : null}
+      {lifecycle.sheet}
     </ScrollView>
   );
 }
@@ -138,12 +145,14 @@ function Files({
   workspaceId,
   workspace,
   canEditFiles,
-  openCreateRef,
+  deletingPath,
+  openActions,
 }: {
   workspaceId: string;
   workspace: string;
   canEditFiles: boolean;
-  openCreateRef: { current: (() => void) | null };
+  deletingPath: string | null;
+  openActions: ReturnType<typeof useFileLifecycle>["openActions"];
 }) {
   const router = useRouter();
   const { state, retry } = useView(views.files);
@@ -169,21 +178,11 @@ function Files({
   );
   const { data, apps, collections } = useAccount();
   const signIn = useSignIn();
-  const lifecycle = useFileLifecycle(workspace);
   const openRowActions = useCallback(
     (item: EditableRow) =>
-      lifecycle.openActions({ title: item.name, path: item.path, objectId: item.objectId }),
-    [lifecycle.openActions],
+      openActions({ title: item.name, path: item.path, objectId: item.objectId }),
+    [openActions],
   );
-  useEffect(() => {
-    openCreateRef.current = () =>
-      lifecycle.openCreate((path) =>
-        router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
-      );
-    return () => {
-      openCreateRef.current = null;
-    };
-  }, [lifecycle, openCreateRef, router]);
   const canOpenSketch = data !== null && !data.joined;
   const canCreateSketch =
     writesIn(data) && rows !== null && !state.fromCache && state.problem === null;
@@ -429,7 +428,7 @@ function Files({
                 ? openRowActions
                 : undefined
             }
-            busy={lifecycle.deletingPath === row.path}
+            busy={deletingPath === row.path}
           />
         ))
       )}
@@ -453,7 +452,7 @@ function Files({
                   onActions={
                     canEditFiles && isLifecycleManagedPath(row.path) ? openRowActions : undefined
                   }
-                  busy={lifecycle.deletingPath === row.path}
+                  busy={deletingPath === row.path}
                 />
               ))}
               {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
@@ -533,7 +532,6 @@ function Files({
             </Pressable>
           ))}
       {fileSection("other", workspaceWords.otherFiles, rows?.others, () => setShowAllOthers(true))}
-      {lifecycle.sheet}
     </>
   );
 }

@@ -974,6 +974,7 @@ export function createSyncRelayHandler({
         phoneCollections,
         ...(phonePages ? { phonePages } : {}),
         ...(liveHost ? { liveHost } : {}),
+        liveRooms,
         ...(shareWebOrigin && relayExchangeKeyHash
           ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
           : {}),

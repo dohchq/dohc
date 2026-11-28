@@ -1582,6 +1582,8 @@ function ensureInsideTransaction(
       rebindCandidate = { enrollment: existing, targetPath: path };
     }
     if (rebindCandidate) {
+      if (isMutationFenced(storage, workspaceId, rebindCandidate.enrollment.objectId))
+        throw relayError("conflict", "This document is being changed. Try again.");
       assertCurrent(storage, rebindCandidate.enrollment, ownerUserId);
       const rebind = movedEnrollmentRebindState(
         storage,
@@ -1604,6 +1606,10 @@ function ensureInsideTransaction(
     }
   }
   const objectId = currentMainDocument(storage, { workspaceId, path: effectivePath }, opening);
+  if (isMutationFenced(storage, workspaceId, objectId))
+    throw opening
+      ? new LiveHostingRefusal("document-unavailable")
+      : relayError("conflict", "This document is being changed. Try again.");
   if (current) {
     assertCurrent(storage, current, ownerUserId);
     if (current.objectId !== objectId)
@@ -2121,12 +2127,44 @@ export function setServiceHostEnrollmentEnabled(
 }
 
 export type RetireIdleServiceHostEnrollmentResult =
-  | { readonly status: "active" | "unsettled" | "none" }
-  | { readonly status: "retired"; readonly enrollment: ServiceHostEnrollment };
+  | { readonly status: "active" }
+  | { readonly status: "unsettled" }
+  | { readonly status: "none"; readonly release: () => void }
+  | {
+      readonly status: "retired";
+      readonly enrollment: ServiceHostEnrollment;
+      readonly release: () => void;
+    };
 
 export type RebindRetiredServiceHostEnrollmentResult =
   | { readonly status: "none" | "blocked" }
   | { readonly status: "rebound"; readonly enrollment: ServiceHostEnrollment };
+
+const mutationFences = new WeakMap<object, Map<string, number>>();
+const mutationFenceKey = (workspaceId: string, objectId: string) => `${workspaceId}\0${objectId}`;
+
+function acquireMutationFence(storage: object, workspaceId: string, objectId: string): () => void {
+  let map = mutationFences.get(storage);
+  if (!map) {
+    map = new Map();
+    mutationFences.set(storage, map);
+  }
+  const key = mutationFenceKey(workspaceId, objectId);
+  map.set(key, (map.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = map.get(key) ?? 0;
+    if (count <= 1) map.delete(key);
+    else map.set(key, count - 1);
+    if (map.size === 0) mutationFences.delete(storage);
+  };
+}
+
+function isMutationFenced(storage: object, workspaceId: string, objectId: string): boolean {
+  return (mutationFences.get(storage)?.get(mutationFenceKey(workspaceId, objectId)) ?? 0) > 0;
+}
 
 function ownedObjectTx<T>(
   storage: StorageContext,
@@ -2201,48 +2239,63 @@ export function retireIdleServiceHostEnrollment(
 ): RetireIdleServiceHostEnrollmentResult {
   const nowMs = timestamp(input.nowMs);
   const target = input.toPath === undefined ? null : canonicalPath(input.toPath);
-  return ownedObjectTx(storage, input, (workspaceId, objectId) => {
-    if (liveEditors(storage).connected({ workspaceId, objectId })) return { status: "active" };
-    if (hasPendingLiveState(storage.db, workspaceId, objectId)) return { status: "unsettled" };
-    const current = readByObject(storage, workspaceId, objectId);
-    if (target !== null) {
-      const occupant = read(storage, workspaceId, target);
-      if (
-        occupant &&
-        occupant.objectId !== objectId &&
-        !clearDrainedDeletedInTx(storage, workspaceId, occupant.objectId)
-      )
-        return { status: "unsettled" };
-      if (current && current.path !== target && !canRebindPreMutation(storage, current, target))
-        return { status: "unsettled" };
-    }
-    if (!current) return { status: "none" };
-    const hosted = isHostedForLiveEditing(storage, workspaceId, objectId);
-    if (!current.retired) {
-      openServiceActivationRetirement(
-        storage,
-        { workspaceId, objectId },
-        nowMs,
-        verifyPreparedRetirement(input.prepared),
-      );
-      endServiceHostRun(storage, current, nowMs);
-      const drainedAt =
-        input.drainNow && !hosted ? (current.hostDrainedAtMs ?? nowMs) : current.hostDrainedAtMs;
-      storage.db
-        .prepare(
-          `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL,host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?),${ACCESS_ENDED} WHERE workspace_id=? AND object_id=?`,
+  let release: (() => void) | undefined;
+  try {
+    return ownedObjectTx(storage, input, (workspaceId, objectId) => {
+      if (liveEditors(storage).connected({ workspaceId, objectId })) return { status: "active" };
+      if (hasPendingLiveState(storage.db, workspaceId, objectId)) return { status: "unsettled" };
+      const current = readByObject(storage, workspaceId, objectId);
+      if (current && hasServiceHostConflictEffect(storage, current)) return { status: "unsettled" };
+      if (target !== null) {
+        const occupant = read(storage, workspaceId, target);
+        if (
+          occupant &&
+          occupant.objectId !== objectId &&
+          !clearDrainedDeletedInTx(storage, workspaceId, occupant.objectId)
         )
-        .run(drainedAt, nowMs, nowMs, workspaceId, objectId);
-      forgetIdleServiceHostUploads(storage, workspaceId);
-    } else if (input.drainNow && current.hostDrainedAtMs === null && !hosted) {
-      storage.db
-        .prepare(
-          `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?) WHERE workspace_id=? AND object_id=?`,
-        )
-        .run(nowMs, nowMs, workspaceId, objectId);
-    }
-    return { status: "retired", enrollment: readByObject(storage, workspaceId, objectId)! };
-  });
+          return { status: "unsettled" };
+        if (current && current.path !== target && !canRebindPreMutation(storage, current, target))
+          return { status: "unsettled" };
+      }
+      if (!current) {
+        release = acquireMutationFence(storage, workspaceId, objectId);
+        return { status: "none", release };
+      }
+      const hosted = isHostedForLiveEditing(storage, workspaceId, objectId);
+      if (!current.retired) {
+        openServiceActivationRetirement(
+          storage,
+          { workspaceId, objectId },
+          nowMs,
+          verifyPreparedRetirement(input.prepared),
+        );
+        endServiceHostRun(storage, current, nowMs);
+        const drainedAt =
+          input.drainNow && !hosted ? (current.hostDrainedAtMs ?? nowMs) : current.hostDrainedAtMs;
+        storage.db
+          .prepare(
+            `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL,host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?),${ACCESS_ENDED} WHERE workspace_id=? AND object_id=?`,
+          )
+          .run(drainedAt, nowMs, nowMs, workspaceId, objectId);
+        forgetIdleServiceHostUploads(storage, workspaceId);
+      } else if (input.drainNow && current.hostDrainedAtMs === null && !hosted) {
+        storage.db
+          .prepare(
+            `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=?,updated_at_ms=max(updated_at_ms,?) WHERE workspace_id=? AND object_id=?`,
+          )
+          .run(nowMs, nowMs, workspaceId, objectId);
+      }
+      release = acquireMutationFence(storage, workspaceId, objectId);
+      return {
+        status: "retired",
+        enrollment: readByObject(storage, workspaceId, objectId)!,
+        release,
+      };
+    });
+  } catch (error) {
+    release?.();
+    throw error;
+  }
 }
 
 export function rebindRetiredServiceHostEnrollment(

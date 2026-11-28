@@ -502,6 +502,7 @@ it.skipIf(engine.missing)(
       ok: true,
       path: "docs/plan.md",
       markdown: "# Plan\n\nStay in Alfama.\n",
+      objectId: expect.any(String),
     });
     expect(await copy.push()).toBe(0);
     expect(logRows()).toBe(before);

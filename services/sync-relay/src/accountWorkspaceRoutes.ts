@@ -89,7 +89,11 @@ export function createAccountWorkspaceRoutes(options: {
         ok: true,
         workspaces: storage.listAccountWorkspaces(userId).map((workspace) => ({
           ...workspace,
-          fileWritesAvailable: fileWritesAvailable && workspace.role === "owner",
+          fileWritesAvailable:
+            fileWritesAvailable &&
+            workspace.role === "owner" &&
+            workspace.showOnPhone &&
+            workspace.canOpen,
         })),
       });
     }
