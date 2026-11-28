@@ -18,8 +18,18 @@ const FIRST = "# Late\n\nTyped before.\n";
 const SECOND = "# Late\n\nTyped before.\n\nTyped after.\n";
 const OBJECT = `ydoc-recovery-object-${"a".repeat(64)}`;
 const RECOVERED = "Late (recovered).md";
+const NUMBERED = "Late (recovered 2).md";
+const OCCUPANT = "# Someone else's note\n";
 
-type Moment = { momentId: string; path: string; text: string; before?: string; delete?: boolean };
+type Moment = {
+  momentId: string;
+  path: string;
+  text: string;
+  before?: string;
+  delete?: boolean;
+  rename?: boolean;
+  objectId?: string;
+};
 
 function op(originSeq: number, moment: Moment) {
   const before = moment.before;
@@ -30,11 +40,11 @@ function op(originSeq: number, moment: Moment) {
     payload: {
       momentId: moment.momentId,
       versionId: "main",
-      objectId: OBJECT,
+      objectId: moment.objectId ?? OBJECT,
       objectCreatedAtMs: 10,
       path: moment.path,
       recordedAtMs: 10 + originSeq,
-      operation: moment.delete ? "delete" : "write",
+      operation: moment.delete ? "delete" : moment.rename ? "rename" : "write",
       payloadBeforeBlobSha256: before === undefined ? null : sha256(before),
       payloadBeforePath: before === undefined ? null : RECOVERED,
       payloadAfterBlobSha256: moment.delete ? null : sha256(moment.text),
@@ -71,7 +81,7 @@ async function relay() {
   const storage = await testStorage(),
     handler = testHandler(storage);
   await claimWorkspace(handler, "owner", "workspace");
-  for (const text of [FIRST, SECOND]) {
+  for (const text of [FIRST, SECOND, OCCUPANT]) {
     storage.putBlob({
       workspaceId: "workspace",
       sha256: sha256(text),
@@ -98,6 +108,11 @@ async function relay() {
           "SELECT m.moment_id FROM sync_relay_object_moments m WHERE m.workspace_id='workspace' AND m.object_id=? ORDER BY m.relay_seq",
         )
         .all(OBJECT),
+      files: db
+        .prepare(
+          "SELECT path,blob_sha256 FROM sync_relay_current_files WHERE workspace_id='workspace' ORDER BY path",
+        )
+        .all(),
       origins: db
         .prepare(
           "SELECT origin_id FROM sync_relay_log WHERE workspace_id='workspace' ORDER BY relay_seq",
@@ -113,7 +128,7 @@ describe("a recovery that a second replica publishes late", () => {
     await f.push("owner-device", [
       op(0, creation),
       op(1, continuation),
-      op(2, { momentId: "rename", path: "Renamed.md", text: SECOND, before: SECOND }),
+      op(2, { momentId: "rename", path: "Renamed.md", text: SECOND, before: SECOND, rename: true }),
     ]);
 
     const late = await f.push("server-copy", [op(0, creation), op(1, continuation)]);
@@ -123,6 +138,7 @@ describe("a recovery that a second replica publishes late", () => {
 
     const projected = f.projected();
     expect(projected.paths).toEqual([{ path: "Renamed.md" }]);
+    expect(projected.files).toEqual([{ path: "Renamed.md", blob_sha256: sha256(SECOND) }]);
     expect(projected.moments).toEqual([
       { moment_id: creation.momentId },
       { moment_id: continuation.momentId },
@@ -155,5 +171,36 @@ describe("a recovery that a second replica publishes late", () => {
     ]);
     await f.push("server-copy", [op(0, { ...creation, text: SECOND })]);
     expect(f.projected().paths).toEqual([{ path: RECOVERED }]);
+  });
+
+  it("places the numbered copy when the first copy found its path taken", async () => {
+    const f = await relay();
+    await f.push("owner-device", [
+      op(0, { momentId: "occupant", objectId: "occupant", path: RECOVERED, text: OCCUPANT }),
+    ]);
+    await f.push("server-copy", [op(0, creation)]);
+    await f.push("owner-device", [op(1, { ...creation, path: NUMBERED })]);
+
+    const projected = f.projected();
+    expect(projected.paths).toEqual([{ path: NUMBERED }]);
+    expect(projected.files).toEqual([
+      { path: NUMBERED, blob_sha256: sha256(FIRST) },
+      { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
+    ]);
+  });
+
+  it("keeps a later copy unplaced once the object has changed", async () => {
+    const f = await relay();
+    await f.push("owner-device", [
+      op(0, { momentId: "occupant", objectId: "occupant", path: RECOVERED, text: OCCUPANT }),
+    ]);
+    await f.push("server-copy", [op(0, creation)]);
+    await f.push("owner-device", [op(1, { ...creation, path: NUMBERED })]);
+    await f.push("third-copy", [op(0, { ...creation, path: "Late (recovered 3).md" })]);
+
+    expect(f.projected().files).toEqual([
+      { path: NUMBERED, blob_sha256: sha256(FIRST) },
+      { path: RECOVERED, blob_sha256: sha256(OCCUPANT) },
+    ]);
   });
 });
