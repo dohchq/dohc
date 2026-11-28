@@ -866,14 +866,14 @@ import {
   recordedShareSelector,
 } from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
-import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   NOTE_CONVERSION_PAUSED,
   createNoteConversion,
   noteConversionOffered,
   noteConversionReach,
-  stopsOnceSyncStarts,
+  stopsOnceSyncChanges,
   type NoteConversionRelay,
+  type NoteConversionRun,
 } from "./workspaces/noteConversion";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
@@ -2288,37 +2288,54 @@ async function relayForNoteConversion(
   };
 }
 
-async function convertNotesForOperation(operation: {
+async function noteConversionRun(operation: {
   workspace: PhysicalWorkspace<RegistryEntry>;
   assertCurrent(): void;
-}): Promise<ConvertNotesResult> {
+}): Promise<NoteConversionRun> {
   operation.assertCurrent();
   const sessions = desktopEngine.sessions;
   if (!sessions) throw new Error("Rust engine workspace sessions are unavailable.");
   const relay = await relayForNoteConversion(operation.workspace);
   const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
   const { workspaceId } = operation.workspace;
-  return convertNotesInWorkspace(workspaceId, {
+  return {
     relay,
-    assertCurrent: relay
-      ? () => operation.assertCurrent()
-      : stopsOnceSyncStarts(
-          () => operation.assertCurrent(),
-          () => Boolean(findWorkspace(workspaceId)?.remote),
-        ),
-    progress: (done, total) => {
-      for (const window of BrowserWindow.getAllWindows())
-        if (
-          !window.isDestroyed() &&
-          rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId
-        )
-          sendIfOpen(window, CHANNELS.noteConversionProgress, { workspaceId, done, total });
-    },
+    assertCurrent: stopsOnceSyncChanges(
+      () => operation.assertCurrent(),
+      relay !== null,
+      () => Boolean(findWorkspace(workspaceId)?.remote),
+    ),
+    progress: (done, total) =>
+      sendToWorkspaceWindows(CHANNELS.noteConversionProgress, {
+        workspaceId,
+        done,
+        total,
+      }),
     convert: (params) =>
       sessions.run(engineWorkspace, ({ client, workspace }) =>
         new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),
       ),
-  });
+  };
+}
+
+const convertNotesForOperation = async (operation: Parameters<typeof noteConversionRun>[0]) =>
+  convertNotesInWorkspace(operation.workspace.workspaceId, await noteConversionRun(operation));
+
+function convertClosedNote(
+  workspace: { workspaceId: string; attachmentId: symbol },
+  path: string,
+): void {
+  const { workspaceId, attachmentId } = workspace;
+  void convertNotesInWorkspace
+    .closed(workspaceId, path, (use) =>
+      withCurrentWorkspaceAttachmentOperation(workspace, async (operation) =>
+        use(await noteConversionRun(operation)),
+      ),
+    )
+    .then((retried) => {
+      if (retried && workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId))
+        sendToWorkspaceWindows(CHANNELS.noteConversionRetried, { workspaceId, path, ...retried });
+    });
 }
 
 // Relay-share HTTP: grant-side calls go to the SYNC RELAY (not the
@@ -8835,6 +8852,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   livePaused: (workspaceId, binding) =>
     holdsRoom(desktopEngine.ownerLivePauses(workspaceId), binding),
   onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
+  onOwnerClosed: convertClosedNote,
   onOwnerEdit: (workspaceId) => desktopEngine.ownerEditLanded(workspaceId),
   sessionFor: (sender) => rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,

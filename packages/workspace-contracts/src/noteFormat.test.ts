@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { leftNoteCount, leftNoteGroups } from "./noteFormat";
+import {
+  leftNoteCount,
+  leftNoteGroups,
+  withNoteRetried,
+  type ConvertNotesResult,
+} from "./noteFormat";
 
 const ENGINE_SKIP_REASONS = {
   "open-here": "Open on this computer",
@@ -51,5 +56,50 @@ describe("notes a conversion left", () => {
       { title: "Doesn't fit the new format", notes: [{ path: "big.md" }] },
     ]);
     expect(leftNoteCount(result)).toBe(6);
+  });
+});
+
+describe("a note retried once its editor closed", () => {
+  const last = {
+    ...empty,
+    converted: 4,
+    skipped: [
+      { path: "a.md", reason: "open-here" },
+      { path: "b.md", reason: "open-here" },
+    ],
+  };
+
+  it("takes a converted note off its group and counts it", () => {
+    const next = withNoteRetried(last, "a.md", { ...empty, converted: 1 }, true);
+    expect(next.converted).toBe(5);
+    expect(leftNoteGroups(next)).toEqual([
+      { title: "Open on this computer", notes: [{ path: "b.md" }] },
+    ]);
+  });
+
+  it("moves the note to the group its retry put it in", () => {
+    const moves: [ConvertNotesResult, string][] = [
+      [{ ...empty, doesNotFit: [{ path: "a.md" }] }, "Doesn't fit the new format"],
+      [{ ...empty, skipped: [{ path: "a.md", reason: "open-elsewhere" }] }, "Open elsewhere"],
+      [{ ...empty, failed: [{ path: "a.md", reason: "engine stopped" }] }, "Could not be read"],
+    ];
+    for (const [retried, title] of moves) {
+      const groups = leftNoteGroups(withNoteRetried(last, "a.md", retried, true));
+      expect(groups).toContainEqual({ title: "Open on this computer", notes: [{ path: "b.md" }] });
+      expect(groups.find((group) => group.title === title)?.notes[0]?.path).toBe("a.md");
+      expect(groups.flatMap(({ notes }) => notes)).toHaveLength(2);
+    }
+  });
+
+  it("keeps a stopped run's prompt to finish after a retry", () => {
+    const stopped = { ...last, sent: false, stopped: "dohc could not reach the relay." };
+    const next = withNoteRetried(stopped, "a.md", { ...empty, converted: 1 }, true);
+    expect(next.stopped).toBe("dohc could not reach the relay.");
+  });
+
+  it("counts earlier notes as sent once the retry drained the workspace, and not before", () => {
+    const unsent = { ...last, sent: false };
+    expect(withNoteRetried(unsent, "a.md", { ...empty, converted: 1 }, true).sent).toBe(true);
+    expect(withNoteRetried(unsent, "a.md", { ...empty, converted: 1 }, false).sent).toBe(false);
   });
 });

@@ -1407,11 +1407,13 @@ impl ActorHandle {
 
     /// Convert the next main note after `after` to format 2, skipping it when
     /// it is open under `here` or live on the relay in `elsewhere`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn convert_next_note(
         &self,
         workspace_id: String,
         root_dir: PathBuf,
         after: Option<String>,
+        only: Option<String>,
         here: dohc_engine_collab::LeaseRegistry,
         elsewhere: Option<std::sync::Arc<HashSet<String>>>,
         now_ms: i64,
@@ -1422,6 +1424,7 @@ impl ActorHandle {
                 cache,
                 &workspace_id,
                 after.as_deref(),
+                only.as_deref(),
                 1,
                 &here,
                 elsewhere.as_deref(),
@@ -4747,6 +4750,7 @@ pub(crate) fn convert_notes_on_store(
     cache: &mut WriterDocCache,
     workspace_id: &str,
     after: Option<&str>,
+    only: Option<&str>,
     budget: usize,
     here: &dohc_engine_collab::LeaseRegistry,
     elsewhere: Option<&HashSet<String>>,
@@ -4769,6 +4773,7 @@ pub(crate) fn convert_notes_on_store(
         store,
         workspace_id,
         after,
+        only,
         budget,
         here,
         &OpenElsewhere(elsewhere),

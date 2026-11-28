@@ -193,6 +193,7 @@ interface EngineYDocSessionIpcOptions {
   ) => boolean;
   /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  onOwnerClosed?: (workspace: EngineYDocWorkspace, path: string) => void;
   // An owner's edit of a shared note is in its queue for the server.
   onOwnerEdit?: (workspaceId: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
@@ -574,6 +575,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
   readonly #livePaused: EngineYDocSessionIpcOptions["livePaused"];
   readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
+  readonly #onOwnerClosed: EngineYDocSessionIpcOptions["onOwnerClosed"];
   readonly #onOwnerEdit: EngineYDocSessionIpcOptions["onOwnerEdit"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
@@ -602,6 +604,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#onLiveEditsPaused = options.onLiveEditsPaused;
     this.#livePaused = options.livePaused;
     this.#onOwnerOpened = options.onOwnerOpened;
+    this.#onOwnerClosed = options.onOwnerClosed;
     this.#onOwnerEdit = options.onOwnerEdit;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
@@ -1770,7 +1773,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   async close(sender: EngineYDocIpcSender, payload: ClosePayload): Promise<void> {
     const input = CloseEngineYDocSessionPayload.parse(payload);
     this.#admissionWaits.get(sender)?.get(input.sessionId)?.cancel.abort();
-    await this.#owner.release(this.#caller(sender, input.sessionId));
+    const caller = this.#caller(sender, input.sessionId);
+    const open = this.#owner.accessSession(caller, ({ workspace, path, provider }) => ({
+      workspace,
+      path,
+      owned: provider.contentKind === "richdoc" && !this.#isSharedView(workspace),
+    }));
+    const release = await this.#owner.release(caller);
+    if (release.kind === "released" && open.kind === "available" && open.value.owned)
+      this.#onOwnerClosed?.(open.value.workspace, open.value.path);
   }
 
   async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {

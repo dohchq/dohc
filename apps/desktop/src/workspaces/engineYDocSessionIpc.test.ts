@@ -163,6 +163,7 @@ interface TestHarnessOptions {
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  onOwnerClosed?: (workspace: { workspaceId: string; attachmentId: symbol }, path: string) => void;
   livePaused?: (
     workspaceId: string,
     binding: { readonly objectId: string; readonly lineageClaimId: string },
@@ -227,6 +228,7 @@ function harness(session = providerSession(), options: TestHarnessOptions = {}) 
     ownerDraftState: options.ownerDraftState,
     onPendingShareMayChange: options.onPendingShareMayChange,
     onOwnerOpened: options.onOwnerOpened,
+    onOwnerClosed: options.onOwnerClosed,
     livePaused: options.livePaused,
     resolveDocumentPath,
     onError,
@@ -320,6 +322,63 @@ describe("engine Y.Doc IPC adapter", () => {
       } finally {
         await h.ipc.shutdown();
       }
+    }
+  });
+
+  it.each([
+    ["an owner-bound note", { ownerBound: true }, false, true],
+    ["a plain unshared note", { ownerBound: false }, false, true],
+    ["a shared view's note", { ownerBound: true }, true, false],
+    [
+      "a close the engine refused",
+      {
+        ownerBound: true,
+        close: vi.fn(async () => {
+          throw new Error("still held");
+        }),
+      },
+      false,
+      false,
+    ],
+  ])(
+    "reports the owner's close of %s only once its release succeeds",
+    async (_name, input, shared, reported) => {
+      const onOwnerClosed = vi.fn();
+      const h = harness(providerSession(input), { onOwnerClosed });
+      const sender = new FakeSender(7);
+      try {
+        await h.ipc.open(sender, openPayload);
+        h.setReadOnly(shared);
+        expect(onOwnerClosed).not.toHaveBeenCalled();
+        await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+        expect(onOwnerClosed.mock.calls).toEqual(
+          reported
+            ? [
+                [
+                  expect.objectContaining({
+                    workspaceId: DOCUMENT.workspaceId,
+                    attachmentId: AUTHORITY_ID,
+                  }),
+                  DOCUMENT.path,
+                ],
+              ]
+            : [],
+        );
+      } finally {
+        await h.ipc.shutdown();
+      }
+      expect(onOwnerClosed).toHaveBeenCalledTimes(reported ? 1 : 0);
+    },
+  );
+
+  it("does not report an owner's close when the app shuts down or the workspace detaches", async () => {
+    for (const end of ["shutdown", "detach"] as const) {
+      const onOwnerClosed = vi.fn();
+      const h = harness(providerSession({ ownerBound: true }), { onOwnerClosed });
+      await h.ipc.open(new FakeSender(7), openPayload);
+      if (end === "detach") await h.ipc.retireAuthority(AUTHORITY_ID);
+      await h.ipc.shutdown();
+      expect(onOwnerClosed).not.toHaveBeenCalled();
     }
   });
 

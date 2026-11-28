@@ -14,6 +14,7 @@ use std::sync::Arc;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Params {
     after: Option<String>,
+    object_id: Option<String>,
     budget: usize,
     relay_live: Option<HashSet<String>>,
 }
@@ -66,6 +67,7 @@ impl EngineService {
                     open.workspace_id.clone(),
                     open.root.clone(),
                     after.clone(),
+                    params.object_id.clone(),
                     here.clone(),
                     relay_live.clone(),
                     now_ms()?,

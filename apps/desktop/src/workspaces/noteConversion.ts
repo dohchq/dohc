@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
+import { runInKeyedLane } from "../keyedLane";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { localPersonOwnsWorkspace } from "./localPersonOwns";
 import type { RegistryEntry } from "./registryStore";
@@ -64,6 +65,7 @@ const EnginePass = z.object({
   resumeAfter: z.string().nullable(),
   total: z.number().int().nonnegative(),
 });
+type EnginePass = z.output<typeof EnginePass>;
 
 const LiveNotes = z.object({
   engineApiMin: z.unknown().optional(),
@@ -77,15 +79,25 @@ export interface NoteConversionRelay {
 
 export interface NoteConversionRun {
   relay: NoteConversionRelay | null;
-  convert(params: { after?: string; budget: number; relayLive?: string[] }): Promise<unknown>;
+  convert(params: {
+    after?: string;
+    objectId?: string;
+    budget: number;
+    relayLive?: string[];
+  }): Promise<unknown>;
   assertCurrent(): void;
   progress?(done: number, total: number): void;
 }
 
-export function stopsOnceSyncStarts(assertCurrent: () => void, syncing: () => boolean): () => void {
+export function stopsOnceSyncChanges(
+  assertCurrent: () => void,
+  synced: boolean,
+  syncing: () => boolean,
+): () => void {
   return () => {
     assertCurrent();
-    if (syncing()) throw new Error(NOTE_CONVERSION_SYNC_STARTED);
+    if (syncing() !== synced)
+      throw new Error(synced ? NOTE_CONVERSION_PAUSED : NOTE_CONVERSION_SYNC_STARTED);
   };
 }
 
@@ -114,87 +126,154 @@ async function liveAboveFloor(relay: NoteConversionRelay): Promise<string[]> {
   return notes.map(({ objectId }) => objectId);
 }
 
+const emptyResult = (): ConvertNotesResult => ({
+  converted: 0,
+  unchanged: 0,
+  skipped: [],
+  doesNotFit: [],
+  failed: [],
+  sent: true,
+});
+
+const sent = (relay: NoteConversionRelay) =>
+  relay.drainRecorded().then(
+    () => true,
+    () => false,
+  );
+
+function addPass(result: ConvertNotesResult, pass: EnginePass): void {
+  if (pass.off) throw new Error(NOTE_CONVERSION_OFF);
+  result.converted += pass.converted;
+  result.unchanged += pass.unchanged;
+  result.skipped.push(...pass.skipped.map(({ path, reason }) => ({ path, reason })));
+  result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
+  result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
+}
+
+type Retried = { result: ConvertNotesResult; drained: boolean } | null;
+
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const running = new Set<string>();
-  return async function convertNotes(
+  const turns = new Map<string, Promise<void>>();
+  const openHere = new Map<string, Map<string, string>>();
+  const forget = (workspaceId: string, path: string) => {
+    const here = openHere.get(workspaceId);
+    here?.delete(path);
+    if (here?.size === 0) openHere.delete(workspaceId);
+  };
+  const record = (workspaceId: string, here: Map<string, string>) => {
+    if (here.size > 0) openHere.set(workspaceId, here);
+    else openHere.delete(workspaceId);
+  };
+
+  const closed = (
+    workspaceId: string,
+    path: string,
+    withRun: (use: (run: NoteConversionRun) => Promise<Retried>) => Promise<Retried | undefined>,
+  ): Promise<Retried> =>
+    runInKeyedLane(turns, workspaceId, async () => {
+      const objectId = openHere.get(workspaceId)?.get(path);
+      if (objectId === undefined) return null;
+      try {
+        const retried = await withRun(async (run) => {
+          run.assertCurrent();
+          const { relay } = run;
+          if (relay) await relay.drainRecorded();
+          const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
+          run.assertCurrent();
+          const pass = EnginePass.parse(await run.convert({ objectId, budget: 1, ...relayLive }));
+          if (pass.skipped.some(({ reason }) => reason === "open-here")) return null;
+          const result = emptyResult();
+          addPass(result, pass);
+          if (pass.failed.length === 0) forget(workspaceId, path);
+          if (relay && result.converted > 0) result.sent = await sent(relay);
+          return { result, drained: result.sent };
+        });
+        return retried ?? null;
+      } catch (error) {
+        forget(workspaceId, path);
+        const reason = error instanceof Error ? error.message : String(error);
+        return { result: { ...emptyResult(), failed: [{ path, reason }] }, drained: false };
+      }
+    });
+
+  async function convertNotes(
     workspaceId: string,
     run: NoteConversionRun,
   ): Promise<ConvertNotesResult> {
     if (running.has(workspaceId)) throw new Error(NOTE_CONVERSION_RUNNING);
     running.add(workspaceId);
     try {
-      const { relay } = run;
-      run.assertCurrent();
-      if (relay) {
-        await liveAboveFloor(relay);
-        await relay.drainRecorded();
-      }
-      const result: ConvertNotesResult = {
-        converted: 0,
-        unchanged: 0,
-        skipped: [],
-        doesNotFit: [],
-        failed: [],
-        sent: true,
-      };
-      const report = (done: number, total: number) => {
-        try {
-          run.progress?.(done, total);
-        } catch {}
-      };
-      try {
-        let after: string | undefined;
-        let more = true;
-        while (more) {
-          run.assertCurrent();
-          const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
-          const before = result.converted;
-          for (let note = 0; note < batch && more; note += 1) {
-            run.assertCurrent();
-            const pass = EnginePass.parse(
-              await run.convert({
-                ...(after === undefined ? {} : { after }),
-                budget: 1,
-                ...relayLive,
-              }),
-            );
-            if (pass.off) throw new Error(NOTE_CONVERSION_OFF);
-            result.converted += pass.converted;
-            result.unchanged += pass.unchanged;
-            result.skipped.push(...pass.skipped.map(({ path, reason }) => ({ path, reason })));
-            result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
-            result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
-            const done =
-              result.converted +
-              result.unchanged +
-              result.skipped.length +
-              result.doesNotFit.length +
-              result.failed.length;
-            report(done, Math.max(done, pass.total));
-            if (pass.resumeAfter === null) more = false;
-            else if (pass.resumeAfter === after) throw new Error(NOTE_CONVERSION_STUCK);
-            else after = pass.resumeAfter;
-          }
-          if (more && relay && result.converted > before) await relay.drainRecorded();
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message === "note-format-two-relay-unchecked")
-          throw new Error(NOTE_CONVERSION_SYNCED_BEFORE, { cause: error });
-        if (result.converted === 0) throw error;
-        return {
-          ...result,
-          sent: false,
-          stopped: error instanceof Error ? error.message : String(error),
-        };
-      }
-      if (relay && result.converted > 0)
-        result.sent = await relay.drainRecorded().then(
-          () => true,
-          () => false,
-        );
-      return result;
+      return await runInKeyedLane(turns, workspaceId, () => convertAll(workspaceId, run));
     } finally {
       running.delete(workspaceId);
     }
-  };
+  }
+
+  async function convertAll(
+    workspaceId: string,
+    run: NoteConversionRun,
+  ): Promise<ConvertNotesResult> {
+    const here = new Map<string, string>();
+    const { relay } = run;
+    run.assertCurrent();
+    if (relay) {
+      await liveAboveFloor(relay);
+      await relay.drainRecorded();
+    }
+    const result = emptyResult();
+    const report = (done: number, total: number) => {
+      try {
+        run.progress?.(done, total);
+      } catch {}
+    };
+    try {
+      let after: string | undefined;
+      let more = true;
+      while (more) {
+        run.assertCurrent();
+        const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
+        const before = result.converted;
+        for (let note = 0; note < batch && more; note += 1) {
+          run.assertCurrent();
+          const pass = EnginePass.parse(
+            await run.convert({
+              ...(after === undefined ? {} : { after }),
+              budget: 1,
+              ...relayLive,
+            }),
+          );
+          addPass(result, pass);
+          for (const { objectId, path, reason } of pass.skipped)
+            if (reason === "open-here") here.set(path, objectId);
+          const done =
+            result.converted +
+            result.unchanged +
+            result.skipped.length +
+            result.doesNotFit.length +
+            result.failed.length;
+          report(done, Math.max(done, pass.total));
+          if (pass.resumeAfter === null) more = false;
+          else if (pass.resumeAfter === after) throw new Error(NOTE_CONVERSION_STUCK);
+          else after = pass.resumeAfter;
+        }
+        if (more && relay && result.converted > before) await relay.drainRecorded();
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === "note-format-two-relay-unchecked")
+        throw new Error(NOTE_CONVERSION_SYNCED_BEFORE, { cause: error });
+      if (result.converted === 0) throw error;
+      record(workspaceId, here);
+      return {
+        ...result,
+        sent: false,
+        stopped: error instanceof Error ? error.message : String(error),
+      };
+    }
+    record(workspaceId, here);
+    if (relay && result.converted > 0) result.sent = await sent(relay);
+    return result;
+  }
+
+  return Object.assign(convertNotes, { closed });
 }

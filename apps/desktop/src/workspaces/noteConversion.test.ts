@@ -11,11 +11,11 @@ import {
   noteConversionOffered,
   noteConversionReach,
   engineNoteBodySequence,
-  stopsOnceSyncStarts,
+  stopsOnceSyncChanges,
   type NoteConversionRelay,
 } from "./noteConversion";
 
-type Params = { after?: string; budget: number; relayLive?: string[] };
+type Params = { after?: string; objectId?: string; budget: number; relayLive?: string[] };
 type Outcome = Record<string, unknown> | Error;
 
 function pass(overrides: Record<string, unknown> = {}) {
@@ -443,8 +443,9 @@ describe("note conversion run", () => {
     const run = await createNoteConversion(2)("ws", {
       relay: null,
       convert,
-      assertCurrent: stopsOnceSyncStarts(
+      assertCurrent: stopsOnceSyncChanges(
         () => undefined,
+        false,
         () => syncing,
       ),
     });
@@ -454,6 +455,29 @@ describe("note conversion run", () => {
       sent: false,
       stopped: "Sync was turned on while dohc converted notes.",
     });
+    expect(convert).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops before the next note once sync is paused in a synced workspace", async () => {
+    let syncing = true;
+    const outcomes = oneNoteAtATime(converted(4));
+    const convert = vi.fn(async (params: Params) => {
+      const answer = await outcomes(params);
+      if (outcomes.mock.calls.length === 2) syncing = false;
+      return answer;
+    });
+
+    const run = await createNoteConversion(10)("ws", {
+      relay: relay(),
+      convert,
+      assertCurrent: stopsOnceSyncChanges(
+        () => undefined,
+        true,
+        () => syncing,
+      ),
+    });
+
+    expect(run).toMatchObject({ converted: 2, sent: false, stopped: NOTE_CONVERSION_PAUSED });
     expect(convert).toHaveBeenCalledTimes(2);
   });
 
@@ -524,6 +548,210 @@ describe("note conversion run", () => {
       }),
     ).resolves.toMatchObject({ converted: 2 });
     expect(progress).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("converting a note once its editor closes", () => {
+  const skippedAs = (objectId: string, reason: string) => ({
+    skipped: [{ objectId, path: `${objectId}.md`, reason }],
+  });
+  const result = (overrides: Record<string, unknown> = {}) => ({
+    converted: 0,
+    unchanged: 0,
+    skipped: [],
+    doesNotFit: [],
+    failed: [],
+    sent: true,
+    ...overrides,
+  });
+
+  async function afterRun(outcomes: Outcome[]) {
+    const conversion = createNoteConversion();
+    await conversion("ws", {
+      relay: relay(),
+      convert: oneNoteAtATime(outcomes),
+      assertCurrent: () => undefined,
+    });
+    return conversion;
+  }
+
+  function closing(
+    conversion: Awaited<ReturnType<typeof afterRun>>,
+    path: string,
+    answer: Outcome,
+    remote = relay(),
+  ) {
+    const convert = vi.fn(async (_params: Params) => {
+      if (answer instanceof Error) throw answer;
+      return pass(answer);
+    });
+    const done = conversion.closed("ws", path, (use) =>
+      use({ relay: remote, convert, assertCurrent: () => undefined }),
+    );
+    return { convert, done, remote };
+  }
+
+  it("pushes, reads the live list, converts that one note, then pushes again", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here"), { converted: 1 }]);
+    const order: string[] = [];
+    const remote = relay({
+      drainRecorded: vi.fn(async () => void order.push("push")),
+      liveNotes: vi.fn(async () => (order.push("live"), live(["live-1"]))),
+    });
+    const { convert, done } = closing(conversion, "a.md", { converted: 1 }, remote);
+    await expect(done).resolves.toEqual({ result: result({ converted: 1 }), drained: true });
+    expect(convert).toHaveBeenCalledExactlyOnceWith({
+      objectId: "a",
+      budget: 1,
+      relayLive: ["live-1"],
+    });
+    expect(order).toEqual(["push", "live", "push"]);
+    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toBeNull();
+  });
+
+  it("sends no live list when the workspace has no relay", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const convert = vi.fn(async (_params: Params) => pass({ converted: 1 }));
+    await conversion.closed("ws", "a.md", (use) =>
+      use({ relay: null, convert, assertCurrent: () => undefined }),
+    );
+    expect(convert).toHaveBeenCalledExactlyOnceWith({ objectId: "a", budget: 1 });
+  });
+
+  it("says the workspace is not drained when the push after the conversion fails", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    let pushes = 0;
+    const remote = relay({
+      drainRecorded: vi.fn(async () => {
+        pushes += 1;
+        if (pushes === 2) throw new Error("relay down");
+      }),
+    });
+    await expect(closing(conversion, "a.md", { converted: 1 }, remote).done).resolves.toEqual({
+      result: result({ converted: 1, sent: false }),
+      drained: false,
+    });
+  });
+
+  it("does not retry a note skipped as open elsewhere when the same path closes here", async () => {
+    const conversion = await afterRun([skippedAs("b", "open-elsewhere")]);
+    const { convert, done, remote } = closing(conversion, "b.md", { converted: 1 });
+    await expect(done).resolves.toBeNull();
+    expect(convert).not.toHaveBeenCalled();
+    expect(remote.drainRecorded).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for a closed note the last run did not skip", async () => {
+    const conversion = await afterRun([{ converted: 1 }]);
+    const { convert, done } = closing(conversion, "a.md", { converted: 1 });
+    await expect(done).resolves.toBeNull();
+    expect(convert).not.toHaveBeenCalled();
+  });
+
+  it("keeps a note that is open here again and retries it on its next close", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    await expect(closing(conversion, "a.md", skippedAs("a", "open-here")).done).resolves.toBeNull();
+    const again = closing(conversion, "a.md", { converted: 1 });
+    await expect(again.done).resolves.toMatchObject({ result: { converted: 1 } });
+    expect(again.convert).toHaveBeenCalledOnce();
+  });
+
+  it("moves a note that does not fit, and stops retrying it", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const overweight = { doesNotFit: [{ objectId: "a", path: "a.md" }] };
+    await expect(closing(conversion, "a.md", overweight).done).resolves.toMatchObject({
+      result: { converted: 0, doesNotFit: [{ path: "a.md" }] },
+    });
+    const later = closing(conversion, "a.md", { converted: 1 });
+    await expect(later.done).resolves.toBeNull();
+    expect(later.convert).not.toHaveBeenCalled();
+  });
+
+  it("moves a note whose retry fails into the failed group with the reason, and leaves it to Convert remaining", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    await expect(
+      closing(conversion, "a.md", new Error(NOTE_CONVERSION_PAUSED)).done,
+    ).resolves.toEqual({
+      result: result({ failed: [{ path: "a.md", reason: NOTE_CONVERSION_PAUSED }] }),
+      drained: false,
+    });
+    const later = closing(conversion, "a.md", { converted: 1 });
+    await expect(later.done).resolves.toBeNull();
+    expect(later.convert).not.toHaveBeenCalled();
+  });
+
+  it("stops a retry whose sync is paused after it read the live notes, before the engine converts", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    let syncing = true;
+    const remote = relay({
+      liveNotes: vi.fn(async () => ((syncing = false), live([]))),
+    });
+    const convert = vi.fn(async () => pass({ converted: 1 }));
+    const done = conversion.closed("ws", "a.md", (use) =>
+      use({
+        relay: remote,
+        convert,
+        assertCurrent: stopsOnceSyncChanges(
+          () => undefined,
+          true,
+          () => syncing,
+        ),
+      }),
+    );
+    await expect(done).resolves.toMatchObject({
+      result: { failed: [{ path: "a.md", reason: NOTE_CONVERSION_PAUSED }] },
+    });
+    expect(convert).not.toHaveBeenCalled();
+  });
+
+  it("keeps retrying a note the engine could not read this time", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const unread = { failed: [{ objectId: "a", path: "a.md", reason: "busy" }] };
+    await expect(closing(conversion, "a.md", unread).done).resolves.toMatchObject({
+      result: { failed: [{ path: "a.md", reason: "busy" }] },
+    });
+    const later = closing(conversion, "a.md", { converted: 1 });
+    await expect(later.done).resolves.toMatchObject({ result: { converted: 1 } });
+    expect(later.convert).toHaveBeenCalledOnce();
+  });
+
+  it("files a failure, rather than rejecting, when the workspace cannot be reached at all", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const done = conversion.closed("ws", "a.md", () => {
+      throw new Error("This workspace was closed.");
+    });
+    await expect(done).resolves.toEqual({
+      result: result({ failed: [{ path: "a.md", reason: "This workspace was closed." }] }),
+      drained: false,
+    });
+    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toBeNull();
+  });
+
+  it("drops the retry quietly when the workspace it closed in is gone", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    await expect(conversion.closed("ws", "a.md", async () => undefined)).resolves.toBeNull();
+    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toMatchObject({
+      result: { converted: 1 },
+    });
+  });
+
+  it("waits for a running Convert notes pass and retries a note it skipped as open here", async () => {
+    const conversion = createNoteConversion();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const running = conversion("ws", {
+      relay: relay(),
+      convert: vi.fn(async () => {
+        await gate;
+        return pass(skippedAs("a", "open-here"));
+      }),
+      assertCurrent: () => undefined,
+    });
+    const { convert, done } = closing(conversion, "a.md", { converted: 1 });
+    release();
+    await running;
+    await expect(done).resolves.toMatchObject({ result: { converted: 1 } });
+    expect(convert).toHaveBeenCalledOnce();
   });
 });
 
