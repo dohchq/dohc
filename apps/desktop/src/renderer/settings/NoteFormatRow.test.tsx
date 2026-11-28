@@ -1,40 +1,20 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 import type { NoteConversionState } from "../shell/useNoteConversion";
 import { NoteFormatRow } from "./NoteFormatRow";
 
-function show(
-  state: NoteConversionState,
-  options: { converts?: boolean; sharedView?: boolean } = {},
-) {
-  window.dohcDesktop = { convertsNotes: options.converts ?? true } as unknown as DohcDesktopBridge;
+function show(state: NoteConversionState) {
   const start = vi.fn();
-  render(
-    <NoteFormatRow
-      conversion={{ state, start }}
-      workspaceName="Trip"
-      sharedView={options.sharedView ?? false}
-    />,
-  );
+  render(<NoteFormatRow conversion={{ state, start }} workspaceName="Trip" />);
   return start;
 }
 
 afterEach(() => {
   cleanup();
-  delete window.dohcDesktop;
 });
 
 describe("Settings › Advanced › Note format", () => {
-  it("is hidden while the engine does not write the new format, and in a shared view", () => {
-    show({ status: "idle" }, { converts: false });
-    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
-    cleanup();
-    show({ status: "idle" }, { sharedView: true });
-    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
-  });
-
   it("asks first, says it cannot be undone, and converts only on the danger button", () => {
     const start = show({ status: "idle" });
     expect(screen.getByText("Convert this workspace's notes to the new format.")).toBeTruthy();

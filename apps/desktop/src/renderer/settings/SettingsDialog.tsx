@@ -1182,13 +1182,12 @@ export function SettingsDialog(props: {
                 workspaceId={props.workspaceId}
                 {...(props.onError ? { onError: props.onError } : {})}
               />
-              {props.noteConversion ? (
+              {props.noteConversion && bridge().convertsNotes && !props.sharedView ? (
                 <NoteFormatRow
                   conversion={props.noteConversion}
                   workspaceName={
                     props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
                   }
-                  sharedView={!!props.sharedView}
                 />
               ) : null}
               <SettingRow

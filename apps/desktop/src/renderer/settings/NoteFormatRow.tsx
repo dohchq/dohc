@@ -1,23 +1,30 @@
 import { FileText } from "lucide-react";
 import { useState } from "react";
-import { bridge } from "../bridge";
 import { convertedWords, type NoteConversion } from "../shell/useNoteConversion";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { SecondaryButton } from "../ui/controls";
 import { SettingRow } from "./SettingRow";
 
-/**
- * Settings › Advanced › Note format: converts the owner's notes to the new
- * format once the engine writes it. Shared views never show it.
- */
-export function NoteFormatRow(props: {
-  conversion: NoteConversion;
-  workspaceName: string;
-  sharedView: boolean;
-}) {
+/** What Convert notes asks before it runs. */
+export function convertNotesConfirm(workspaceName: string) {
+  return {
+    title: `Convert notes in ${workspaceName} to the new format`,
+    icon: FileText,
+    intent: "danger" as const,
+    confirmLabel: "Convert notes",
+    children: (
+      <p className="m-0">
+        Every computer and phone that opens this workspace must run this version of dohc or a later
+        one first. This cannot be undone.
+      </p>
+    ),
+  };
+}
+
+/** Settings › Advanced › Note format: converts the owner's notes to the new format. */
+export function NoteFormatRow(props: { conversion: NoteConversion; workspaceName: string }) {
   const { state, start } = props.conversion;
   const [confirming, setConfirming] = useState(false);
-  if (!bridge().convertsNotes || props.sharedView) return null;
 
   const description =
     state.status === "running" ? (
@@ -60,10 +67,7 @@ export function NoteFormatRow(props: {
       )}
       {confirming ? (
         <ConfirmDialog
-          title={`Convert notes in ${props.workspaceName} to the new format`}
-          icon={FileText}
-          intent="danger"
-          confirmLabel="Convert notes"
+          {...convertNotesConfirm(props.workspaceName)}
           testId="settings-confirm-convert-notes"
           cancelTestId="settings-cancel-convert-notes"
           confirmTestId="settings-confirm-convert-notes-action"
@@ -72,12 +76,7 @@ export function NoteFormatRow(props: {
             setConfirming(false);
             start();
           }}
-        >
-          <p className="m-0">
-            Every computer and phone that opens this workspace must run this version of dohc or a
-            later one first. This cannot be undone.
-          </p>
-        </ConfirmDialog>
+        />
       ) : null}
     </SettingRow>
   );

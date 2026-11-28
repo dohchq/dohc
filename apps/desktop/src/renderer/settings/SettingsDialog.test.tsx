@@ -164,6 +164,7 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 }
 
 const bridge = {
+  convertsNotes: false,
   onWorkspaceActivity: vi.fn(() => () => {}),
   listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({
@@ -1727,4 +1728,37 @@ it("shows Members in a joined workspace, which lists the owner's people", async 
   expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
   fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
   expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
+});
+
+it("offers Note format in Advanced only while the engine writes the new format, never in a shared view", async () => {
+  const noteConversion = { state: { status: "idle" as const }, start: vi.fn() };
+  const advanced = (sharedView: boolean) =>
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x/Trip"
+        initialSection="advanced"
+        sharedView={sharedView}
+        noteConversion={noteConversion}
+        onClose={vi.fn()}
+      />,
+    );
+  try {
+    advanced(false);
+    await screen.findByTestId("settings-row-reset-workspace");
+    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
+    cleanup();
+
+    bridge.convertsNotes = true;
+    advanced(false);
+    expect(await screen.findByTestId("settings-row-note-format")).toBeTruthy();
+    cleanup();
+
+    advanced(true);
+    await screen.findByTestId("settings-dialog");
+    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
+  } finally {
+    bridge.convertsNotes = false;
+  }
 });
