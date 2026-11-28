@@ -75,8 +75,15 @@ const OWNER_READ_STATE: Readonly<Record<string, unknown>> = {
  * A chat answer as a Member reads it: every file link their reach doesn't cover reads "(a file not shared here)", as
  * in their browser, and no unread count or read place of the owner's shows.
  */
-export function memberChatAnswer<Answer>(member: PhoneMember, answer: Answer): Answer {
+export function memberChatAnswer<Answer>(
+  member: PhoneMember,
+  answer: Answer,
+  channels?: readonly { channelWireId: string; type: "posts" | "chat" | "both" }[],
+): Answer {
   const files = workspaceFileReach(member.selector);
+  const channelTypes = channels
+    ? new Map(channels.map((channel) => [channel.channelWireId, channel.type]))
+    : null;
   const served = (value: unknown, key?: string): unknown => {
     if (key !== undefined && Object.hasOwn(OWNER_READ_STATE, key)) return OWNER_READ_STATE[key];
     if (typeof value === "string") return withheldLinkText(value, files);
@@ -91,6 +98,8 @@ export function memberChatAnswer<Answer>(member: PhoneMember, answer: Answer): A
             ? "read-only"
             : workspaceChatAccess(member.selector, record.channelWireId),
         ]);
+        const type = channelTypes?.get(record.channelWireId);
+        if (type !== undefined) entries.push(["type", type]);
       }
       return Object.fromEntries(entries);
     }

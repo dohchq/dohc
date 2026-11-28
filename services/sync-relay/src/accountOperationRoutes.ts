@@ -438,7 +438,7 @@ export function createAccountOperationRoute(options: {
             refusal: "missing",
             reason: `chat thread not found: ${parsed.operation === "reply" ? parsed.args.threadId : ""}`,
           });
-        const authorizeMemberAppend = () => {
+        const authorizeMemberGroup = (action: "read" | "append") => {
           const role = storage.phoneRole(caller.userId, route.workspaceId);
           if (
             role === null ||
@@ -461,7 +461,7 @@ export function createAccountOperationRoute(options: {
           const granted = authorizeShareGrantAction({
             storage,
             grantId: fresh.grantId,
-            action: "append",
+            action,
             principal: { kind: "user", userId: caller.userId },
           });
           if (!granted.ok)
@@ -472,15 +472,17 @@ export function createAccountOperationRoute(options: {
             !isWorkspaceSelector(granted.effectiveSelector)
           )
             throw notFound();
-          if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
-            throw relayError("share_read_only");
-          if (
-            parsed.operation === "post" &&
-            storage
-              .listChannelCreates(route.workspaceId)
-              .find((group) => group.channelWireId === channelWireId)?.type === "chat"
-          )
-            throw relayError("share_op_rejected");
+          if (action === "append") {
+            if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
+              throw relayError("share_read_only");
+            if (
+              parsed.operation === "post" &&
+              storage
+                .listChannelCreates(route.workspaceId)
+                .find((group) => group.channelWireId === channelWireId)?.type === "chat"
+            )
+              throw relayError("share_op_rejected");
+          }
           return {
             share: { shareId: granted.share.shareId, workspaceId: granted.share.workspaceId },
             effectiveSelector: granted.effectiveSelector,
@@ -495,21 +497,26 @@ export function createAccountOperationRoute(options: {
             humanOnly: true,
             allowPostParent: true,
             redactFileLinks: true,
+            bindRequest: true,
             channelWireId,
             id: parsed.args.operationId,
             body: parsed.args.body,
             ...(parsed.operation === "post"
               ? { lane: "posts" as const, title: parsed.args.title }
               : { threadId: parsed.args.threadId, parentMessageId: parsed.args.parentMessageId }),
-            authorKind: "human",
-            authorUserId: caller.userId,
-            hasAuthorDisplayName: false,
             nowMs: () => options.nowMs(),
             signal: visitor.signal,
             lookupUserDisplayName: options.lookupUserDisplayName,
             refreshMentionAccountNames: options.refreshMentionAccountNames,
             activity: options.activity,
-            authorizeAppend: authorizeMemberAppend,
+            authorizeRetry: () => {
+              authorizeMemberGroup("read");
+            },
+            authorizeAppend: () => authorizeMemberGroup("append"),
+            requireParentMessage: (tid, parentId) => {
+              if (!storage.hasThreadMessage(route.workspaceId, tid, parentId))
+                throw new MemberTargetMissing(`chat message not found: ${parentId}`);
+            },
             afterNameLookup: () => check(false),
           });
           return await replyAnswer({

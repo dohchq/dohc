@@ -45,7 +45,6 @@ import {
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
-import type { BrowserPostWakes } from "./storage/chatWakes";
 import type { MemberReach } from "./storage/memberReach";
 import { StaleReferenceCollection } from "./storage/workReferences";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -56,18 +55,6 @@ export const MEMBER_IDENTITY_MAX_AGE_MS = 60_000;
 export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
-
-/**
- * The owner's browser post, which only the relay's named chat sends. `authorize` throws once the owner's access ends.
- * `wakes` become rows with a new message, in its append.
- */
-export interface OwnerBrowserPost {
-  originId: string;
-  authorize(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
-    share: { shareId: string; workspaceId: string };
-  };
-  wakes?: BrowserPostWakes;
-}
 
 /** What a share reaches, without its level. */
 function shareScopeKey(selector: AnyShareSelector): string {
@@ -152,7 +139,6 @@ export function createNamedShareTransportRoutes(
     | "messageDeleted"
     | "deletedMessageCount"
     | "appendLogBatch"
-    | "appendBrowserChatBatch"
     | "putBlob"
     | "listWorkReferences"
     | "shareLogHead"
@@ -185,8 +171,6 @@ export function createNamedShareTransportRoutes(
     request: Request,
     route: NamedShareTransportRoute,
     actor: { userId: string },
-    browserMessageId?: string,
-    owner?: OwnerBrowserPost,
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
@@ -475,9 +459,8 @@ export function createNamedShareTransportRoutes(
     // replicas: the fail-closed share/channel filter governs their appends,
     // so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
-      if (browserMessageId === undefined) await claimPendingShares(actor.userId);
-      const appendable = () =>
-        owner ? owner.authorize() : requireShareAction(route.shareId, actor.userId, "append");
+      await claimPendingShares(actor.userId);
+      const appendable = () => requireShareAction(route.shareId, actor.userId, "append");
       const authorized = appendable();
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const input = await readJsonObject(request);
@@ -489,7 +472,7 @@ export function createNamedShareTransportRoutes(
       if (originId.startsWith(PROPOSAL_ORIGIN_PREFIX)) {
         throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
       }
-      if (originId === "browser-chat" && browserMessageId === undefined) {
+      if (originId === "browser-chat") {
         throw badRequest("originId is reserved for browser chat");
       }
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -596,10 +579,10 @@ export function createNamedShareTransportRoutes(
         if (mentionBodies.length > 0)
           await refreshMentionAccountNames(share.workspaceId, mentionBodies);
       }
-      const batch = {
+      const result = storage.appendLogBatch({
         workspaceId: share.workspaceId,
         // Authentication, not the caller, selects the member sequence space.
-        originId: owner?.originId ?? namedShareOrigin(share.shareId, actor.userId, originId),
+        originId: namedShareOrigin(share.shareId, actor.userId, originId),
         ops,
         // Close the revoke race completely: the share is re-verified inside
         // the append's own BEGIN IMMEDIATE transaction (the same write lock
@@ -611,7 +594,7 @@ export function createNamedShareTransportRoutes(
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
         guard: () => {
-          if (!owner) shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
+          shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
           const fresh = appendable();
           for (const op of ops) {
             if (
@@ -621,15 +604,7 @@ export function createNamedShareTransportRoutes(
               throw relayError("share_op_rejected");
           }
         },
-      };
-      const result =
-        browserMessageId === undefined
-          ? storage.appendLogBatch(batch)
-          : storage.appendBrowserChatBatch({
-              ...batch,
-              messageId: browserMessageId,
-              ...(owner?.wakes ? { wakes: owner.wakes } : {}),
-            });
+      });
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }

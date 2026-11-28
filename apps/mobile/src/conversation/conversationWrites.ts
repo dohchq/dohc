@@ -23,7 +23,10 @@ export interface Lanes {
   readonly send: boolean;
 }
 
-export const JOINED_GROUP_LANES: Lanes = { post: true, send: false };
+export const joinedGroupLanes = (group: { readonly type?: "posts" | "chat" | "both" }): Lanes => ({
+  post: group.type !== "chat",
+  send: false,
+});
 
 export function groupForStream<
   Group extends { readonly id: string; readonly channelWireId?: string },

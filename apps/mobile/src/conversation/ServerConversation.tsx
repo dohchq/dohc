@@ -59,7 +59,7 @@ import {
   chatWrite,
   createWriteScope,
   groupForStream,
-  JOINED_GROUP_LANES,
+  joinedGroupLanes,
   lanesOf,
   replyWrite,
   routeReply,
@@ -165,7 +165,7 @@ export function ServerConversation() {
         groupId={streamId}
         postGroupId={listedGroup.channelWireId}
         name={name ?? listedGroup.name}
-        lanes={JOINED_GROUP_LANES}
+        lanes={joinedGroupLanes(listedGroup)}
         lanesProblem={null}
         joined
       />
@@ -526,7 +526,8 @@ function WritableStream({
           setReplyTo((current) => (current === chosen ? null : current));
         return outcome;
       }
-      if (joined && kind === "send") return { kind: "blocked" as const };
+      if (joined && (kind === "send" || (kind === "post" && !lanes?.post)))
+        return { kind: "blocked" as const };
       const write = chatWrite(
         kind === "send" ? { kind, streamId: groupId } : { kind, groupId: postGroupId },
         body,
@@ -534,7 +535,7 @@ function WritableStream({
       );
       return write ? writes.submit(workspaceId, write) : { kind: "blocked" as const };
     },
-    [writes, workspaceId, groupId, postGroupId, joined, replyTo],
+    [writes, workspaceId, groupId, postGroupId, joined, lanes, replyTo],
   );
   const cancelReply = useCallback(() => setReplyTo(null), []);
   const composer = useMemo(

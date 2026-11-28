@@ -1578,12 +1578,22 @@ export interface SyncRelayStorage {
     originId: string;
     messageId: string;
   }): SyncRelayLogRow | null;
+  hasThreadMessage(workspaceId: string, threadId: string, messageId: string): boolean;
+  lookupBrowserChatBinding(input: {
+    workspaceId: string;
+    originId: string;
+    messageId: string;
+    requestHash: string;
+    guard?: () => void;
+  }): { threadId: string } | null;
   appendBrowserChatBatch(input: {
     workspaceId: string;
     originId: string;
     messageId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    requestHash?: string;
+    retryGuard?: () => void;
     wakes?: import("./chatWakes").BrowserPostWakes;
   }): AppendLogBatchResult;
   appendLinkChatPost(

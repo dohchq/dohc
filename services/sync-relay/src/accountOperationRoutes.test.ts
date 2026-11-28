@@ -4732,9 +4732,18 @@ describe("a Member's phone reads in a workspace they joined", () => {
     ).toHaveLength(0);
   });
 
-  it("refuses a joined Member's post to a chat-only Group without appending into its chat lane", async () => {
-    const { h, storage } = await joinedChat({ copies: false });
-    const chatOnlyWire = "wire-chat-only";
+  it("refuses a joined Member's post to a chat-only Group without appending into its chat lane, and exposes Group type on groupsFull", async () => {
+    const { h, storage, engine, planningWire } = await joinedChat();
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const created = await chats.createChannel({
+      workspaceId: "trip",
+      name: "Watercooler",
+      kind: "channel",
+      type: "chat",
+    });
+    const chatOnlyWire =
+      (await chats.getChannelWireId({ workspaceId: "trip", channelId: created.channelId })) ??
+      "wire-chat-only";
     storage.appendLogBatch({
       workspaceId: "trip",
       originId: "owner-chat-only",
@@ -4743,7 +4752,7 @@ describe("a Member's phone reads in a workspace they joined", () => {
           originSeq: 0,
           opKind: "chat.channel.create",
           payloadJson: JSON.stringify({
-            channelId: "channel-chat-only",
+            channelId: created.channelId,
             wireId: chatOnlyWire,
             name: "Watercooler",
             slug: "watercooler",
@@ -4754,6 +4763,16 @@ describe("a Member's phone reads in a workspace they joined", () => {
           recordedAtMs: 5,
         },
       ],
+    });
+    const listed = await answer(await h(op("trip", "groupsFull", {}, asBen)));
+    const listedGroups = listed.groups as Array<Record<string, unknown>>;
+    expect(listedGroups.find((g) => g.channelWireId === planningWire)).toMatchObject({
+      access: "read-write",
+      type: "both",
+    });
+    expect(listedGroups.find((g) => g.channelWireId === chatOnlyWire)).toMatchObject({
+      access: "read-write",
+      type: "chat",
     });
     const res = await h(
       op(
@@ -4774,5 +4793,277 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
         .rows.filter((row) => row.originId === memberOrigin),
     ).toHaveLength(0);
+  });
+
+  it("keeps identical Member outbox retries saved after file reach narrows or Group becomes read-only, while refusing conflicts and hidden/revoked retries", async () => {
+    const { h, storage, planningWire } = await joinedChat({ copies: false });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const countRows = () =>
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin).length;
+
+    const first = await json(
+      await h(
+        op(
+          "trip",
+          "post",
+          {
+            operationId: "op-b2-retry",
+            groupId: planningWire,
+            title: "Plan",
+            body: "See @[docs/plan.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(first).toMatchObject({ ok: true, result: { ok: true, state: "saved" } });
+    const saved = first.result as { threadId: string; messageId: string };
+    expect(countRows()).toBe(2);
+
+    // Restrict docs/ after save: identical retry must still return saved, not refused.
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: { kind: "create", folder: "docs", rule: RULE },
+        nowMs: 10,
+      }),
+    ).toMatchObject({ ok: true });
+    const retryAfterNarrow = await json(
+      await h(
+        op(
+          "trip",
+          "post",
+          {
+            operationId: "op-b2-retry",
+            groupId: planningWire,
+            title: "Plan",
+            body: "See @[docs/plan.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(retryAfterNarrow).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        state: "saved",
+        threadId: saved.threadId,
+        messageId: saved.messageId,
+      },
+    });
+    expect(countRows()).toBe(2);
+
+    // Downgrade Group to read-only (view): identical retry still returns saved; conflicting reuse refuses.
+    storage.setWorkspaceGroupRule({
+      workspaceId: "trip",
+      channelWireId: planningWire,
+      level: "view",
+      actorUserId: "ana",
+      nowMs: 11,
+    });
+    expect(
+      await json(
+        await h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-b2-retry",
+              groupId: planningWire,
+              title: "Plan",
+              body: "See @[docs/plan.md]",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: true, state: "saved", threadId: saved.threadId, messageId: saved.messageId },
+    });
+    expect(
+      await json(
+        await h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-b2-retry",
+              groupId: planningWire,
+              title: "Plan",
+              body: "Different body",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "refused", reason: "Couldn't send" },
+    });
+
+    // Hide the Group: retry answers missing.
+    storage.setWorkspaceGroupRule({
+      workspaceId: "trip",
+      channelWireId: planningWire,
+      level: null,
+      actorUserId: "ana",
+      nowMs: 12,
+    });
+    expect(
+      await json(
+        await h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-b2-retry",
+              groupId: planningWire,
+              title: "Plan",
+              body: "See @[docs/plan.md]",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toMatchObject({ ok: true, result: { ok: false, refusal: "missing" } });
+
+    // Hide workspace on phone: retry answers 404.
+    storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false });
+    expect(
+      (
+        await h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-b2-retry",
+              groupId: planningWire,
+              title: "Plan",
+              body: "See @[docs/plan.md]",
+            },
+            asBen,
+          ),
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it("returns identical missing refusals for absent, foreign-thread, and mid-flight-deleted parentMessageId on Member replies", async () => {
+    const { h, storage, planningWire } = await joinedChat({ copies: false });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const countRows = () =>
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin).length;
+
+    const p1 = (
+      await json(
+        await h(
+          op("trip", "post", { operationId: "op-p1", groupId: planningWire, body: "First" }, asBen),
+        ),
+      )
+    ).result as { threadId: string; messageId: string };
+    const p2 = (
+      await json(
+        await h(
+          op(
+            "trip",
+            "post",
+            { operationId: "op-p2", groupId: planningWire, body: "Second" },
+            asBen,
+          ),
+        ),
+      )
+    ).result as { threadId: string; messageId: string };
+    const beforeReplies = countRows();
+
+    // Nonexistent parent
+    const absent = await json(
+      await h(
+        op(
+          "trip",
+          "reply",
+          {
+            operationId: "op-bad-parent-1",
+            threadId: p1.threadId,
+            parentMessageId: "message-does-not-exist",
+            body: "Orphan",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(absent).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        refusal: "missing",
+        reason: "chat message not found: message-does-not-exist",
+      },
+    });
+
+    // Foreign thread parent (another visible thread)
+    const foreign = await json(
+      await h(
+        op(
+          "trip",
+          "reply",
+          {
+            operationId: "op-bad-parent-2",
+            threadId: p1.threadId,
+            parentMessageId: p2.messageId,
+            body: "Cross-thread",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(foreign).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "missing", reason: `chat message not found: ${p2.messageId}` },
+    });
+
+    // Mid-flight parent deletion right inside appendBrowserChatBatch rolls back as missing.
+    const realAppend = storage.appendBrowserChatBatch.bind(storage);
+    const deleteParentSpy = vi
+      .spyOn(storage, "appendBrowserChatBatch")
+      .mockImplementationOnce((batch) => {
+        expect(
+          storage.deleteWorkspaceMessage({
+            workspaceId: "trip",
+            threadId: p1.threadId,
+            messageId: p1.messageId,
+            actor: { kind: "account", userId: "ben" },
+            nowMs: 25,
+          }),
+        ).toMatchObject({ ok: true });
+        return realAppend(batch);
+      });
+    const racedDelete = await json(
+      await h(
+        op(
+          "trip",
+          "reply",
+          {
+            operationId: "op-bad-parent-3",
+            threadId: p1.threadId,
+            parentMessageId: p1.messageId,
+            body: "Raced delete",
+          },
+          asBen,
+        ),
+      ),
+    );
+    deleteParentSpy.mockRestore();
+    expect(racedDelete).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "missing", reason: `chat message not found: ${p1.messageId}` },
+    });
+    expect(countRows()).toBe(beforeReplies);
   });
 });

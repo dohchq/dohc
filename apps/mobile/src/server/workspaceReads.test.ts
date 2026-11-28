@@ -500,7 +500,7 @@ describe("a joined workspace's cursor", () => {
     expect(earlierCursor(`0.5.2.${reach}`, "0.4.3")).toBe("0.4.2");
   });
 
-  it("preserves per-Group channelWireId and access from groupsFull", async () => {
+  it("preserves per-Group channelWireId, type, and access from groupsFull", async () => {
     const server = testServer();
     server.on(
       "POST",
@@ -513,6 +513,7 @@ describe("a joined workspace's cursor", () => {
             channelWireId: "wire-team",
             name: "Team",
             kind: "group",
+            type: "both",
             access: "read-write",
             threads: [],
           },
@@ -521,6 +522,7 @@ describe("a joined workspace's cursor", () => {
             channelWireId: "wire-news",
             name: "News",
             kind: "group",
+            type: "chat",
             access: "read-only",
             threads: [],
           },
@@ -528,6 +530,7 @@ describe("a joined workspace's cursor", () => {
             id: "channel-3",
             name: "No wire",
             kind: "group",
+            type: "invalid",
             access: "unknown",
             threads: [],
           },
@@ -545,14 +548,20 @@ describe("a joined workspace's cursor", () => {
       expect.objectContaining({
         id: "channel-1",
         channelWireId: "wire-team",
+        type: "both",
         access: "read-write",
       }),
       expect.objectContaining({
         id: "channel-2",
         channelWireId: "wire-news",
+        type: "chat",
         access: "read-only",
       }),
-      expect.not.objectContaining({ channelWireId: expect.anything(), access: expect.anything() }),
+      expect.not.objectContaining({
+        channelWireId: expect.anything(),
+        type: expect.anything(),
+        access: expect.anything(),
+      }),
     ]);
   });
 });

@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS push_registrations (
 ) STRICT`;
 
 /** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */
-export const CACHE_FORMAT = 4;
+export const CACHE_FORMAT = 5;
 
 /** `views`: each workspace's saved views, as JSON, and their size. `lists`: each account's workspace list. */
 export const CACHE_SCHEMA = `CREATE TABLE IF NOT EXISTS views (

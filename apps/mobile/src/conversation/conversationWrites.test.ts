@@ -18,6 +18,7 @@ import {
   createWriteScope,
   fieldChanged,
   groupForStream,
+  joinedGroupLanes,
   lanesOf,
   replyParentGone,
   replyWrite,
@@ -1020,6 +1021,10 @@ describe("joined Member per-Group chat gating", () => {
     expect(groupForStream(groups, "g-rw")?.id).toBe("g-rw");
     expect(groupForStream(groups, "wire-rw")?.id).toBe("g-rw");
     expect(groupForStream(groups, "missing")).toBeNull();
+    expect(joinedGroupLanes({ type: "both" })).toEqual({ post: true, send: false });
+    expect(joinedGroupLanes({ type: "posts" })).toEqual({ post: true, send: false });
+    expect(joinedGroupLanes({})).toEqual({ post: true, send: false });
+    expect(joinedGroupLanes({ type: "chat" })).toEqual({ post: false, send: false });
     expect(writableJoinedThread(groups, "thread-rw")).toBe(true);
     expect(writableJoinedThread(groups, "thread-ro")).toBe(false);
     expect(writableJoinedThread(groups, "t-nw")).toBe(false);

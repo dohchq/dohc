@@ -302,6 +302,7 @@ export interface AppendNamedChatMessageInput {
   humanOnly?: boolean;
   allowPostParent?: boolean;
   redactFileLinks?: boolean;
+  bindRequest?: boolean;
   channelWireId: string | null;
   file?: CommentFile | null;
   id: unknown;
@@ -310,7 +311,7 @@ export interface AppendNamedChatMessageInput {
   threadId?: unknown;
   lane?: unknown;
   parentMessageId?: unknown;
-  authorKind: unknown;
+  authorKind?: unknown;
   authorUserId?: unknown;
   hasAuthorDisplayName?: boolean;
   authorDisplayName?: unknown;
@@ -319,13 +320,18 @@ export interface AppendNamedChatMessageInput {
   lookupUserDisplayName?: LogAuthorNameLookup;
   refreshMentionAccountNames?: RefreshMentionAccountNames;
   activity?: Pick<DiscussionActivityHub, "wakeLog">;
+  authorizeRetry?: () => void;
   authorizeAppend(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
     share: { shareId: string; workspaceId: string };
   };
+  requireParentMessage?: (threadId: string, parentMessageId: string) => void;
   afterNameLookup?: () => Promise<void>;
   recheckRead?: () => void;
   checkDraft?: (draft: ThreadedChatMessage | null) => void;
 }
+
+const fileReachOf = (selector: AnyShareSelector) =>
+  isWorkspaceSelector(selector) ? workspaceFileReach(selector) : null;
 
 /** Authorizes and appends one named-share chat post or reply directly into the workspace's named share log. */
 export async function appendNamedChatMessage(input: AppendNamedChatMessageInput): Promise<{
@@ -337,48 +343,28 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const file = input.file ?? null;
   const owned = input.owned === true;
   if (channelWireId === null && !file) throw notFound();
-  input.authorizeAppend();
+  if (input.authorizeRetry) input.authorizeRetry();
+  else input.authorizeAppend();
   if (input.authorUserId !== undefined && input.authorUserId !== userId)
     throw relayError("authorship_mismatch");
   const id = parseString(input.id, "id", 256);
   if (!id.isWellFormed()) throw badRequest("invalid id");
-  const { authorKind } = input;
+  const authorKind = input.humanOnly && input.authorKind === undefined ? "human" : input.authorKind;
   if (authorKind !== "human" && (owned || input.humanOnly || authorKind !== "agent"))
     throw badRequest("invalid author kind");
   if (authorKind === "human" && input.hasAuthorDisplayName) throw relayError("share_op_rejected");
   const agentName = authorKind === "agent" ? displayName(input.authorDisplayName) : undefined;
-  const rawAccountName = await accountDisplayName(input.lookupUserDisplayName, userId);
-  input.signal?.throwIfAborted();
-  await input.afterNameLookup?.();
-  const authorized = input.authorizeAppend();
-  if (authorized.share.workspaceId !== workspaceId) throw notFound();
-  const accountName = rawAccountName ?? "Unnamed";
-  const authorDisplayName = agentName ?? accountName;
-  const authorOwnerDisplayName = authorKind === "agent" ? accountName : undefined;
   if (typeof input.body !== "string" || !input.body.isWellFormed())
     throw badRequest("invalid body");
-  let body = input.body.replace(/\r\n?/gu, "\n").trimEnd();
-  if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
+  const rawBody = input.body.replace(/\r\n?/gu, "\n").trimEnd();
+  if (!rawBody || Buffer.byteLength(rawBody) > MAX_MESSAGE_BODY_BYTES)
+    throw badRequest("invalid body");
   let rawTitle = "";
   if (input.title !== undefined) {
     if (typeof input.title !== "string" || !input.title.isWellFormed())
       throw badRequest("invalid title");
     rawTitle = input.title.trim();
     if (rawTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
-  }
-  const redactFiles =
-    input.redactFileLinks && !owned
-      ? isWorkspaceSelector(authorized.effectiveSelector)
-        ? workspaceFileReach(authorized.effectiveSelector)
-        : null
-      : undefined;
-  if (redactFiles !== undefined) {
-    body = withheldLinkText(body, redactFiles);
-    if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
-    if (rawTitle) {
-      rawTitle = withheldLinkText(rawTitle, redactFiles).trim();
-      if (rawTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
-    }
   }
   const originId = "browser-chat";
   const storedOrigin = owned
@@ -388,6 +374,39 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const replying = input.threadId !== undefined;
   if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
   if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
+  const parentMessageId =
+    input.parentMessageId === undefined
+      ? undefined
+      : parseString(input.parentMessageId, "parentMessageId", 256);
+  if (parentMessageId !== undefined && !parentMessageId.isWellFormed())
+    throw badRequest("invalid parent");
+  const requestedThreadId = replying ? parseString(input.threadId, "threadId", 256) : undefined;
+  if (requestedThreadId !== undefined && !requestedThreadId.isWellFormed())
+    throw badRequest("invalid thread id");
+  const requestHash = input.bindRequest
+    ? sha256Hex(
+        JSON.stringify([
+          replying ? "reply" : "post",
+          channelWireId ?? "",
+          requestedThreadId ?? "",
+          parentMessageId ?? null,
+          rawTitle,
+          rawBody,
+        ]),
+      )
+    : undefined;
+  if (requestHash !== undefined) {
+    const existingReceipt = storage.lookupBrowserChatBinding({
+      workspaceId,
+      originId: storedOrigin,
+      messageId,
+      requestHash,
+      guard: input.authorizeRetry,
+    });
+    if (existingReceipt !== null)
+      return { threadId: existingReceipt.threadId, messageId, message: null };
+  }
+  input.authorizeAppend();
   let lane: "posts" | "chat" | undefined;
   if (!replying && !file) {
     const type =
@@ -408,8 +427,7 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
         : storage.findChannelChatThread(workspaceId, channelWireId!)
       : null;
   const createThread = !replying && (stored ? storedThread === ownThread : chatThread === null);
-  const threadId =
-    chatThread ?? (createThread ? ownThread : parseString(input.threadId, "threadId", 256));
+  const threadId = chatThread ?? (createThread ? ownThread : requestedThreadId!);
   if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
   if (file && replying && commentFileOf(storage, workspaceId, threadId)?.objectId !== file.objectId)
     throw notFound();
@@ -422,11 +440,6 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const threadLane = file
     ? "posts"
     : (lane ?? storage.findThreadCreateLane(workspaceId, threadId) ?? "posts");
-  const threadTitle = createThread && !file && threadLane === "posts" ? rawTitle : "";
-  const parentMessageId =
-    input.parentMessageId === undefined
-      ? undefined
-      : parseString(input.parentMessageId, "parentMessageId", 256);
   if (
     parentMessageId !== undefined &&
     (!replying ||
@@ -434,6 +447,27 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
       !parentMessageId.isWellFormed())
   )
     throw badRequest("invalid parent");
+  if (parentMessageId !== undefined) input.requireParentMessage?.(threadId, parentMessageId);
+  const rawAccountName = await accountDisplayName(input.lookupUserDisplayName, userId);
+  input.signal?.throwIfAborted();
+  await input.afterNameLookup?.();
+  const authorized = input.authorizeAppend();
+  if (authorized.share.workspaceId !== workspaceId) throw notFound();
+  const accountName = rawAccountName ?? "Unnamed";
+  const authorDisplayName = agentName ?? accountName;
+  const authorOwnerDisplayName = authorKind === "agent" ? accountName : undefined;
+  let body = rawBody;
+  let threadTitle = createThread && !file && threadLane === "posts" ? rawTitle : "";
+  const redactFiles =
+    input.redactFileLinks && !owned ? fileReachOf(authorized.effectiveSelector) : undefined;
+  if (redactFiles !== undefined) {
+    body = withheldLinkText(body, redactFiles);
+    if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
+    if (threadTitle) {
+      threadTitle = withheldLinkText(threadTitle, redactFiles).trim();
+      if (threadTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
+    }
+  }
   let wakes: BrowserPostWakes | undefined;
   if (owned && !stored) {
     const nowMs = input.nowMs();
@@ -551,14 +585,14 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
     originId: storedOrigin,
     messageId,
     ops,
+    ...(requestHash !== undefined ? { requestHash, retryGuard: input.authorizeRetry } : {}),
     ...(wakes ? { wakes } : {}),
     guard: () => {
       const fresh = input.authorizeAppend();
       if (fresh.share.workspaceId !== workspaceId) throw notFound();
+      if (parentMessageId !== undefined) input.requireParentMessage?.(threadId, parentMessageId);
       if (input.redactFileLinks && !owned) {
-        const freshFiles = isWorkspaceSelector(fresh.effectiveSelector)
-          ? workspaceFileReach(fresh.effectiveSelector)
-          : null;
+        const freshFiles = fileReachOf(fresh.effectiveSelector);
         if (
           withheldLinkText(body, freshFiles) !== body ||
           (threadTitle && withheldLinkText(threadTitle, freshFiles) !== threadTitle)
