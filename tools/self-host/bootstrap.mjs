@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isDeepStrictEqual, parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
-import { composeArgs, readSettings, validateSettings } from "./config.mjs";
+import { composeArgs, gatewayConfigHash, readSettings, validateSettings } from "./config.mjs";
 
 export function initialSettings({
   origin,
@@ -132,6 +132,7 @@ function main() {
         throw new Error("Use upgrade --image RELEASE_IMAGE.");
       const errors = validateSettings({ ...settings, DOHC_IMAGE: values.image });
       if (errors.length) throw new Error(errors.join("\n"));
+      gatewayConfigHash({ ...settings, DOHC_IMAGE: values.image });
       const inspected = spawnSync("docker", ["image", "inspect", values.image], {
         stdio: "ignore",
       });

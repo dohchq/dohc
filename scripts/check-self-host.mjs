@@ -83,45 +83,66 @@ else {
     if ((values.start || values.running) && compose.status === 0 && deploymentOk) {
       let upOk = true;
       if (values.start) {
-        const env = composeEnv(settings);
+        let env;
+        try {
+          env = composeEnv(settings);
+        } catch (error) {
+          record("gateway configuration files", false, error.message);
+          upOk = false;
+        }
         const runUp = (...args) =>
           spawnSync("docker", composeArgs(envFile, settings, ...args), {
             stdio: "inherit",
             env,
           }).status === 0;
-        const before = spawnSync(
-          "docker",
-          composeArgs(
-            envFile,
-            settings,
-            ...(settings.DOHC_SNAPSHOT_S3_BUCKET ? [] : ["--profile", "snapshots"]),
-            "ps",
-            "--status",
-            "running",
-            "--services",
-          ),
-          { encoding: "utf8", env },
-        );
-        const alreadyRunning = new Set((before.stdout ?? "").trim().split(/\r?\n/).filter(Boolean));
-        const rolling =
-          !values["first-start"] &&
-          before.status === 0 &&
-          ["workspace-api", "sync-relay", "share-web", "gateway"].every((service) =>
-            alreadyRunning.has(service),
+        if (upOk) {
+          const before = spawnSync(
+            "docker",
+            composeArgs(envFile, settings, "ps", "--status", "running", "--services"),
+            { encoding: "utf8", env },
           );
-        if (rolling) {
-          for (const step of rollingUpdateSteps(settings, alreadyRunning)) {
-            if (!runUp(...step)) {
-              upOk = false;
-              break;
+          const alreadyRunning = new Set(
+            (before.stdout ?? "").trim().split(/\r?\n/).filter(Boolean),
+          );
+          if (!settings.DOHC_SNAPSHOT_S3_BUCKET) {
+            const snapshotContainer = spawnSync(
+              "docker",
+              composeArgs(
+                envFile,
+                settings,
+                "--profile",
+                "snapshots",
+                "ps",
+                "--all",
+                "--quiet",
+                "relay-snapshot",
+              ),
+              { encoding: "utf8", env },
+            );
+            if (snapshotContainer.status === 0 && (snapshotContainer.stdout ?? "").trim()) {
+              alreadyRunning.add("relay-snapshot");
             }
           }
-        } else {
-          upOk = runUp("up", "-d", "--wait", "--wait-timeout", String(startupWaitSeconds));
-          if (upOk && !settings.DOHC_SNAPSHOT_S3_BUCKET && alreadyRunning.has("relay-snapshot")) {
-            upOk =
-              runUp("--profile", "snapshots", "stop", "relay-snapshot") &&
-              runUp("--profile", "snapshots", "rm", "-f", "relay-snapshot");
+          const rolling =
+            !values["first-start"] &&
+            before.status === 0 &&
+            ["workspace-api", "sync-relay", "share-web", "gateway"].every((service) =>
+              alreadyRunning.has(service),
+            );
+          if (rolling) {
+            for (const step of rollingUpdateSteps(settings, alreadyRunning)) {
+              if (!runUp(...step)) {
+                upOk = false;
+                break;
+              }
+            }
+          } else {
+            upOk = runUp("up", "-d", "--wait", "--wait-timeout", String(startupWaitSeconds));
+            if (upOk && !settings.DOHC_SNAPSHOT_S3_BUCKET && alreadyRunning.has("relay-snapshot")) {
+              upOk =
+                runUp("--profile", "snapshots", "stop", "relay-snapshot") &&
+                runUp("--profile", "snapshots", "rm", "-f", "relay-snapshot");
+            }
           }
         }
         record("compose startup", upOk);

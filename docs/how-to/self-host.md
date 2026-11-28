@@ -440,7 +440,7 @@ Use the app domain only for published apps. Serve nothing else on it, including 
    ```
 
 5. Bypass the cache and turn off bot challenges for the app hosts, as for the server's own host.
-6. Run `node tools/self-host/bootstrap.mjs start` to apply the updated settings.
+6. Run `sudo node tools/self-host/bootstrap.mjs start` to apply the updated settings (with `sudo` so the command can read the root-owned certificate and key files).
 
 To check the setup, publish an app from a connected desktop and open its share link in a browser.
 The app opens on a host under your app domain.
@@ -707,6 +707,7 @@ Phones and share pages keep working. `GET /ready` reports the setting as `engine
 Save an encrypted relay snapshot online while the deployment keeps running:
 
 ```sh
+sudo install -d -o 1000 -g 1000 -m 0700 /srv/dohc-backups
 node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/relay-before-upgrade
 ```
 
@@ -715,7 +716,7 @@ If you use the bundled Postgres database, also save an online database dump befo
 ```sh
 (umask 077 && install -d -m 0700 /srv/dohc-backups && \
   docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T postgres \
-    sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > /srv/dohc-backups/postgres-before-upgrade.sql.tmp && \
+    sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > /srv/dohc-backups/postgres-before-upgrade.sql.tmp && \
   mv /srv/dohc-backups/postgres-before-upgrade.sql.tmp /srv/dohc-backups/postgres-before-upgrade.sql)
 ```
 
@@ -725,7 +726,7 @@ If you want a stopped continuity-matched backup and full volume archive instead,
 Update the Compose files and scripts (`git pull` in a repository checkout, or copy the new release bundle).
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
 Do not rerun `init`.
-Pull or load the new image, then upgrade in place:
+Pull or load the new image, then upgrade in place (prefix with `sudo` if your gateway TLS files belong to root):
 
 ```sh
 docker pull ghcr.io/dohchq/dohc-self-host:latest
