@@ -26,4 +26,8 @@ export const confirmWords = {
     `${count} ${one(count, "message is", "messages are")} waiting to send from this phone. Forget deletes ${one(count, "it", "them")}. Undo restores the workspace, not the ${one(count, "message", "messages")}.`,
   forgot: (name: string) => `Forgot ${name}. It stays on the server.`,
   undo: "Undo",
+  deletedFile: (name: string) => `Deleted ${name}`,
+  restoredFile: (name: string) => `Restored ${name}`,
+  couldntRestore: (name: string) => `dohc could not restore ${name}.`,
+  restoreUnavailable: "This deleted file can no longer be restored.",
 } as const;

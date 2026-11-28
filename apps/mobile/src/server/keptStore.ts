@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS push_registrations (
   generation INTEGER,
   signing_out INTEGER NOT NULL,
   PRIMARY KEY (origin, account_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS captures (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  origin TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  request_id TEXT NOT NULL UNIQUE,
+  payload TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  reason TEXT,
+  created_at_ms INTEGER NOT NULL
 ) STRICT`;
 
 /** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */
@@ -99,7 +110,7 @@ CREATE TABLE IF NOT EXISTS lists (scope TEXT PRIMARY KEY, value TEXT NOT NULL) S
 
 /** Deletes every row kept.db holds for the account, in the caller's transaction. Sign out runs it in one commit. */
 export async function deleteAccountRows(sql: Sql, account: { origin: string; userId: string }) {
-  for (const table of ["outbox", "notice_lists", "notice_marks"])
+  for (const table of ["outbox", "notice_lists", "notice_marks", "captures"])
     await sql.run(`DELETE FROM ${table} WHERE origin = ? AND account_id = ?`, [
       account.origin,
       account.userId,

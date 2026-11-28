@@ -437,6 +437,7 @@ export function createAccountOperationRoute(options: {
           args,
           visitor,
           authorize,
+          nowMs: () => options.nowMs(),
         },
       );
       return jsonResponse({ ok: true, result, cursor });

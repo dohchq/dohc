@@ -1,3 +1,4 @@
+import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -85,10 +86,16 @@ describe("fileWriteOperations & refusals", () => {
     expect(fileWriteRefusalText("stale-object", "x")).toBe(documentWords.refusedChanged);
     expect(fileWriteRefusalText("live-active", "x")).toBe(documentWords.refusedLiveActive);
     expect(fileWriteRefusalText("live-unsettled", "x")).toBe(documentWords.refusedLiveUnsettled);
+    expect(fileWriteRefusalText("restore-unavailable", "x")).toBe(confirmWords.restoreUnavailable);
     expect(newFileRequestId()).toMatch(/^[A-Za-z0-9._-]{8,96}$/u);
 
-    const send = vi.fn(async (_method, _path, read, _body, opts) => {
+    const send = vi.fn(async (_method, path, read, _body, opts) => {
       expect(opts?.timeoutMs).toBe(FILE_WRITE_TIMEOUT_MS);
+      if (path.endsWith("/deleteFile"))
+        return read({
+          ok: true,
+          result: { ok: true, path: "notes/new.md", objectId: "obj-1", deleteMomentId: "mom-1" },
+        });
       return read({
         ok: true,
         result: { ok: true, path: "notes/new.md", objectId: "obj-1" },
@@ -100,11 +107,31 @@ describe("fileWriteOperations & refusals", () => {
       path: "notes/new.md",
       objectId: "obj-1",
     });
+    await expect(
+      ops.deleteFile({ path: "notes/new.md", expectedObjectId: "obj-1", requestId: "r2" }),
+    ).resolves.toEqual({
+      ok: true,
+      path: "notes/new.md",
+      objectId: "obj-1",
+      deleteMomentId: "mom-1",
+    });
+    await expect(
+      ops.restoreDeletedFile({
+        path: "notes/new.md",
+        objectId: "obj-1",
+        deleteMomentId: "mom-1",
+        requestId: "r3",
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      path: "notes/new.md",
+      objectId: "obj-1",
+    });
     expect(send).toHaveBeenCalledWith(
       "POST",
-      "/sync/ws-1/ops/createPage",
+      "/sync/ws-1/ops/restoreDeletedFile",
       expect.any(Function),
-      { path: "notes/new.md", requestId: "r1" },
+      { path: "notes/new.md", objectId: "obj-1", deleteMomentId: "mom-1", requestId: "r3" },
       { signal: undefined, timeoutMs: FILE_WRITE_TIMEOUT_MS },
     );
   });

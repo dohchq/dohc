@@ -112,6 +112,7 @@ describe("Document Collection ops: Member/Admin 404 isolation", () => {
             requestId: "req-3",
           },
         ],
+        ["captureInboxItem", { body: "Quick note", requestId: "req-4" }],
       ];
       for (const [op, args] of ops) {
         const missing = await denialBytes(await h(postOp("nowhere", op, "ben", args)));
@@ -142,6 +143,16 @@ describe("Document Collection ops: Member/Admin 404 isolation", () => {
               postOp("trip", "createDocumentCollection", "ana", {
                 folder: "Tasks",
                 requestId: "req-4",
+              }),
+            )
+          ).status,
+        ).toBe(503);
+        expect(
+          (
+            await h(
+              postOp("trip", "captureInboxItem", "ana", {
+                body: "Quick note",
+                requestId: "req-5",
               }),
             )
           ).status,
@@ -191,7 +202,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       },
       {
         path: "Tasks/Alpha.md",
-        text: `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nStatus: Todo\nProject: ${projectRecId}\n---\n${largeBody}\n`,
+        text: `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nTitle: Alpha Record\nStatus: Todo\nProject: ${projectRecId}\n---\n${largeBody}\n`,
         objectId: "obj-alpha",
       },
       {
@@ -204,7 +215,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
 
     // Accepted live frontmatter cut overrides stale settled Status: Todo -> Done.
     const liveDoc = markdownToYDoc(
-      `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nStatus: Todo\nProject: ${projectRecId}\n---\nBody\n`,
+      `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nTitle: Alpha Record\nStatus: Todo\nProject: ${projectRecId}\n---\nBody\n`,
     );
     const checkpoint = Y.encodeStateAsUpdate(liveDoc);
     const updates: Uint8Array[] = [];
@@ -250,6 +261,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       };
     };
     expect(recBody.result.records.map((r) => r.path)).toEqual(["Tasks/Alpha.md", "Tasks/Beta.md"]);
+    expect(recBody.result.records[0]?.title).toBe("Alpha Record");
     expect(recBody.result.records[0]?.values).toEqual({
       Status: "Done",
       Project: projectRecId,

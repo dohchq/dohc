@@ -1,14 +1,41 @@
 import { accountWords } from "@dohc/interface-words/account";
 import { appWords } from "@dohc/interface-words/apps";
-import { chatWords } from "@dohc/interface-words/notices";
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
+import { chatWords, noticesWords } from "@dohc/interface-words/notices";
+import { workspaceWords } from "@dohc/interface-words/workspace";
+import {
+  DarkTheme,
+  DefaultTheme,
+  Stack,
+  ThemeProvider,
+  usePathname,
+  useRouter,
+  useSegments,
+} from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo } from "react";
-import { Platform, useColorScheme } from "react-native";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import { Platform, useColorScheme, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
-import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
+import { AccountGate, AccountProvider, useAccount } from "../src/account/AccountProvider";
 import { demoMode } from "../src/demo";
+import { NoticesProvider, useOptionalNotices } from "../src/notices/NoticesState";
+import { HideToast, ShowToast, Toast, useShowToast, type ToastMessage } from "../src/notices/Toast";
+import {
+  clearUndoToast,
+  closeToast,
+  hideToast,
+  NO_TOASTS,
+  showToast,
+  type ToastSlots,
+} from "../src/notices/toastSlots";
 import { AlertTaps } from "../src/push/AlertTaps";
 import { ChoiceSheetHost } from "../src/ChoiceSheet";
 import { sampleBuild } from "../src/sampleBuild";
@@ -20,6 +47,103 @@ import { useTheme } from "../src/theme";
 // src/routes.test.ts reads the next statement as text, on one line.
 // oxfmt-ignore
 const openTestRoute = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? (require("../src/testRoute/sample") as typeof import("../src/testRoute/sample")).openTestRoute : null;
+
+const sampleToast: ToastMessage | null =
+  __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1"
+    ? {
+        tone: "failure",
+        sender: "automation",
+        title: "Automation “Budget sync” failed",
+        body: "The exchange-rate source didn’t answer.",
+        action: { label: noticesWords.tryAgain },
+      }
+    : null;
+
+function SignedInToastEffects({ clearUndo }: { clearUndo(): void }) {
+  const { currentWorkspaceId, captureQueue } = useAccount();
+  const show = useShowToast();
+  const notices = useOptionalNotices();
+  const prevWorkspace = useRef(currentWorkspaceId);
+  useEffect(() => {
+    if (prevWorkspace.current !== currentWorkspaceId) {
+      prevWorkspace.current = currentWorkspaceId;
+      clearUndo();
+    }
+  }, [currentWorkspaceId, clearUndo]);
+  const captureState = useSyncExternalStore(captureQueue.subscribe, captureQueue.state);
+  const seenSeq = useRef(captureState.lastEvent?.seq ?? 0);
+  useEffect(() => {
+    const ev = captureState.lastEvent;
+    if (!ev || ev.seq <= seenSeq.current) return;
+    seenSeq.current = ev.seq;
+    if (ev.kind === "saved") {
+      show({ id: `capture:saved:${ev.seq}`, tone: "success", title: workspaceWords.captureSaved });
+    } else if (ev.kind === "queued") {
+      show({
+        id: `capture:queued:${ev.seq}`,
+        tone: "success",
+        title: workspaceWords.captureQueued,
+        body: workspaceWords.captureQueuedBody,
+      });
+    } else {
+      const id = `capture:refused:${ev.seq}`;
+      const title = workspaceWords.captureFailed(ev.title);
+      const body = ev.reason ?? "";
+      show({ id, tone: "failure", title, body });
+      notices?.add({
+        id,
+        senderKind: null,
+        senderLabel: "",
+        title,
+        body,
+        minutesAgo: 0,
+        atMs: Date.now(),
+        read: false,
+        dismissible: true,
+        failed: true,
+      });
+    }
+  }, [captureState.lastEvent, notices, show]);
+  return null;
+}
+
+function ToastHost({ signedIn, children }: { signedIn: boolean; children: ReactNode }) {
+  const [slots, setSlots] = useState<ToastSlots>(
+    demoMode === "toast" || demoMode === "toast-copied"
+      ? { shown: sampleToast, waiting: null }
+      : NO_TOASTS,
+  );
+  const show = useCallback(
+    (message: ToastMessage) => setSlots((current) => showToast(current, message)),
+    [],
+  );
+  const hide = useCallback((id: string) => setSlots((current) => hideToast(current, id)), []);
+  const close = useCallback(() => setSlots(closeToast), []);
+  const clearUndo = useCallback(() => setSlots(clearUndoToast), []);
+  const pathname = usePathname();
+  const segments = useSegments();
+  const aboveTabs = segments[0] === "(tabs)";
+  return (
+    <ShowToast value={show}>
+      <HideToast value={hide}>
+        <NoticesProvider>
+          <View style={{ flex: 1 }}>
+            {signedIn ? <SignedInToastEffects clearUndo={clearUndo} /> : null}
+            {children}
+            {slots.shown && (pathname !== "/notices" || slots.shown.holdsUndo) ? (
+              <Toast
+                key={slots.shown.id ?? slots.shown.title}
+                message={slots.shown}
+                aboveTabs={aboveTabs}
+                onClose={close}
+              />
+            ) : null}
+          </View>
+        </NoticesProvider>
+      </HideToast>
+    </ShowToast>
+  );
+}
 
 export default function RootLayout() {
   const router = useRouter();
@@ -107,12 +231,14 @@ export default function RootLayout() {
   return (
     <>
       {sampleBuild ? (
-        app
+        <ToastHost signedIn={false}>{app}</ToastHost>
       ) : (
         <AccountProvider>
           <AccountGate>
-            {app}
-            <AlertTaps />
+            <ToastHost signedIn>
+              {app}
+              <AlertTaps />
+            </ToastHost>
           </AccountGate>
         </AccountProvider>
       )}

@@ -48,6 +48,7 @@ import { useWorkspaces } from "../chats/Workspaces";
 import { choose } from "../confirm";
 import { appState } from "../apps/reviewControls";
 import { shownProblem } from "../server/client";
+import { captureLabel } from "../server/captureQueue";
 import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
@@ -60,6 +61,7 @@ import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
 import { useFileLifecycle } from "./FileNameSheet";
+import { QuickCaptureSheet } from "./QuickCaptureSheet";
 import { appGroups, homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
@@ -80,8 +82,10 @@ export function ServerHome() {
   const canEditFiles = canWriteFiles(data, current);
   const lifecycle = useFileLifecycle(current?.name ?? "");
   const [creatingCollection, setCreatingCollection] = useState(false);
+  const [capturing, setCapturing] = useState(false);
   useEffect(() => {
     setCreatingCollection(false);
+    setCapturing(false);
   }, [data?.workspaceId]);
   const openCreate = () =>
     lifecycle.openCreate((path) =>
@@ -90,10 +94,15 @@ export function ServerHome() {
   const openCreateMenu = () =>
     void choose({
       title: workspaceWords.pages,
-      options: [{ label: workspaceWords.newPage }, { label: collectionWords.newCollection }],
+      options: [
+        { label: workspaceWords.quickCapture },
+        { label: workspaceWords.newPage },
+        { label: collectionWords.newCollection },
+      ],
     }).then((picked) => {
-      if (picked === 0) openCreate();
-      else if (picked === 1) setCreatingCollection(true);
+      if (picked === 0) setCapturing(true);
+      else if (picked === 1) openCreate();
+      else if (picked === 2) setCreatingCollection(true);
     });
   return (
     <ScrollView
@@ -127,6 +136,12 @@ export function ServerHome() {
         <Stack.Toolbar placement="right">
           {canEditFiles ? (
             <Stack.Toolbar.Menu icon="plus" accessibilityLabel={collectionWords.create}>
+              <Stack.Toolbar.MenuAction
+                icon="tray.and.arrow.down"
+                onPress={() => setCapturing(true)}
+              >
+                {workspaceWords.quickCapture}
+              </Stack.Toolbar.MenuAction>
               <Stack.Toolbar.MenuAction icon="doc.badge.plus" onPress={openCreate}>
                 {workspaceWords.newPage}
               </Stack.Toolbar.MenuAction>
@@ -156,14 +171,17 @@ export function ServerHome() {
       ) : null}
       {lifecycle.sheet}
       {canEditFiles ? (
-        <NewDocumentCollectionSheet
-          open={creatingCollection}
-          onClose={() => setCreatingCollection(false)}
-          onCreated={(folder) => {
-            setCreatingCollection(false);
-            router.push({ pathname: "/document-collection", params: { path: folder } });
-          }}
-        />
+        <>
+          <QuickCaptureSheet open={capturing} onClose={() => setCapturing(false)} />
+          <NewDocumentCollectionSheet
+            open={creatingCollection}
+            onClose={() => setCreatingCollection(false)}
+            onCreated={(folder) => {
+              setCreatingCollection(false);
+              router.push({ pathname: "/document-collection", params: { path: folder } });
+            }}
+          />
+        </>
       ) : null}
     </ScrollView>
   );
@@ -202,7 +220,21 @@ function Files({
   });
   const createAbort = useRef<AbortController | null>(null);
   const createAttempt = useRef<{ path: string; requestId: string } | null>(null);
-  const { data, apps, collections } = useAccount();
+  const { data, apps, collections, captureQueue } = useAccount();
+  const captureState = useSyncExternalStore(captureQueue.subscribe, captureQueue.state);
+  const signIn = useSignIn();
+  const workspaceCaptures = useMemo(
+    () =>
+      captureState.items.filter(
+        (item) =>
+          item.origin === signIn.origin &&
+          item.accountId === signIn.userId &&
+          item.workspaceId === workspaceId,
+      ),
+    [captureState.items, signIn.origin, signIn.userId, workspaceId],
+  );
+  const pendingCaptures = workspaceCaptures.filter((i) => i.stage !== "refused");
+  const refusedCaptures = workspaceCaptures.filter((i) => i.stage === "refused");
   const { state: docCollectionsState, retry: retryDocCollections } = useView(
     views.documentCollections,
   );
@@ -223,7 +255,6 @@ function Files({
         : null,
     [state.value, expanded, showAllOthers, docCollectionPaths],
   );
-  const signIn = useSignIn();
   const openRowActions = useCallback(
     (item: EditableRow) =>
       openActions({ title: item.name, path: item.path, objectId: item.objectId }),
@@ -406,6 +437,41 @@ function Files({
   };
   return (
     <>
+      {pendingCaptures.length > 0 ? (
+        <Pressable
+          onPress={() => captureQueue.wake()}
+          android_ripple={ripple(theme)}
+          style={[styles.captureRow, { backgroundColor: theme.panel, borderColor: theme.line }]}
+          accessibilityRole="button"
+        >
+          {pendingCaptures.some((i) => i.stage === "sending") ? (
+            <ActivityIndicator size="small" />
+          ) : null}
+          <Text style={[styles.captureText, { color: theme.muted }]} numberOfLines={1}>
+            {pendingCaptures.some((i) => i.stage === "sending")
+              ? workspaceWords.captureSending(pendingCaptures.length)
+              : workspaceWords.captureWaiting(pendingCaptures.length)}
+          </Text>
+        </Pressable>
+      ) : null}
+      {refusedCaptures.map((item) => (
+        <View
+          key={item.requestId}
+          style={[styles.captureRow, { backgroundColor: theme.panel, borderColor: theme.line }]}
+        >
+          <Text style={[styles.captureText, { color: theme.danger }]} numberOfLines={2}>
+            {workspaceWords.captureFailed(captureLabel(item))} {item.reason ?? ""}
+          </Text>
+          <Pressable
+            onPress={() => void captureQueue.discard(item.requestId)}
+            android_ripple={ripple(theme, true)}
+            style={styles.discardBtn}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.discardText, { color: theme.ink }]}>{workspaceWords.discard}</Text>
+          </Pressable>
+        </View>
+      ))}
       <SectionHeader
         title={appWords.apps}
         collapsed={collapsed.has("apps")}
@@ -795,4 +861,19 @@ const styles = StyleSheet.create({
   state: { maxWidth: "45%", fontSize: 15, textAlign: "right" },
   made: { fontSize: 15 },
   app: { paddingLeft: 32 },
+  captureRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: TOUCH,
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  captureText: { flex: 1, fontSize: 14, lineHeight: 19 },
+  discardBtn: { minHeight: TOUCH, justifyContent: "center", paddingHorizontal: 8 },
+  discardText: { fontSize: 14, fontWeight: "600" },
 });

@@ -20,16 +20,10 @@ import {
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { useShownWorkspaces } from "../chats/Workspaces";
-import { choose, confirm } from "../confirm";
-import { SheetModal } from "../home/FileNameSheet";
+import { choose } from "../confirm";
+import { SheetModal, useFileLifecycle } from "../home/FileNameSheet";
 import { shownProblem } from "../server/client";
-import {
-  buildTargetPath,
-  canWriteFiles,
-  fileWriteOperations,
-  fileWriteRefusalText,
-  newFileRequestId,
-} from "../server/fileWrites";
+import { buildTargetPath, canWriteFiles, newFileRequestId } from "../server/fileWrites";
 import type { RecordCursor, RecordId, RecordValue } from "../server/phoneCollections";
 import {
   coerceDocumentFieldValue,
@@ -99,8 +93,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
   const [reading, setReading] = useState<"first" | "refresh" | "more" | null>("first");
   const [problem, setProblem] = useState<{ cause: ReadProblem; more: boolean } | null>(null);
   const [creating, setCreating] = useState(false);
-  const [deletingPath, setDeletingPath] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const lifecycle = useFileLifecycle(current?.name ?? "");
   const abortRef = useRef<AbortController | null>(null);
   const loadedRef = useRef(false);
   const mounted = useMounted();
@@ -160,36 +153,14 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
     }, [load]),
   );
 
-  const removeRecord = async (record: DocumentCollectionRecord) => {
-    if (!data || !canEdit || deletingPath !== null) return;
-    const active = data;
-    const ok = await confirm({
-      title: confirmWords.deleteFilesTitle([record.path]),
-      message: confirmWords.deleteFilesBody(1, current?.name ?? ""),
-      confirm: confirmWords.delete,
-      destructive: true,
+  const removeRecord = (record: DocumentCollectionRecord) => {
+    if (!canEdit) return;
+    lifecycle.confirmDelete({
+      path: record.path,
+      objectId: record.objectId,
+      onDone: (deletedPath) => setRecords((cur) => cur.filter((r) => r.path !== deletedPath)),
+      onRestored: () => void load("refresh"),
     });
-    if (!ok || !mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
-    setDeletingPath(record.path);
-    setDeleteError(null);
-    try {
-      const res = await fileWriteOperations(signIn.client, active.workspaceId).deleteFile({
-        path: record.path,
-        expectedObjectId: record.objectId,
-        requestId: newFileRequestId(),
-      });
-      if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
-      if (!res.ok) return setDeleteError(fileWriteRefusalText(res.refusal, res.reason));
-      active.invalidate(views.files);
-      active.invalidate(views.page(record.path), true);
-      setRecords((cur) => cur.filter((r) => r.path !== record.path));
-    } catch (error) {
-      if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
-      const cause = shownProblem(error);
-      setDeleteError(cause ? problemText(cause) : documentWords.couldntDelete);
-    } finally {
-      if (mounted.current) setDeletingPath((cur) => (cur === record.path ? null : cur));
-    }
   };
 
   const displayName = collection?.name ?? collectionPath.split("/").pop() ?? collectionPath;
@@ -244,11 +215,6 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
           />
         </View>
       ) : null}
-      {deleteError ? (
-        <Text style={[styles.errLine, { color: theme.danger }]} accessibilityRole="alert">
-          {deleteError}
-        </Text>
-      ) : null}
       <FlatList
         style={styles.flex}
         keyboardShouldPersistTaps="handled"
@@ -296,7 +262,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
                 ) : null}
               </Pressable>
               {canEdit ? (
-                deletingPath === item.path ? (
+                lifecycle.deletingPath === item.path ? (
                   <View style={styles.iconBtn}>
                     <ActivityIndicator size="small" accessibilityLabel={documentWords.deleting} />
                   </View>
@@ -307,7 +273,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
                         title: item.title,
                         options: [{ label: confirmWords.delete, destructive: true }],
                       }).then((idx) => {
-                        if (idx === 0) void removeRecord(item);
+                        if (idx === 0) removeRecord(item);
                       })
                     }
                     android_ripple={ripple(theme, true)}

@@ -42,6 +42,7 @@ export interface FileTarget {
   readonly guard?: () => boolean;
   readonly before?: () => Promise<void>;
   readonly onDone?: (path: string) => void;
+  readonly onRestored?: (path: string) => void;
   readonly onCancel?: () => void;
 }
 
@@ -236,6 +237,65 @@ export function useFileLifecycle(workspaceName: string) {
     [alive, errorText, hideToast, notices, reportFailure, signIn],
   );
 
+  const restoringRef = useRef(new Set<string>());
+  const runRestore = useCallback(
+    async (
+      active: WorkspaceData,
+      target: Pick<FileTarget, "path" | "objectId" | "onRestored">,
+      deleteMomentId: string,
+      restoreRequestId: string,
+    ) => {
+      if (!alive(active) || restoringRef.current.has(restoreRequestId)) return;
+      restoringRef.current.add(restoreRequestId);
+      const fileName = target.path.split("/").pop() ?? target.path;
+      const noticeId = `restore:${target.path}:${deleteMomentId}`;
+      try {
+        const res = await fileWriteOperations(signIn.client, active.workspaceId).restoreDeletedFile(
+          {
+            path: target.path,
+            objectId: target.objectId,
+            deleteMomentId,
+            requestId: restoreRequestId,
+          },
+        );
+        if (!alive(active)) return;
+        if (!res.ok) {
+          reportFailure(
+            noticeId,
+            confirmWords.couldntRestore(fileName),
+            fileWriteRefusalText(res.refusal, res.reason),
+            res.refusal === "live-active"
+              ? () => void runRestore(active, target, deleteMomentId, restoreRequestId)
+              : undefined,
+          );
+          return;
+        }
+        hideToast(noticeId);
+        notices?.dismiss(noticeId);
+        active.invalidate(views.files);
+        active.invalidate(views.page(target.path), true);
+        active.invalidate(views.documentCollections);
+        if (mountedRef.current) target.onRestored?.(target.path);
+        showToast({
+          id: `restored:${target.path}:${deleteMomentId}`,
+          tone: "success",
+          title: confirmWords.restoredFile(fileName),
+        });
+      } catch (error) {
+        if (!alive(active)) return;
+        reportFailure(
+          noticeId,
+          confirmWords.couldntRestore(fileName),
+          errorText(error, confirmWords.couldntRestore(fileName)),
+          () => void runRestore(active, target, deleteMomentId, restoreRequestId),
+        );
+      } finally {
+        restoringRef.current.delete(restoreRequestId);
+      }
+    },
+    [alive, errorText, hideToast, notices, reportFailure, showToast, signIn],
+  );
+
   const runDelete = useCallback(
     async (active: WorkspaceData, target: FileTarget, requestId: string) => {
       if (mountedRef.current && target.guard?.()) return;
@@ -264,6 +324,21 @@ export function useFileLifecycle(workspaceName: string) {
         active.invalidate(views.files);
         active.invalidate(views.page(target.path), true);
         if (mountedRef.current && focusedRef.current) target.onDone?.(target.path);
+        if (result.deleteMomentId) {
+          const deleteMomentId = result.deleteMomentId;
+          const restoreRequestId = newFileRequestId();
+          const fileName = target.path.split("/").pop() ?? target.path;
+          showToast({
+            id: `deleted:${target.path}:${deleteMomentId}`,
+            tone: "success",
+            title: confirmWords.deletedFile(fileName),
+            holdsUndo: true,
+            action: {
+              label: confirmWords.undo,
+              onPress: () => void runRestore(active, target, deleteMomentId, restoreRequestId),
+            },
+          });
+        }
       } catch (error) {
         if (!alive(active)) return;
         if (mountedRef.current) target.onCancel?.();
@@ -284,7 +359,7 @@ export function useFileLifecycle(workspaceName: string) {
         if (mountedRef.current) setDeletingPath((cur) => (cur === target.path ? null : cur));
       }
     },
-    [alive, errorText, hideToast, notices, reportFailure, signIn],
+    [alive, errorText, hideToast, notices, reportFailure, runRestore, showToast, signIn],
   );
 
   const confirmDelete = useCallback(

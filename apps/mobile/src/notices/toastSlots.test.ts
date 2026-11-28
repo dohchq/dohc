@@ -1,7 +1,15 @@
 import type { NoticeMark } from "@dohc/workspace-contracts/relay";
 import { describe, expect, it, vi } from "vitest";
 import type { ToastMessage } from "./Toast";
-import { closeToast, doneToast, hideToast, markDone, NO_TOASTS, showToast } from "./toastSlots";
+import {
+  clearUndoToast,
+  closeToast,
+  doneToast,
+  hideToast,
+  markDone,
+  NO_TOASTS,
+  showToast,
+} from "./toastSlots";
 
 describe("Done on a Notice from the server", () => {
   it("offers its Undo only once the phone keeps the dismissal, and Undo restores after it", async () => {
@@ -86,5 +94,15 @@ describe("the tabs' toast", () => {
   it("replaces one toast with the next when neither holds an Undo", () => {
     const next: ToastMessage = { ...failure, id: "read:w1:files" };
     expect(showToast(showToast(NO_TOASTS, failure), next)).toEqual({ shown: next, waiting: null });
+  });
+
+  it("clears an active Undo toast on workspace switch without dropping non-Undo toasts", () => {
+    const withUndo = showToast(
+      showToast(NO_TOASTS, failure),
+      doneToast("n1", () => {}),
+    );
+    expect(clearUndoToast(withUndo)).toEqual({ shown: failure, waiting: null });
+    const plain = showToast(NO_TOASTS, failure);
+    expect(clearUndoToast(plain)).toBe(plain);
   });
 });

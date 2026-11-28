@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -28,6 +29,7 @@ import { useOutboxState } from "../conversation/useOutbox";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
+import { createCaptureQueue, type CaptureQueue } from "../server/captureQueue";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
 import { openNow } from "../server/keptStore";
 import {
@@ -41,7 +43,7 @@ import { phoneWrites } from "../server/phoneWrites";
 import { pendingSignOuts } from "../server/pushRegistration";
 import { createAlerts, type Alerts } from "../push/alerts";
 import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
-import { cacheScope, createReadCache, type WorkspaceData } from "../server/workspaceData";
+import { cacheScope, createReadCache, views, type WorkspaceData } from "../server/workspaceData";
 import { pageTimings } from "../pages/pageTimings";
 import {
   createWorkspaceList,
@@ -59,6 +61,7 @@ interface AccountValue {
   readonly state: AccountState;
   /** Chat writes waiting for the server. Only the composer adds to it, while phone writes are on. */
   readonly outbox: Outbox;
+  readonly captureQueue: CaptureQueue;
   /** Whether a Sign out's delete of the outbox failed. */
   readonly deletion: OutboxState["deletion"];
   readonly workspaces: WorkspaceList;
@@ -130,11 +133,33 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [cacheFile] = useState(createCacheDatabase);
   const [cache] = useState(() => createReadCache(createCacheRows(cacheFile)));
   const [outbox] = useState(() => createOutbox({ store: kept, sends: phoneWrites }));
+  const openRef = useRef<ReturnType<typeof createOpenWorkspace> | null>(null);
+  const [captureQueue] = useState(() =>
+    createCaptureQueue({
+      store: kept,
+      sends: phoneWrites,
+      held: outbox.holding,
+      onSaved: (workspaceId) => {
+        const active = openRef.current?.state().data;
+        if (active && active.workspaceId === workspaceId && active.isOpen()) {
+          active.invalidate(views.files);
+          active.invalidate(views.documentCollections);
+        }
+      },
+    }),
+  );
   const [account] = useState(() =>
     createAccount({
       store: secureSignInStore,
       fetch,
-      onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
+      onSignOut: teardown.signOut(async (leave, ending) => {
+        await captureQueue.holdForSignOut();
+        try {
+          await outbox.signOut(leave, ending);
+        } finally {
+          captureQueue.releaseSignOut();
+        }
+      }),
       pendingSignOuts: pendingSignOuts(kept),
       onSaved: (saved) => cache.preload(saved),
     }),
@@ -152,11 +177,15 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => pageTimings?.follow(account), [account]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);
+  useEffect(() => captureQueue.follow(account), [account, captureQueue]);
   const deletion = useSyncExternalStore(outbox.subscribe, () => outbox.state().deletion);
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", () => outbox.wake());
+    const subscription = AppState.addEventListener("change", () => {
+      outbox.wake();
+      captureQueue.wake();
+    });
     return () => subscription.remove();
-  }, [outbox]);
+  }, [outbox, captureQueue]);
 
   // The saved list shows until the server's answers, so a relaunch opens the last workspace from the cache.
   const list = useMemo<WorkspaceListStore | null>(
@@ -185,6 +214,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
+  openRef.current = open;
   if (currentWorkspaceId && !choosing) launchTimings?.mark("chosen");
   const apps = useMemo(
     () =>
@@ -306,6 +336,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       account,
       state,
       outbox,
+      captureQueue,
       deletion,
       workspaces,
       currentWorkspaceId,
@@ -336,6 +367,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       account,
       state,
       outbox,
+      captureQueue,
       deletion,
       workspaces,
       currentWorkspaceId,

@@ -32,6 +32,7 @@ import {
 import { probeRelayWorkspace } from "../../../apps/desktop/src/workspaces/relayWorkspaceProbe";
 import { installWorkspaceDataKey } from "../../../apps/desktop/src/workspaces/workspaceDataKey";
 import { createWorkspaceEngineCapture } from "../../../apps/desktop/src/workspaces/workspaceEngineCapture";
+import { listInboxItems } from "../../../apps/desktop/src/workspaces/workspaceInbox";
 import { bootstrapJoinedWorkspace } from "../../../apps/desktop/src/workspaces/workspaceJoinEnrollment";
 import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
@@ -610,18 +611,21 @@ describe.skipIf(engine.missing)(
         expect(syncedMd).toContain("Body from phone live");
 
         // Proof 5: deleteFile works inside collection.yaml and is restorable via desktop History.
-        const deleted = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
-          "deleteFile",
-          {
-            path: "Tasks/Ship Milestone.md",
-            expectedObjectId: createdRec.objectId,
-            requestId: "del-rec-1",
-          },
-        );
+        const deleted = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "Tasks/Ship Milestone.md",
+          expectedObjectId: createdRec.objectId,
+          requestId: "del-rec-1",
+        });
         expect(deleted).toEqual({
           ok: true,
           path: "Tasks/Ship Milestone.md",
           objectId: createdRec.objectId,
+          deleteMomentId: expect.any(String),
         });
         const afterDelete = await stack.phoneOp<{ ok: true; records: unknown[] }>(
           "documentCollectionRecords",
@@ -769,6 +773,128 @@ describe.skipIf(engine.missing)(
         const merged = await readFile(join(desktop.root, "Projects/Alpha.md"), "utf8");
         expect(merged).toContain("Status: Done");
         expect(merged).toContain("Concurrent desktop body edit");
+      },
+      REAL_DAEMON_DEADLINE_MS * 3,
+    );
+
+    it(
+      "Proof 1 (PR 8c): captureInboxItem lazily creates Inbox, is idempotent across retries, opens live with zero desktop, and interoperates with desktop listInboxItems",
+      async () => {
+        const stack = await startRealStack();
+        const first = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          recordId: string;
+          title: string;
+          createdInbox: boolean;
+        }>("captureInboxItem", {
+          title: "Flight receipts",
+          body: "Check boarding pass PDF",
+          url: "https://example.com/trips/lisbon",
+          kind: "link",
+          requestId: "cap-req-1",
+        });
+        expect(first).toMatchObject({
+          ok: true,
+          title: "Flight receipts",
+          createdInbox: true,
+        });
+        expect(first.path).toMatch(/^Inbox\/\d{4}-\d{2}-\d{2}-flight-receipts\.md$/u);
+        expect(isRecordId(first.recordId)).toBe(true);
+
+        // Idempotent retry with exact same requestId creates zero duplicate records.
+        const replay = await stack.phoneOp<typeof first>("captureInboxItem", {
+          title: "Flight receipts",
+          body: "Check boarding pass PDF",
+          url: "https://example.com/trips/lisbon",
+          kind: "link",
+          requestId: "cap-req-1",
+        });
+        expect(replay).toMatchObject({
+          ok: true,
+          path: first.path,
+          objectId: first.objectId,
+          recordId: first.recordId,
+          createdInbox: false,
+        });
+
+        // Captured Inbox note opens live immediately on phone with zero desktop running.
+        const live = await stack.openPhoneLive(first.path);
+        await live.editBody("Added on phone right after capture");
+        await live.waitSettled("Added on phone right after capture");
+        await live.disconnect();
+
+        // Second capture appends into existing Inbox without recreating collection.yaml.
+        const second = await stack.phoneOp<typeof first>("captureInboxItem", {
+          body: "Buy espresso beans",
+          kind: "note",
+          requestId: "cap-req-2",
+        });
+        expect(second).toMatchObject({
+          ok: true,
+          title: "Buy espresso beans",
+          createdInbox: false,
+        });
+
+        // Phone Document Collection view shows both Inbox items with their Title: frontmatter.
+        const phoneInbox = await stack.phoneOp<{
+          ok: true;
+          records: Array<{
+            path: string;
+            title: string;
+            recordId: string | null;
+            values: Record<string, unknown>;
+          }>;
+        }>("documentCollectionRecords", { collectionPath: "Inbox" });
+        expect(phoneInbox.records.map((r) => r.title).sort()).toEqual([
+          "Buy espresso beans",
+          "Flight receipts",
+        ]);
+
+        // Desktop syncs and reads both items cleanly through desktop's own listInboxItems.
+        const desktop = await stack.connectDesktop("desktop-inbox-interop");
+        await desktop.pull();
+        const desktopInbox = await listInboxItems(
+          { workspaceId: WORKSPACE, rootPath: desktop.root },
+          { status: "New" },
+          {
+            withAdapter: (fn) =>
+              desktop.desktop.sessions.run(desktop.desktop.workspace, ({ client, workspace }) =>
+                fn(new VersionedLiveAdapter(client, workspace, { workspaceId: WORKSPACE })),
+              ),
+          },
+        );
+        expect(desktopInbox.exists).toBe(true);
+        expect(
+          desktopInbox.items.map((i) => ({
+            id: i.id,
+            title: i.title,
+            status: i.status,
+            kind: i.kind,
+            source: i.source,
+          })),
+        ).toEqual(
+          expect.arrayContaining([
+            {
+              id: first.recordId,
+              title: "Flight receipts",
+              status: "New",
+              kind: "link",
+              source: "capture",
+            },
+            {
+              id: second.recordId,
+              title: "Buy espresso beans",
+              status: "New",
+              kind: "note",
+              source: "capture",
+            },
+          ]),
+        );
+        const firstMd = await readFile(join(desktop.root, first.path), "utf8");
+        expect(firstMd).toContain("URL: https://example.com/trips/lisbon");
+        expect(firstMd).toContain("Added on phone right after capture");
       },
       REAL_DAEMON_DEADLINE_MS * 3,
     );

@@ -1,0 +1,311 @@
+import { existsSync, readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { createAccount, type Account, type AccountState } from "./account";
+import { createCaptureQueue } from "./captureQueue";
+import { createOutbox } from "./outbox";
+import { keptDisk } from "./testKeptDisk";
+import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
+
+const ORIGIN = "https://dohc.example.com";
+const CAPTURE_PATH = "/sync/ws-1/ops/captureInboxItem";
+const okCapture = (title = "Quick note"): Answer => ({
+  status: 200,
+  body: {
+    ok: true,
+    result: {
+      ok: true,
+      path: "Inbox/2026-11-28-quick-note.md",
+      objectId: "obj-1",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title,
+      createdInbox: true,
+    },
+    cursor: "0.1.1",
+  },
+});
+
+const waitFor = async (check: () => boolean, limit = 100) => {
+  for (let i = 0; i < limit; i += 1) {
+    if (check()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for capture queue condition.");
+};
+
+function stubAccount(initial: AccountState) {
+  let current = initial;
+  const listeners = new Set<() => void>();
+  return {
+    state: () => current,
+    subscribe(fn: () => void) {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    set(next: AccountState) {
+      current = next;
+      for (const fn of listeners) fn();
+    },
+  };
+}
+
+async function signedInAccount(
+  server: ReturnType<typeof testServer>,
+  options: {
+    userId?: string;
+    onSignOut?: Parameters<typeof createAccount>[0]["onSignOut"];
+  } = {},
+) {
+  const userId = options.userId ?? "u-1";
+  const store = memoryStore({
+    origin: ORIGIN,
+    userId,
+    token: `tok-${userId}`,
+    email: `${userId}@dohc.test`,
+  });
+  const account = createAccount({
+    store: store.store,
+    fetch: server.fetch,
+    onSignOut: options.onSignOut,
+  });
+  await account.restore();
+  return account;
+}
+
+describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", () => {
+  it("persists captures across crash/relaunch and retries with the exact same requestId until saved", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, () => ({
+      status: 503,
+      body: { ok: false, code: "server_busy" },
+    }));
+    const account = await signedInAccount(server);
+    const store1 = disk.launch();
+    const q1 = createCaptureQueue({
+      store: store1,
+      retryMs: () => 60_000,
+    });
+    const stop1 = q1.follow(account);
+    await waitFor(() => q1.state().status === "ready");
+
+    const queued = await q1.enqueue({
+      workspaceId: "ws-1",
+      title: "Offline thought",
+      body: "Remember to pack adapter",
+      kind: "note",
+    });
+    await waitFor(() => q1.state().lastEvent?.kind === "queued");
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(1);
+    expect(disk.sql("SELECT request_id, stage FROM captures")).toEqual([
+      { request_id: queued.requestId, stage: "queued" },
+    ]);
+
+    // Simulate abrupt app termination while queued, then relaunch with server back online.
+    stop1();
+    disk.crash();
+
+    const savedWorkspaces: string[] = [];
+    server.on("POST", CAPTURE_PATH, () => okCapture("Offline thought"));
+    const store2 = disk.launch();
+    const q2 = createCaptureQueue({
+      store: store2,
+      retryMs: () => 10,
+      onSaved: (ws) => savedWorkspaces.push(ws),
+    });
+    const stop2 = q2.follow(account);
+    await waitFor(() => q2.state().items.length === 0 && savedWorkspaces.length === 1);
+    stop2();
+
+    const sent = server.calls
+      .filter((c) => c.path === CAPTURE_PATH)
+      .map((c) => c.body as Record<string, unknown>);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]?.requestId).toBe(queued.requestId);
+    expect(sent[1]?.requestId).toBe(queued.requestId);
+    expect(sent[1]).toMatchObject({
+      title: "Offline thought",
+      body: "Remember to pack adapter",
+      kind: "note",
+    });
+    expect(savedWorkspaces).toEqual(["ws-1"]);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+  });
+
+  it("keeps rows through 401 and resumes only when the same account signs back in", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, () => ({
+      status: 401,
+      body: { ok: false, code: "unauthorized" },
+    }));
+    const acc1 = await signedInAccount(server, { userId: "u-1" });
+    const store = disk.launch();
+    const queue = createCaptureQueue({ store, retryMs: () => 5 });
+    const fake = stubAccount(acc1.state());
+    const stop = queue.follow(fake);
+    await waitFor(() => queue.state().status === "ready");
+
+    const item = await queue.enqueue({
+      workspaceId: "ws-1",
+      body: "Held across 401",
+      kind: "note",
+    });
+    await waitFor(() => server.calls.some((c) => c.path === CAPTURE_PATH));
+    fake.set({
+      status: "signed-out",
+      origin: ORIGIN,
+      ended: true,
+      forgetFailed: false,
+      pendingSignOut: null,
+    });
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([{ request_id: item.requestId }]);
+
+    // Another account signing in does NOT send u-1's capture.
+    const acc2 = await signedInAccount(server, { userId: "u-2" });
+    server.on("POST", CAPTURE_PATH, () => okCapture("Held across 401"));
+    const callsBeforeU2 = server.calls.length;
+    fake.set(acc2.state());
+    await new Promise<void>((r) => setTimeout(r, 30));
+    expect(server.calls.length).toBe(callsBeforeU2);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([{ request_id: item.requestId }]);
+
+    // Same account u-1 re-signing in sends it with the exact same requestId and clears it.
+    const acc1Again = await signedInAccount(server, { userId: "u-1" });
+    fake.set(acc1Again.state());
+    await waitFor(() => queue.state().items.length === 0);
+    stop();
+    const last = server.calls.filter((c) => c.path === CAPTURE_PATH).at(-1)?.body as Record<
+      string,
+      unknown
+    >;
+    expect(last?.requestId).toBe(item.requestId);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+  });
+
+  it("marks terminal 400/refusal rows as refused and removes them on discard", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, () => ({
+      status: 200,
+      body: {
+        ok: true,
+        result: {
+          ok: false,
+          refusal: "folder-occupied",
+          reason: "A file named Inbox already exists.",
+        },
+        cursor: "0.1.1",
+      },
+    }));
+    const account = await signedInAccount(server);
+    const queue = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
+    const stop = queue.follow(account);
+    await waitFor(() => queue.state().status === "ready");
+
+    const item = await queue.enqueue({
+      workspaceId: "ws-1",
+      body: "Blocked capture",
+      kind: "note",
+    });
+    await waitFor(() => queue.state().items[0]?.stage === "refused");
+    expect(queue.state().items[0]?.reason).toBe("A file named Inbox already exists.");
+    expect(queue.state().lastEvent).toMatchObject({
+      kind: "refused",
+      reason: "A file named Inbox already exists.",
+    });
+    const callsAfterRefusal = server.calls.filter((c) => c.path === CAPTURE_PATH).length;
+    queue.wake();
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(callsAfterRefusal);
+
+    await queue.discard(item.requestId);
+    expect(queue.state().items).toEqual([]);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+    stop();
+  });
+
+  it("wipes captures and WAL bytes atomically on Sign out and blocks writes while Sign-out hold stands", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    serveSessionEnd(server);
+    server.on("POST", CAPTURE_PATH, () => ({
+      status: 503,
+      body: { ok: false, code: "server_busy" },
+    }));
+    const store = disk.launch();
+    const outbox = createOutbox({ store, sends: true, retryMs: () => 60_000 });
+    const queue = createCaptureQueue({
+      store,
+      sends: true,
+      held: outbox.holding,
+      retryMs: () => 60_000,
+    });
+    const account: Account = await signedInAccount(server, {
+      onSignOut: async (leave, ending) => {
+        await queue.holdForSignOut();
+        try {
+          await outbox.signOut(leave, ending);
+        } finally {
+          queue.releaseSignOut();
+        }
+      },
+    });
+    const stopOutbox = outbox.follow(account);
+    const stopQueue = queue.follow(account);
+    await waitFor(() => outbox.state().status === "ready" && queue.state().status === "ready");
+
+    const secret = "TOP_SECRET_PHONE_DRAFT_99182";
+    await queue.enqueue({ workspaceId: "ws-1", title: "Private", body: secret, kind: "note" });
+    await waitFor(() => queue.state().lastEvent?.kind === "queued");
+    expect(disk.sql("SELECT request_id FROM captures")).toHaveLength(1);
+
+    // Failed Sign-out commit keeps Sign-out hold active so no new captures can be enqueued.
+    disk.failWrites = /DELETE FROM captures/;
+    await expect(account.signOut()).rejects.toThrow();
+    expect(outbox.holding()).toBe(true);
+    await expect(
+      queue.enqueue({ workspaceId: "ws-1", body: "Should be held", kind: "note" }),
+    ).rejects.toThrow();
+    disk.failWrites = null;
+
+    // Succeeding Sign-out deletes captures atomically and checkpoints WAL so zero draft bytes remain.
+    await account.signOut();
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+    expect(queue.state().items).toEqual([]);
+    const dbBytes = readFileSync(disk.path);
+    const walPath = `${disk.path}-wal`;
+    const walBytes = existsSync(walPath) ? readFileSync(walPath) : Buffer.alloc(0);
+    expect(dbBytes.includes(Buffer.from(secret))).toBe(false);
+    expect(walBytes.includes(Buffer.from(secret))).toBe(false);
+
+    stopQueue();
+    stopOutbox();
+  });
+
+  it("never sends requests when sends is false", async () => {
+    const disk = keptDisk();
+    disk.sql(
+      "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason, created_at_ms) VALUES (?, ?, ?, ?, ?, 'queued', NULL, 1)",
+      ORIGIN,
+      "u-1",
+      "ws-1",
+      "req-old",
+      JSON.stringify({ body: "From earlier build", kind: "note" }),
+    );
+    const server = testServer();
+    const account = await signedInAccount(server);
+    const queue = createCaptureQueue({ store: disk.launch(), sends: false });
+    const stop = queue.follow(account);
+    await waitFor(() => queue.state().status === "ready");
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toEqual([]);
+    expect(queue.state().items).toHaveLength(1);
+    await expect(
+      queue.enqueue({ workspaceId: "ws-1", body: "Blocked", kind: "note" }),
+    ).rejects.toThrow();
+    await queue.discard("req-old");
+    expect(queue.state().items).toEqual([]);
+    stop();
+  });
+});

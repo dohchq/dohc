@@ -17,6 +17,7 @@ import {
 import type { ChangeAuthor, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import {
   DEFAULT_INBOX_LIST_LIMIT,
+  defaultInboxCaptureTitle,
   formatInboxRecordMarkdown,
   INBOX_COLLECTION_PATH,
   INBOX_COLLECTION_YAML,
@@ -616,30 +617,7 @@ export async function listInboxItems(
   };
 }
 
-function defaultTitleForCapture(input: {
-  title?: string;
-  url?: string;
-  body?: string;
-  fallback?: string;
-}): string {
-  const explicit = input.title ? sanitizeInboxSingleLine(input.title) : "";
-  if (explicit) return explicit;
-  if (input.url) {
-    try {
-      const parsed = new URL(input.url);
-      const pathPart = parsed.pathname.replace(/\/+$/u, "");
-      return sanitizeInboxSingleLine(`${parsed.hostname}${pathPart}`) || parsed.hostname;
-    } catch {
-      // Validated separately.
-    }
-  }
-  const firstLine = (input.body ?? "")
-    .split(/\r?\n/u)
-    .map((line) => sanitizeInboxSingleLine(line, 80))
-    .find((line) => line.length > 0);
-  if (firstLine) return firstLine;
-  return input.fallback ?? "Captured item";
-}
+const defaultTitleForCapture = defaultInboxCaptureTitle;
 
 async function waitForInboxIndexed(
   operation: InboxOperationLike,

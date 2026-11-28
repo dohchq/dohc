@@ -60,3 +60,8 @@ export function hideToast(slots: ToastSlots, id: string): ToastSlots {
 export function closeToast(slots: ToastSlots): ToastSlots {
   return { shown: slots.waiting, waiting: null };
 }
+
+/** Clears an active Undo toast (for example on workspace switch); any toast behind it shows. */
+export function clearUndoToast(slots: ToastSlots): ToastSlots {
+  return slots.shown?.holdsUndo ? { shown: slots.waiting, waiting: null } : slots;
+}
