@@ -32,6 +32,7 @@ import {
   ServiceActivationStore,
 } from "./storage/serviceActivation.js";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery.js";
+import { closeResolvedLineage } from "./storage/liveDocumentAuthority.js";
 import { initialAcceptedHistoryDigest } from "./liveAcceptedHistory.js";
 import { ServiceActivationDriver } from "./serviceActivationDriver.js";
 import { ServiceHostedReplication } from "./serviceHostedReplication.js";
@@ -4115,6 +4116,56 @@ it.each([true])(
     if (restart) expect(o.client().sendLiveOwnerAdoption).not.toHaveBeenCalled();
   },
 );
+
+it("records an adoption whose reply was lost before a replacement closed its note, during its retirement", async () => {
+  const o = await emptyServiceHost({ adopted: false });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.f.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: "workspace",
+    ownerUserId: "owner",
+    shareId: "share",
+    path: o.sibling.path,
+    nowMs: 10,
+    guard() {},
+  });
+  const adopt = o.client().sendLiveOwnerAdoption,
+    adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  adopt.mockImplementationOnce(async (...args: unknown[]) => {
+    await adopted(...args);
+    const storage = o.f.storage as StorageContext;
+    storage.tx(() => closeResolvedLineage(storage, o.document, 20));
+    throw new Error("Adoption reply lost.");
+  });
+  const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
+  await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
+  await vi.waitFor(() =>
+    expect(adopt.mock.settledResults).toEqual([
+      { type: "rejected", value: new Error("Adoption reply lost.") },
+    ]),
+  );
+  await o.host.update({ workspaces: [o.workspace], documents: [], departing: [o.sibling] });
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), { timeout: 10_000 });
+  expect(
+    o.raw
+      .prepare(
+        "SELECT retired_at_ms IS NOT NULL AS retired,retired_boundary_json FROM sync_relay_service_activations",
+      )
+      .get(),
+  ).toEqual({
+    retired: 1,
+    retired_boundary_json: JSON.stringify({
+      terminalReceipt: null,
+      eventCount: 0,
+      historyEvidenceDigest: initialAcceptedHistoryDigest(o.f.history.namespace, o.document),
+    }),
+  });
+  expect(cuts.mock.results.filter((result) => result.type === "throw")).toEqual([]);
+  expect(adopt).toHaveBeenCalledTimes(1);
+  expect(
+    o.raw.prepare("SELECT lineage_state,admission_state FROM sync_relay_live_documents").all(),
+  ).toEqual([{ lineage_state: "current", admission_state: "closed" }]);
+});
 
 // Proves: a retirement records what the engine applied a page at a time, at
 // most four pages a pass, and the next pass continues from the tip the last
