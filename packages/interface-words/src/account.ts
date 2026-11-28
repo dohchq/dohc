@@ -58,9 +58,14 @@ export const accountWords = {
    * Sign out's body: what it deletes from the phone's outbox, messages not sent and ones that may still send, or, when
    * the phone can't read its outbox, that it can't count them.
    */
-  signOutBody: (counts: { readonly unsent: number; readonly maySend: number } | null): string => {
-    if (counts === null)
-      return "dohc could not check this phone for unsent messages. Signing out deletes any it has.";
+  signOutBody: (
+    counts: { readonly unsent: number; readonly maySend: number } | null,
+    captures?: number | null,
+  ): string => {
+    if (counts === null || captures === null)
+      return captures === undefined
+        ? "dohc could not check this phone for unsent messages. Signing out deletes any it has."
+        : "dohc could not check this phone for unsent messages or Inbox captures. Signing out deletes any it has.";
     const { unsent, maySend } = counts;
     const lines = [
       unsent === 1
@@ -72,6 +77,11 @@ export const accountWords = {
         ? "1 message may still send."
         : maySend > 1
           ? `${maySend} messages may still send.`
+          : null,
+      captures === 1
+        ? "1 Inbox capture hasn't been sent. Signing out deletes it."
+        : captures && captures > 1
+          ? `${captures} Inbox captures haven't been sent. Signing out deletes them.`
           : null,
     ].filter((line) => line !== null);
     return lines.length > 0

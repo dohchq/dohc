@@ -25,6 +25,18 @@ import {
   validateFieldValue,
 } from "@dohc/workspace-contracts/collection-values";
 import {
+  defaultInboxCaptureTitle,
+  formatInboxRecordMarkdown,
+  INBOX_COLLECTION_PATH,
+  INBOX_COLLECTION_YAML,
+  INBOX_SCHEMA_PATH,
+  MAX_INBOX_BODY_BYTES,
+  MAX_INBOX_TITLE_CHARS,
+  safeInboxSlug,
+  sanitizeInboxSingleLine,
+  validateInboxUrl,
+} from "@dohc/workspace-contracts/inbox";
+import {
   workspaceDestinationError,
   workspaceNameError,
 } from "@dohc/workspace-contracts/workspace-paths";
@@ -69,7 +81,8 @@ export type PhoneDocumentCollectionReadOperation =
 export type PhoneDocumentCollectionWriteOperation =
   | "createDocumentCollection"
   | "createDocumentRecord"
-  | "editDocumentRecordFields";
+  | "editDocumentRecordFields"
+  | "captureInboxItem";
 export const isPhoneDocumentCollectionReadOperation = (
   name: string,
 ): name is PhoneDocumentCollectionReadOperation =>
@@ -79,7 +92,8 @@ export const isPhoneDocumentCollectionWriteOperation = (
 ): name is PhoneDocumentCollectionWriteOperation =>
   name === "createDocumentCollection" ||
   name === "createDocumentRecord" ||
-  name === "editDocumentRecordFields";
+  name === "editDocumentRecordFields" ||
+  name === "captureInboxItem";
 
 export const PHONE_DOC_COLLECTION_PAGE = 50;
 export const PHONE_DOC_COLLECTION_MAX_SCAN = 200;
@@ -391,10 +405,14 @@ export function runPhoneDocumentCollectionRead(
       entry.frontmatter ??
       {};
     const rawId = raw[RECORD_ID_FRONTMATTER_KEY];
-    const title = clipText(
+    const rawTitle =
       typeof raw.title === "string" && raw.title.trim()
         ? raw.title.trim()
-        : posix.basename(entry.path).replace(/\.md$/i, ""),
+        : typeof raw.Title === "string" && raw.Title.trim()
+          ? raw.Title.trim()
+          : "";
+    const title = clipText(
+      rawTitle || posix.basename(entry.path).replace(/\.md$/i, ""),
       MAX_DISPLAY_TITLE,
     );
     const values: Record<string, unknown> = Object.create(null);
@@ -483,10 +501,23 @@ async function createIdempotentFile(
       versionId: "main",
       path: input.path,
     });
-    if (!existing) throw error;
-    return existing.metadataCorrelationId === input.correlationId
-      ? { ok: true, objectId: existing.objectId }
-      : { ok: false };
+    if (existing)
+      return existing.metadataCorrelationId === input.correlationId
+        ? { ok: true, objectId: existing.objectId }
+        : { ok: false };
+    if (
+      error.message === "target-path-exists" ||
+      error.message === "invalid-input" ||
+      (
+        await files.listTextFileMetadata({
+          workspaceId: input.workspaceId,
+          versionId: "main",
+          under: input.path,
+        })
+      ).length > 0
+    )
+      return { ok: false };
+    throw error;
   }
 }
 
@@ -499,6 +530,7 @@ export async function runPhoneDocumentCollectionWrite(
     readonly args: unknown;
     readonly visitor: Extract<CopyVisitor, { reason: "account" }>;
     authorize(): Promise<void>;
+    nowMs?: () => number;
   },
 ): Promise<{ readonly result: unknown; readonly cursor: string }> {
   const { workspaceId, owner, operation, visitor } = input;
@@ -655,6 +687,156 @@ export async function runPhoneDocumentCollectionWrite(
         objectId: created.objectId,
         recordId: prepared.recordId,
       };
+    });
+    return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };
+  }
+
+  if (operation === "captureInboxItem") {
+    const body = parseFields(input.args, ["title", "body", "url", "kind", "requestId"]);
+    const requestId = parseRequestId(body.requestId);
+    if (
+      (body.title !== undefined &&
+        (typeof body.title !== "string" || body.title.length > MAX_INBOX_TITLE_CHARS * 2)) ||
+      (body.body !== undefined &&
+        (typeof body.body !== "string" ||
+          Buffer.byteLength(body.body, "utf8") > MAX_INBOX_BODY_BYTES)) ||
+      (body.url !== undefined && typeof body.url !== "string") ||
+      (body.kind !== undefined && body.kind !== "note" && body.kind !== "link")
+    )
+      throw badRequest("Invalid Inbox item arguments.");
+    const rawTitle = body.title ? sanitizeInboxSingleLine(body.title) : "";
+    const noteBody = body.body ?? "";
+    let url: string | undefined;
+    if (body.url?.trim()) {
+      try {
+        url = validateInboxUrl(body.url);
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Invalid Inbox link.");
+      }
+    }
+    const kind = body.kind ?? (url ? "link" : "note");
+    if (!rawTitle && !url && !noteBody.trim()) throw badRequest("Enter a title, note, or link.");
+    const title = defaultInboxCaptureTitle({ title: rawTitle, url, body: noteBody });
+    const recordId = derivedRecordId(`phone-inbox-capture:${workspaceId}:${requestId}`);
+    const correlationId = `phone-inbox-capture:${requestId}`;
+    const receivedIso = new Date(input.nowMs?.() ?? Date.now()).toISOString();
+    let markdown: string;
+    try {
+      markdown = formatInboxRecordMarkdown({
+        recordId,
+        title,
+        source: "capture",
+        kind,
+        receivedIso,
+        url,
+        body: noteBody,
+      });
+    } catch (error) {
+      throw badRequest(error instanceof Error ? error.message : "Invalid Inbox item.");
+    }
+    const occupied = (reason: string) => ({ ok: false, refusal: "folder-occupied", reason });
+    const result = await withCopy(async (replica, files) => {
+      await files.ensureMainVersion({ workspaceId });
+      await assertOutsideCollection(files, workspaceId, INBOX_SCHEMA_PATH, true);
+      const confirmCapture = async (path: string, objectId: string) => {
+        await seedRichDocLineage(deps.storage, replica, { workspaceId, path, objectId });
+        await replica.sync(signal);
+        if (
+          objectAt(path) !== objectId ||
+          !deps.storage.mainLiveLineageExists({ workspaceId, objectId })
+        )
+          throw unconfirmed("the captured note");
+        return { ok: true, path, objectId, recordId };
+      };
+      const ctx = deps.storage as StorageContext;
+      const prior = ctx.readTx(() => {
+        const hit = ctx.db
+          .prepare(
+            `SELECT json_extract(payload_json, '$.path') AS path, json_extract(payload_json, '$.objectId') AS object_id
+             FROM sync_relay_log
+             WHERE workspace_id = ? AND op_kind = 'moment.append'
+               AND json_extract(payload_json, '$.versionId') = 'main'
+               AND json_extract(payload_json, '$.operation') = 'write'
+               AND json_extract(payload_json, '$.metadata.correlationId') = ?
+             ORDER BY relay_seq DESC LIMIT 1`,
+          )
+          .get(workspaceId, correlationId);
+        return typeof hit?.path === "string" && typeof hit?.object_id === "string"
+          ? { path: hit.path, objectId: hit.object_id }
+          : null;
+      });
+      if (prior) {
+        const currentPath = ctx.readTx(() => {
+          const row = ctx.db
+            .prepare(
+              `SELECT f.path
+               FROM sync_relay_object_moments m
+               JOIN sync_relay_current_files f
+                 ON f.workspace_id = m.workspace_id
+                AND f.version_id = m.version_id
+                AND f.path = m.path
+                AND f.state_relay_seq = m.relay_seq
+               WHERE m.workspace_id = ? AND m.version_id = 'main' AND m.object_id = ?
+               ORDER BY m.relay_seq DESC LIMIT 1`,
+            )
+            .get(workspaceId, prior.objectId);
+          return typeof row?.path === "string" ? row.path : null;
+        });
+        if (currentPath) return await confirmCapture(currentPath, prior.objectId);
+        return { ok: true, path: prior.path, objectId: prior.objectId, recordId };
+      }
+      const rootHit = (
+        await files.resolveFiles({ workspaceId, targets: [{ path: INBOX_COLLECTION_PATH }] })
+      ).results[0];
+      if (rootHit?.status === "found") return occupied("A file named Inbox already exists.");
+      const schemaFile = await files.readTextFile({
+        workspaceId,
+        versionId: "main",
+        path: INBOX_SCHEMA_PATH,
+      });
+      if (schemaFile) {
+        if (schemaFile.contentKind !== "text")
+          return occupied("Inbox cannot be used as a Collection.");
+      } else {
+        if (
+          (
+            await files.listTextFileMetadata({
+              workspaceId,
+              versionId: "main",
+              under: INBOX_SCHEMA_PATH,
+            })
+          ).length > 0
+        )
+          return occupied("Inbox cannot be used as a Collection.");
+        const createdSchema = await createIdempotentFile(files, {
+          workspaceId,
+          path: INBOX_SCHEMA_PATH,
+          text: INBOX_COLLECTION_YAML,
+          requestId: `${requestId}:inbox`,
+          correlationId: `phone-inbox-schema:${requestId}`,
+          author,
+        });
+        if (
+          !createdSchema.ok &&
+          (await files.readTextFile({ workspaceId, versionId: "main", path: INBOX_SCHEMA_PATH }))
+            ?.contentKind !== "text"
+        )
+          return occupied("Inbox cannot be used as a Collection.");
+      }
+      const suffix = recordId.slice(-6).toLowerCase();
+      const base = `${INBOX_COLLECTION_PATH}/${receivedIso.slice(0, 10)}-${safeInboxSlug(title, kind, 52)}-${suffix}`;
+      for (const candidate of [`${base}.md`, `${base}-2.md`]) {
+        const created = await createIdempotentFile(files, {
+          workspaceId,
+          path: candidate,
+          text: markdown,
+          requestId,
+          correlationId,
+          author,
+        });
+        if (created.ok) return await confirmCapture(candidate, created.objectId);
+      }
+      throw unconfirmed("the captured note");
     });
     return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };
   }

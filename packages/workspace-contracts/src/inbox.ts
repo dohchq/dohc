@@ -10,9 +10,9 @@ export const INBOX_STATUSES = ["New", "Filed", "Archived"] as const;
 export const INBOX_SOURCES = ["drop", "capture", "webhook", "cli", "agent"] as const;
 export const INBOX_KINDS = ["note", "file", "image", "link", "webhook"] as const;
 
-const MAX_INBOX_TITLE_CHARS = 240;
+export const MAX_INBOX_TITLE_CHARS = 240;
 const MAX_INBOX_URL_CHARS = 2048;
-const MAX_INBOX_BODY_BYTES = 256 * 1024;
+export const MAX_INBOX_BODY_BYTES = 256 * 1024;
 export const MAX_INBOX_PATH_CHARS = 4096;
 export const MAX_INBOX_MOVE_ATTACHMENTS = 5000;
 export const MAX_INBOX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -117,6 +117,30 @@ export function validateInboxUrl(raw: string): string {
     throw new Error(`Link exceeds ${MAX_INBOX_URL_CHARS} characters. Use a shorter URL.`);
   }
   return parsed.href;
+}
+
+export function defaultInboxCaptureTitle(input: {
+  title?: string;
+  url?: string;
+  body?: string;
+  fallback?: string;
+}): string {
+  const explicit = input.title ? sanitizeInboxSingleLine(input.title) : "";
+  if (explicit) return explicit;
+  if (input.url) {
+    try {
+      const parsed = new URL(input.url);
+      const pathPart = parsed.pathname.replace(/\/+$/u, "");
+      return sanitizeInboxSingleLine(`${parsed.hostname}${pathPart}`) || parsed.hostname;
+    } catch {
+      // Validated separately.
+    }
+  }
+  const firstLine = (input.body ?? "")
+    .split(/\r?\n/u)
+    .map((line) => sanitizeInboxSingleLine(line, 80))
+    .find((line) => line.length > 0);
+  return firstLine || input.fallback || "Captured item";
 }
 
 export function safeInboxSlug(seed: string, fallback = "item", maxChars = 60): string {

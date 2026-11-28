@@ -15,7 +15,7 @@ import {
   type ResolveActor,
   type StoredAccountSession,
 } from "@dohc/workspace-auth/session";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { documentEditUpdate } from "@dohc/ydoc-projection";
 import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
@@ -1031,18 +1031,21 @@ describe.skipIf(engine.missing)(
           .run(WORKSPACE, created.objectId);
 
         // Proof 3c: delete previously live-edited page + idempotent retry + enrollment cleared.
-        const deleted = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
-          "deleteFile",
-          {
-            path: "notes/renamed.md",
-            expectedObjectId: created.objectId,
-            requestId: "req-delete-ok",
-          },
-        );
+        const deleted = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "notes/renamed.md",
+          expectedObjectId: created.objectId,
+          requestId: "req-delete-ok",
+        });
         expect(deleted).toEqual({
           ok: true,
           path: "notes/renamed.md",
           objectId: created.objectId,
+          deleteMomentId: expect.any(String),
         });
         expect(
           stack.storage.readServiceHostEnrollmentByObjectId(WORKSPACE, created.objectId),
@@ -1176,6 +1179,7 @@ describe.skipIf(engine.missing)(
           ok: true,
           path: "sketches/wireframe.excalidraw",
           objectId: sketchObjId,
+          deleteMomentId: expect.any(String),
         });
 
         // Collection ancestry: writes inside a Collection folder (holding dataset.json) are rejected with 400.
@@ -1303,7 +1307,278 @@ describe.skipIf(engine.missing)(
             expectedObjectId: deepCreated.objectId,
             requestId: "req-deep-delete",
           }),
-        ).toEqual({ ok: true, path: deepRenamed, objectId: deepCreated.objectId });
+        ).toEqual({
+          ok: true,
+          path: deepRenamed,
+          objectId: deepCreated.objectId,
+          deleteMomentId: expect.any(String),
+        });
+      },
+      4 * REAL_DAEMON_DEADLINE_MS,
+    );
+
+    it(
+      "Proofs 3-4 (PR 8c): restoreDeletedFile preserves objectId, re-seeds live lineage for immediate live editing, restores sketches, is idempotent, and maps occupied/unavailable refusals",
+      async () => {
+        const stack = await startRealStack();
+        const desktopRoot = join(stack.root, "desktop-restore");
+        await mkdir(desktopRoot, { recursive: true });
+        const desktop = await openLiveDaemonWorkspace(
+          { workspaceId: WORKSPACE, rootPath: desktopRoot },
+          { maxRestarts: 0, allowInsecureLoopbackForTests: false },
+        );
+        cleanup.push(() => desktop.close());
+        const relay = desktop.relay.bind({ ...desktop.workspace, relay: stack.relayConnection });
+        const probe = await probeRelayWorkspace({
+          workspaceId: WORKSPACE,
+          relay: stack.relayConnection,
+        });
+        await bootstrapJoinedWorkspace({
+          workspaceId: WORKSPACE,
+          identity: probe.identity,
+          transport: relay,
+          installDataKey: async (key) => await installWorkspaceDataKey(desktopRoot, key),
+        });
+        const desktopCapture = createWorkspaceEngineCapture({
+          ...desktop.workspace,
+          rustEngineSessions: desktop.sessions,
+        });
+        cleanup.push(() => desktopCapture.stop());
+        const pushDesktop = async () => {
+          for (let more = true; more;) more = (await relay.push()).hasMore;
+        };
+
+        // Create and live-edit a Markdown page on phone, then attach a file-comment thread linked to its objectId.
+        const page = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "createPage",
+          { path: "notes/undo-me.md", requestId: "req-undo-create" },
+        );
+        const liveBefore = await stack.openPhoneLive("notes/undo-me.md");
+        await liveBefore.editMarkdown("Important live content before delete");
+        await liveBefore.waitSettled("Important live content before delete");
+        await liveBefore.disconnect();
+        await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+        const commentThreadId = await desktop.sessions.run(
+          desktop.workspace,
+          async ({ client, workspace: handle }) => {
+            const chats = new ChatsLiveAdapter(client, handle, { workspaceId: WORKSPACE });
+            const thread = await chats.createThread({
+              workspaceId: WORKSPACE,
+              title: "Undo review",
+              linkedFile: { objectId: page.objectId, pathHint: "notes/undo-me.md" },
+            });
+            await chats.sendMessage({
+              workspaceId: WORKSPACE,
+              threadId: thread.id,
+              author: { kind: "human", displayName: "Owner" },
+              authorUserId: OWNER,
+              authorActorKey: null,
+              body: "Keep this comment linked after undo.",
+            });
+            return thread.id;
+          },
+        );
+        await pushDesktop();
+        expect(
+          await stack.phoneOp<{ threads: Array<{ id: string }> }>("fileChats", {
+            path: "notes/undo-me.md",
+          }),
+        ).toMatchObject({ threads: [expect.objectContaining({ id: commentThreadId })] });
+
+        // Delete the previously live-edited page and verify deleteMomentId + idempotent replay.
+        const del = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "notes/undo-me.md",
+          expectedObjectId: page.objectId,
+          requestId: "req-undo-delete",
+        });
+        expect(del).toEqual({
+          ok: true,
+          path: "notes/undo-me.md",
+          objectId: page.objectId,
+          deleteMomentId: expect.any(String),
+        });
+        expect(
+          await stack.phoneOp("deleteFile", {
+            path: "notes/undo-me.md",
+            expectedObjectId: page.objectId,
+            requestId: "req-undo-delete",
+          }),
+        ).toEqual(del);
+
+        // Restore via restoreDeletedFile: preserves exact objectId, file-comment links, and re-seeds live lineage!
+        const restored = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "restoreDeletedFile",
+          {
+            path: "notes/undo-me.md",
+            objectId: page.objectId,
+            deleteMomentId: del.deleteMomentId,
+            requestId: "req-undo-restore",
+          },
+        );
+        expect(restored).toEqual({ ok: true, path: "notes/undo-me.md", objectId: page.objectId });
+        expect(
+          await stack.phoneOp<{ threads: Array<{ id: string }> }>("fileChats", {
+            path: "notes/undo-me.md",
+          }),
+        ).toMatchObject({ threads: [expect.objectContaining({ id: commentThreadId })] });
+
+        // Idempotent retry after replica restart returns exact same ok result.
+        await stack.restartCopies();
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "notes/undo-me.md",
+            objectId: page.objectId,
+            deleteMomentId: del.deleteMomentId,
+            requestId: "req-undo-restore",
+          }),
+        ).toEqual(restored);
+
+        // CRITICAL: Restored page immediately opens live on phone with ZERO desktop online and edits cleanly!
+        const liveAfter = await stack.openPhoneLive("notes/undo-me.md");
+        await liveAfter.editMarkdown("Edited live after restore");
+        await liveAfter.waitSettled("Edited live after restore");
+        await liveAfter.disconnect();
+
+        // Desktop syncs and sees the restored file + post-restore live edit with exact same objectId and zero conflicts.
+        await vi.waitFor(
+          async () => {
+            await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+            expect(await readFile(join(desktopRoot, "notes/undo-me.md"), "utf8")).toContain(
+              "Edited live after restore",
+            );
+          },
+          { timeout: REAL_DAEMON_DEADLINE_MS, interval: 100 },
+        );
+        const restoredDesktopLive = await desktopCapture.openYDocSession({
+          path: "notes/undo-me.md",
+          contentKind: "richdoc",
+          onRemoteUpdate: () => undefined,
+        });
+        expect(restoredDesktopLive.lineageAtOpen).toBe("existing");
+        await restoredDesktopLive.close();
+        const desktopResolved = await desktop.sessions.run(
+          desktop.workspace,
+          async ({ client, workspace: handle }) => {
+            const adapter = new VersionedLiveAdapter(client, handle, { workspaceId: WORKSPACE });
+            const [res, conflicts] = await Promise.all([
+              adapter.resolveFiles({
+                workspaceId: WORKSPACE,
+                targets: [{ path: "notes/undo-me.md" }],
+              }),
+              adapter.listTextConflicts({ workspaceId: WORKSPACE }),
+            ]);
+            return { res: res.results[0], conflicts: conflicts.conflicts };
+          },
+        );
+        expect(desktopResolved.res).toMatchObject({ status: "found", objectId: page.objectId });
+        expect(desktopResolved.conflicts).toEqual([]);
+
+        // Sketch (.excalidraw) delete + restore preserves exact objectId and scene JSON.
+        const sketchScene = '{"type":"excalidraw","version":2,"elements":[{"id":"box-1"}]}\n';
+        const sketchObjId = await desktop.sessions.run(
+          desktop.workspace,
+          async ({ client, workspace: handle }) =>
+            (
+              await new VersionedLiveAdapter(client, handle, {
+                workspaceId: WORKSPACE,
+              }).writeTextFile({
+                workspaceId: WORKSPACE,
+                versionId: "main",
+                path: "sketches/undo.excalidraw",
+                text: sketchScene,
+                publish: true,
+                createOnly: true,
+                metadata: { origin: "api" },
+              })
+            ).object.id,
+        );
+        await pushDesktop();
+        const delSketch = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "sketches/undo.excalidraw",
+          expectedObjectId: sketchObjId,
+          requestId: "req-del-sketch",
+        });
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "sketches/undo.excalidraw",
+            objectId: sketchObjId,
+            deleteMomentId: delSketch.deleteMomentId,
+            requestId: "req-restore-sketch",
+          }),
+        ).toEqual({ ok: true, path: "sketches/undo.excalidraw", objectId: sketchObjId });
+        await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+        expect(await readFile(join(desktopRoot, "sketches/undo.excalidraw"), "utf8")).toBe(
+          sketchScene,
+        );
+
+        // Edge case 1: occupied path returns path-exists (never 500).
+        const occ = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "createPage",
+          {
+            path: "notes/occupied.md",
+            requestId: "req-occ-1",
+          },
+        );
+        const delOcc = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "notes/occupied.md",
+          expectedObjectId: occ.objectId,
+          requestId: "req-occ-del",
+        });
+        await stack.phoneOp("createPage", { path: "notes/occupied.md", requestId: "req-occ-2" });
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "notes/occupied.md",
+            objectId: occ.objectId,
+            deleteMomentId: delOcc.deleteMomentId,
+            requestId: "req-occ-restore",
+          }),
+        ).toMatchObject({ ok: false, refusal: "path-exists" });
+
+        // Edge case 2: unavailable/mismatched deleteMomentId returns restore-unavailable (never 500).
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "notes/occupied.md",
+            objectId: occ.objectId,
+            deleteMomentId: "nonexistent-moment-id",
+            requestId: "req-bad-moment",
+          }),
+        ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
+
+        // Edge case 3 (B5): stale Undo cannot resurrect an older revision after a later restore, edit, and delete.
+        const del2 = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "notes/undo-me.md",
+          expectedObjectId: page.objectId,
+          requestId: "req-undo-delete-2",
+        });
+        expect(del2.deleteMomentId).not.toBe(del.deleteMomentId);
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "notes/undo-me.md",
+            objectId: page.objectId,
+            deleteMomentId: del.deleteMomentId,
+            requestId: "req-stale-undo",
+          }),
+        ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
       },
       4 * REAL_DAEMON_DEADLINE_MS,
     );

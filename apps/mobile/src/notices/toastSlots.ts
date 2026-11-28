@@ -60,3 +60,10 @@ export function hideToast(slots: ToastSlots, id: string): ToastSlots {
 export function closeToast(slots: ToastSlots): ToastSlots {
   return { shown: slots.waiting, waiting: null };
 }
+
+/** Clears an active workspace-scoped Undo toast (leaving account-level Notice Done Undo alone). */
+export function clearUndoToast(slots: ToastSlots): ToastSlots {
+  return slots.shown?.holdsUndo && slots.shown.workspaceId !== undefined
+    ? { shown: slots.waiting, waiting: null }
+    : slots;
+}

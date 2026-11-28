@@ -112,6 +112,7 @@ describe("Document Collection ops: Member/Admin 404 isolation", () => {
             requestId: "req-3",
           },
         ],
+        ["captureInboxItem", { body: "Quick note", requestId: "req-4" }],
       ];
       for (const [op, args] of ops) {
         const missing = await denialBytes(await h(postOp("nowhere", op, "ben", args)));
@@ -142,6 +143,16 @@ describe("Document Collection ops: Member/Admin 404 isolation", () => {
               postOp("trip", "createDocumentCollection", "ana", {
                 folder: "Tasks",
                 requestId: "req-4",
+              }),
+            )
+          ).status,
+        ).toBe(503);
+        expect(
+          (
+            await h(
+              postOp("trip", "captureInboxItem", "ana", {
+                body: "Quick note",
+                requestId: "req-5",
               }),
             )
           ).status,
@@ -191,7 +202,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       },
       {
         path: "Tasks/Alpha.md",
-        text: `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nStatus: Todo\nProject: ${projectRecId}\n---\n${largeBody}\n`,
+        text: `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nTitle: Alpha Record\nStatus: Todo\nProject: ${projectRecId}\n---\n${largeBody}\n`,
         objectId: "obj-alpha",
       },
       {
@@ -204,7 +215,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
 
     // Accepted live frontmatter cut overrides stale settled Status: Todo -> Done.
     const liveDoc = markdownToYDoc(
-      `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nStatus: Todo\nProject: ${projectRecId}\n---\nBody\n`,
+      `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nTitle: Alpha Record\nStatus: Todo\nProject: ${projectRecId}\n---\nBody\n`,
     );
     const checkpoint = Y.encodeStateAsUpdate(liveDoc);
     const updates: Uint8Array[] = [];
@@ -250,6 +261,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       };
     };
     expect(recBody.result.records.map((r) => r.path)).toEqual(["Tasks/Alpha.md", "Tasks/Beta.md"]);
+    expect(recBody.result.records[0]?.title).toBe("Alpha Record");
     expect(recBody.result.records[0]?.values).toEqual({
       Status: "Done",
       Project: projectRecId,
@@ -444,5 +456,137 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
         true,
       ),
     ).rejects.toThrow();
+  });
+
+  it("replays captureInboxItem against current path after rename and original path after delete without SQL error or revival", async () => {
+    const storage = (await testStorage()) as StorageContext;
+    vi.spyOn(storage, "mainLiveLineageExists").mockReturnValue(true);
+    let writeCalls = 0;
+    const replica = {
+      workspace: "/tmp/unused",
+      withRecordWork: async <T>(work: () => Promise<T>) => work(),
+      sync: async () => undefined,
+      client: {
+        sendRequest: async (req: {
+          id: number;
+          method: string;
+          params?: Record<string, unknown>;
+        }) => {
+          if (req.method === "versions.ensureMain")
+            return {
+              type: "response",
+              id: req.id,
+              ok: true,
+              result: {
+                id: "main",
+                workspaceId: "cap",
+                kind: "main",
+                name: "main",
+                createdAtMs: 1,
+              },
+            };
+          if (req.method === "files.resolve") {
+            const targets = Array.isArray(req.params?.targets) ? req.params.targets : [];
+            return {
+              type: "response",
+              id: req.id,
+              ok: true,
+              result: {
+                versionId: "main",
+                results: targets.map(() => ({ status: "absent" })),
+              },
+            };
+          }
+          writeCalls += 1;
+          throw new Error(`unexpected write call: ${req.method}`);
+        },
+        close() {},
+      },
+    };
+    const h = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () =>
+        ({
+          withServerCopy: async (
+            _owner: string,
+            _ws: string,
+            _visitor: unknown,
+            work: (r: typeof replica) => Promise<unknown>,
+          ) => work(replica),
+          hold() {},
+          endHold() {},
+        }) as never,
+    });
+    await claimWorkspace(h, "ana", "cap");
+    const originalPath = "Inbox/2026-11-28-flight-receipts-abc123.md";
+    const renamedPath = "Inbox/renamed.md";
+    const text = "---\nTitle: Flight receipts\n---\n\nCheck boarding pass\n";
+    await putBlob(h, "ana", "cap", text);
+    await appendLog(h, "ana", "cap", [
+      moment(originalPath, text, {
+        objectId: "obj-cap-1",
+        payload: { metadata: { origin: "user", correlationId: "phone-inbox-capture:req-cap-1" } },
+      }),
+    ]);
+
+    const replayLive = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayLive.status).toBe(200);
+    expect((await replayLive.json()).result).toMatchObject({
+      ok: true,
+      path: originalPath,
+      objectId: "obj-cap-1",
+    });
+
+    await appendLog(h, "ana", "cap", [
+      moment(renamedPath, text, {
+        objectId: "obj-cap-1",
+        operation: "rename",
+        beforePath: originalPath,
+        beforeContent: text,
+      }),
+    ]);
+    const replayRenamed = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayRenamed.status).toBe(200);
+    expect((await replayRenamed.json()).result).toMatchObject({
+      ok: true,
+      path: renamedPath,
+      objectId: "obj-cap-1",
+    });
+
+    await appendLog(h, "ana", "cap", [
+      moment(renamedPath, text, {
+        objectId: "obj-cap-1",
+        operation: "delete",
+        beforePath: renamedPath,
+        beforeContent: text,
+        afterContent: null,
+      }),
+    ]);
+    const replayDeleted = await h(
+      postOp("cap", "captureInboxItem", "ana", {
+        title: "Flight receipts",
+        body: "Check boarding pass",
+        requestId: "req-cap-1",
+      }),
+    );
+    expect(replayDeleted.status).toBe(200);
+    expect((await replayDeleted.json()).result).toMatchObject({
+      ok: true,
+      path: originalPath,
+      objectId: "obj-cap-1",
+    });
+    expect(writeCalls).toBe(0);
   });
 });

@@ -84,6 +84,36 @@ describe("owner file write path allowlist & argument validation", () => {
         requestId: "req-2",
       }),
     ).toMatchObject({ fromPath: "a.excalidraw", toPath: "b.excalidraw" });
+    expect(
+      parseAccountFileWrite("restoreDeletedFile", {
+        path: "notes/plan.md",
+        objectId: "obj-1",
+        deleteMomentId: "mom-1",
+        requestId: "req-3",
+      }),
+    ).toEqual({
+      operation: "restoreDeletedFile",
+      path: "notes/plan.md",
+      objectId: "obj-1",
+      deleteMomentId: "mom-1",
+      requestId: "req-3",
+    });
+    expect(() =>
+      parseAccountFileWrite("restoreDeletedFile", {
+        path: ".secret.md",
+        objectId: "obj-1",
+        deleteMomentId: "mom-1",
+        requestId: "req-3",
+      }),
+    ).toThrow();
+    expect(() =>
+      parseAccountFileWrite("restoreDeletedFile", {
+        path: "notes/plan.md",
+        objectId: "obj-1",
+        deleteMomentId: "",
+        requestId: "req-3",
+      }),
+    ).toThrow();
   });
 
   it("refuses system, collection, hidden, traversal, marker, non-page/sketch, cross-kind, and cross-folder paths", () => {
@@ -194,6 +224,10 @@ describe("owner-only file write authorization and Member 404 isolation", () => {
           },
         ],
         ["deleteFile", { path: "a.md", expectedObjectId: "obj-1", requestId: "req-3" }],
+        [
+          "restoreDeletedFile",
+          { path: "a.md", objectId: "obj-1", deleteMomentId: "mom-1", requestId: "req-4" },
+        ],
       ];
       for (const [operation, args] of ops) {
         const missingBytes = await denialBytes(await h(postOp("nowhere", operation, "ben", args)));
@@ -219,6 +253,8 @@ describe("owner-only file write authorization and Member 404 isolation", () => {
       if (!hasCopies) {
         const ownerResp = await h(postOp("trip", "createPage", "ana", ops[0]![1]));
         expect(ownerResp.status).toBe(503);
+        const ownerRestore = await h(postOp("trip", "restoreDeletedFile", "ana", ops[3]![1]));
+        expect(ownerRestore.status).toBe(503);
       }
 
       const hiddenResp = await h(

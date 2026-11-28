@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -26,16 +28,24 @@ import {
   type ServiceHostRetirementPreparation,
 } from "./storage/serviceHostEnrollment";
 
-export type AccountFileWriteOperation = "createPage" | "renameFile" | "deleteFile";
+export type AccountFileWriteOperation =
+  | "createPage"
+  | "renameFile"
+  | "deleteFile"
+  | "restoreDeletedFile";
 export const isAccountFileWriteOperation = (name: string): name is AccountFileWriteOperation =>
-  name === "createPage" || name === "renameFile" || name === "deleteFile";
+  name === "createPage" ||
+  name === "renameFile" ||
+  name === "deleteFile" ||
+  name === "restoreDeletedFile";
 
 export type AccountFileWriteRefusal =
   | "path-exists"
   | "not-found"
   | "stale-object"
   | "live-active"
-  | "live-unsettled";
+  | "live-unsettled"
+  | "restore-unavailable";
 
 export type AccountFileWriteResult =
   | {
@@ -44,6 +54,7 @@ export type AccountFileWriteResult =
       readonly objectId: string;
       readonly fromPath?: string;
       readonly linksUpdated?: number;
+      readonly deleteMomentId?: string;
     }
   | { readonly ok: false; readonly refusal: AccountFileWriteRefusal; readonly reason: string };
 
@@ -142,9 +153,17 @@ export async function seedRichDocLineage(
     readonly client: Parameters<typeof openEngineYdocProviderSession>[0]["transport"];
     readonly workspace: string;
   },
-  input: { readonly workspaceId: string; readonly path: string; readonly objectId: string },
+  input: {
+    readonly workspaceId: string;
+    readonly path: string;
+    readonly objectId: string;
+    readonly force?: boolean;
+  },
 ): Promise<void> {
-  if (storage.mainLiveLineageExists({ workspaceId: input.workspaceId, objectId: input.objectId }))
+  if (
+    !input.force &&
+    storage.mainLiveLineageExists({ workspaceId: input.workspaceId, objectId: input.objectId })
+  )
     return;
   const session = await openEngineYdocProviderSession({
     transport: replica.client,
@@ -168,11 +187,12 @@ export const parseRequestId = (v: unknown) => {
     throw badRequest("A valid requestId is required.");
   return v;
 };
-export const parseObjectId = (v: unknown) => {
+const parseId = (v: unknown, label: string) => {
   if (typeof v !== "string" || !v.length || v.length > 128)
-    throw badRequest("A valid expectedObjectId is required.");
+    throw badRequest(`A valid ${label} is required.`);
   return v;
 };
+export const parseObjectId = (v: unknown) => parseId(v, "expectedObjectId");
 
 export function validateAllowedFileWritePath(
   value: unknown,
@@ -239,6 +259,20 @@ export function parseAccountFileWrite(operation: AccountFileWriteOperation, args
       fromPath: from.path,
       toPath: to.path,
       expectedObjectId: parseObjectId(body.expectedObjectId),
+      requestId: parseRequestId(body.requestId),
+    } as const;
+  }
+  if (operation === "restoreDeletedFile") {
+    const body = parseFields(args, ["path", "objectId", "deleteMomentId", "requestId"]);
+    const { path } = validateAllowedFileWritePath(body.path, {
+      allowSketch: true,
+      checkDestination: false,
+    });
+    return {
+      operation,
+      path,
+      objectId: parseObjectId(body.objectId),
+      deleteMomentId: parseId(body.deleteMomentId, "deleteMomentId"),
       requestId: parseRequestId(body.requestId),
     } as const;
   }
@@ -455,6 +489,125 @@ export async function runAccountFileWrite(
         return await complete({ ok: true, path: parsed.path, objectId });
       }
 
+      if (parsed.operation === "restoreDeletedFile") {
+        const rich = liveDocumentKindForPath(parsed.path) === "richdoc";
+        await assertOutsideCollection(files, workspaceId, parsed.path, rich);
+        const moment = await files.getMoment({ workspaceId, momentId: parsed.deleteMomentId });
+        const unavailable = () =>
+          refuse("restore-unavailable", "This deleted file can no longer be restored.");
+        if (
+          !moment ||
+          moment.versionId !== "main" ||
+          moment.operation !== "delete" ||
+          moment.objectId !== parsed.objectId ||
+          moment.path !== parsed.path ||
+          !moment.beforePresent ||
+          moment.beforeContentKind !== "text"
+        )
+          return unavailable();
+        const text =
+          moment.beforeText ??
+          (moment.beforeBlobSha256
+            ? await files.readTextBlob({ workspaceId, sha256: moment.beforeBlobSha256 })
+            : null);
+        if (text === null) return unavailable();
+        const correlationId = `phone-restore:${parsed.requestId}`;
+        const hadLineage =
+          rich && deps.storage.mainLiveLineageExists({ workspaceId, objectId: parsed.objectId });
+        const confirmRestored = async (replayed: boolean): Promise<AccountFileWriteResult> => {
+          if (
+            rich &&
+            !(
+              replayed &&
+              liveEditors(deps.storage).connected({ workspaceId, objectId: parsed.objectId })
+            )
+          ) {
+            try {
+              await seedRichDocLineage(deps.storage, replica, {
+                workspaceId,
+                path: parsed.path,
+                objectId: parsed.objectId,
+                force: true,
+              });
+            } catch (error) {
+              if (hadLineage || !(error instanceof DaemonRefusalError)) throw error;
+            }
+          }
+          await replica.sync(signal);
+          if (objectAt(parsed.path) !== parsed.objectId) throw unconfirmed("the restore");
+          return await complete({ ok: true, path: parsed.path, objectId: parsed.objectId });
+        };
+        const checkExisting = async (): Promise<AccountFileWriteResult | "replay" | null> => {
+          const hit = (await files.resolveFiles({ workspaceId, targets: [{ path: parsed.path }] }))
+            .results[0];
+          if (hit?.status !== "found") return null;
+          if (hit.objectId === parsed.objectId) {
+            const { moments } = await files.listMoments({
+              workspaceId,
+              versionId: "main",
+              objectId: parsed.objectId,
+              limit: 10,
+              metadataOnly: true,
+            });
+            if (
+              moments.some(
+                (m) =>
+                  m.path === parsed.path &&
+                  m.metadataOrigin === "restore" &&
+                  m.metadataCorrelationId === correlationId,
+              )
+            )
+              return "replay";
+          }
+          return refuse("path-exists", "A file with this name already exists.");
+        };
+        const runMutation = <T>(work: () => Promise<T>) =>
+          replica.withSyncPaused ? replica.withSyncPaused(work, signal) : work();
+        const outcome = await runMutation(
+          async (): Promise<AccountFileWriteResult | "replay" | null> => {
+            const already = await checkExisting();
+            if (already) return already;
+            if (replica.root)
+              await rm(join(replica.root, parsed.path), { force: true }).catch(() => undefined);
+            try {
+              const written = await files.writeTextFile({
+                workspaceId,
+                versionId: "main",
+                path: parsed.path,
+                text,
+                publish: true,
+                createOnly: true,
+                expectedPathClearSinceOrder: moment.momentOrder,
+                expectedPathClearObjectId: parsed.objectId,
+                expectedPathClearHeadMomentId: parsed.deleteMomentId,
+                restoreBeforeMomentId: parsed.deleteMomentId,
+                requestId: parsed.requestId,
+                metadata: { origin: "restore", correlationId },
+                author,
+              });
+              if (written.object.id !== parsed.objectId) throw unconfirmed("the restore");
+              return null;
+            } catch (error) {
+              if (!(error instanceof DaemonRefusalError)) throw error;
+              const code = error.message;
+              if (code === "live-page-owned" || code === "live-document-binding-active")
+                return refuse("live-active", ACTIVE_MSG);
+              if (code === "target-path-exists" || code === "restore-path-collision")
+                return refuse("path-exists", "A file with this name already exists.");
+              if (
+                code === "synced-deletion-revival-refused" ||
+                code === "restore-head-changed" ||
+                code === "invalid-input"
+              )
+                return (await checkExisting()) ?? unavailable();
+              throw error;
+            }
+          },
+        );
+        if (outcome && outcome !== "replay") return outcome;
+        return await confirmRestored(outcome === "replay");
+      }
+
       const operationId = `${OPERATION_ID_PREFIX}${parsed.requestId}`;
       const isRename = parsed.operation === "renameFile";
       const srcPath = isRename ? parsed.fromPath : parsed.path;
@@ -474,7 +627,10 @@ export async function runAccountFileWrite(
           "stale-object",
           `This file changed before it could be ${isRename ? "renamed" : "deleted"}. Try again.`,
         );
-      const finish = async (objectId: string): Promise<AccountFileWriteResult> => {
+      const finish = async (
+        objectId: string,
+        deleteMomentId?: string,
+      ): Promise<AccountFileWriteResult> => {
         if (dstPath !== null) {
           const linksUpdated = caseOnly
             ? 0
@@ -516,7 +672,12 @@ export async function runAccountFileWrite(
           ownerUserId: owner,
           guard: () => signal.throwIfAborted(),
         });
-        return await complete({ ok: true, path: srcPath, objectId });
+        return await complete({
+          ok: true,
+          path: srcPath,
+          objectId,
+          ...(deleteMomentId ? { deleteMomentId } : {}),
+        });
       };
 
       let { versionId, from, to } = await resolve();
@@ -534,7 +695,7 @@ export async function runAccountFileWrite(
               limit: 10,
             })
           ).moments;
-          const replayed = opMoments.some((m) =>
+          const replayed = opMoments.find((m) =>
             dstPath !== null
               ? m.operation === "rename" &&
                 m.objectId === parsed.expectedObjectId &&
@@ -546,7 +707,11 @@ export async function runAccountFileWrite(
                 m.path === srcPath &&
                 m.metadataCorrelationId === operationId,
           );
-          if (replayed) return await finish(parsed.expectedObjectId);
+          if (replayed)
+            return await finish(
+              parsed.expectedObjectId,
+              dstPath === null ? replayed.momentId : undefined,
+            );
         }
         return from?.status === "found"
           ? stale()
@@ -572,6 +737,7 @@ export async function runAccountFileWrite(
         }
         const runMutation = <T>(work: () => Promise<T>) =>
           replica.withSyncPaused ? replica.withSyncPaused(work, signal) : work();
+        let deleteMomentId: string | undefined;
         const refused = await runMutation(async (): Promise<AccountFileWriteResult | null> => {
           const hold = await files.holdCapture({ operationId });
           try {
@@ -594,7 +760,7 @@ export async function runAccountFileWrite(
               });
               if (renamed.object.id !== parsed.expectedObjectId) throw unconfirmed("the rename");
             } else {
-              await files.deleteTextFile({
+              const deleted = await files.deleteTextFile({
                 workspaceId,
                 versionId: "main",
                 path: srcPath,
@@ -604,6 +770,9 @@ export async function runAccountFileWrite(
                 metadata: { origin: "api" },
                 author,
               });
+              if (replica.root)
+                await rm(join(replica.root, srcPath), { force: true }).catch(() => undefined);
+              deleteMomentId = deleted.moment.momentId;
             }
             return null;
           } finally {
@@ -611,7 +780,7 @@ export async function runAccountFileWrite(
           }
         });
         if (refused) return refused;
-        return await finish(parsed.expectedObjectId);
+        return await finish(parsed.expectedObjectId, deleteMomentId);
       } finally {
         releaseLiveFence?.();
       }

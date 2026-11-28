@@ -1,3 +1,4 @@
+import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
 import { isFields, okAnswer, segment, text } from "./api";
@@ -13,6 +14,7 @@ const REFUSAL_TEXT = {
   "stale-object": () => documentWords.refusedChanged,
   "live-active": () => documentWords.refusedLiveActive,
   "live-unsettled": () => documentWords.refusedLiveUnsettled,
+  "restore-unavailable": () => confirmWords.restoreUnavailable,
 } as const;
 
 export type FileWriteRefusal = keyof typeof REFUSAL_TEXT;
@@ -22,6 +24,7 @@ export type FileWriteResult =
       readonly path: string;
       readonly objectId: string;
       readonly fromPath?: string;
+      readonly deleteMomentId?: string;
     }
   | { readonly ok: false; readonly refusal: FileWriteRefusal; readonly reason: string };
 
@@ -82,11 +85,13 @@ function readFileWriteResult(body: unknown): FileWriteResult | null {
   if (result.ok) {
     if (!text(result.path, 1024) || !text(result.objectId, 256)) return null;
     if (result.fromPath !== undefined && !text(result.fromPath, 1024)) return null;
+    if (result.deleteMomentId !== undefined && !text(result.deleteMomentId, 256)) return null;
     return {
       ok: true,
       path: result.path,
       objectId: result.objectId,
       ...(result.fromPath !== undefined ? { fromPath: result.fromPath } : {}),
+      ...(result.deleteMomentId !== undefined ? { deleteMomentId: result.deleteMomentId } : {}),
     };
   }
   if (
@@ -121,5 +126,9 @@ export function fileWriteOperations(client: ServerClient, workspaceId: string) {
       input: { path: string; expectedObjectId: string; requestId: string },
       signal?: AbortSignal,
     ) => run("deleteFile", input, signal),
+    restoreDeletedFile: (
+      input: { path: string; objectId: string; deleteMomentId: string; requestId: string },
+      signal?: AbortSignal,
+    ) => run("restoreDeletedFile", input, signal),
   };
 }

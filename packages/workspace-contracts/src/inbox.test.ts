@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseCollectionSchema } from "./collectionValues";
 import {
+  defaultInboxCaptureTitle,
   formatInboxRecordMarkdown,
   INBOX_COLLECTION_YAML,
   InboxMoveResult,
@@ -127,5 +128,17 @@ describe("inbox contracts", () => {
     expect(payload.toPath.length).toBeGreaterThan(512);
     expect(InboxMoveResult.parse(payload)).toEqual(payload);
     expect(InboxUndoMoveInput.parse(payload)).toEqual(payload);
+  });
+
+  it("derives default Inbox capture titles from explicit title, URL, body, or fallback", () => {
+    expect(defaultInboxCaptureTitle({ title: "  My\nTitle  ", body: "ignored" })).toBe("My Title");
+    expect(defaultInboxCaptureTitle({ url: "https://example.com/docs/intro/" })).toBe(
+      "example.com/docs/intro",
+    );
+    expect(defaultInboxCaptureTitle({ body: "\n\n  First real line\nSecond line" })).toBe(
+      "First real line",
+    );
+    expect(defaultInboxCaptureTitle({})).toBe("Captured item");
+    expect(defaultInboxCaptureTitle({ fallback: "Empty note" })).toBe("Empty note");
   });
 });

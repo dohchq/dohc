@@ -28,9 +28,11 @@ export interface ToastMessage {
   readonly sender?: SenderKind;
   /** Its action is the only Undo for a change: it stays until closed, on Notices too. */
   readonly holdsUndo?: boolean;
+  /** Set on workspace-scoped Undo toasts (such as file Delete) so switching workspaces clears them. */
+  readonly workspaceId?: string;
 }
 
-// Any screen under the tabs shows a toast through this; the tabs layout owns the one on screen.
+// Any screen shows a toast through this; the root layout owns the one on screen.
 export const ShowToast = createContext<(message: ToastMessage) => void>(() => {});
 export const useShowToast = () => useContext(ShowToast);
 /** Closes the toast on screen if it's the one with this id. */
@@ -43,7 +45,15 @@ const FADING_TOAST_MS = 6000;
 
 // The desktop's toast on a phone: bottom, full width in 16pt gutters above the tab bar.
 // Copy and × on the title line, worded actions on a row under the text. Closing it keeps its row in Notices.
-export function Toast({ message, onClose }: { message: ToastMessage; onClose(): void }) {
+export function Toast({
+  message,
+  onClose,
+  aboveTabs = true,
+}: {
+  message: ToastMessage;
+  onClose(): void;
+  aboveTabs?: boolean;
+}) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const success = message.tone === "success";
@@ -65,7 +75,7 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
       style={[
         styles.toast,
         {
-          bottom: insets.bottom + ABOVE_TABS,
+          bottom: insets.bottom + (aboveTabs ? ABOVE_TABS : 12),
           backgroundColor: theme.raised,
           borderColor: theme.raisedLine,
         },
