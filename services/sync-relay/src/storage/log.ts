@@ -36,6 +36,8 @@ import { forgetCollectionFilePresence } from "./collectionFilePresence";
 import { forgetDeletedOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
 import { confirmLiveApplication } from "./liveApplicationAuthorship";
 import { REFUSED_OP_KIND } from "./relayAdmission";
+import { closeResolvedLineage } from "./liveDocumentAuthority";
+import { parseConflictResolve } from "../conflictResolve";
 import {
   parseLiveAuthorSnapshot,
   type LiveAuthorSnapshot,
@@ -418,6 +420,31 @@ export function appendLogBatchInTransaction(
   if (referencedShas.size > 0) {
     const missing = storage.missingBlobs(input.workspaceId, [...referencedShas]);
     if (missing.length > 0) throw logBlobsMissing(missing);
+  }
+
+  const closedAtMs = Date.now();
+  for (const op of newOps) {
+    if (
+      op.opKind !== "conflict.resolve" ||
+      op.settlementAdmission?.status === "refused" ||
+      op.relayAdmission !== undefined
+    )
+      continue;
+    const resolve = parseConflictResolve(op.payloadJson, {
+      workspaceId: input.workspaceId,
+      recordedAtMs: op.recordedAtMs,
+    });
+    if (!resolve.lineageTransition || !resolve.current.present) continue;
+    closeResolvedLineage(
+      storage,
+      {
+        workspaceId: input.workspaceId,
+        mainVersionId: resolve.targetVersionId,
+        objectId: resolve.current.objectId,
+        lineageClaimId: resolve.lineageTransition.predecessorClaimId,
+      },
+      closedAtMs,
+    );
   }
 
   const insertStmt = storage.db.prepare(

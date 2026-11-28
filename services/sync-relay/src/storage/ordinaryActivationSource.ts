@@ -164,6 +164,23 @@ export function ordinaryActivationBaseline(
     byte_length: held.baseline.projectedMarkdownByteLength,
   };
 }
+export function ordinaryActivationPredecessor(
+  storage: StorageContext,
+  cut: VerifiedOrdinaryActivationCut,
+): string | null {
+  const held = cuts.get(cut);
+  requireValue(held && held.storage === storage, "Ordinary activation source was not verified.");
+  const base = storage.db
+    .prepare("SELECT op_kind,payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?")
+    .get(held.source.workspaceId, held.baseRelaySeq);
+  if (base?.op_kind !== "conflict.resolve") return null;
+  const claim = (
+    JSON.parse(String(base.payload_json)) as {
+      lineageTransition?: { predecessorClaimId?: unknown } | null;
+    }
+  ).lineageTransition?.predecessorClaimId;
+  return typeof claim === "string" ? claim : null;
+}
 function basisValues(
   storage: StorageContext,
   input: LiveDocumentBaselineRegistrationInput,
