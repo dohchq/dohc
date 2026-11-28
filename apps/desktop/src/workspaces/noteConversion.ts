@@ -1,5 +1,9 @@
 import { z } from "zod";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
+import type { CloudCredentials } from "./cloudCredentialStore";
+import { localPersonOwnsWorkspace } from "./localPersonOwns";
+import type { RegistryEntry } from "./registryStore";
+import { shareViewIsPresent } from "./shareViewMarker";
 
 export const NOTE_CONVERSION_BATCH = 10;
 export const RELAY_ENGINE_API_FLOOR = 2;
@@ -17,36 +21,26 @@ export const NOTE_CONVERSION_NOT_OWNER =
 export const NOTE_CONVERSION_SHARED_VIEW =
   "This is a shared view. Only the original workspace converts its notes.";
 
-type ConvertingWorkspace = {
-  sharedView: boolean;
-  remote?: { ownerUserId: string };
-  pausedRemote?: { ownerUserId: string };
-};
-
-function ownsNotes(workspace: ConvertingWorkspace, signedInUserId: string | null): boolean {
-  const remote = workspace.remote ?? workspace.pausedRemote;
-  return !remote || signedInUserId === null || remote.ownerUserId === signedInUserId;
-}
+type ConvertingWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView">;
 
 export function noteConversionOffered(
   env: Readonly<Record<string, string | undefined>>,
   workspace: ConvertingWorkspace,
-  signedInUserId: string | null,
+  credentials: CloudCredentials | null,
 ): boolean {
   return (
     env.DOHC_ENGINE_NOTE_BODY_SEQUENCE === "1" &&
     env.DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE === "1" &&
-    !workspace.sharedView &&
-    ownsNotes(workspace, signedInUserId)
+    localPersonOwnsWorkspace(workspace, credentials)
   );
 }
 
 export function noteConversionReach(
   workspace: ConvertingWorkspace,
-  signedInUserId: string | null,
+  credentials: CloudCredentials | null,
 ): "local" | "relay" {
-  if (workspace.sharedView) throw new Error(NOTE_CONVERSION_SHARED_VIEW);
-  if (!ownsNotes(workspace, signedInUserId)) throw new Error(NOTE_CONVERSION_NOT_OWNER);
+  if (shareViewIsPresent(workspace.shareView)) throw new Error(NOTE_CONVERSION_SHARED_VIEW);
+  if (!localPersonOwnsWorkspace(workspace, credentials)) throw new Error(NOTE_CONVERSION_NOT_OWNER);
   if (workspace.pausedRemote && !workspace.remote) throw new Error(NOTE_CONVERSION_PAUSED);
   return workspace.remote ? "relay" : "local";
 }
@@ -145,6 +139,11 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
         failed: [],
         sent: true,
       };
+      const report = (done: number, total: number) => {
+        try {
+          run.progress?.(done, total);
+        } catch {}
+      };
       try {
         let after: string | undefined;
         let more = true;
@@ -173,7 +172,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
               result.skipped.length +
               result.doesNotFit.length +
               result.failed.length;
-            run.progress?.(done, Math.max(done, pass.total));
+            report(done, Math.max(done, pass.total));
             if (pass.resumeAfter === null) more = false;
             else if (pass.resumeAfter === after) throw new Error(NOTE_CONVERSION_STUCK);
             else after = pass.resumeAfter;

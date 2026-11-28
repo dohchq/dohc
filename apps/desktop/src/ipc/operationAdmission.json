@@ -100,7 +100,6 @@
   "desktop:read-crash-report": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-workspace-trust": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-note-conversion-offered": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:send-converted-notes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:request-workspace-trust": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:restrict-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-old-window-state": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "rendererWorkspaceSessions.current(event.sender)" } },

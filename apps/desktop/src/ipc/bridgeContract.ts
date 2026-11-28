@@ -8378,16 +8378,6 @@ export const noteConversionOperations = {
     scope: "workspace",
     inactiveMessage: "Open this workspace to see whether it can convert its notes.",
   },
-  sendConvertedNotes: {
-    capabilityId: "workspace.notes.convert.send",
-    channel: "desktop:send-converted-notes",
-    payload: WorkspaceIdPayload,
-    result: z.null(),
-    guard: "active-workspace",
-    scope: "workspace",
-    inactiveMessage:
-      "Sending converted notes stopped because this window changed workspaces. Open the workspace and try again.",
-  },
 } satisfies OperationTable;
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),

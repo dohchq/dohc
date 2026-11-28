@@ -1,9 +1,10 @@
 import { FileText } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { bridge } from "../bridge";
-import { convertedWords, type NoteConversion } from "../shell/useNoteConversion";
+import { ipcErrorMessage } from "../ipcError";
+import { convertedWords, finishedWords, type NoteConversion } from "../shell/useNoteConversion";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { SecondaryButton } from "../ui/controls";
+import { RetryRow, SecondaryButton } from "../ui/controls";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SettingRow } from "./SettingRow";
@@ -25,17 +26,53 @@ export function convertNotesConfirm(workspaceName: string) {
 
 type RowProps = { conversion: NoteConversion; workspaceName: string; searchMatch?: boolean };
 
-export function OfferedNoteFormatRow(props: RowProps & { workspaceId: string }) {
-  const { workspaceId, ...row } = props;
+export function OfferedNoteFormatRow(
+  props: RowProps & {
+    workspaceId: string;
+    onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+  },
+) {
+  const { workspaceId, onError, ...row } = props;
+  const [account, setAccount] = useState({ generation: 0, ready: true });
+  useEffect(
+    () =>
+      bridge().onCloudSessionChanged(({ phase }) =>
+        setAccount((current) => ({ generation: current.generation + 1, ready: phase === "ready" })),
+      ),
+    [],
+  );
   const offered = useWorkspaceQuery(useWorkspaceSession(), {
-    key: workspaceId,
+    key: `${workspaceId}:${account.generation}`,
+    manual: !account.ready,
     load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
   });
+  const { error, retry } = offered;
+  useEffect(() => {
+    if (error !== null)
+      onError?.(
+        ipcErrorMessage(
+          error,
+          "dohc could not check whether this workspace's notes can be converted.",
+        ),
+        error,
+        retry,
+      );
+  }, [error, onError, retry]);
+  if (error !== null)
+    return (
+      <SettingRow
+        title="Note format"
+        testId="settings-row-note-format"
+        searchMatch={row.searchMatch === true}
+      >
+        <RetryRow testId="settings-note-format-retry" onRetry={() => void retry()} />
+      </SettingRow>
+    );
   return offered.value === true ? <NoteFormatRow {...row} /> : null;
 }
 
 export function NoteFormatRow(props: RowProps) {
-  const { state, start, sendConverted } = props.conversion;
+  const { state, start } = props.conversion;
   const [confirming, setConfirming] = useState(false);
 
   const description =
@@ -43,15 +80,15 @@ export function NoteFormatRow(props: RowProps) {
       state.total === 0 ? (
         "Checking open notes…"
       ) : (
-        <span className="flex flex-col gap-1.5">
-          <span>{`Converting notes · ${state.done.toLocaleString("en-US")} of ${state.total.toLocaleString("en-US")}`}</span>
+        <span className="flex flex-col gap-1">
+          <span className="tabular-nums">{`Converting notes · ${state.done.toLocaleString("en-US")} of ${state.total.toLocaleString("en-US")}`}</span>
           <span
             role="progressbar"
             aria-label="Converting notes"
             aria-valuemin={0}
             aria-valuemax={state.total}
             aria-valuenow={state.done}
-            className="block h-1 w-40 overflow-hidden rounded-full bg-hover"
+            className="block h-1 w-40 overflow-hidden rounded-full bg-panel-2"
           >
             <span
               className="block h-full bg-accent motion-safe:transition-[width]"
@@ -61,11 +98,9 @@ export function NoteFormatRow(props: RowProps) {
         </span>
       )
     ) : state.status === "done" ? (
-      convertedWords(state.converted)
+      finishedWords(state.converted, state.left)
     ) : state.status === "unsent" ? (
       `${convertedWords(state.converted)}. dohc could not send them to the server yet.`
-    ) : state.status === "sending" ? (
-      `Sending ${state.converted.toLocaleString("en-US")} converted ${state.converted === 1 ? "note" : "notes"}…`
     ) : state.status === "failed" ? (
       "dohc could not convert notes."
     ) : (
@@ -79,12 +114,8 @@ export function NoteFormatRow(props: RowProps) {
       testId="settings-row-note-format"
       searchMatch={props.searchMatch === true}
     >
-      {state.status === "failed" ? (
+      {state.status === "failed" || state.status === "unsent" ? (
         <SecondaryButton onClick={start}>Try again</SecondaryButton>
-      ) : state.status === "unsent" || state.status === "sending" ? (
-        <SecondaryButton disabled={state.status === "sending"} onClick={sendConverted}>
-          Try again
-        </SecondaryButton>
       ) : (
         <SecondaryButton disabled={state.status === "running"} onClick={() => setConfirming(true)}>
           Convert notes…

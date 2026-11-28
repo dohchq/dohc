@@ -27,7 +27,11 @@ import {
 } from "../../workspaces/workspaceSettings";
 import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
-import type { ScheduleHostResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import type {
+  DohcDesktopBridge,
+  ScheduleHostResult,
+  UpdateStateEvent,
+} from "../../ipc/bridgeContract";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
@@ -163,6 +167,8 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
   };
 }
 
+type CloudSessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
+
 const bridge = {
   readNoteConversionOffered: vi.fn(async () => ({ offered: false })),
   onWorkspaceActivity: vi.fn(() => () => {}),
@@ -260,7 +266,7 @@ const bridge = {
   getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
   readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   onScheduleHostChanged: vi.fn(() => () => undefined),
-  onCloudSessionChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn((_listener: CloudSessionListener) => () => undefined),
   chooseScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   takeOverScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   listWorkspaceSecrets: vi.fn(async () => ({
@@ -1782,8 +1788,7 @@ describe("Settings › Advanced › Note format", () => {
   });
 
   it("hides the row while the account changes, and asks main again once it is ready", async () => {
-    const listeners: Array<(event: { sessionKey: string | null; phase: "changing" | "ready" }) => void> =
-      [];
+    const listeners: CloudSessionListener[] = [];
     bridge.onCloudSessionChanged.mockImplementation((listener) => {
       listeners.push(listener);
       return () => undefined;

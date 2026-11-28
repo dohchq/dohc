@@ -2270,10 +2270,7 @@ async function relayForNoteConversion(
   workspace: RegistryEntry,
 ): Promise<NoteConversionRelay | null> {
   await warmCredentialCache();
-  const reach = noteConversionReach(
-    { ...workspace, sharedView: shareViewIsPresent(workspace.shareView) },
-    cachedCredentials?.userId ?? null,
-  );
+  const reach = noteConversionReach(workspace, cachedCredentials);
   if (reach === "local") return null;
   const syncing = async () => {
     const current = findWorkspace(workspace.workspaceId);
@@ -2311,7 +2308,8 @@ async function convertNotesForOperation(operation: {
         ),
     progress: (done, total) => {
       for (const window of BrowserWindow.getAllWindows())
-        window.webContents.send(CHANNELS.noteConversionProgress, { workspaceId, done, total });
+        if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId)
+          sendIfOpen(window, CHANNELS.noteConversionProgress, { workspaceId, done, total });
     },
     convert: (params) =>
       sessions.run(engineWorkspace, ({ client, workspace }) =>
@@ -11425,16 +11423,8 @@ function registerIpcHandlers(): void {
       await warmCredentialCache();
       const { workspace } = operation;
       return {
-        offered: noteConversionOffered(
-          process.env,
-          { ...workspace, sharedView: shareViewIsPresent(workspace.shareView) },
-          cachedCredentials?.userId ?? null,
-        ),
+        offered: noteConversionOffered(process.env, workspace, cachedCredentials),
       };
-    },
-    sendConvertedNotes: async (_input, { operation }) => {
-      await (await relayForNoteConversion(operation.workspace))?.drainRecorded();
-      return null;
     },
   });
 

@@ -1886,10 +1886,6 @@ const LISTED_CAPABILITIES = {
     "Read whether main offers Convert notes for the admitted workspace.",
     { ipc: ["readNoteConversionOffered"] },
   ),
-  "workspace.notes.convert.send": capability(
-    "Send the notes a Convert notes run converted but could not send to the server.",
-    { ipc: ["sendConvertedNotes"] },
-  ),
   "workspace.name.suggest": capability(
     "Suggest a new workspace's folder name that is free in a location dohc offered.",
     { ipc: ["suggestWorkspaceFolderName"] },

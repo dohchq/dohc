@@ -561,9 +561,9 @@ describe("who converts a workspace's notes", () => {
     }
     expect(noteConversionOffered(on, { remote, shareView }, owner)).toBe(false);
 
-    expect(noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, {}, null)).toBe(
-      false,
-    );
+    expect(
+      noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, {}, null),
+    ).toBe(false);
     expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, {}, null)).toBe(false);
     expect(noteConversionOffered({}, {}, null)).toBe(false);
   });

@@ -362,7 +362,6 @@
   "workspace.name.suggest",
   "workspace.notes.convert",
   "workspace.notes.convert.offer.read",
-  "workspace.notes.convert.send",
   "workspace.open.failures.take",
   "workspace.open.retry",
   "workspace.search",

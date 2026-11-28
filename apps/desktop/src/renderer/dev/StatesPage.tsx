@@ -375,10 +375,10 @@ const NOTE_FORMAT_STATES: ReadonlyArray<readonly [string, NoteConversionState]> 
   ["ready", { status: "idle" }],
   ["checking open notes", { status: "running", done: 0, total: 0 }],
   ["converting", { status: "running", done: 400, total: 2000 }],
-  ["converted", { status: "done", converted: 1980 }],
-  ["nothing to convert", { status: "done", converted: 0 }],
-  ["not sent", { status: "unsent", converted: 1980 }],
-  ["sending", { status: "sending", converted: 1980 }],
+  ["converted", { status: "done", converted: 1980, left: 0 }],
+  ["nothing to convert", { status: "done", converted: 0, left: 0 }],
+  ["all left", { status: "done", converted: 0, left: 12 }],
+  ["not sent", { status: "unsent", converted: 1980, left: 0 }],
   ["failed", { status: "failed" }],
 ];
 
@@ -5349,10 +5349,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         {NOTE_FORMAT_STATES.map(([label, state]) => (
           <Specimen key={label} label={label}>
             <div className="w-[640px]">
-              <NoteFormatRow
-                conversion={{ state, start: noop, sendConverted: noop }}
-                workspaceName="Trip"
-              />
+              <NoteFormatRow conversion={{ state, start: noop }} workspaceName="Trip" />
             </div>
           </Specimen>
         ))}

@@ -1184,6 +1184,7 @@ export function SettingsDialog(props: {
               {props.noteConversion ? (
                 <OfferedNoteFormatRow
                   workspaceId={props.workspaceId}
+                  {...(props.onError ? { onError: props.onError } : {})}
                   conversion={props.noteConversion}
                   searchMatch={rowSearchMatch("Note format", "convert notes")}
                   workspaceName={

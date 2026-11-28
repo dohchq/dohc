@@ -15,15 +15,13 @@ type Shell = ReturnType<typeof useShellError>;
 export type NoteConversionState =
   | { status: "idle" }
   | { status: "running"; done: number; total: number }
-  | { status: "done"; converted: number }
-  | { status: "unsent"; converted: number }
-  | { status: "sending"; converted: number }
+  | { status: "done"; converted: number; left: number }
+  | { status: "unsent"; converted: number; left: number }
   | { status: "failed" };
 
 export interface NoteConversion {
   state: NoteConversionState;
   start(): void;
-  sendConverted(): void;
 }
 
 const KIND = "note-conversion";
@@ -37,6 +35,12 @@ export function convertedWords(converted: number): string {
   return converted === 0
     ? "No notes to convert"
     : `Converted ${countWords(converted, "note", "notes")}`;
+}
+
+export function finishedWords(converted: number, left: number): string {
+  if (left === 0) return convertedWords(converted);
+  const notConverted = `${countWords(left, "note was", "notes were")} not converted`;
+  return converted === 0 ? notConverted : `${convertedWords(converted)}. ${notConverted}.`;
 }
 
 const pathWords = (path: string) => path || "(no path)";
@@ -57,7 +61,7 @@ export function noteConversionNotice(result: ConvertNotesResult): {
   if (left === 0) return result.sent ? null : { message: `${converted}${unsent}`, tone: "warning" };
   const groups = leftNoteGroups(result);
   return {
-    title: `${countWords(left, "note was", "notes were")} not converted`,
+    title: finishedWords(0, left),
     message: `${converted}${unsent} The rest stay as they were and can still be edited. Convert them once they close or finish syncing.`,
     tone: "warning",
     rows: groups.map(({ title, notes }) => {
@@ -98,13 +102,15 @@ export function useNoteConversion(input: {
     [workspaceId],
   );
 
-  const unsent = useRef<{ workspaceId: string; result: ConvertNotesResult } | null>(null);
-  const run = useMemo(() => {
+  const unsent = useRef<{ workspaceId: string; converted: number } | null>(null);
+  const inFlight = useRef(new Set<string>());
+  const convert = useMemo(() => {
     const show = (next: NoteConversionState) => setShown({ workspaceId, state: next });
 
-    function settle(result: ConvertNotesResult, cause?: unknown) {
-      unsent.current = result.sent ? null : { workspaceId, result };
-      show({ status: result.sent ? "done" : "unsent", converted: result.converted });
+    function settle(result: ConvertNotesResult) {
+      const left = leftNoteCount(result);
+      unsent.current = result.sent ? null : { workspaceId, converted: result.converted };
+      show({ status: result.sent ? "done" : "unsent", converted: result.converted, left });
       const notice = noteConversionNotice(result);
       if (!notice) {
         clear(KIND);
@@ -113,45 +119,34 @@ export function useNoteConversion(input: {
       }
       report({
         ...notice,
-        ...(cause === undefined ? {} : { cause }),
         kind: KIND,
-        retry: result.sent ? null : sendConverted,
-        ...(leftNoteCount(result) > 0
+        retry: result.sent ? null : convert,
+        ...(result.sent && left > 0
           ? { action: { label: "Convert remaining", run: convert, ends: true } }
           : {}),
       });
     }
 
-    function sendConverted() {
-      if (unsent.current?.workspaceId !== workspaceId) return;
-      const { result } = unsent.current;
-      const token = requests.next();
-      show({ status: "sending", converted: result.converted });
-      bridge()
-        .sendConvertedNotes({ workspaceId })
-        .then(
-          () => {
-            if (requests.isCurrent(token)) settle({ ...result, sent: true });
-          },
-          (error: unknown) => {
-            if (requests.isCurrent(token)) settle(result, error);
-          },
-        );
-    }
-
     function convert() {
+      if (inFlight.current.has(workspaceId)) return;
+      inFlight.current.add(workspaceId);
       const token = requests.next();
-      unsent.current = null;
+      const carried = unsent.current?.workspaceId === workspaceId ? unsent.current.converted : 0;
       show({ status: "running", done: 0, total: 0 });
       bridge()
         .convertNotes({ workspaceId })
         .then(
           (result) => {
-            if (requests.isCurrent(token)) settle(result);
+            if (requests.isCurrent(token))
+              settle({ ...result, converted: result.converted + carried });
           },
           (error: unknown) => {
             if (!requests.isCurrent(token)) return;
-            show({ status: "failed" });
+            show(
+              carried > 0
+                ? { status: "unsent", converted: carried, left: 0 }
+                : { status: "failed" },
+            );
             report({
               message: ipcErrorMessage(error, "dohc could not convert notes."),
               cause: error,
@@ -159,11 +154,12 @@ export function useNoteConversion(input: {
               kind: KIND,
             });
           },
-        );
+        )
+        .finally(() => inFlight.current.delete(workspaceId));
     }
 
-    return { convert, sendConverted };
+    return convert;
   }, [workspaceId, requests, report, success, clear]);
 
-  return { state, start: run.convert, sendConverted: run.sendConverted };
+  return { state, start: convert };
 }
