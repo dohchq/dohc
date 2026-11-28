@@ -457,7 +457,7 @@ import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createBackgroundLiveStart, syncedNotePaths } from "./workspaces/backgroundLiveStart";
 import { createShowOnPhone } from "./workspaces/showOnPhone";
-import { holdsDeliveries } from "./workspaces/ownerLivePause";
+import { holdsRoom } from "./workspaces/ownerLivePause";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import {
   createLocalChangeAuthor,
@@ -8820,8 +8820,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
   onLiveEditsPaused: (workspaceId, path) =>
     desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
-  livePaused: (workspaceId, objectId) =>
-    holdsDeliveries(desktopEngine.ownerLivePauses(workspaceId), objectId),
+  livePaused: (workspaceId, binding) =>
+    holdsRoom(desktopEngine.ownerLivePauses(workspaceId), binding),
   onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
   onOwnerEdit: (workspaceId) => desktopEngine.ownerEditLanded(workspaceId),
   sessionFor: (sender) => rendererWorkspaceSessions.current(sender as WebContents),
