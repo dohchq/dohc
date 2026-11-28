@@ -469,8 +469,9 @@ That header carries sign-in credentials and the credential your server syncs wit
 
 `DOHC_GATEWAY_ADDRESS` and `DOHC_SHARE_WEB_ADDRESS` in `.env.self-host` are the Docker network addresses of the gateway and `share-web`.
 If you change them, keep each one a single IPv4 address inside `DOHC_NETWORK_SUBNET`, with no hostname, CIDR range, or port.
-The bundle passes them to `DOHC_AUTH_TRUSTED_PROXIES` and `DOHC_SHARE_WEB_TRUSTED_PROXIES`.
-The sign-in service, `workspace-api`, trusts `X-Forwarded-For` from both addresses, and `share-web` trusts it only from the gateway.
+The bundle passes them to `DOHC_AUTH_TRUSTED_PROXIES`, `DOHC_SHARE_WEB_TRUSTED_PROXIES`, and `DOHC_RELAY_TRUSTED_PROXIES`.
+The sign-in service, `workspace-api`, trusts `X-Forwarded-For` from both addresses. `share-web` and the relay trust it only from the gateway.
+The relay reads it only for incoming webhook deliveries, to give each sender of a website form its own limit.
 Each service refuses to start when a trusted proxy entry is not an IP address.
 
 `workspace-api` reads `X-Forwarded-For` only from a trusted proxy.
@@ -508,7 +509,12 @@ If it fails, inspect the sync-relay logs and verify disk space and the relay's p
 ### Collect a website form
 
 An incoming webhook can take a form on any website. Each response becomes a record in a private Collection.
-Create the webhook in **Settings > Secrets > Incoming webhooks**, then use its address as the form's `action`:
+A form's address sits in the page, so anyone who loads the page can post to it. Make it a website form address so dohc limits what they can send.
+
+1. In **Settings > Secrets > Incoming webhooks**, choose **New webhook**.
+2. Turn on **Website form**.
+3. Under **Fields to keep**, list the form's field names, such as `email, source`.
+4. Choose **Create webhook**, then copy the example form into your page.
 
 ```html
 <form method="post" action="WEBHOOK_ADDRESS">
@@ -517,13 +523,25 @@ Create the webhook in **Settings > Secrets > Incoming webhooks**, then use its a
 </form>
 ```
 
+Agents create the same address with `dohc webhook create Waitlist --collection waitlist --form-fields email,source`.
+
+A website form address works differently from a private one:
+
+- It takes only form-encoded posts of up to 8 KiB.
+- It keeps the fields you listed and drops every other field. It refuses a post with none of them, a field sent twice, a value over 500 characters, or an `email` that isn't an email address.
+- Each network can post 5 times in a burst and 20 times a day. One IPv6 /64 counts as one network.
+- At most 20 responses wait to be written, so a busy form can't hold up the workspace's other webhooks.
+
 The record's title is the webhook name followed by the first of `title`, `subject`, `summary`, `event`, `name`, or `email` that has a value.
-The record keeps the whole response as text.
+The record keeps the response as text. For a website form, that is only the fields you listed.
 Without a script, the browser shows the webhook's JSON answer after submitting.
 A script on the page can send the same fields with `fetch` and read the answer: `202` when dohc accepted the response, `429` past a limit.
 Send them form-encoded, as `new URLSearchParams(new FormData(form))`, with no custom headers. dohc refuses a `FormData` body, and a JSON body needs a preflight that the address doesn't answer.
-Anyone who reads the page can post to the address. Each webhook takes 500 deliveries a day.
+Each webhook takes 500 deliveries a day.
+dohc doesn't check that a person, rather than a script, filled in the form.
+A script that changes networks can still send junk records up to the daily limit.
 Rotate the address in **Settings > Secrets > Incoming webhooks** to stop it.
+To change a website form's fields, create a new webhook and delete the old one.
 
 ### Turn server automations off
 

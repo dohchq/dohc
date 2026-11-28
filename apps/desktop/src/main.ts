@@ -6651,7 +6651,11 @@ async function createIncomingWebhookState(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: input.name, collectionPath: input.collectionPath }),
+      body: JSON.stringify({
+        name: input.name,
+        collectionPath: input.collectionPath,
+        ...(input.form ? { form: input.form } : {}),
+      }),
       signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
     },
   );

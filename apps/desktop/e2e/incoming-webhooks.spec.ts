@@ -351,6 +351,69 @@ test("creates, delivers and drains into desktop Inbox, pauses, rotates, and dele
       body: "deleted token",
     });
     expect(deletedPost.status).toBe(404);
+
+    // A website form keeps only its named fields, all the way to the record on disk.
+    await section.getByTestId("incoming-webhooks-add").click();
+    await expect(createDialog).toBeVisible();
+    await createDialog.getByTestId("incoming-webhook-name-input").fill("Waitlist");
+    await createDialog.getByRole("switch", { name: "Website form" }).click();
+    await createDialog.getByTestId("incoming-webhook-form-fields-input").fill("email, source");
+    await shoot(page, createDialog, "webhooks-form-create-dialog");
+    await createDialog.getByTestId("incoming-webhook-create-submit").click();
+    await expect(revealDialog).toBeVisible();
+    const formUrl = (
+      await revealDialog.getByTestId("incoming-webhook-reveal-url").innerText()
+    ).trim();
+    await expect(revealDialog.getByTestId("incoming-webhook-reveal-curl")).toContainText(
+      `<form method="post" action="${formUrl}">`,
+    );
+    await shoot(page, revealDialog, "webhooks-form-reveal-dialog");
+    await revealDialog.getByTestId("incoming-webhook-reveal-done").click();
+    await expect(section.getByText("Website form", { exact: true })).toBeVisible();
+    await shoot(page, dialog, "webhooks-form-list");
+
+    const formPostUrl = `${relay.baseUrl}/sync/hooks/${encodeURIComponent(formUrl.split("/sync/hooks/")[1]!)}`;
+    const jsonToForm = await fetch(formPostUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "ada@example.com" }),
+    });
+    expect(jsonToForm.status).toBe(415);
+    const formPost = await fetch(formPostUrl, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "email=ada%40example.com&source=site&note=dropped-by-dohc",
+    });
+    expect(formPost.status).toBe(202);
+    const { deliveryId: formDeliveryId } = (await formPost.json()) as { deliveryId: string };
+    let formRecordPath = "";
+    await expect
+      .poll(
+        () => {
+          const formDb = new DatabaseSync(relay!.dbPath, { readOnly: true });
+          try {
+            const row = formDb
+              .prepare(
+                "SELECT state, record_path FROM sync_relay_webhook_deliveries WHERE delivery_id = ?",
+              )
+              .get(formDeliveryId) as { state: string; record_path: string | null } | undefined;
+            if (row?.record_path) formRecordPath = row.record_path;
+            return row?.state ?? "missing";
+          } finally {
+            formDb.close();
+          }
+        },
+        { timeout: 90_000, intervals: [500] },
+      )
+      .toBe("settled");
+    const formRecordFile = join(temp.rootPath, ...formRecordPath.split("/"));
+    await expect
+      .poll(() => readFile(formRecordFile, "utf8").catch(() => ""), {
+        timeout: 60_000,
+        intervals: [500],
+      })
+      .toContain("email=ada%40example.com&source=site");
+    expect(await readFile(formRecordFile, "utf8")).not.toContain("dropped-by-dohc");
   } finally {
     try {
       await desktop?.close();

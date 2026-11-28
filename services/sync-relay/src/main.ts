@@ -26,6 +26,7 @@ import {
 } from "@dohc/workspace-auth/credentialFence";
 import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
+import { relayClientAddress } from "./relayClientAddress";
 import { createApnsClient } from "./apnsClient";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
@@ -34,6 +35,7 @@ import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  canonicalIpAddress,
   fatal,
   installShutdown,
   jsonResponse,
@@ -203,6 +205,18 @@ const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
+const trustedProxies = new Set(
+  (process.env.DOHC_RELAY_TRUSTED_PROXIES ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .map((entry) => {
+      const address = canonicalIpAddress(entry);
+      if (!address)
+        fatal("FATAL: DOHC_RELAY_TRUSTED_PROXIES must contain exact proxy IP addresses.");
+      return address;
+    }),
+);
 // A workspace invite link lets a new person create an account to join that
 // workspace. DOHC_INVITE_LINK_SIGN_UP=off keeps sign-up to listed and invited
 // addresses only; the links still let existing accounts join.
@@ -1234,7 +1248,15 @@ const server = serveFetchHandler({
       headers.get("x-dohc-relay-client-ip") === null ||
       !presentsValidRelayExchangeKey(headers)
     ) {
-      headers.set("x-dohc-relay-client-ip", incoming.socket.remoteAddress ?? "unknown");
+      headers.set(
+        "x-dohc-relay-client-ip",
+        relayClientAddress(
+          url.pathname,
+          incoming.socket.remoteAddress,
+          headers.get("x-forwarded-for"),
+          trustedProxies,
+        ),
+      );
     }
   },
 });

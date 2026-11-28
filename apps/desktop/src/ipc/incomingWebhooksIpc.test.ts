@@ -15,6 +15,7 @@ const sampleWebhook = {
   createdAtMs: 1_700_000_000_000,
   updatedAtMs: 1_700_000_000_000,
   lastDeliveryAtMs: null,
+  form: null,
   pendingCount: 0,
   recentDeliveries: [],
 };

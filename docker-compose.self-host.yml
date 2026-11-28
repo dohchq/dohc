@@ -99,6 +99,7 @@ services:
       # with a desktop connected measured the same either way.
       NODE_OPTIONS: --max-semi-space-size=16
       DOHC_RELAY_LINK_KEY: ${DOHC_RELAY_LINK_KEY:?Run the self-host bootstrap to generate secrets}
+      DOHC_RELAY_TRUSTED_PROXIES: ${DOHC_GATEWAY_ADDRESS:-10.233.42.2}
       DOHC_RELAY_SECRET_KEYS: ${DOHC_RELAY_SECRET_KEYS:-}
       DOHC_RELAY_SHARE_WEB_URL: http://share-web:1790
       DOHC_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Run the self-host bootstrap to generate secrets}

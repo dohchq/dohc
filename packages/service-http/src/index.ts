@@ -14,6 +14,7 @@ export { TokenBucketLimiter } from "./tokenBucketLimiter";
 export { WaiterRegistry, type WaiterCaps } from "./waiterRegistry";
 export { readBoundedBytes, readBoundedJson } from "./readBoundedJson";
 export { canonicalIpAddress } from "./canonicalIpAddress";
+export { clientAddress, senderAddressKey } from "./clientAddress";
 export { closeServer, fatal, installShutdown, parseGracePeriodMs } from "./process";
 export { withConnectRetry, type ConnectRetryOptions } from "./connectRetry";
 export { createDeviceControlRequestParser, refuseDeviceControl } from "./deviceControlRequest";

@@ -4,6 +4,8 @@ import { INBOX_COLLECTION_PATH } from "@dohc/workspace-contracts/inbox";
 import {
   INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
   INCOMING_WEBHOOK_IDEMPOTENCY_RETENTION_MS,
+  IncomingWebhookForm,
+  MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT,
   MAX_INCOMING_WEBHOOK_PENDING_BYTES,
   MAX_INCOMING_WEBHOOK_PENDING_COUNT,
   MAX_INCOMING_WEBHOOKS_PER_WORKSPACE,
@@ -110,6 +112,10 @@ function constantTimeHexEqual(leftHex: string, rightHex: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+const FORM_COLUMN =
+  "form_json TEXT CHECK (form_json IS NULL OR (json_valid(form_json) AND length(form_json) <= 2048))";
+const FORM_MIGRATION_ID = "incoming-webhook-form-v1";
+
 export function initializeIncomingWebhookSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_incoming_webhooks (
@@ -125,7 +131,8 @@ export function initializeIncomingWebhookSchema(db: SqliteDb): void {
       updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
       last_delivery_at_ms INTEGER CHECK (last_delivery_at_ms IS NULL OR last_delivery_at_ms >= 0),
       daily_cap_notified_day TEXT CHECK (daily_cap_notified_day IS NULL OR length(daily_cap_notified_day) = 10),
-      storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0)
+      storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
+      ${FORM_COLUMN}
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_incoming_webhooks_workspace
       ON sync_relay_incoming_webhooks(workspace_id, created_at_ms);
@@ -207,6 +214,39 @@ export function initializeIncomingWebhookSchema(db: SqliteDb): void {
         WHERE workspace_id = OLD.workspace_id;
       END;
   `);
+  if (
+    !db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(FORM_MIGRATION_ID)
+  ) {
+    const columns = db
+      .prepare("PRAGMA table_info(sync_relay_incoming_webhooks)")
+      .all()
+      .map((row) => String(row.name));
+    if (!columns.includes("form_json")) {
+      db.exec(`ALTER TABLE sync_relay_incoming_webhooks ADD COLUMN ${FORM_COLUMN}`);
+    }
+    db.prepare(
+      "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+    ).run(FORM_MIGRATION_ID, Date.now());
+  }
+}
+
+function storedForm(value: unknown): IncomingWebhookForm | null {
+  return typeof value === "string" ? IncomingWebhookForm.parse(JSON.parse(value)) : null;
+}
+
+/** A form webhook gets its own queue share, so a busy page can't stall the workspace's other webhooks. */
+function formPendingCount(storage: StorageContext, webhookId: string): number | null {
+  const row = storage.db
+    .prepare(
+      `SELECT COUNT(d.delivery_id) AS count
+         FROM sync_relay_incoming_webhooks w
+         LEFT JOIN sync_relay_webhook_deliveries d
+           ON d.webhook_id = w.webhook_id AND d.state IN ('pending', 'accepted')
+        WHERE w.webhook_id = ? AND w.form_json IS NOT NULL
+        GROUP BY w.webhook_id`,
+    )
+    .get(webhookId);
+  return row === undefined ? null : Number(row.count);
 }
 
 function ownerMayMutateWorkspace(
@@ -545,6 +585,7 @@ function summaryForRow(
     createdAtMs: Number(row.created_at_ms),
     updatedAtMs: Number(row.updated_at_ms),
     lastDeliveryAtMs: row.last_delivery_at_ms == null ? null : Number(row.last_delivery_at_ms),
+    form: storedForm(row.form_json),
     pendingCount: Number(pendingRow?.count ?? 0),
     recentDeliveries,
   };
@@ -557,7 +598,7 @@ export function listIncomingWebhooks(
   const rows = storage.db
     .prepare(
       `SELECT webhook_id, name, collection_path, collection_id, paused, pause_reason,
-              created_at_ms, updated_at_ms, last_delivery_at_ms
+              created_at_ms, updated_at_ms, last_delivery_at_ms, form_json
          FROM sync_relay_incoming_webhooks
          WHERE workspace_id = ?
          ORDER BY created_at_ms ASC, webhook_id ASC`,
@@ -595,6 +636,7 @@ export function createIncomingWebhook(
     readonly webhookId: string;
     readonly name: string;
     readonly collectionPath: string;
+    readonly form: IncomingWebhookForm | null;
     readonly tokenHash: string;
     readonly nowMs: number;
     readonly automationServer: AutomationServer | null;
@@ -706,11 +748,13 @@ export function createIncomingWebhook(
       return { ok: false, reason: "collection-not-found" };
     }
 
+    const formJson = input.form ? JSON.stringify(input.form) : null;
     const storageBytes =
       Buffer.byteLength(input.webhookId, "utf8") +
       Buffer.byteLength(input.name, "utf8") +
       Buffer.byteLength(normalizedPath, "utf8") +
       (collectionId ? Buffer.byteLength(collectionId, "utf8") : 0) +
+      (formJson ? Buffer.byteLength(formJson, "utf8") : 0) +
       128;
     assertWorkspaceQuota(storage, input.workspaceId, storageBytes);
 
@@ -719,8 +763,8 @@ export function createIncomingWebhook(
         `INSERT INTO sync_relay_incoming_webhooks (
             webhook_id, workspace_id, name, collection_path, collection_id,
             token_hash, paused, pause_reason, created_at_ms, updated_at_ms,
-            last_delivery_at_ms, daily_cap_notified_day, storage_bytes
-          ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, NULL, NULL, ?)`,
+            last_delivery_at_ms, daily_cap_notified_day, storage_bytes, form_json
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, NULL, NULL, ?, ?)`,
       )
       .run(
         input.webhookId,
@@ -732,6 +776,7 @@ export function createIncomingWebhook(
         now,
         now,
         storageBytes,
+        formJson,
       );
 
     const webhooks = listIncomingWebhooks(storage, input.workspaceId);
@@ -924,6 +969,7 @@ export interface ResolvedIncomingWebhook {
   readonly collectionPath: string;
   readonly collectionId: string | null;
   readonly tokenHash: string;
+  readonly form: IncomingWebhookForm | null;
   readonly hostReady: boolean;
 }
 
@@ -936,7 +982,7 @@ export function lookupActiveIncomingWebhookByToken(
   const row = storage.db
     .prepare(
       `SELECT w.webhook_id, w.workspace_id, w.name, w.collection_path, w.collection_id,
-              w.token_hash, w.paused, ws.owner_user_id
+              w.token_hash, w.paused, w.form_json, ws.owner_user_id
          FROM sync_relay_incoming_webhooks w
          JOIN sync_relay_workspaces ws ON ws.workspace_id = w.workspace_id
         WHERE w.token_hash = ?
@@ -959,6 +1005,7 @@ export function lookupActiveIncomingWebhookByToken(
     collectionPath: String(row.collection_path),
     collectionId: row.collection_id == null ? null : String(row.collection_id),
     tokenHash: candidateHash,
+    form: storedForm(row.form_json),
     hostReady: workspaceHasServerAutomationHost(storage, workspaceId),
   };
 }
@@ -973,7 +1020,7 @@ export function precheckIncomingWebhookBudgets(
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: "daily-cap" | "pending-count" | "pending-bytes";
+      readonly reason: "daily-cap" | "pending-count" | "pending-bytes" | "form-pending-count";
       readonly current: number;
       readonly limit: number;
       readonly shouldNotifyDailyCap?: boolean;
@@ -1006,6 +1053,15 @@ export function precheckIncomingWebhookBudgets(
       current: dailyCount,
       limit: INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
       shouldNotifyDailyCap,
+    };
+  }
+  const formPending = formPendingCount(storage, webhookId);
+  if (formPending !== null && formPending >= MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT) {
+    return {
+      ok: false,
+      reason: "form-pending-count",
+      current: formPending,
+      limit: MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT,
     };
   }
   const pendingRow = storage.db
@@ -1052,7 +1108,8 @@ export type EnqueueIncomingWebhookDeliveryResult =
         | "idempotency-conflict"
         | "daily-cap"
         | "pending-count"
-        | "pending-bytes";
+        | "pending-bytes"
+        | "form-pending-count";
       readonly shouldNotifyDailyCap?: boolean;
       readonly ownerUserId?: string;
       readonly workspaceId?: string;
@@ -1204,6 +1261,16 @@ export function enqueueIncomingWebhookDelivery(
         collectionPath,
         current: dailyCount,
         limit: INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
+      };
+    }
+
+    const formPending = formPendingCount(storage, input.webhookId);
+    if (formPending !== null && formPending >= MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT) {
+      return {
+        ok: false,
+        reason: "form-pending-count",
+        current: formPending,
+        limit: MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT,
       };
     }
 

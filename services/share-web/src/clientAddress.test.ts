@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clientAddress } from "./clientAddress";
+import { clientAddress } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 
 function trusted(value = "127.0.0.1"): ReadonlySet<string> {

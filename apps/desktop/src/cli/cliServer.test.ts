@@ -2422,6 +2422,7 @@ describe("CLI socket server", () => {
       createdAtMs: 1_700_000_000_000,
       updatedAtMs: 1_700_000_000_000,
       lastDeliveryAtMs: null,
+      form: null,
       pendingCount: 0,
       recentDeliveries: [],
     };
@@ -2565,6 +2566,16 @@ describe("CLI socket server", () => {
       expect(agentSetup.createWebhook).toHaveBeenCalledWith(WORKSPACE_ID, {
         name: "Waitlist",
         collectionPath: "waitlist",
+      });
+      await send("webhookCreate", {
+        name: "Waitlist",
+        collection: "waitlist",
+        form: { fields: ["email"] },
+      });
+      expect(agentSetup.createWebhook).toHaveBeenLastCalledWith(WORKSPACE_ID, {
+        name: "Waitlist",
+        collectionPath: "waitlist",
+        form: { fields: ["email"] },
       });
       expect(await send("webhookList")).toMatchObject({
         ok: true,

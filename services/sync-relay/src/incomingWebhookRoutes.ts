@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
-import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
+import {
+  jsonResponse,
+  readBoundedJson,
+  senderAddressKey,
+  TokenBucketLimiter,
+} from "@dohc/service-http";
 import {
   extractAllowedIncomingWebhookHeaders,
   INCOMING_WEBHOOK_BURST_CAPACITY,
+  INCOMING_WEBHOOK_FORM_SENDER_BURST,
+  INCOMING_WEBHOOK_FORM_SENDER_DAILY,
+  keepIncomingWebhookFormFields,
   INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
   INCOMING_WEBHOOK_DELIVERY_KEY_PATTERN,
   INCOMING_WEBHOOK_MAX_CHAIN_DEPTH,
@@ -13,6 +21,7 @@ import {
   IncomingWebhookId,
   IncomingWebhookUpdateInput,
   MAX_INCOMING_WEBHOOK_BODY_BYTES,
+  MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES,
   MAX_INCOMING_WEBHOOKS_PER_WORKSPACE,
   parseIncomingWebhookContentType,
 } from "@dohc/workspace-contracts/incoming-webhooks";
@@ -63,6 +72,11 @@ export function createIncomingWebhookLimiters() {
       1,
     ),
     admin: new TokenBucketLimiter(ADMIN_BUCKET_CAPACITY, ADMIN_REFILL_PER_SECOND, MAX_TRACKED_KEYS),
+    formSender: new TokenBucketLimiter(
+      INCOMING_WEBHOOK_FORM_SENDER_BURST,
+      INCOMING_WEBHOOK_FORM_SENDER_DAILY / 86_400,
+      MAX_TRACKED_KEYS,
+    ),
   };
 }
 
@@ -75,6 +89,18 @@ function webhookJson(
     "cache-control": "no-store",
     ...extraHeaders,
   });
+}
+
+function pendingError(
+  reason: "pending-count" | "pending-bytes" | "form-pending-count",
+  current: number | undefined,
+  limit: number | undefined,
+): string {
+  if (reason === "form-pending-count")
+    return `form webhook pending queue full (${current} of ${limit} deliveries)`;
+  return reason === "pending-count"
+    ? `workspace pending webhook queue full (${current} of ${limit} deliveries)`
+    : `workspace pending webhook buffer full (${current} of ${limit} bytes)`;
 }
 
 function opaqueNotFound(): Response {
@@ -281,6 +307,14 @@ export function createIncomingWebhookRoutes(options: {
       );
     }
 
+    const form = resolved.form;
+    if (form) {
+      const sender = senderAddressKey(request.headers.get("x-dohc-relay-client-ip") ?? "");
+      if (!options.limiters.formSender.allow(`${resolved.webhookId}|${sender}`, now)) {
+        return webhookJson({ ok: false, error: "too many submissions from this network" }, 429);
+      }
+    }
+
     // Per-endpoint rate limit (30 burst, 0.5/s refill), checked BEFORE reading the body.
     if (!options.limiters.endpoint.allow(resolved.webhookId, now)) {
       return webhookJson({ ok: false, error: "webhook rate limit exceeded" }, 429);
@@ -331,18 +365,18 @@ export function createIncomingWebhookRoutes(options: {
         );
       }
       return webhookJson(
-        {
-          ok: false,
-          error:
-            precheck.reason === "pending-count"
-              ? `workspace pending webhook queue full (${precheck.current} of ${precheck.limit} deliveries)`
-              : `workspace pending webhook buffer full (${precheck.current} of ${precheck.limit} bytes)`,
-        },
+        { ok: false, error: pendingError(precheck.reason, precheck.current, precheck.limit) },
         429,
       );
     }
 
     const contentType = parseIncomingWebhookContentType(request.headers.get("content-type"));
+    if (form && contentType !== "application/x-www-form-urlencoded") {
+      return webhookJson(
+        { ok: false, error: "unsupported content-type; use application/x-www-form-urlencoded" },
+        415,
+      );
+    }
     if (contentType === null) {
       return webhookJson(
         {
@@ -354,22 +388,19 @@ export function createIncomingWebhookRoutes(options: {
       );
     }
 
+    const maxBodyBytes = form
+      ? MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES
+      : MAX_INCOMING_WEBHOOK_BODY_BYTES;
     let payloadBytes: Uint8Array;
     try {
       payloadBytes = await readStreamingBoundedBody(
         request,
-        MAX_INCOMING_WEBHOOK_BODY_BYTES,
+        maxBodyBytes,
         INCOMING_WEBHOOK_READ_TIMEOUT_MS,
       );
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
-        return webhookJson(
-          {
-            ok: false,
-            error: `payload exceeds ${MAX_INCOMING_WEBHOOK_BODY_BYTES} bytes`,
-          },
-          413,
-        );
+        return webhookJson({ ok: false, error: `payload exceeds ${maxBodyBytes} bytes` }, 413);
       }
       if (error instanceof BodyReadTimeoutError) {
         return webhookJson({ ok: false, error: "request body timed out" }, 408);
@@ -378,6 +409,12 @@ export function createIncomingWebhookRoutes(options: {
         return webhookJson({ ok: false, error: "request body aborted" }, 400);
       }
       return webhookJson({ ok: false, error: "invalid request body" }, 400);
+    }
+
+    if (form) {
+      const kept = keepIncomingWebhookFormFields(form, new TextDecoder().decode(payloadBytes));
+      if (!kept.ok) return webhookJson({ ok: false, error: kept.error }, 422);
+      payloadBytes = new TextEncoder().encode(kept.body);
     }
 
     const allowedHeaders = extractAllowedIncomingWebhookHeaders(request.headers);
@@ -444,14 +481,9 @@ export function createIncomingWebhookRoutes(options: {
           );
         case "pending-count":
         case "pending-bytes":
+        case "form-pending-count":
           return webhookJson(
-            {
-              ok: false,
-              error:
-                queued.reason === "pending-count"
-                  ? `workspace pending webhook queue full (${queued.current} of ${queued.limit} deliveries)`
-                  : `workspace pending webhook buffer full (${queued.current} of ${queued.limit} bytes)`,
-            },
+            { ok: false, error: pendingError(queued.reason, queued.current, queued.limit) },
             429,
           );
       }
@@ -534,6 +566,7 @@ export function createIncomingWebhookRoutes(options: {
             webhookId,
             name: parsed.data.name,
             collectionPath: parsed.data.collectionPath,
+            form: parsed.data.form ?? null,
             tokenHash,
             nowMs: options.nowMs(),
             automationServer: options.automationServer,

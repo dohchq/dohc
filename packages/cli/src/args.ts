@@ -2692,7 +2692,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         noExtraArgs(extra, "webhook create");
         const collection = lastValue(input, "--collection");
         if (!name || !collection) fail("webhook create requires a name and --collection <path>");
-        const parsed = AgentIncomingWebhookCreateInput.safeParse({ name, collection });
+        const formFields = lastValue(input, "--form-fields");
+        const parsed = AgentIncomingWebhookCreateInput.safeParse({
+          name,
+          collection,
+          ...(formFields === undefined
+            ? {}
+            : { form: { fields: formFields.split(",").map((field) => field.trim()) } }),
+        });
         if (!parsed.success)
           fail(parsed.error.issues[0]?.message ?? "invalid webhook create input");
         return parsed.data;

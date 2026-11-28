@@ -86,9 +86,15 @@ export const AGENT_SETUP_WRITE_DECLARATIONS = {
           value: "path",
           text: "Required. The Collection's folder, relative to the workspace root.",
         },
+        {
+          name: "--form-fields",
+          value: "names",
+          text: "Make a website form address. Comma-separated field names to keep, such as email,source. dohc drops every other field.",
+        },
       ],
       notes: [
         "The address is a secret: anyone who has it can add records. dohc shows it once.",
+        "A website form address goes in a public page. It takes only form posts, keeps only the named fields, and allows each network a few posts a day.",
         "If you don't know whether a create worked, run dohc webhook list before you try again.",
         "Creating needs the server to run this workspace's automations, with no handover waiting, and a synced Collection.",
       ],
@@ -97,7 +103,7 @@ export const AGENT_SETUP_WRITE_DECLARATIONS = {
     mcp: {
       tool: "dohc_create_incoming_webhook",
       description:
-        "Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.",
+        'Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection\'s folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. For an address that a public web page posts to, pass form.fields with the field names to keep, such as ["email", "source"]: it then takes only form posts, drops every other field, and allows each network a few posts a day. If you don\'t know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace\'s automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.',
       levels: ["owner"],
       reason: OWNER_SETUP_REASON,
     },

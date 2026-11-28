@@ -1,5 +1,6 @@
 import { INBOX_COLLECTION_PATH } from "@dohc/workspace-contracts/inbox";
 import {
+  IncomingWebhookForm,
   MAX_INCOMING_WEBHOOK_NAME_CHARS,
   type IncomingWebhookCreateInput,
   type IncomingWebhookCreatedResult,
@@ -27,13 +28,34 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
-import { SettingRow, SettingsSection } from "./SettingRow";
+import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
 function formatCurlExample(endpointUrl: string): string {
   const escaped = endpointUrl.replace(/'/gu, "'\\''");
   return `curl -X POST -H "Content-Type: application/json" -d '{"title":"Captured from curl"}' '${escaped}'`;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(
+    /[&<>"]/gu,
+    (char) => `&${{ "&": "amp", "<": "lt", ">": "gt", '"': "quot" }[char]};`,
+  );
+}
+
+function formatFormExample(endpointUrl: string, form: IncomingWebhookForm): string {
+  const inputs = form.fields.map((field) =>
+    field === "email"
+      ? `  <input name="email" type="email" required>`
+      : `  <input name="${field}">`,
+  );
+  return [
+    `<form method="post" action="${escapeHtml(endpointUrl)}">`,
+    ...inputs,
+    `  <button>Send</button>`,
+    `</form>`,
+  ].join("\n");
 }
 
 function hostFromOrigin(origin: string): string {
@@ -52,6 +74,9 @@ function CreateWebhookDialog(props: {
   const [collectionPath, setCollectionPath] = useState(INBOX_COLLECTION_PATH);
   const [nameError, setNameError] = useState<string | null>(null);
   const [collectionError, setCollectionError] = useState<string | null>(null);
+  const [websiteForm, setWebsiteForm] = useState(false);
+  const [formFields, setFormFields] = useState("email");
+  const [fieldsError, setFieldsError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -81,12 +106,32 @@ function CreateWebhookDialog(props: {
     } else {
       setCollectionError(null);
     }
+    const form = websiteForm
+      ? IncomingWebhookForm.safeParse({
+          fields: formFields
+            .split(",")
+            .map((field) => field.trim())
+            .filter((field) => field !== ""),
+        })
+      : null;
+    if (form && !form.success) {
+      setFieldsError(
+        "Name 1 to 10 different fields, such as email, source. Use letters, numbers, - and _.",
+      );
+      invalid = true;
+    } else {
+      setFieldsError(null);
+    }
     setSubmitError(null);
     if (invalid) return;
 
     setSaving(true);
     try {
-      await props.onCreate({ name: trimmedName, collectionPath: trimmedCollection });
+      await props.onCreate({
+        name: trimmedName,
+        collectionPath: trimmedCollection,
+        ...(form?.success ? { form: form.data } : {}),
+      });
     } catch (error) {
       setSubmitError(ipcErrorMessage(error, "dohc could not create this incoming webhook."));
     } finally {
@@ -182,6 +227,56 @@ function CreateWebhookDialog(props: {
             )}
           </div>
 
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <span id={`${id}-form-label`} className="text-[12px] font-medium text-muted">
+                Website form
+              </span>
+              <SwitchControl
+                label="Website form"
+                labelledBy={`${id}-form-label`}
+                describedBy={`${id}-form-help`}
+                checked={websiteForm}
+                disabled={saving}
+                onChange={setWebsiteForm}
+              />
+            </div>
+            <p id={`${id}-form-help`} className="m-0 text-[12px] text-subtle">
+              {websiteForm
+                ? "For a public page. Anyone who loads it can post. dohc keeps only the fields below and allows each network 20 posts a day."
+                : "Turn on when a public web page posts to this address."}
+            </p>
+            {websiteForm ? (
+              <div className="flex flex-col gap-1">
+                <label htmlFor={`${id}-fields`} className="text-[12px] font-medium text-muted">
+                  Fields to keep
+                </label>
+                <input
+                  id={`${id}-fields`}
+                  type="text"
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={saving}
+                  value={formFields}
+                  placeholder="email, source"
+                  aria-invalid={fieldsError ? true : undefined}
+                  aria-describedby={fieldsError ? `${id}-fields-error` : undefined}
+                  data-testid="incoming-webhook-form-fields-input"
+                  onChange={(event) => {
+                    setFormFields(event.target.value);
+                    if (fieldsError) setFieldsError(null);
+                  }}
+                  className="w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
+                />
+                {fieldsError ? (
+                  <FieldError id={`${id}-fields-error`} testId="incoming-webhook-form-fields-error">
+                    {fieldsError}
+                  </FieldError>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
           {submitError ? (
             <FieldError id={`${id}-submit-error`} testId="incoming-webhook-submit-error">
               {submitError}
@@ -221,7 +316,10 @@ function WebhookRevealDialog(props: {
   const titleId = `${id}-title`;
   const panelRef = useRef<HTMLDivElement>(null);
   const doneRef = useRef<HTMLButtonElement>(null);
-  const curlCommand = formatCurlExample(props.revealed.endpointUrl);
+  const form = props.revealed.webhook.form;
+  const example = form
+    ? formatFormExample(props.revealed.endpointUrl, form)
+    : formatCurlExample(props.revealed.endpointUrl);
 
   useOpeningFocus(() => doneRef.current);
 
@@ -263,19 +361,21 @@ function WebhookRevealDialog(props: {
           </div>
 
           <div className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-muted">Example curl</span>
+            <span className="text-[12px] font-medium text-muted">
+              {form ? "Example form" : "Example curl"}
+            </span>
             <CopyField
-              label="Copy example curl command"
-              copiedLabel="Example command copied"
+              label={form ? "Copy example form" : "Copy example curl command"}
+              copiedLabel={form ? "Example form copied" : "Example command copied"}
               copyTestId="incoming-webhook-reveal-curl-copy"
-              getText={() => curlCommand}
+              getText={() => example}
             >
               <code
                 data-testid="incoming-webhook-reveal-curl"
-                title={curlCommand}
-                className="font-mono text-[12px]"
+                title={example}
+                className="whitespace-pre-wrap font-mono text-[12px]"
               >
-                {curlCommand}
+                {example}
               </code>
             </CopyField>
           </div>
@@ -579,6 +679,7 @@ export function WorkspaceWebhooksSettings(props: {
                   <span className="inline-flex items-center gap-1.5">
                     <Pill>{webhook.paused ? "Paused" : "Active"}</Pill>
                     <Pill>{webhook.collectionPath}</Pill>
+                    {webhook.form ? <Pill>Website form</Pill> : null}
                   </span>
                 }
                 description={webhookDescription(webhook)}
