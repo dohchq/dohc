@@ -136,6 +136,7 @@ describe("holdsDeliveries", () => {
     const pause = (objectId: string, cause: OwnerLivePause["cause"]): OwnerLivePause => ({
       pauseId: `pause-${objectId}`,
       objectId,
+      lineageClaimId: "lineage",
       path: `${objectId}.md`,
       cause,
       names: [],
@@ -160,6 +161,7 @@ describe("settleOwnerLivePauses", () => {
       {
         pauseId: "pause",
         objectId: "note",
+        lineageClaimId: "lineage",
         path: "notes/plan.md",
         cause: "refused",
         names: ["Ana", "Ben"],
@@ -375,6 +377,7 @@ describe("settleOwnerLivePauses", () => {
       {
         pauseId: "pause",
         objectId: "note",
+        lineageClaimId: "lineage",
         path: "notes/plan.md",
         cause: "refused" as const,
         names: [],

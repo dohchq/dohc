@@ -23,6 +23,7 @@ export interface RelayLivePause {
 export interface OwnerLivePause {
   readonly pauseId: string;
   readonly objectId: string;
+  readonly lineageClaimId: string;
   readonly path: string;
   /** "ended" when the note's file was moved, deleted or replaced, or its lineage ended. */
   readonly cause: "refused" | "failing" | "ended";
@@ -40,6 +41,16 @@ export interface OwnerLivePause {
  */
 export function holdsDeliveries(pauses: readonly OwnerLivePause[], objectId: string): boolean {
   return pauses.some((pause) => pause.objectId === objectId && pause.cause !== "ended");
+}
+
+export function holdsRoom(
+  pauses: readonly OwnerLivePause[],
+  binding: { readonly objectId: string; readonly lineageClaimId: string },
+): boolean {
+  return holdsDeliveries(
+    pauses.filter((pause) => pause.lineageClaimId === binding.lineageClaimId),
+    binding.objectId,
+  );
 }
 
 export interface OwnerLivePauseRelay {
@@ -246,6 +257,7 @@ export async function settleOwnerLivePauses(input: {
       settled.push({
         pauseId: pause.pauseId,
         objectId: pause.objectId,
+        lineageClaimId: pause.lineageClaimId,
         path: pause.path,
         cause: pause.refusal === "stale-binding" ? "ended" : pause.cause,
         names: authorNames(pause.named),
