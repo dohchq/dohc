@@ -124,7 +124,8 @@ const LAUNCH_STEPS: readonly (readonly [LaunchStep, string])[] = [
 function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
-  const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone, alerts } = useAccount();
+  const { account, outbox, captureQueue, workspaces, reloadWorkspaces, setShowOnPhone, alerts } =
+    useAccount();
   const groups = workspaceGroups(workspaces.status === "ready" ? workspaces.workspaces : []);
   const server = serverName(signIn.origin);
   const router = useRouter();
@@ -177,7 +178,7 @@ function SettingsScreen() {
     });
   }, [account, signIn]);
   const signOut = useCallback(async () => {
-    const message = accountWords.signOutBody(outbox.signOutCounts());
+    const message = accountWords.signOutBody(outbox.signOutCounts(), captureQueue.signOutCount());
     if (
       await confirm({
         title: accountWords.signOutTitle(server),
@@ -187,7 +188,7 @@ function SettingsScreen() {
       })
     )
       leave();
-  }, [leave, outbox, server]);
+  }, [captureQueue, leave, outbox, server]);
 
   const end = (session: AccountSession) =>
     act(session.sessionId, async () => {

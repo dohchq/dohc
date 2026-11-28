@@ -193,6 +193,14 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [signIn, cache],
   );
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
+  useEffect(() => {
+    if (workspaces.status !== "ready") return;
+    captureQueue.workspaces(
+      workspaces.workspaces
+        .filter((w) => w.showOnPhone && w.canOpen && w.role === "owner")
+        .map((w) => w.workspaceId),
+    );
+  }, [captureQueue, workspaces]);
   useEffect(() => list?.reload(), [list]);
   const open = useMemo(
     () =>

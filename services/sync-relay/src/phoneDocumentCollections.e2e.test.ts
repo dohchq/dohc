@@ -800,7 +800,7 @@ describe.skipIf(engine.missing)(
           title: "Flight receipts",
           createdInbox: true,
         });
-        expect(first.path).toMatch(/^Inbox\/\d{4}-\d{2}-\d{2}-flight-receipts\.md$/u);
+        expect(first.path).toMatch(/^Inbox\/\d{4}-\d{2}-\d{2}-flight-receipts-[a-z0-9]{6}\.md$/u);
         expect(isRecordId(first.recordId)).toBe(true);
 
         // Idempotent retry with exact same requestId creates zero duplicate records.

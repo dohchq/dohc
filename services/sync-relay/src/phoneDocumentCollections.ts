@@ -30,7 +30,6 @@ import {
   INBOX_COLLECTION_PATH,
   INBOX_COLLECTION_YAML,
   INBOX_SCHEMA_PATH,
-  isInboxRecordPath,
   MAX_INBOX_BODY_BYTES,
   MAX_INBOX_TITLE_CHARS,
   safeInboxSlug,
@@ -748,15 +747,6 @@ export async function runPhoneDocumentCollectionWrite(
       const indexedObjectId = indexedPath ? objectAt(indexedPath) : null;
       if (indexedPath && indexedObjectId)
         return await confirmCapture(indexedPath, indexedObjectId, false);
-      const inboxFiles = await files.listTextFileMetadata({
-        workspaceId,
-        versionId: "main",
-        under: INBOX_COLLECTION_PATH,
-      });
-      const replay = inboxFiles.find(
-        (f) => isInboxRecordPath(f.path) && f.metadataCorrelationId === correlationId,
-      );
-      if (replay) return await confirmCapture(replay.path, replay.objectId, false);
       const rootHit = (
         await files.resolveFiles({ workspaceId, targets: [{ path: INBOX_COLLECTION_PATH }] })
       ).results[0];
@@ -786,11 +776,9 @@ export async function runPhoneDocumentCollectionWrite(
         )
           return occupied("Inbox cannot be used as a Collection.");
       }
-      const taken = new Set(inboxFiles.map((f) => f.path.toLowerCase()));
-      const base = `${INBOX_COLLECTION_PATH}/${receivedIso.slice(0, 10)}-${safeInboxSlug(title, kind)}`;
-      for (let attempt = 0; attempt < 200; attempt += 1) {
-        const candidate = attempt === 0 ? `${base}.md` : `${base}-${attempt + 1}.md`;
-        if (taken.has(candidate.toLowerCase())) continue;
+      const suffix = recordId.slice(-6).toLowerCase();
+      const base = `${INBOX_COLLECTION_PATH}/${receivedIso.slice(0, 10)}-${safeInboxSlug(title, kind, 52)}-${suffix}`;
+      for (const candidate of [`${base}.md`, `${base}-2.md`]) {
         const created = await createIdempotentFile(files, {
           workspaceId,
           path: candidate,
@@ -800,7 +788,6 @@ export async function runPhoneDocumentCollectionWrite(
           author,
         });
         if (created.ok) return await confirmCapture(candidate, created.objectId, createdInbox);
-        taken.add(candidate.toLowerCase());
       }
       throw unconfirmed("the captured note");
     });

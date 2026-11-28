@@ -92,8 +92,7 @@ CREATE TABLE IF NOT EXISTS captures (
   request_id TEXT NOT NULL UNIQUE,
   payload TEXT NOT NULL,
   stage TEXT NOT NULL,
-  reason TEXT,
-  created_at_ms INTEGER NOT NULL
+  reason TEXT
 ) STRICT`;
 
 /** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */

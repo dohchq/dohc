@@ -1,13 +1,24 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
-import { validateInboxUrl } from "@dohc/workspace-contracts/inbox";
+import { MAX_INBOX_TITLE_CHARS, validateInboxUrl } from "@dohc/workspace-contracts/inbox";
 import * as Haptics from "expo-haptics";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, Text, TextInput } from "react-native";
 import { useAccount } from "../account/AccountProvider";
+import {
+  CAPTURE_MAX_BODY_BYTES,
+  capturePayloadBytes,
+  type QueuedCapture,
+} from "../server/captureQueue";
+import { newFileRequestId } from "../server/fileWrites";
 import { useTheme } from "../theme";
 import { SheetModal } from "./FileNameSheet";
 
-export function QuickCaptureSheet(props: { readonly open: boolean; readonly onClose: () => void }) {
+export function QuickCaptureSheet(props: {
+  readonly open: boolean;
+  readonly draft?: QueuedCapture | null;
+  readonly onClose: () => void;
+}) {
+  const { open, draft, onClose } = props;
   const theme = useTheme();
   const { data, captureQueue } = useAccount();
   const [note, setNote] = useState("");
@@ -15,16 +26,23 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
   const [link, setLink] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!props.open) return;
-    setNote("");
-    setTitle("");
-    setLink("");
+    if (!open) return;
+    setNote(draft?.body ?? "");
+    setTitle(draft?.title ?? "");
+    setLink(draft?.url ?? "");
     setSaving(false);
-    setError(null);
-  }, [props.open]);
+    setError(draft?.reason ?? null);
+    requestId.current = null;
+  }, [open, draft]);
 
+  const edit = (set: (next: string) => void) => (next: string) => {
+    set(next);
+    setError(null);
+    requestId.current = null;
+  };
   const fail = (message: string) => {
     setError(message);
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -44,18 +62,27 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
         return fail(workspaceWords.captureInvalidLink);
       }
     }
+    const payload = {
+      workspaceId: draft?.workspaceId ?? data.workspaceId,
+      ...(trimmedTitle ? { title: trimmedTitle } : {}),
+      ...(trimmedNote ? { body: note } : {}),
+      ...(trimmedLink ? { url: trimmedLink } : {}),
+      kind: (trimmedLink ? "link" : "note") as "note" | "link",
+    };
+    if (
+      trimmedTitle.length > MAX_INBOX_TITLE_CHARS * 2 ||
+      capturePayloadBytes(payload) > CAPTURE_MAX_BODY_BYTES
+    )
+      return fail(workspaceWords.captureTooLarge);
+    requestId.current ??= newFileRequestId();
     setSaving(true);
     setError(null);
     try {
-      await captureQueue.enqueue({
-        workspaceId: data.workspaceId,
-        ...(trimmedTitle ? { title: trimmedTitle } : {}),
-        ...(trimmedNote ? { body: note } : {}),
-        ...(trimmedLink ? { url: trimmedLink } : {}),
-        kind: trimmedLink ? "link" : "note",
-      });
+      await captureQueue.enqueue({ ...payload, requestId: requestId.current });
+      if (draft) void captureQueue.discard(draft.requestId);
+      requestId.current = null;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      props.onClose();
+      onClose();
     } catch {
       setSaving(false);
       fail(workspaceWords.captureCouldntKeep);
@@ -69,12 +96,12 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
 
   return (
     <SheetModal
-      open={props.open}
+      open={open}
       title={workspaceWords.quickCapture}
       saving={saving}
       savingLabel={workspaceWords.capturing}
       actionLabel={workspaceWords.captureSave}
-      onClose={props.onClose}
+      onClose={onClose}
       onAction={() => void submit()}
     >
       <ScrollView
@@ -87,7 +114,7 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
         </Text>
         <TextInput
           value={note}
-          onChangeText={(next) => (setNote(next), setError(null))}
+          onChangeText={edit(setNote)}
           placeholder={workspaceWords.captureNotePlaceholder}
           placeholderTextColor={theme.subtle}
           editable={!saving}
@@ -102,7 +129,7 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
         </Text>
         <TextInput
           value={title}
-          onChangeText={(next) => (setTitle(next), setError(null))}
+          onChangeText={edit(setTitle)}
           placeholder={workspaceWords.captureTitlePlaceholder}
           placeholderTextColor={theme.subtle}
           editable={!saving}
@@ -115,7 +142,7 @@ export function QuickCaptureSheet(props: { readonly open: boolean; readonly onCl
         </Text>
         <TextInput
           value={link}
-          onChangeText={(next) => (setLink(next), setError(null))}
+          onChangeText={edit(setLink)}
           placeholder={workspaceWords.captureLinkPlaceholder}
           placeholderTextColor={theme.subtle}
           editable={!saving}

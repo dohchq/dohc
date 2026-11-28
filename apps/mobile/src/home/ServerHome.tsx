@@ -48,7 +48,7 @@ import { useWorkspaces } from "../chats/Workspaces";
 import { choose } from "../confirm";
 import { appState } from "../apps/reviewControls";
 import { shownProblem } from "../server/client";
-import { captureLabel } from "../server/captureQueue";
+import { captureLabel, type QueuedCapture } from "../server/captureQueue";
 import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
@@ -82,7 +82,7 @@ export function ServerHome() {
   const canEditFiles = canWriteFiles(data, current);
   const lifecycle = useFileLifecycle(current?.name ?? "");
   const [creatingCollection, setCreatingCollection] = useState(false);
-  const [capturing, setCapturing] = useState(false);
+  const [capturing, setCapturing] = useState<boolean | QueuedCapture>(false);
   useEffect(() => {
     setCreatingCollection(false);
     setCapturing(false);
@@ -167,12 +167,17 @@ export function ServerHome() {
           canEditFiles={canEditFiles}
           deletingPath={lifecycle.deletingPath}
           openActions={lifecycle.openActions}
+          onEditCapture={(item) => setCapturing(item)}
         />
       ) : null}
       {lifecycle.sheet}
       {canEditFiles ? (
         <>
-          <QuickCaptureSheet open={capturing} onClose={() => setCapturing(false)} />
+          <QuickCaptureSheet
+            open={capturing !== false}
+            draft={typeof capturing === "object" ? capturing : null}
+            onClose={() => setCapturing(false)}
+          />
           <NewDocumentCollectionSheet
             open={creatingCollection}
             onClose={() => setCreatingCollection(false)}
@@ -195,12 +200,14 @@ function Files({
   canEditFiles,
   deletingPath,
   openActions,
+  onEditCapture,
 }: {
   workspaceId: string;
   workspace: string;
   canEditFiles: boolean;
   deletingPath: string | null;
   openActions: ReturnType<typeof useFileLifecycle>["openActions"];
+  onEditCapture: (item: QueuedCapture) => void;
 }) {
   const router = useRouter();
   const { state, retry } = useView(views.files);
@@ -439,7 +446,7 @@ function Files({
     <>
       {pendingCaptures.length > 0 ? (
         <Pressable
-          onPress={() => captureQueue.wake()}
+          onPress={() => captureQueue.wake(workspaceId)}
           android_ripple={ripple(theme)}
           style={[styles.captureRow, { backgroundColor: theme.panel, borderColor: theme.line }]}
           accessibilityRole="button"
@@ -462,6 +469,18 @@ function Files({
           <Text style={[styles.captureText, { color: theme.danger }]} numberOfLines={2}>
             {workspaceWords.captureFailed(captureLabel(item))} {item.reason ?? ""}
           </Text>
+          {canEditFiles ? (
+            <Pressable
+              onPress={() => onEditCapture(item)}
+              android_ripple={ripple(theme, true)}
+              style={styles.discardBtn}
+              accessibilityRole="button"
+            >
+              <Text style={[styles.discardText, { color: theme.accent }]}>
+                {workspaceWords.edit}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             onPress={() => void captureQueue.discard(item.requestId)}
             android_ripple={ripple(theme, true)}

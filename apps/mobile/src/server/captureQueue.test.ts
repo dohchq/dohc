@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
+import { accountWords } from "@dohc/interface-words/account";
 import { describe, expect, it } from "vitest";
 import { createAccount, type Account, type AccountState } from "./account";
-import { createCaptureQueue } from "./captureQueue";
+import { CAPTURE_MAX_BODY_BYTES, capturePayloadBytes, createCaptureQueue } from "./captureQueue";
+import { StoreError } from "./keptStore";
 import { createOutbox } from "./outbox";
 import { keptDisk } from "./testKeptDisk";
 import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
@@ -283,10 +285,10 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     stopOutbox();
   });
 
-  it("never sends requests when sends is false", async () => {
+  it("never sends requests when sends is false and reports Sign-out counts honestly", async () => {
     const disk = keptDisk();
     disk.sql(
-      "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason, created_at_ms) VALUES (?, ?, ?, ?, ?, 'queued', NULL, 1)",
+      "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason) VALUES (?, ?, ?, ?, ?, 'queued', NULL)",
       ORIGIN,
       "u-1",
       "ws-1",
@@ -296,16 +298,121 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     const server = testServer();
     const account = await signedInAccount(server);
     const queue = createCaptureQueue({ store: disk.launch(), sends: false });
+    expect(queue.signOutCount()).toBeNull();
+    expect(accountWords.signOutBody({ unsent: 0, maySend: 0 }, null)).toContain("Inbox captures");
     const stop = queue.follow(account);
     await waitFor(() => queue.state().status === "ready");
     await new Promise<void>((r) => setTimeout(r, 25));
     expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toEqual([]);
     expect(queue.state().items).toHaveLength(1);
+    expect(queue.signOutCount()).toBe(1);
+    expect(accountWords.signOutBody({ unsent: 0, maySend: 0 }, queue.signOutCount())).toContain(
+      "1 Inbox capture",
+    );
     await expect(
       queue.enqueue({ workspaceId: "ws-1", body: "Blocked", kind: "note" }),
     ).rejects.toThrow();
     await queue.discard("req-old");
     expect(queue.state().items).toEqual([]);
+    expect(queue.signOutCount()).toBe(0);
     stop();
+  });
+
+  it("B2: parks an unreachable (404) workspace without blocking other workspaces and unparks when reachable", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    let hiddenVisible = false;
+    server.on("POST", "/sync/ws-hidden/ops/captureInboxItem", () =>
+      hiddenVisible ? okCapture("Hidden note") : { status: 404, body: { ok: false } },
+    );
+    server.on("POST", "/sync/ws-visible/ops/captureInboxItem", () => okCapture("Visible note"));
+    const account = await signedInAccount(server);
+    const queue = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
+    const stop = queue.follow(account);
+    await waitFor(() => queue.state().status === "ready");
+
+    await queue.enqueue({ workspaceId: "ws-hidden", title: "Hidden note", kind: "note" });
+    await queue.enqueue({ workspaceId: "ws-visible", title: "Visible note", kind: "note" });
+    await waitFor(
+      () =>
+        queue.state().items.length === 1 &&
+        queue.state().items[0]?.workspaceId === "ws-hidden" &&
+        queue.state().items[0]?.stage === "queued",
+    );
+    const hiddenCalls = server.calls.filter((c) => c.path.includes("ws-hidden")).length;
+    queue.wake("ws-visible");
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(server.calls.filter((c) => c.path.includes("ws-hidden")).length).toBe(hiddenCalls);
+
+    hiddenVisible = true;
+    queue.workspaces(["ws-hidden", "ws-visible"]);
+    await waitFor(() => queue.state().items.length === 0);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+    stop();
+  });
+
+  it("B3: retrying with the same draft requestId after an uncertain SQLite commit never creates two rows", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, () => okCapture("Once only"));
+    const account = await signedInAccount(server);
+    const real = disk.launch();
+    let failOnce = true;
+    const flakyStore: typeof real = {
+      read: (s, p) => real.read(s, p),
+      checkpoint: () => real.checkpoint(),
+      destroy: () => real.destroy(),
+      async transaction(body) {
+        const res = await real.transaction(body);
+        if (failOnce) {
+          failOnce = false;
+          throw new StoreError("uncertain", "Injected uncertain commit failure");
+        }
+        return res;
+      },
+    };
+    const q1 = createCaptureQueue({ store: flakyStore, retryMs: () => 5 });
+    const stop1 = q1.follow(account);
+    await waitFor(() => q1.state().status === "ready");
+
+    const draftRequestId = "draft-req-stable-1";
+    await expect(
+      q1.enqueue({
+        workspaceId: "ws-1",
+        title: "Once only",
+        body: "Exact once",
+        kind: "note",
+        requestId: draftRequestId,
+      }),
+    ).rejects.toThrow("Injected uncertain commit failure");
+
+    await q1.enqueue({
+      workspaceId: "ws-1",
+      title: "Once only",
+      body: "Exact once",
+      kind: "note",
+      requestId: draftRequestId,
+    });
+    await waitFor(() => q1.state().items.length === 0);
+    stop1();
+
+    const q2 = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
+    const stop2 = q2.follow(account);
+    await waitFor(() => q2.state().status === "ready");
+    await new Promise<void>((r) => setTimeout(r, 25));
+    stop2();
+
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(1);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+  });
+
+  it("B4: measures serialized JSON request bytes so quote-heavy notes cannot exceed relay body limit", () => {
+    const quotes = '"'.repeat(140_000);
+    expect(capturePayloadBytes({ body: quotes, kind: "note" })).toBeGreaterThan(
+      CAPTURE_MAX_BODY_BYTES,
+    );
+    expect(capturePayloadBytes({ body: "Short note", kind: "note" })).toBeLessThan(
+      CAPTURE_MAX_BODY_BYTES,
+    );
   });
 });

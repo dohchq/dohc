@@ -28,6 +28,8 @@ export interface ToastMessage {
   readonly sender?: SenderKind;
   /** Its action is the only Undo for a change: it stays until closed, on Notices too. */
   readonly holdsUndo?: boolean;
+  /** Set on workspace-scoped Undo toasts (such as file Delete) so switching workspaces clears them. */
+  readonly workspaceId?: string;
 }
 
 // Any screen shows a toast through this; the root layout owns the one on screen.

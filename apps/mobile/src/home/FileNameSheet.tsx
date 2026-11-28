@@ -333,6 +333,7 @@ export function useFileLifecycle(workspaceName: string) {
             tone: "success",
             title: confirmWords.deletedFile(fileName),
             holdsUndo: true,
+            workspaceId: active.workspaceId,
             action: {
               label: confirmWords.undo,
               onPress: () => void runRestore(active, target, deleteMomentId, restoreRequestId),

@@ -96,12 +96,22 @@ describe("the tabs' toast", () => {
     expect(showToast(showToast(NO_TOASTS, failure), next)).toEqual({ shown: next, waiting: null });
   });
 
-  it("clears an active Undo toast on workspace switch without dropping non-Undo toasts", () => {
-    const withUndo = showToast(
+  it("clears workspace-scoped Undo toasts on workspace switch without dropping Notice Done Undo or failures", () => {
+    const fileUndo: ToastMessage = {
+      id: "deleted:notes/a.md:m1",
+      tone: "success",
+      title: "Deleted a.md",
+      holdsUndo: true,
+      workspaceId: "ws-1",
+      action: { label: "Undo" },
+    };
+    const withFileUndo = showToast(showToast(NO_TOASTS, failure), fileUndo);
+    expect(clearUndoToast(withFileUndo)).toEqual({ shown: failure, waiting: null });
+    const withNoticeUndo = showToast(
       showToast(NO_TOASTS, failure),
       doneToast("n1", () => {}),
     );
-    expect(clearUndoToast(withUndo)).toEqual({ shown: failure, waiting: null });
+    expect(clearUndoToast(withNoticeUndo)).toBe(withNoticeUndo);
     const plain = showToast(NO_TOASTS, failure);
     expect(clearUndoToast(plain)).toBe(plain);
   });

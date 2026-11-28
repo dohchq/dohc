@@ -1558,6 +1558,27 @@ describe.skipIf(engine.missing)(
             requestId: "req-bad-moment",
           }),
         ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
+
+        // Edge case 3 (B5): stale Undo cannot resurrect an older revision after a later restore, edit, and delete.
+        const del2 = await stack.phoneOp<{
+          ok: true;
+          path: string;
+          objectId: string;
+          deleteMomentId: string;
+        }>("deleteFile", {
+          path: "notes/undo-me.md",
+          expectedObjectId: page.objectId,
+          requestId: "req-undo-delete-2",
+        });
+        expect(del2.deleteMomentId).not.toBe(del.deleteMomentId);
+        expect(
+          await stack.phoneOp("restoreDeletedFile", {
+            path: "notes/undo-me.md",
+            objectId: page.objectId,
+            deleteMomentId: del.deleteMomentId,
+            requestId: "req-stale-undo",
+          }),
+        ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
       },
       4 * REAL_DAEMON_DEADLINE_MS,
     );

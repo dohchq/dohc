@@ -70,6 +70,7 @@ export const workspaceWords = {
   captureLinkPlaceholder: "https://example.com",
   captureEmptyError: "Enter a title, note, or link.",
   captureInvalidLink: "Enter a link starting with http:// or https://.",
+  captureTooLarge: "This note is too large to send. Shorten it and try again.",
   captureSaved: "Saved to Inbox",
   captureQueued: "Queued for Inbox",
   captureQueuedBody: "This phone will send it when back online.",
@@ -79,5 +80,6 @@ export const workspaceWords = {
     count === 1 ? "1 item waiting to send to Inbox" : `${count} items waiting to send to Inbox`,
   captureFailed: (title: string) => `dohc could not send "${title}" to Inbox.`,
   captureCouldntKeep: "dohc could not save this note on this phone.",
+  edit: "Edit",
   discard: "Discard",
 } as const;
