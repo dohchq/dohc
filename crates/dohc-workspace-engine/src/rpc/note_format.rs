@@ -80,8 +80,7 @@ impl EngineService {
             }));
             does_not_fit.extend(pass.does_not_fit.into_iter().map(|(key, path, over)| {
                 let limit = over.map(|over| {
-                    let (limit, unit) = (over.limit, over.unit);
-                    json!({"limit": limit, "unit": unit, "used": over.used, "max": over.max})
+                    json!({"limit": over.limit, "unit": over.unit, "used": over.used, "max": over.max})
                 });
                 json!({"objectId": key.object_id, "path": path, "limit": limit})
             }));

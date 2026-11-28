@@ -471,7 +471,7 @@ pub fn fresh_successor_base(
         .flatten();
     let (doc, does_not_fit) = match candidate.map(|doc| (doc.fits_a_live_note(artifact), doc)) {
         Some((Ok(()), doc)) => (doc, None),
-        Some((Err(overweight), _)) => (successor_doc(identity, artifact, 1.0)?, Some(overweight)),
+        Some((Err(overweight), _)) => (successor_doc(identity, artifact, 1.0)?, overweight),
         None => (successor_doc(identity, artifact, 1.0)?, None),
     };
     let update = doc.encode_full_state();
@@ -690,8 +690,13 @@ impl Ydoc {
         }
     }
 
-    fn fits_a_live_note(&self, markdown: &str) -> Result<(), Overweight> {
-        self.live_note_weight(markdown).fits_a_live_note()
+    fn fits_a_live_note(&self, markdown: &str) -> Result<(), Option<Overweight>> {
+        if body_sequence_writer::frontmatter_holds_a_plain_proto_key(&self.doc) {
+            return Err(None);
+        }
+        self.live_note_weight(markdown)
+            .fits_a_live_note()
+            .map_err(Some)
     }
 
     /// Refuses a format-2 note on an engine that does not read format 2.

@@ -269,47 +269,109 @@ fn needs_a_shared_type(value: &Any) -> bool {
     }
 }
 
-fn shared_structs(value: &Any) -> usize {
-    match value {
-        Any::BigInt(_) => 1,
-        Any::Map(values) => values.values().map(|value| 1 + shared_structs(value)).sum(),
-        Any::Array(values) => {
-            let mut packed = false;
-            values
-                .iter()
-                .map(|value| match value {
-                    Any::Map(_) | Any::Array(_) | Any::BigInt(_) | Any::Buffer(_) => {
-                        packed = false;
-                        1 + shared_structs(value)
-                    }
-                    _ => usize::from(!std::mem::replace(&mut packed, true)),
-                })
-                .sum()
-        }
-        _ => 0,
+#[derive(Default)]
+struct Stored {
+    structs: usize,
+    key_sorts: usize,
+}
+
+impl std::ops::AddAssign for Stored {
+    fn add_assign(&mut self, other: Self) {
+        self.structs += other.structs;
+        self.key_sorts += other.key_sorts;
     }
 }
 
-fn escaped_in_a_shared_map(key: &str) -> bool {
-    key.starts_with('$') && key.trim_start_matches('$') == "dohcBigInt"
+fn plain(value: &Any) -> Stored {
+    Stored {
+        structs: 0,
+        key_sorts: key_sorts(value),
+    }
 }
 
-fn key_sorts(value: &Any, shared: bool) -> usize {
+fn stored_frontmatter_value(value: &Any) -> Stored {
+    if needs_a_shared_type(value) {
+        in_a_shared_type(value)
+    } else {
+        plain(value)
+    }
+}
+
+pub(super) fn frontmatter_holds_a_plain_proto_key(doc: &Doc) -> bool {
+    fn holds(value: &Any) -> bool {
+        match value {
+            Any::Array(values) => values.iter().any(holds),
+            Any::Map(values) => values.contains_key("__proto__") || values.values().any(holds),
+            _ => false,
+        }
+    }
+    let txn = doc.transact();
+    txn.get_map(ROOT_FRONTMATTER).is_some_and(|frontmatter| {
+        frontmatter
+            .iter(&txn)
+            .any(|(_, value)| matches!(value, Out::Any(value) if holds(&value)))
+    })
+}
+
+fn in_a_shared_type(value: &Any) -> Stored {
     match value {
-        Any::Array(values) => values.iter().map(|value| key_sorts(value, shared)).sum(),
+        Any::BigInt(_) => Stored {
+            structs: 1,
+            key_sorts: 1,
+        },
+        Any::Array(values) => {
+            let mut stored = Stored::default();
+            let mut packed = false;
+            for value in values.iter() {
+                match value {
+                    Any::Map(_) | Any::Array(_) | Any::BigInt(_) | Any::Buffer(_) => {
+                        packed = false;
+                        stored.structs += 1;
+                        stored += in_a_shared_type(value);
+                    }
+                    _ => stored.structs += usize::from(!std::mem::replace(&mut packed, true)),
+                }
+            }
+            stored
+        }
         Any::Map(values) => {
             let longest = values
                 .keys()
-                .map(|key| key.len() + usize::from(shared && escaped_in_a_shared_map(key)))
+                .map(|key| key.len() + usize::from(escaped(key)))
                 .max()
                 .unwrap_or(0);
-            let held: usize = values.values().map(|value| key_sorts(value, shared)).sum();
-            held + match values.len() {
-                keys @ 0..=1 => keys,
-                keys => keys * log2_up(keys) * (longest + 3),
+            let mut stored = Stored {
+                structs: values.len(),
+                key_sorts: sorted_keys(values.len(), longest),
+            };
+            for value in values.values() {
+                stored += stored_frontmatter_value(value);
             }
+            stored
         }
-        Any::BigInt(_) if shared => 1,
+        _ => Stored::default(),
+    }
+}
+
+fn escaped(key: &str) -> bool {
+    key.starts_with('$') && key.trim_start_matches('$') == "dohcBigInt"
+}
+
+fn sorted_keys(keys: usize, longest: usize) -> usize {
+    match keys {
+        0..=1 => keys,
+        keys => keys * log2_up(keys) * (longest + 3),
+    }
+}
+
+fn key_sorts(value: &Any) -> usize {
+    match value {
+        Any::Array(values) => values.iter().map(key_sorts).sum(),
+        Any::Map(values) => {
+            let longest = values.keys().map(|key| key.len()).max().unwrap_or(0);
+            let held: usize = values.values().map(key_sorts).sum();
+            held + sorted_keys(values.len(), longest)
+        }
         _ => 0,
     }
 }
@@ -334,9 +396,7 @@ impl Weight {
                     for (key, value) in map.iter(&txn) {
                         weight.root_entries += 1;
                         weight.item(name.len() + key.len());
-                        let shared = name == ROOT_FRONTMATTER
-                            && matches!(&value, Out::Any(value) if needs_a_shared_type(value));
-                        weight.out(value, shared);
+                        weight.out(value, name == ROOT_FRONTMATTER);
                     }
                 }
                 Out::YText(text) => {
@@ -372,11 +432,7 @@ impl Weight {
                 self.astral += text.bytes().filter(|byte| *byte >= 0xF0).count();
                 if run.counted.as_ref() != Some(&run.marks) {
                     self.structs += 1 + 2 * run.marks.len();
-                    self.key_sorts += run
-                        .marks
-                        .values()
-                        .map(|value| key_sorts(value, false))
-                        .sum::<usize>();
+                    self.key_sorts += run.marks.values().map(key_sorts).sum::<usize>();
                     run.counted = Some(run.marks.clone());
                 }
             }
@@ -410,13 +466,16 @@ impl Weight {
         }
     }
 
-    fn out(&mut self, value: Out, shared: bool) {
+    fn out(&mut self, value: Out, frontmatter: bool) {
         match value {
             Out::Any(value) => {
-                if shared {
-                    self.structs += shared_structs(&value);
-                }
-                self.key_sorts += key_sorts(&value, shared);
+                let stored = if frontmatter {
+                    stored_frontmatter_value(&value)
+                } else {
+                    plain(&value)
+                };
+                self.structs += stored.structs;
+                self.key_sorts += stored.key_sorts;
                 self.any(&value);
             }
             _ => self.values += 1,
@@ -441,6 +500,7 @@ impl Weight {
 
     pub(super) fn with_room_for_a_trailing_line(mut self) -> Self {
         self.structs += TRAILING_LINE_STRUCTS;
+        self.elements += 1;
         self
     }
 

@@ -25,7 +25,6 @@ import {
   liveNoteWeight,
   MAX_PROJECTION_BYTES,
   MAX_PROJECTION_NODES,
-  newNoteIndexOperations,
   type NewNoteCounts,
   SAVE_VISITS_OUTSIDE_A_MARK,
   SAVE_VISITS_PER_READ,
@@ -617,9 +616,6 @@ describe("a note made in format 2 only where the save's check and the engine's M
       fits({ engineBytes: MAX_PROJECTION_BYTES }),
       fits({ engineBytes: MAX_PROJECTION_BYTES + 1 }),
     ]).toEqual([true, false]);
-    expect(
-      [30_286_363, 30_286_364].map((keySorts) => newNoteIndexOperations({ ...none, keySorts })),
-    ).toEqual([99_999_998, 100_000_002]);
     expect([fits({ keySorts: 30_286_363 }), fits({ keySorts: 30_286_364 })]).toEqual([true, false]);
   });
 });
