@@ -46,13 +46,7 @@ export const SAVE_VISITS_PER_READ: OrderedLiveUpdateCutPolicy = Object.freeze({
 /** How many times the save's check is at each value and each byte of text outside a mark. */
 export const SAVE_VISITS_OUTSIDE_A_MARK = 4;
 
-/**
- * The index operations the save's check spends registering a new note, at most, measured on the
- * check itself: a base, sorting and searching each struct, each struct by where it sits, sorting
- * the keys of each map value once on each of the three times it reads the note, and sorting and
- * searching the letters of text outside the Basic Multilingual Plane. A tenth more is added.
- */
-export const INDEX_OPERATIONS_PER = Object.freeze({
+const INDEX_OPERATIONS_PER = Object.freeze({
   note: 50_000,
   structSearch: 31,
   struct: 370,
@@ -93,11 +87,6 @@ export type NewNoteCounts = LiveNoteWeight &
     engineBytes: number;
   };
 
-/**
- * What the save's check sorts in a new note: its structs, the entries of its root maps, the key
- * sorts of its map values (`keySorts`), and its letters outside the Basic Multilingual Plane in
- * text.
- */
 export type IndexCounts = {
   structs: number;
   rootEntries: number;
@@ -107,7 +96,6 @@ export type IndexCounts = {
 
 const log2Up = (count: number) => (count <= 1 ? 0 : 32 - Math.clz32(count - 1));
 
-/** The index operations the save's check spends registering a new note of these counts, at most. */
 export function newNoteIndexOperations({
   structs,
   rootEntries,
@@ -126,11 +114,6 @@ export function newNoteIndexOperations({
   return Math.floor((operations * 11 + 9) / 10);
 }
 
-/**
- * The bytes the save's check compares sorting the keys of every map in `value` once: for a map of
- * k keys whose longest is L bytes, k ⌈log2 k⌉ (L + 3), or k when k is under 2. A shared map counts
- * as if it were a value.
- */
 export function keySorts(value: unknown): number {
   if (value instanceof Y.Map) return keySortsOf(value.entries());
   if (value instanceof Y.Array) return keySorts(value.toArray());
@@ -139,7 +122,6 @@ export function keySorts(value: unknown): number {
   return keySortsOf(Object.entries(value));
 }
 
-/** The letters of `text` outside the Basic Multilingual Plane, each written as a surrogate pair. */
 export function astralLetters(text: string): number {
   let letters = 0;
   for (let at = 0; at < text.length - 1; at++) {
@@ -196,7 +178,8 @@ export function fitsLiveNoteCapacity(
 
 /**
  * Whether a new note of these counts fits: its weight, the save's visits and index operations
- * under `policy`, and the engine's Markdown writer's limits. A new note's update holds each struct the note stores.
+ * under `policy`, and the engine's Markdown writer's limits. A new note's update holds each
+ * struct the note stores.
  */
 export function fitsNewNote(counts: NewNoteCounts, policy: OrderedLiveUpdateCutPolicy): boolean {
   const visits = (outside: number, inside: number, perRead: number) =>

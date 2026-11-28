@@ -24,6 +24,10 @@ const FIT_FILE = new URL("./fixtures/body-sequence-fit.json", import.meta.url);
 const CLIENT = 7;
 const schema = getDohcProseMirrorSchema();
 const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);
+const registerWithMoreIndexOperations = createLiveMarkdownRegistrationValidator({
+  ...WORKER_LIVE_VALIDATION_POLICY,
+  maxIndexOperations: 10 * WORKER_LIVE_VALIDATION_POLICY.maxIndexOperations,
+});
 beforeAll(() => admitBodySequenceNotes(true));
 afterAll(() => admitBodySequenceNotes(false));
 
@@ -81,6 +85,23 @@ const RECIPES: Recipe[] = [
     name: "20,000 keys in a map and paragraphs just over the limit",
     frontmatter: keys(20_000, LONG_KEY),
     body: paragraphs(11_250),
+  },
+  {
+    name: "a shared map of 3,000 keys and 23,900 paragraphs",
+    frontmatter: [
+      [1, "---\ntable:\n  constructor: 1\n"],
+      [3_000, `  ${"k".repeat(34)}{i}: {i}\n`],
+      [1, "---\n"],
+    ],
+    body: paragraphs(23_900),
+  },
+  {
+    name: "20,000 keys in a map and overlapping marks just under the limit",
+    frontmatter: keys(20_000, LONG_KEY),
+    body: [
+      [3_700, "**a *b* c** d "],
+      [1, "\n"],
+    ],
   },
   {
     name: "2,000 keys of 100 bytes in a map",
@@ -163,7 +184,7 @@ function inFormatTwoByHand(recipe: Recipe, markdown: string): Y.Doc {
   return withItsSource(doc, markdown);
 }
 
-function registered(doc: Y.Doc) {
+function registered(checkpoint: Uint8Array, registrar = register) {
   const validate = ordered.validateRegistrationCutForProjection;
   let indexOperations: number | undefined;
   const spy = vi
@@ -180,8 +201,7 @@ function registered(doc: Y.Doc) {
       return { ...result, cut: { ...result.cut, finishAfterProjection } };
     });
   try {
-    const checkpoint = Y.encodeStateAsUpdate(doc);
-    const result = register({
+    const result = registrar({
       document: {
         workspaceId: "workspace",
         mainVersionId: "main",
@@ -241,13 +261,19 @@ describe("the index operations a new note is counted at", () => {
       "20,000 keys in a map and 24,000 paragraphs": 1,
       "20,000 keys in a map and paragraphs just under the limit": 2,
       "20,000 keys in a map and paragraphs just over the limit": 1,
+      "a shared map of 3,000 keys and 23,900 paragraphs": 1,
+      "20,000 keys in a map and overlapping marks just under the limit": 2,
       "2,000 keys of 100 bytes in a map": 2,
       "a map with a constructor key, written as a shared map": 2,
     });
     for (const recipe of RECIPES.filter(({ name }) => THE_RELAY_REFUSES_IN_FORMAT_TWO.has(name))) {
       const doc = inFormatTwoByHand(recipe, markdownOf(recipe));
-      expect(registered(doc).kind, recipe.name).toBe("capacity-refused");
+      const checkpoint = Y.encodeStateAsUpdate(doc);
       doc.destroy();
+      expect(registered(checkpoint).kind, recipe.name).toBe("capacity-refused");
+      expect(registered(checkpoint, registerWithMoreIndexOperations).kind, recipe.name).toBe(
+        "accepted",
+      );
     }
   }, 600_000);
 
@@ -258,7 +284,7 @@ describe("the index operations a new note is counted at", () => {
       if (note.format !== 2) return;
       const markdown = markdownOf(recipe);
       const { doc } = made(markdown);
-      const result = registered(withItsSource(doc, markdown));
+      const result = registered(Y.encodeStateAsUpdate(withItsSource(doc, markdown)));
       doc.destroy();
       expect(result.kind).toBe("accepted");
       expect(result.indexOperations!).toBeLessThanOrEqual(note.indexOperations);

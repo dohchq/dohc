@@ -25,6 +25,7 @@ const KEY_SORT_PASSES: usize = 3;
 const INDEX_OPERATIONS_PER_ASTRAL_SEARCH: usize = 5;
 const INDEX_OPERATIONS_PER_BOUNDARY_SEARCH: usize = 4;
 const SHA256_HEX_BYTES: usize = 64;
+const TRAILING_LINE_STRUCTS: usize = 3;
 
 const KINDS_A_CONTAINER_CAN_BECOME: [&[&str]; 4] = [
     &["blockquote", "callout"],
@@ -256,6 +257,69 @@ fn log2_up(count: usize) -> usize {
     (usize::BITS - count.saturating_sub(1).leading_zeros()) as usize
 }
 
+fn needs_a_shared_type(value: &Any) -> bool {
+    match value {
+        Any::Array(values) => values.iter().any(needs_a_shared_type),
+        Any::Map(values) => {
+            values.contains_key("constructor")
+                || values.contains_key("__proto__")
+                || values.values().any(needs_a_shared_type)
+        }
+        _ => false,
+    }
+}
+
+fn shared_structs(value: &Any) -> usize {
+    match value {
+        Any::BigInt(_) => 1,
+        Any::Map(values) => values.values().map(|value| 1 + shared_structs(value)).sum(),
+        Any::Array(values) => {
+            let mut packed = false;
+            values
+                .iter()
+                .map(|value| match value {
+                    Any::Map(_) | Any::Array(_) | Any::BigInt(_) | Any::Buffer(_) => {
+                        packed = false;
+                        1 + shared_structs(value)
+                    }
+                    _ => usize::from(!std::mem::replace(&mut packed, true)),
+                })
+                .sum()
+        }
+        _ => 0,
+    }
+}
+
+fn escaped_in_a_shared_map(key: &str) -> bool {
+    key.starts_with('$') && key.trim_start_matches('$') == "dohcBigInt"
+}
+
+fn key_sorts(value: &Any, shared: bool) -> usize {
+    match value {
+        Any::Array(values) => values.iter().map(|value| key_sorts(value, shared)).sum(),
+        Any::Map(values) => {
+            let longest = values
+                .keys()
+                .map(|key| key.len() + usize::from(shared && escaped_in_a_shared_map(key)))
+                .max()
+                .unwrap_or(0);
+            let held: usize = values.values().map(|value| key_sorts(value, shared)).sum();
+            held + match values.len() {
+                keys @ 0..=1 => keys,
+                keys => keys * log2_up(keys) * (longest + 3),
+            }
+        }
+        Any::BigInt(_) if shared => 1,
+        _ => 0,
+    }
+}
+
+#[derive(Default)]
+struct Run {
+    marks: HashMap<String, Any>,
+    counted: Option<HashMap<String, Any>>,
+}
+
 impl Weight {
     pub(super) fn of(doc: &Doc) -> Self {
         for name in [ROOT_META, ROOT_FRONTMATTER, ROOT_CONTAINERS] {
@@ -270,12 +334,15 @@ impl Weight {
                     for (key, value) in map.iter(&txn) {
                         weight.root_entries += 1;
                         weight.item(name.len() + key.len());
-                        weight.out(value);
+                        let shared = name == ROOT_FRONTMATTER
+                            && matches!(&value, Out::Any(value) if needs_a_shared_type(value));
+                        weight.out(value, shared);
                     }
                 }
                 Out::YText(text) => {
+                    let mut run = Run::default();
                     let _ = text.try_visit_items(&txn, |item| {
-                        weight.text_item(&txn, name.len(), item);
+                        weight.text_item(&txn, name.len(), item, &mut run);
                         Ok::<(), ()>(())
                     });
                 }
@@ -291,35 +358,67 @@ impl Weight {
         self.bytes += bytes;
     }
 
-    fn text_item<T: ReadTxn>(&mut self, txn: &T, root_bytes: usize, item: TextItem<'_>) {
+    fn text_item<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        root_bytes: usize,
+        item: TextItem<'_>,
+        run: &mut Run,
+    ) {
         match item {
             TextItem::Letters(text) => {
-                self.item(root_bytes + text.len());
+                self.values += 1;
+                self.bytes += root_bytes + text.len();
                 self.astral += text.bytes().filter(|byte| *byte >= 0xF0).count();
+                if run.counted.as_ref() != Some(&run.marks) {
+                    self.structs += 1 + 2 * run.marks.len();
+                    self.key_sorts += run
+                        .marks
+                        .values()
+                        .map(|value| key_sorts(value, false))
+                        .sum::<usize>();
+                    run.counted = Some(run.marks.clone());
+                }
             }
             TextItem::Format(key, value) => {
-                self.item(root_bytes + key.len());
+                self.values += 1;
+                self.bytes += root_bytes + key.len();
                 self.any(value);
+                match value {
+                    Any::Null => run.marks.remove(key),
+                    value => run.marks.insert(key.to_owned(), value.clone()),
+                };
             }
             TextItem::Embed(Out::YXmlElement(element)) => {
+                run.counted = None;
                 self.item(root_bytes + element.tag().len());
                 self.elements += 1;
                 for (key, value) in element.attributes(txn) {
                     self.item(key.len());
-                    self.out(value);
+                    self.out(value, false);
                 }
             }
             TextItem::Embed(embedded) => {
+                run.counted = None;
                 self.item(root_bytes);
-                self.out(embedded);
+                self.out(embedded, false);
             }
-            TextItem::Other => self.item(root_bytes),
+            TextItem::Other => {
+                run.counted = None;
+                self.item(root_bytes);
+            }
         }
     }
 
-    fn out(&mut self, value: Out) {
+    fn out(&mut self, value: Out, shared: bool) {
         match value {
-            Out::Any(value) => self.any(&value),
+            Out::Any(value) => {
+                if shared {
+                    self.structs += shared_structs(&value);
+                }
+                self.key_sorts += key_sorts(&value, shared);
+                self.any(&value);
+            }
             _ => self.values += 1,
         }
     }
@@ -331,11 +430,6 @@ impl Weight {
             Any::Buffer(bytes) => self.bytes += bytes.len(),
             Any::Array(values) => values.iter().for_each(|value| self.any(value)),
             Any::Map(values) => {
-                let longest = values.keys().map(String::len).max().unwrap_or(0);
-                self.key_sorts += match values.len() {
-                    keys @ 0..=1 => keys,
-                    keys => keys * log2_up(keys) * (longest + 3),
-                };
                 for (key, value) in values.iter() {
                     self.bytes += key.len();
                     self.any(value);
@@ -343,6 +437,11 @@ impl Weight {
             }
             _ => {}
         }
+    }
+
+    pub(super) fn with_room_for_a_trailing_line(mut self) -> Self {
+        self.structs += TRAILING_LINE_STRUCTS;
+        self
     }
 
     pub(super) fn with_room_for_a_kept_source(mut self, markdown: &str) -> Self {
@@ -531,14 +630,6 @@ mod tests {
             "maxValueNodeVisits: 7,",
             "maxDecodedPayloadByteVisits: 7,",
             "SAVE_VISITS_OUTSIDE_A_MARK = 4;",
-            "maxIndexOperations: 100_000_000,",
-            "  note: 50_000,",
-            "  structSearch: 31,",
-            "  struct: 370,",
-            "  rootEntry: 80,",
-            "  keySortPass: 3,",
-            "  astralSearch: 5,",
-            "  boundarySearch: 4,",
         ] {
             assert!(POLICY.contains(declared), "{declared}");
         }

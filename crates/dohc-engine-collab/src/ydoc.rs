@@ -683,7 +683,7 @@ impl Ydoc {
     }
 
     fn live_note_weight(&self, markdown: &str) -> body_sequence_writer::Weight {
-        let weight = body_sequence_writer::Weight::of(&self.doc);
+        let weight = body_sequence_writer::Weight::of(&self.doc).with_room_for_a_trailing_line();
         match self.markdown_source_reference() {
             Some(_) => weight,
             None => weight.with_room_for_a_kept_source(markdown),
