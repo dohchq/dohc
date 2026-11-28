@@ -425,7 +425,8 @@ pub fn convert_notes_to_format_two(
                  LEFT JOIN snapshots s ON s.workspace_id=d.workspace_id \
                  AND s.version_id=d.version_id AND s.object_id=d.object_id \
                  WHERE d.workspace_id=?1 AND d.version_id='main' AND d.content_kind='richdoc' \
-                 AND (?2 IS NULL OR d.object_id > ?2) AND (?4 IS NULL OR d.object_id = ?4) \n                 ORDER BY d.object_id LIMIT ?3",
+                 AND (?2 IS NULL OR d.object_id > ?2) AND (?4 IS NULL OR d.object_id = ?4) \
+                 ORDER BY d.object_id LIMIT ?3",
             )
             .and_then(|mut statement| {
                 statement
