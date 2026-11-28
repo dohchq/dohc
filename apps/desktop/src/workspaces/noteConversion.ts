@@ -30,7 +30,6 @@ const LiveNotes = z.object({
 });
 
 export interface NoteConversionRelay {
-  assertSyncAllowed(): Promise<void>;
   liveNotes(): Promise<unknown>;
   drainRecorded(): Promise<void>;
 }
@@ -104,7 +103,6 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
         let more = true;
         while (more) {
           run.assertCurrent();
-          await relay?.assertSyncAllowed();
           const relayLive = relay ? await liveAboveFloor(relay) : [];
           const before = result.converted;
           for (let note = 0; note < batch && more; note += 1) {

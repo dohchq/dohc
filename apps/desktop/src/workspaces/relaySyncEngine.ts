@@ -150,6 +150,8 @@ export interface CloudSyncEngine {
   stop(): Promise<void>;
 }
 
+const DRAIN_EMPTY_PASS_LIMIT = 8;
+
 type PushOutcome = { ran?: boolean; hasMore: boolean; sent?: number; held?: number };
 
 export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyncEngine {
@@ -841,6 +843,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     },
 
     async drainRecorded() {
+      let emptyPasses = 0;
       for (;;) {
         if (claimRefusal) throw claimRefusal;
         if (authExpired || stopped)
@@ -850,9 +853,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const pushed = { ran: false, hasMore: true, sent: 0, held: 0 };
         await runPass(true, false, undefined, pushed);
         if (!pushed.ran) continue;
-        if (pushed.hasMore && pushed.sent === 0)
+        emptyPasses = pushed.hasMore && pushed.sent === 0 ? emptyPasses + 1 : 0;
+        if (emptyPasses === DRAIN_EMPTY_PASS_LIMIT)
           throw new Error(
-            "dohc could not send changes to your server. It took none of them and said more were waiting.",
+            `dohc could not send changes to your server. It took none of them ${DRAIN_EMPTY_PASS_LIMIT} times in a row and said more were waiting.`,
           );
         if (pushed.hasMore) continue;
         if (pushed.held === 1)

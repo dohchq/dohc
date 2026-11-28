@@ -2273,7 +2273,6 @@ async function relayForNoteConversion(
   };
   await syncing();
   return {
-    assertSyncAllowed: async () => void (await syncing()),
     liveNotes: async () =>
       relayShareJsonWithCredentials<unknown>(
         await syncing(),
