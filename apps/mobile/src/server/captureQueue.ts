@@ -419,11 +419,19 @@ export function createCaptureQueue(options: {
             await sql.run("UPDATE captures SET stage = 'queued' WHERE request_id = ?", [requestId]);
           });
         } catch (error) {
-          if (epoch === at && !isHeld()) {
-            items.set(requestId, placeholder(seq));
-            changed();
+          const persisted = isUncertain(error)
+            ? await store
+                .read("SELECT stage FROM captures WHERE request_id = ?", [requestId])
+                .then((rows) => rows[0]?.stage)
+                .catch(() => null)
+            : null;
+          if (persisted !== "queued") {
+            if (epoch === at && !isHeld()) {
+              items.set(requestId, placeholder(seq));
+              changed();
+            }
+            throw error;
           }
-          throw error;
         }
         const item: QueuedCapture = { ...placeholder(seq), stage: "queued" };
         if (epoch === at && !isHeld()) {

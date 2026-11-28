@@ -520,4 +520,39 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
       CAPTURE_MAX_BODY_BYTES,
     );
   });
+
+  it("Sol R2 B1: reconciles an uncertain second commit when SQLite actually committed queued", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, () => okCapture());
+    const account = await signedInAccount(server);
+    const real = disk.launch();
+    let commits = 0;
+    const flakyStore: typeof real = {
+      read: (s, p) => real.read(s, p),
+      checkpoint: () => real.checkpoint(),
+      destroy: () => real.destroy(),
+      async transaction(body) {
+        const res = await real.transaction(body);
+        commits += 1;
+        if (commits === 2) throw new StoreError("uncertain", "Injected uncertain 2nd commit");
+        return res;
+      },
+    };
+    const queue = createCaptureQueue({ store: flakyStore, retryMs: () => 5 });
+    const stop = queue.follow(account);
+    await waitFor(() => queue.state().status === "ready");
+
+    const kept = await queue.enqueue({
+      workspaceId: "ws-1",
+      title: "Landed 2nd commit",
+      kind: "note",
+      requestId: "draft-2nd-commit",
+    });
+    expect(kept.stage).toBe("queued");
+    await waitFor(() => queue.state().items.length === 0 && queue.signOutCount() === 0);
+    stop();
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(1);
+    expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+  });
 });

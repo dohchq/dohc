@@ -766,8 +766,15 @@ export async function runPhoneDocumentCollectionWrite(
           : null;
       });
       if (prior) {
-        if (objectAt(prior.path) === prior.objectId)
-          return await confirmCapture(prior.path, prior.objectId);
+        const currentPath = ctx.readTx(() => {
+          const row = ctx.db
+            .prepare(
+              "SELECT path FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND object_id=? LIMIT 1",
+            )
+            .get(workspaceId, prior.objectId);
+          return typeof row?.path === "string" ? row.path : null;
+        });
+        if (currentPath) return await confirmCapture(currentPath, prior.objectId);
         return { ok: true, path: prior.path, objectId: prior.objectId, recordId };
       }
       const rootHit = (

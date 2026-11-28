@@ -149,17 +149,31 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
 
   const focused = useIsFocused();
   const { state: filesState } = useView(views.files);
-  const prevFilesRef = useRef(filesState.value);
+  const collectionFilesKey = useMemo(() => {
+    const list = filesState.value;
+    if (!list) return null;
+    const prefix = `${collectionPath}/`;
+    return list
+      .filter(
+        (f) =>
+          f.path.startsWith(prefix) &&
+          !f.path.slice(prefix.length).includes("/") &&
+          /\.md$/iu.test(f.path),
+      )
+      .map((f) => `${f.path}\0${f.objectId}`)
+      .join("\n");
+  }, [collectionPath, filesState.value]);
+  const prevFilesKeyRef = useRef(collectionFilesKey);
   useFocusEffect(
     useCallback(() => {
       void load(loadedRef.current ? "refresh" : "first");
     }, [load]),
   );
   useEffect(() => {
-    if (prevFilesRef.current === filesState.value) return;
-    prevFilesRef.current = filesState.value;
+    if (prevFilesKeyRef.current === collectionFilesKey) return;
+    prevFilesKeyRef.current = collectionFilesKey;
     if (focused && loadedRef.current) void load("refresh");
-  }, [filesState.value, focused, load]);
+  }, [collectionFilesKey, focused, load]);
 
   const removeRecord = (record: DocumentCollectionRecord) => {
     if (!canEdit) return;
