@@ -19,15 +19,58 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_PREFIXES = 512;
 const PREFIX_BUDGET_MS = 8_000;
+const TITLE_MAX_CHARS = 160;
 const SNIPPET_MAX_CHARS = 260;
 const REDACT_READ_MAX_BYTES = 256 * 1024;
 const MD_LINK_RE = /!?\[[^\]]*\]\(\s*(?:<([^>\r\n]+)>|([^)\s\r\n]+))(?:\s+[^)\r\n]*)?\)/gu;
 const WIKI_LINK_RE = /!?\[\[([^\]\r\n]+)\]\]/gu;
 const CLIPPED_TRAILING_RE =
-  /(?:@\[[^\]\r\n]*|!?\[[^\]]*\]\(\s*<?(?![a-zA-Z][a-zA-Z0-9+.-]*:)[^)\r\n]*|!?\[\[[^\]\r\n]*)$/gu;
+  /(?:@\[[^\]\r\n]*|!?\[[^\]]*\]\(\s*<?(?![a-zA-Z][a-zA-Z0-9+.-]*:)[^)\r\n]*|!?\[\[[^\]\r\n]*|!?\[[^\]\r\n]*(?:…|\.\.\.))$/gu;
 const CLIPPED_LEADING_MD_RE = /^(?:…|\.\.\.)[^(\r\n]*\)/u;
 const CLIPPED_LEADING_WIKI_RE = /^(?:…|\.\.\.)[^[\r\n]*\]\]/u;
+const CLIPPED_LEADING_AT_RE = /^(?:…|\.\.\.)[^[\r\n]*\/[^[\r\n]*\]/u;
 const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/u;
+
+function truncateChars(text: string, maxChars: number): string {
+  const chars = Array.from(text);
+  return chars.length > maxChars ? `${chars.slice(0, maxChars - 1).join("")}…` : text;
+}
+
+function stripFrontmatter(text: string): string {
+  const rest = text.startsWith("---\r\n")
+    ? text.slice(5)
+    : text.startsWith("---\n")
+      ? text.slice(4)
+      : null;
+  if (rest === null) return text;
+  let offset = 0;
+  for (const line of rest.split(/(?<=\n)/u)) {
+    const trimmed = line.replace(/[\r\n]+$/u, "");
+    if (trimmed === "---" || trimmed === "...") return rest.slice(offset + line.length);
+    offset += line.length;
+  }
+  return text;
+}
+
+function extractRedactedHeading(text: string): string | null {
+  const lines = stripFrontmatter(text).split(/\r?\n/u);
+  for (let i = 0; i < Math.min(24, lines.length); i += 1) {
+    const trimmed = lines[i]!.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("# ")) {
+      const cleaned = trimmed.slice(2).trim().replace(/#+$/u, "").trim();
+      if (cleaned) return truncateChars(cleaned, TITLE_MAX_CHARS);
+    }
+    break;
+  }
+  return null;
+}
+
+function fallbackTitleFromPath(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const stem = name.replace(/\.(md|markdown|mdx|txt|excalidraw)$/iu, "") || name;
+  return truncateChars(stem, TITLE_MAX_CHARS);
+}
 
 export interface PhoneSearchHit {
   readonly path: string;
@@ -262,6 +305,7 @@ export async function searchWorkspacePages(
     if (clipped) {
       out = out.replace(CLIPPED_TRAILING_RE, CHAT_FILE_LINK_WITHHELD);
       out = out.replace(CLIPPED_LEADING_WIKI_RE, `…${CHAT_FILE_LINK_WITHHELD}`);
+      out = out.replace(CLIPPED_LEADING_AT_RE, `…${CHAT_FILE_LINK_WITHHELD}`);
       out = out.replace(CLIPPED_LEADING_MD_RE, (full) =>
         URL_SCHEME_RE.test(full.replace(/^(?:…|\.\.\.)/u, ""))
           ? full
@@ -370,7 +414,6 @@ export async function searchWorkspacePages(
       const visible = allPaths.filter((p) => pageShown(member, p));
       if (visible.length > 0) {
         scoped = true;
-        byPath.clear();
         await runScoped(allPaths, visible);
       }
     }
@@ -383,15 +426,16 @@ export async function searchWorkspacePages(
   const finalHits: PhoneSearchHit[] = [];
   const versionId = member !== null && files.readTextFile ? (await loadFiles()).versionId : null;
   for (const entry of ordered) {
+    if (finalHits.length > limit) break;
     if (member === null) {
       finalHits.push(entry.hit);
       continue;
     }
-    const title = redactText(entry.rawTitle, entry.hit.path, true);
     const matchTerms =
       entry.matchedTerms.length > 0
         ? entry.matchedTerms.map((t) => t.toLowerCase()).filter(Boolean)
         : queryTokens;
+    let title = redactText(entry.rawTitle, entry.hit.path, true);
     let snippet: string;
     let changed = title !== entry.rawTitle;
     let haystackSource: string | null = null;
@@ -408,10 +452,12 @@ export async function searchWorkspacePages(
         if (redactedBody !== loaded.text) {
           changed = true;
           haystackSource = redactedBody;
+          title = extractRedactedHeading(redactedBody) ?? fallbackTitleFromPath(entry.hit.path);
           snippet = extractRedactedSnippet(redactedBody, matchTerms);
         } else {
-          snippet = redactText(entry.rawSnippet, entry.hit.path, true);
-          if (snippet !== entry.rawSnippet) changed = true;
+          title = entry.rawTitle;
+          snippet = entry.rawSnippet;
+          changed = false;
         }
       } else {
         snippet = redactText(entry.rawSnippet, entry.hit.path, true);

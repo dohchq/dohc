@@ -1207,5 +1207,35 @@ describe("an answer whose decision the engine refused", () => {
       reason: "This file changed or was replaced",
     });
     expect(f.engine.writes.length).toBe(writesBeforeReplay);
+
+    f.engine.failing.set(CHATS_METHOD.threadCreate, new Error("interrupted again"));
+    expect(
+      await f.run(comment("op-comment-stale-replay", "README.md", "object-readme-v2", "Race")),
+    ).toMatchObject({ ok: true, state: "pending" });
+    f.engine.failing.clear();
+    f.engine.files.seedTextFile({
+      workspace: WORKSPACE,
+      path: "README.md",
+      text: "# V3\n",
+      objectId: "object-readme-v3",
+    });
+    let fresh = true;
+    const realSend = f.engine.sendRequest.bind(f.engine);
+    vi.spyOn(f.engine, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "files.resolve") fresh = false;
+      return await realSend(request);
+    });
+    const errors: unknown[] = [];
+    const done = await replayUnfinishedWrites({
+      storage: f.storage,
+      copy: f.copy,
+      records: f.storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE }),
+      nowMs: () => 50,
+      onError: (e) => errors.push(e),
+      current: () => fresh,
+    });
+    expect(done).toBe(false);
+    expect(errors).toEqual([]);
+    expect(f.operation("op-comment-stale-replay")).toMatchObject({ stage: "publishing" });
   });
 });

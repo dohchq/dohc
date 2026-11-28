@@ -345,21 +345,37 @@ describe("searchWorkspacePages", () => {
         path === "docs/long.md"
           ? {
               contentKind: "text",
-              text: `${"x".repeat(250)} [Budget](../private/budget.md) quartz ${"y".repeat(250)}`,
+              text: `# Heading ${"a".repeat(240)} [Secret Budget](../private/budget.md)\n\n${"x".repeat(250)} [Budget](../private/budget.md) quartz ${"y".repeat(250)}`,
             }
           : null,
     };
-    const fromBody = await searchWorkspacePages(bodyFiles, {
-      workspaceId: "trip",
-      query: "quartz",
-      limit: 20,
-      member,
-      signal: new AbortController().signal,
-    });
-    expect(JSON.stringify(fromBody)).not.toContain("private/");
-    expect(fromBody.results.find((r) => r.path === "docs/long.md")?.snippet).toContain(
-      "(a file not shared here) quartz",
+    const fromBody = await searchWorkspacePages(
+      {
+        ...bodyFiles,
+        retrieveWorkspace: async () =>
+          searchResult({
+            results: [
+              hit({
+                id: "clipped-heading",
+                path: "docs/long.md",
+                title: `Heading ${"a".repeat(240)} [Secret Bud…`,
+                snippet: "…private/budget.md) quartz",
+                matchedTerms: ["quartz"],
+              }),
+            ],
+          }),
+      },
+      {
+        workspaceId: "trip",
+        query: "quartz",
+        limit: 20,
+        member,
+        signal: new AbortController().signal,
+      },
     );
+    expect(JSON.stringify(fromBody)).not.toContain("private/");
+    expect(JSON.stringify(fromBody)).not.toContain("Secret Bud");
+    expect(fromBody.results[0]?.snippet).toContain("(a file not shared here) quartz");
   });
 
   it("searches beyond 32 root pages when a folder rule exists and marks incomplete when time budget expires", async () => {
@@ -445,6 +461,35 @@ describe("searchWorkspacePages", () => {
       truncated: false,
       complete: true,
     });
+
+    // Keeps initial eligible hits when scoped fallback exhausts the prefix cap before reaching them.
+    const manyPages = Array.from({ length: 520 }, (_, i) => `p-${String(i).padStart(3, "0")}.md`);
+    const keptFallback = mockFiles([...drawings.slice(0, 49), ...manyPages], (input) => {
+      if (!input.pathPrefix) {
+        return searchResult({
+          results: [
+            ...drawings
+              .slice(0, 49)
+              .map((p, i) => hit({ id: `d-${i}`, path: p, title: `D${i}`, snippet: "quartz" })),
+            hit({ id: "md-last", path: "p-519.md", title: "Last", snippet: "Markdown quartz" }),
+          ],
+          truncated: false,
+          complete: true,
+        });
+      }
+      return searchResult({ results: [] });
+    });
+    const preserved = await searchWorkspacePages(keptFallback, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member: null,
+      signal: new AbortController().signal,
+    });
+    expect(preserved.results).toEqual([
+      { path: "p-519.md", title: "Last", snippet: "Markdown quartz" },
+    ]);
+    expect(preserved.complete).toBe(false);
   });
 
   it("drops path:undefined hits and preserves honest incomplete status on non-crowded Member results", async () => {

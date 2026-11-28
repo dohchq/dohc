@@ -1273,6 +1273,7 @@ async function replayStages(
             await targets.file(write.path, write.objectId);
           } catch (error) {
             if (error instanceof FileChanged || error instanceof TargetMissing) {
+              stillCurrent(context);
               storage.advanceAccountOperation({
                 accountId: record.accountId,
                 operationId: record.operationId,

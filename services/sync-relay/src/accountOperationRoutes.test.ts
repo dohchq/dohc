@@ -5636,7 +5636,7 @@ describe("a Member's phone reads in a workspace they joined", () => {
     engine.files.seedTextFile({
       workspace: "trip",
       path: "docs/plan.md",
-      text: "# Plan\n\nVisible quartz @[private/budget.md]\n",
+      text: "# Plan @[private/budget.md]\n\nVisible quartz @[private/budget.md]\n",
       objectId: "object-plan",
     });
     vi.spyOn(engine, "sendRequest").mockImplementation(async (request) => {
