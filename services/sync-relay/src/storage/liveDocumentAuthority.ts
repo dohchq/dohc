@@ -10,7 +10,7 @@ import { ownedPersonalReachIn, readPersonalAuthority } from "./personalAgents";
 import {
   ordinaryActivationBaseline,
   ordinaryActivationBasisCharge,
-  ordinaryActivationPredecessor,
+  ordinaryActivationResolves,
   persistOrdinaryActivationBasis,
   ServiceActivationLineageEnding,
   type VerifiedOrdinaryActivationCut,
@@ -1517,7 +1517,11 @@ function registerValidatedBaseline(
     const resolved =
       !!ordinaryCut &&
       !!current &&
-      ordinaryActivationPredecessor(storage, ordinaryCut) === current.binding.lineageClaimId;
+      !current.open &&
+      ordinaryActivationResolves(storage, ordinaryCut, {
+        lineageClaimId: current.binding.lineageClaimId,
+        baselineSequence: current.baselineSequence,
+      });
     const replaces =
       ordinaryCut &&
       current &&
