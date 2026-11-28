@@ -74,6 +74,8 @@ export interface AutomationReplica {
   step(signal?: AbortSignal): Promise<boolean>;
   /** Serializes record draft preparation and delivery without delaying ordinary sync. */
   withRecordWork<T>(work: () => Promise<T>): Promise<T>;
+  /** Serializes a brief engine mutation with the sync lane so background pulls cannot interleave. */
+  withSyncPaused?<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 }
 
 /** Whether `value` is exactly an HTTPS origin, such as `https://relay.example.com`, which the copies sync with. */
@@ -536,6 +538,17 @@ export async function startAutomationReplicas(options: {
       recordChain = run.catch(() => undefined);
       return run;
     };
+    const withSyncPaused = <T>(work: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> => {
+      if (callerSignal?.aborted) return Promise.reject(callerSignal.reason);
+      const run = syncChain.then(() => {
+        replicaSignal.throwIfAborted();
+        callerSignal?.throwIfAborted();
+        current();
+        return work();
+      });
+      syncChain = run.catch(() => undefined);
+      return callerSignal === undefined ? run : untilAborted(run, callerSignal);
+    };
     let closing: Promise<void> | undefined;
     // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their stored
     // commands once, after a step caught the copy up: a target is judged by the relay's current state, not by
@@ -674,6 +687,7 @@ export async function startAutomationReplicas(options: {
       nextRequestId,
       pulledHead: 0,
       withRecordWork,
+      withSyncPaused,
       sync(callerSignal?: AbortSignal): Promise<void> {
         return syncRounds(Number.POSITIVE_INFINITY, callerSignal).then(() => undefined);
       },

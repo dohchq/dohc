@@ -1279,6 +1279,31 @@ describe.skipIf(engine.missing)(
           path: "notes/swap.md",
         });
         expect(afterSwap).toMatchObject({ ok: true, objectId: replacementId });
+
+        // Deeply nested path (>64 segments -> >128 collection markers) batches marker checks cleanly.
+        const deepDir = "a/".repeat(64);
+        const deepPath = `${deepDir}leaf.md`;
+        const deepRenamed = `${deepDir}leaf-renamed.md`;
+        const deepCreated = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "createPage",
+          { path: deepPath, requestId: "req-deep-create" },
+        );
+        expect(deepCreated).toMatchObject({ ok: true, path: deepPath });
+        expect(
+          await stack.phoneOp("renameFile", {
+            fromPath: deepPath,
+            toPath: deepRenamed,
+            expectedObjectId: deepCreated.objectId,
+            requestId: "req-deep-rename",
+          }),
+        ).toMatchObject({ ok: true, fromPath: deepPath, path: deepRenamed });
+        expect(
+          await stack.phoneOp("deleteFile", {
+            path: deepRenamed,
+            expectedObjectId: deepCreated.objectId,
+            requestId: "req-deep-delete",
+          }),
+        ).toEqual({ ok: true, path: deepRenamed, objectId: deepCreated.objectId });
       },
       4 * REAL_DAEMON_DEADLINE_MS,
     );

@@ -442,4 +442,37 @@ describe("text read later", () => {
     t.live.end();
     expect(holdsPage(t.live.state())).toBe(false);
   });
+
+  it("binds objectId only when a live stream reaches live state so a failed reconnect keeps the displayed identity", async () => {
+    const readyObj = (objectId: string) =>
+      answer({
+        status: "ready",
+        objectId,
+        lineageClaimId: "claim-1",
+        ticket: TICKET,
+        expiresAtMs: 1,
+        editorLimits: liveLimits(),
+      });
+    const t = await connected(readyObj("obj-1"), readyObj("obj-2"), readyObj("obj-2"));
+    expect(t.live.state().objectId).toBeUndefined();
+    t.fromPage(1)({ type: "state", facts: facts("syncing") });
+    expect(t.live.state().shown).toBe(false);
+    expect(t.live.state().objectId).toBeUndefined();
+    t.fromPage(1)({ type: "state", facts: facts("live") });
+    expect(t.live.state()).toMatchObject({ shown: true, objectId: "obj-1" });
+
+    t.latest().onclose?.();
+    t.live.retry();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(2));
+    t.latest().open();
+    t.fromPage(2)({ type: "state", facts: facts("syncing") });
+    t.latest().onclose?.();
+    expect(t.live.state()).toMatchObject({ phase: "lost", shown: true, objectId: "obj-1" });
+
+    t.live.retry();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(3));
+    t.latest().open();
+    t.fromPage(3)({ type: "state", facts: facts("live") });
+    expect(t.live.state()).toMatchObject({ phase: "open", shown: true, objectId: "obj-2" });
+  });
 });

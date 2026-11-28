@@ -82,6 +82,7 @@ import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
 import type { LiveRooms } from "./liveRoom.js";
+import { isObjectMutationFenced } from "./storage/serviceHostEnrollment";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -1044,6 +1045,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         );
         // Counted before capture, so the host cannot unload the document while this connection opens.
         releaseEditor = editors.acquire(document);
+        if (isObjectMutationFenced(storage, document.workspaceId, document.objectId))
+          throw new Error();
         const native = await captureNative(current.binding, signal);
         signal.throwIfAborted();
         check();
@@ -1149,6 +1152,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           context.workspaceId,
         );
         releaseEditor = editors.acquire(ticket.binding);
+        if (isObjectMutationFenced(storage, ticket.binding.workspaceId, ticket.binding.objectId)) {
+          stop();
+          return;
+        }
         const native = await captureNative(ticket.binding, signal);
         signal.throwIfAborted();
         check();
@@ -1257,6 +1264,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         }
         reserve(reservations, reservations[1]![0], context.workspaceId, context.shareId);
         releaseEditor = editors.acquire(ticket.binding);
+        if (isObjectMutationFenced(storage, ticket.binding.workspaceId, ticket.binding.objectId)) {
+          stop();
+          return;
+        }
         const native = await captureNative(ticket.binding, signal);
         signal.throwIfAborted();
         check();

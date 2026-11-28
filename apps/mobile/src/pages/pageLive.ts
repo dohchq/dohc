@@ -50,6 +50,7 @@ export interface PageLive {
 }
 
 interface Stream {
+  readonly objectId: string;
   readonly toPage: (body: Body<ToPage>) => void;
   readonly check: (message: FromPage) => "next" | "stale" | "broken";
   readonly window: ReturnType<typeof frameWindow>;
@@ -175,7 +176,6 @@ export function createPageLive(options: {
 
   function connect(answer: Extract<PageOpen, { status: "ready" }>) {
     const held = open!;
-    set({ objectId: answer.objectId });
     const query = `objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
     const socket = options.client.liveSocket(
       `/sync/workspaces/${segment(options.workspaceId)}/live/owner?${query}`,
@@ -185,6 +185,7 @@ export function createPageLive(options: {
     socket.binaryType = "arraybuffer";
     const frames = answer.limits.provider.frames;
     const next = {
+      objectId: answer.objectId,
       toPage: outgoing<ToPage>(++gen, options.post),
       check: incoming(gen),
       window: frameWindow(frames.maxQueuedFrames, frames.maxQueuedBytes),
@@ -255,7 +256,12 @@ export function createPageLive(options: {
         return;
       case "state": {
         const facts = message.facts;
-        set({ facts, unsent: facts.unsent, shown: state.shown || facts.status === "live" });
+        set({
+          facts,
+          unsent: facts.unsent,
+          shown: state.shown || facts.status === "live",
+          ...(facts.status === "live" ? { objectId: held.objectId } : {}),
+        });
         if (facts.status !== "quarantined") return;
         if (facts.reason === "lineage-replaced" && !facts.unsent && state.phase === "lost")
           void begin();

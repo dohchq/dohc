@@ -81,6 +81,9 @@ const refuse = (refusal: AccountFileWriteRefusal, reason: string): AccountFileWr
   reason,
 });
 
+const COLLECTION_MARKER_BATCH_TARGETS = 64;
+const COLLECTION_MARKER_BATCH_BYTES = 32 * 1024;
+
 function collectionMarkerPaths(path: string): string[] {
   const segments = path.split("/");
   const markers: string[] = [];
@@ -90,6 +93,35 @@ function collectionMarkerPaths(path: string): string[] {
     markers.push(prefix ? `${prefix}/collection.yaml` : "collection.yaml");
   }
   return markers;
+}
+
+async function assertOutsideCollection(
+  files: VersionedLiveAdapter,
+  workspaceId: string,
+  path: string,
+): Promise<void> {
+  const markers = collectionMarkerPaths(path);
+  let batch: Array<{ path: string }> = [];
+  let batchBytes = 0;
+  const flush = async () => {
+    if (!batch.length) return;
+    const resolved = await files.resolveFiles({ workspaceId, targets: batch });
+    if (resolved.results.some((entry) => entry.status === "found"))
+      throw badRequest("This path cannot be changed here.");
+    batch = [];
+    batchBytes = 0;
+  };
+  for (const marker of markers) {
+    const bytes = Buffer.byteLength(marker, "utf8");
+    if (
+      batch.length >= COLLECTION_MARKER_BATCH_TARGETS ||
+      (batch.length > 0 && batchBytes + bytes > COLLECTION_MARKER_BATCH_BYTES)
+    )
+      await flush();
+    batch.push({ path: marker });
+    batchBytes += bytes;
+  }
+  await flush();
 }
 
 function parseFields(args: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -351,12 +383,7 @@ export async function runAccountFileWrite(
 
       if (parsed.operation === "createPage") {
         await files.ensureMainVersion({ workspaceId });
-        const markers = await files.resolveFiles({
-          workspaceId,
-          targets: collectionMarkerPaths(parsed.path).map((path) => ({ path })),
-        });
-        if (markers.results.some((entry) => entry.status === "found"))
-          throw badRequest("This path cannot be changed here.");
+        await assertOutsideCollection(files, workspaceId, parsed.path);
         const correlationId = `phone-create:${parsed.requestId}`;
         let objectId: string;
         try {
@@ -418,15 +445,10 @@ export async function runAccountFileWrite(
       const dstPath = isRename ? parsed.toPath : null;
       const caseOnly = dstPath !== null && srcPath.toLowerCase() === dstPath.toLowerCase();
       const rich = liveDocumentKindForPath(srcPath) === "richdoc";
-      const markerTargets = collectionMarkerPaths(srcPath).map((path) => ({ path }));
       const resolve = async () => {
-        const targets = dstPath
-          ? [{ path: srcPath }, { path: dstPath }, ...markerTargets]
-          : [{ path: srcPath }, ...markerTargets];
+        await assertOutsideCollection(files, workspaceId, srcPath);
+        const targets = dstPath ? [{ path: srcPath }, { path: dstPath }] : [{ path: srcPath }];
         const { versionId, results } = await files.resolveFiles({ workspaceId, targets });
-        const markerOffset = dstPath ? 2 : 1;
-        if (results.slice(markerOffset).some((entry) => entry.status === "found"))
-          throw badRequest("This path cannot be changed here.");
         return { versionId, from: results[0], to: dstPath ? results[1] : undefined };
       };
       const blockedTarget = (to: Awaited<ReturnType<typeof resolve>>["to"]) =>
@@ -532,40 +554,47 @@ export async function runAccountFileWrite(
           await replica.sync(signal);
           await authorize();
         }
-        const hold = await files.holdCapture({ operationId });
-        try {
-          ({ from, to } = await resolve());
-          if (from?.status !== "found") return refuse("not-found", "This file is no longer here.");
-          if (from.objectId !== parsed.expectedObjectId) return stale();
-          if (blockedTarget(to))
-            return refuse("path-exists", "A file with this name already exists.");
-          if (dstPath !== null) {
-            const renamed = await files.renameTextFile({
-              workspaceId,
-              versionId: "main",
-              fromPath: srcPath,
-              toPath: dstPath,
-              requestId: parsed.requestId,
-              captureHoldId: hold.holdId,
-              metadata: { origin: "api" },
-              author,
-            });
-            if (renamed.object.id !== parsed.expectedObjectId) throw unconfirmed("the rename");
-          } else {
-            await files.deleteTextFile({
-              workspaceId,
-              versionId: "main",
-              path: srcPath,
-              expectedObjectId: parsed.expectedObjectId,
-              requestId: parsed.requestId,
-              captureHoldId: hold.holdId,
-              metadata: { origin: "api" },
-              author,
-            });
+        const runMutation = <T>(work: () => Promise<T>) =>
+          replica.withSyncPaused ? replica.withSyncPaused(work, signal) : work();
+        const refused = await runMutation(async (): Promise<AccountFileWriteResult | null> => {
+          const hold = await files.holdCapture({ operationId });
+          try {
+            ({ from, to } = await resolve());
+            if (from?.status !== "found")
+              return refuse("not-found", "This file is no longer here.");
+            if (from.objectId !== parsed.expectedObjectId) return stale();
+            if (blockedTarget(to))
+              return refuse("path-exists", "A file with this name already exists.");
+            if (dstPath !== null) {
+              const renamed = await files.renameTextFile({
+                workspaceId,
+                versionId: "main",
+                fromPath: srcPath,
+                toPath: dstPath,
+                requestId: parsed.requestId,
+                captureHoldId: hold.holdId,
+                metadata: { origin: "api" },
+                author,
+              });
+              if (renamed.object.id !== parsed.expectedObjectId) throw unconfirmed("the rename");
+            } else {
+              await files.deleteTextFile({
+                workspaceId,
+                versionId: "main",
+                path: srcPath,
+                expectedObjectId: parsed.expectedObjectId,
+                requestId: parsed.requestId,
+                captureHoldId: hold.holdId,
+                metadata: { origin: "api" },
+                author,
+              });
+            }
+            return null;
+          } finally {
+            await files.releaseCapture(hold.holdId).catch(() => undefined);
           }
-        } finally {
-          await files.releaseCapture(hold.holdId).catch(() => undefined);
-        }
+        });
+        if (refused) return refused;
         return await finish(parsed.expectedObjectId);
       } finally {
         releaseLiveFence?.();

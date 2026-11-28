@@ -2166,6 +2166,14 @@ function isMutationFenced(storage: object, workspaceId: string, objectId: string
   return (mutationFences.get(storage)?.get(mutationFenceKey(workspaceId, objectId)) ?? 0) > 0;
 }
 
+export function isObjectMutationFenced(
+  storage: object,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  return isMutationFenced(storage, workspaceId, objectId);
+}
+
 function ownedObjectTx<T>(
   storage: StorageContext,
   input: { workspaceId: string; objectId: string; ownerUserId: string; guard(): void },
@@ -2654,6 +2662,7 @@ export function serviceHostDocumentEnabled(
   document: { workspaceId: string; objectId: string },
   nowMs = Date.now(),
 ): boolean {
+  if (isMutationFenced(storage, document.workspaceId, document.objectId)) return false;
   if (serviceActivationRetirementOpen(storage, document)) return false;
   const value = storage.db
     .prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,e.demand_at_ms,e.owner_demand,

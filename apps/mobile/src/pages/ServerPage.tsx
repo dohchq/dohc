@@ -144,14 +144,21 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const [early, setEarly] = useState<{
     mount: number;
     markdown: string | null;
+    objectId: string | null;
     script?: string;
   } | null>(null);
-  const given = useRef<{ mount: number; markdown: string } | null>(null);
+  const given = useRef<{ mount: number; markdown: string; objectId: string | null } | null>(null);
   const sentTo = (to: number) =>
     given.current?.mount === to
       ? given.current.markdown
       : early?.mount === to
         ? early.markdown
+        : null;
+  const sentObjectIdTo = (to: number) =>
+    given.current?.mount === to
+      ? given.current.objectId
+      : early?.mount === to
+        ? early.objectId
         : null;
   useEffect(() => () => void host.gone(), [host]);
   // The account's teardown reaches the page from the start, before any session opens.
@@ -184,11 +191,10 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   );
   const holding = live !== null && holdsPage(liveState);
   const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
-  const objectId = holding
-    ? (liveState.objectId ?? null)
-    : state.value?.kind === "page"
-      ? (state.value.objectId ?? null)
-      : null;
+  const readObjectId = state.value?.kind === "page" ? (state.value.objectId ?? null) : null;
+  const displayedReadObjectId = holding ? (sentObjectIdTo(mount) ?? readObjectId) : readObjectId;
+  const objectId =
+    live !== null && liveState.shown ? (liveState.objectId ?? null) : displayedReadObjectId;
   const canEditFiles =
     canWriteFiles(data, currentWorkspace) &&
     isLifecycleManagedPath(path) &&
@@ -284,7 +290,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
       return;
     }
     if (sent !== null && !painted) return;
-    given.current = { mount, markdown };
+    given.current = { mount, markdown, objectId: displayedReadObjectId };
     web.current?.injectJavaScript(
       sent === null
         ? pageScript(path, markdown, writesIn(data))
@@ -360,6 +366,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     setEarly({
       mount,
       markdown,
+      objectId: displayedReadObjectId,
       script: markdown === null ? undefined : pageScript(path, markdown, writesIn(data)),
     });
   useEffect(() => {

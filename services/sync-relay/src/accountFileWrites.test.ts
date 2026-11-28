@@ -8,7 +8,12 @@ import { parseAccountFileWrite, validateAllowedFileWritePath } from "./accountFi
 import { liveEditors } from "./liveEditors";
 import { LIVE_ROOM_EDITS } from "./storage/liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./storage/liveRoomPauses";
-import { LiveHostingRefusal, SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
+import {
+  isObjectMutationFenced,
+  LiveHostingRefusal,
+  SERVICE_HOST_ENROLLMENTS,
+  serviceHostDocumentEnabled,
+} from "./storage/serviceHostEnrollment";
 import type { StorageContext } from "./storage/context";
 import {
   claimWorkspace,
@@ -600,5 +605,29 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
       status: "rebound",
       enrollment: { path: "notes/new.md", objectId: "obj-1" },
     });
+  });
+
+  it("fences live admission for unenrolled objects while a file mutation is in progress", async () => {
+    const storage = await enrolledStorage();
+    const doc = { workspaceId: "trip", objectId: "obj-unenrolled" };
+    expect(serviceHostDocumentEnabled(storage, doc)).toBe(true);
+    expect(isObjectMutationFenced(storage, doc.workspaceId, doc.objectId)).toBe(false);
+
+    const fenced = storage.retireIdleServiceHostEnrollment({
+      workspaceId: doc.workspaceId,
+      objectId: doc.objectId,
+      ownerUserId: "ana",
+      drainNow: true,
+      nowMs: 10,
+      guard() {},
+    });
+    expect(fenced.status).toBe("none");
+    if (fenced.status !== "none") throw new Error("expected none");
+    expect(isObjectMutationFenced(storage, doc.workspaceId, doc.objectId)).toBe(true);
+    expect(serviceHostDocumentEnabled(storage, doc)).toBe(false);
+
+    fenced.release();
+    expect(isObjectMutationFenced(storage, doc.workspaceId, doc.objectId)).toBe(false);
+    expect(serviceHostDocumentEnabled(storage, doc)).toBe(true);
   });
 });
