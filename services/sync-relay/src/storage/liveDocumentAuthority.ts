@@ -1640,14 +1640,19 @@ function registerValidatedBaseline(
   });
 }
 
-const lineageEndings = (oneObject: boolean, forRead = false, exceptClaim = false) => {
+const roomEndings = (lineage: string) =>
+  `SELECT 'room-edits' AS kind,object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${lineage}
+    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${lineage}`;
+const lineageEndings = (oneObject: boolean, forRead = false) => {
   const object = oneObject ? " AND object_id=?" : "";
-  const lineage = `${object}${exceptClaim ? " AND lineage_claim_id IS NOT ?" : ""}`;
-  return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${lineage} AND retired_at_ms IS NULL
-    UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${lineage}
-    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${lineage}
+  return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
+    UNION ALL ${roomEndings(object)}
     UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND ${forRead ? "(state<>'off' OR host_drained_at_ms IS NULL)" : "state<>'starting'"}`;
 };
+const resolvedLineageEndings =
+  () => `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS}
+    WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
+  UNION ALL ${roomEndings(" AND object_id=? AND lineage_claim_id<>?")}`;
 
 export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
 export type RelayLiveNote = { objectId: string; kinds: RelayLiveNoteKind[] };
@@ -1689,12 +1694,16 @@ function lastLineageEnding(
   resolvedClaim: string | null,
 ): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
-  const lineage = [workspaceId, mainVersionId, objectId, resolvedClaim];
-  return (
-    storage.db
-      .prepare(`${lineageEndings(true, false, true)} LIMIT 1`)
-      .get(...lineage, ...lineage, ...lineage, workspaceId, objectId) !== undefined
-  );
+  const object = [workspaceId, mainVersionId, objectId];
+  const ending =
+    resolvedClaim === null
+      ? storage.db
+          .prepare(`${lineageEndings(true)} LIMIT 1`)
+          .get(...object, ...object, ...object, workspaceId, objectId)
+      : storage.db
+          .prepare(`${resolvedLineageEndings()} LIMIT 1`)
+          .get(...object, ...object, resolvedClaim, ...object, resolvedClaim);
+  return ending !== undefined;
 }
 
 export function closeResolvedLineage(
