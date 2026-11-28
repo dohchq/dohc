@@ -1247,6 +1247,44 @@ describe("relaySyncEngine", () => {
       expect(pushMock).toHaveBeenCalledOnce();
     });
 
+    it("refuses when the last push leaves changes waiting for the owner to admit them", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      pushMock.mockResolvedValueOnce({
+        ...more,
+        pushed: 1,
+        hasMore: false,
+        ownerAdmissionPending: [
+          {
+            workspaceId: "workspace",
+            originId: "origin",
+            originSeq: 4,
+            versionId: "main",
+            objectId: "object",
+            path: "notes.md",
+          },
+        ],
+      });
+      await expect(sync.drainRecorded()).rejects.toThrow(
+        "dohc could not send every change to your server yet. 1 change is waiting for the owner to admit it.",
+      );
+      expect(pushMock).toHaveBeenCalledOnce();
+      await sync.stop();
+    });
+
+    it("refuses instead of looping when a push sends nothing and still reports more", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      for (let pass = 0; pass < 3; pass += 1) pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      await expect(sync.drainRecorded()).rejects.toThrow(
+        "dohc could not send changes to your server. It took none of them and said more were waiting.",
+      );
+      expect(pushMock).toHaveBeenCalledOnce();
+      await sync.stop();
+    });
+
     it("counts only a pass that pushed, so a pull-only bootstrap pass does not end it", async () => {
       const sync = createRelaySyncEngine({
         rootDir: "/tmp/workspace",
