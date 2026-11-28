@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { ProblemLine } from "../account/ProblemLine";
 import { pageTitle } from "../home/homeModel";
 import { ActionPill } from "../notices/ActionPill";
 import { requestGenerations, shownProblem } from "../server/client";
@@ -26,7 +27,7 @@ import {
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
-import { EmptyLine, NoWorkspace, RetryRow } from "../workspace/ListStates";
+import { EmptyLine, NoWorkspace } from "../workspace/ListStates";
 
 export function SearchScreen() {
   const theme = useTheme();
@@ -158,6 +159,7 @@ export function SearchScreen() {
               {query.length > 0 ? (
                 <Pressable
                   onPress={() => setQuery("")}
+                  hitSlop={6}
                   android_ripple={ripple(theme, true)}
                   style={styles.clear}
                   accessibilityRole="button"
@@ -175,18 +177,19 @@ export function SearchScreen() {
               </View>
             ) : null}
             {ui.kind === "error" ? (
-              <RetryRow label={workspaceWords.searchFailed} onRetry={() => runSearch(query)} />
+              <View style={styles.inset}>
+                <ProblemLine text={workspaceWords.searchFailed} onRetry={() => runSearch(query)} />
+              </View>
             ) : null}
-            {ui.kind === "incomplete" ? (
-              <RetryRow label={workspaceWords.searchIncomplete} onRetry={() => runSearch(query)} />
-            ) : null}
-            {ui.kind === "indexing" ? (
+            {ui.kind === "indexing" || ui.kind === "incomplete" ? (
               <>
                 <View
                   style={[styles.banner, { backgroundColor: theme.panel, borderColor: theme.line }]}
                 >
                   <Text style={[styles.snippet, { color: theme.muted }]}>
-                    {workspaceWords.searchIndexing}
+                    {ui.kind === "indexing"
+                      ? workspaceWords.searchIndexing
+                      : workspaceWords.searchIncomplete}
                   </Text>
                   <ActionPill label={noticesWords.tryAgain} onPress={() => runSearch(query)} />
                 </View>
@@ -219,6 +222,7 @@ const styles = StyleSheet.create({
   input: { flex: 1, fontSize: 17, paddingVertical: 8 },
   clear: { minWidth: 32, minHeight: 32, alignItems: "center", justifyContent: "center" },
   list: { paddingBottom: 48 },
+  inset: { paddingHorizontal: 16, paddingTop: 8 },
   stateRow: { padding: 24, alignItems: "center" },
   banner: {
     margin: 16,

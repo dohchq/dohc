@@ -34,11 +34,13 @@ export function createOpenWorkspace(options: {
   readonly cache: ReadCache;
   /** A read of a workspace showed these messages, for the outbox's handoff. */
   readonly onMessages?: (workspaceId: string, messages: readonly ChatMessage[]) => void;
+  /** A fileChats read showed these comment thread IDs, for retiring saved comment writes. */
+  readonly onThreads?: (workspaceId: string, threadIds: readonly string[]) => void;
   /** The open workspace becomes `workspaceId`, before the open store stops (appTeardown). */
   readonly beforeSwitch?: (workspaceId: string | null) => void;
   readonly onGone?: (workspaceId: string) => void;
 }): OpenWorkspace {
-  const { signIn, list, cache, onMessages, beforeSwitch, onGone } = options;
+  const { signIn, list, cache, onMessages, onThreads, beforeSwitch, onGone } = options;
   const listeners = new Set<() => void>();
   const saved = cache.savedList(signIn);
   let chosen: string | null = null;
@@ -62,6 +64,7 @@ export function createOpenWorkspace(options: {
         list.reload();
       },
       onMessages: onMessages && ((messages) => onMessages(workspaceId, messages)),
+      onThreads: onThreads && ((threadIds) => onThreads(workspaceId, threadIds)),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {
         if (!stopped && state.data === data) show(workspaceId);

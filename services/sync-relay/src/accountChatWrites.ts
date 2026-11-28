@@ -1265,6 +1265,28 @@ async function replayStages(
       return;
     case "comment":
       if (absent("post")) {
+        const exists = (await adapter.listThreads({ workspaceId })).some(
+          (each) => each.id === write.threadId,
+        );
+        if (!exists) {
+          try {
+            await targets.file(write.path, write.objectId);
+          } catch (error) {
+            if (error instanceof FileChanged || error instanceof TargetMissing) {
+              storage.advanceAccountOperation({
+                accountId: record.accountId,
+                operationId: record.operationId,
+                nowMs: nowMs(),
+                stage: "refused",
+                result: {
+                  threadId: null,
+                  reason: error instanceof FileChanged ? FILE_CHANGED : COULD_NOT_SEND,
+                },
+              });
+            }
+            throw error;
+          }
+        }
         const message = await stage("post", () =>
           writeComment(adapter, workspaceId, stored, write),
         );
@@ -1473,6 +1495,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
           await replayStages(context, record, stored);
         } catch (error) {
           if (error instanceof RelayError || signal?.aborted) throw error;
+          if (error instanceof FileChanged) return await answered(refused(FILE_CHANGED));
           if (error instanceof TargetMissing) return await answered(missing(error.reason));
           // A stage still unwritten leaves the write pending; its publication answers.
         }
@@ -1880,7 +1903,12 @@ export async function replayUnfinishedWrites(input: {
     } catch (error) {
       // The copy moved on: the next pass replays against what it pulls.
       if (error instanceof CopyBehind) return false;
-      if (error instanceof RelayError || error instanceof TargetMissing || copy.signal.aborted)
+      if (
+        error instanceof RelayError ||
+        error instanceof FileChanged ||
+        error instanceof TargetMissing ||
+        copy.signal.aborted
+      )
         continue;
       input.onError(error);
       // A stage the engine refused left the write refused, which is done with; anything else stays owed.

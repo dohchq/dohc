@@ -300,6 +300,66 @@ describe("searchWorkspacePages", () => {
         snippet: "Visible [Plan](./plan.md) mentions budget",
       },
     ]);
+
+    // Clipped snippet link fragments and full-text pre-clipping redaction never leak private paths.
+    const clippedFiles = mockFiles(["private/budget.md", "docs/plan.md", "docs/long.md"], () =>
+      searchResult({
+        results: [
+          hit({
+            id: "clipped-tail",
+            path: "docs/plan.md",
+            title: "Plan",
+            snippet: "Quartz note with [Budget](../private/bud…",
+            matchedTerms: ["quartz"],
+          }),
+          hit({
+            id: "clipped-head",
+            path: "docs/long.md",
+            title: "Long",
+            snippet: "…private/budget.md) and quartz details",
+            matchedTerms: ["quartz"],
+          }),
+        ],
+      }),
+    );
+    const clipped = await searchWorkspacePages(clippedFiles, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member,
+      signal: new AbortController().signal,
+    });
+    expect(JSON.stringify(clipped)).not.toContain("private/");
+    expect(clipped.results).toEqual([
+      { path: "docs/plan.md", title: "Plan", snippet: "Quartz note with (a file not shared here)" },
+      {
+        path: "docs/long.md",
+        title: "Long",
+        snippet: "…(a file not shared here) and quartz details",
+      },
+    ]);
+
+    const bodyFiles: PhoneSearchFiles = {
+      ...clippedFiles,
+      readTextFile: async ({ path }) =>
+        path === "docs/long.md"
+          ? {
+              contentKind: "text",
+              text: `${"x".repeat(250)} [Budget](../private/budget.md) quartz ${"y".repeat(250)}`,
+            }
+          : null,
+    };
+    const fromBody = await searchWorkspacePages(bodyFiles, {
+      workspaceId: "trip",
+      query: "quartz",
+      limit: 20,
+      member,
+      signal: new AbortController().signal,
+    });
+    expect(JSON.stringify(fromBody)).not.toContain("private/");
+    expect(fromBody.results.find((r) => r.path === "docs/long.md")?.snippet).toContain(
+      "(a file not shared here) quartz",
+    );
   });
 
   it("searches beyond 32 root pages when a folder rule exists and marks incomplete when time budget expires", async () => {
@@ -360,8 +420,8 @@ describe("searchWorkspacePages", () => {
           results: drawings.map((p, i) =>
             hit({ id: `d-${i}`, path: p, title: `Drawing ${i}`, snippet: "quartz" }),
           ),
-          truncated: true,
-          complete: false,
+          truncated: false,
+          complete: true,
         });
       }
       return searchResult({
@@ -387,19 +447,46 @@ describe("searchWorkspacePages", () => {
     });
   });
 
-  it("drops path:undefined hits and normalizes truncated/complete when a Member without folder rules drops leaked hits", async () => {
+  it("drops path:undefined hits and preserves honest incomplete status on non-crowded Member results", async () => {
     const member = await memberFixture([]);
-    const files = mockFiles(["docs/plan.md"], () =>
-      searchResult({
-        results: [
-          hit({ id: "c1", kind: "chat", path: undefined, title: "Hidden chat", snippet: "secret" }),
-          hit({ id: "r1", kind: "record", path: undefined, title: "Record", snippet: "secret" }),
-          hit({ id: "s1", kind: "page", path: ".env", title: "Env", snippet: "KEY=1" }),
-          hit({ id: "p1", kind: "page", path: "docs/plan.md", title: "Plan", snippet: "Open" }),
-        ],
-        truncated: true,
-        complete: false,
-      }),
+    const files = mockFiles(["docs/plan.md", "docs/sketch.excalidraw"], (input) =>
+      input.pathPrefix
+        ? searchResult({
+            results:
+              input.pathPrefix === "docs/plan.md"
+                ? [
+                    hit({
+                      id: "p1",
+                      kind: "page",
+                      path: "docs/plan.md",
+                      title: "Plan",
+                      snippet: "Open",
+                    }),
+                  ]
+                : [],
+          })
+        : searchResult({
+            results: [
+              hit({
+                id: "c1",
+                kind: "chat",
+                path: undefined,
+                title: "Hidden chat",
+                snippet: "secret",
+              }),
+              hit({
+                id: "r1",
+                kind: "record",
+                path: undefined,
+                title: "Record",
+                snippet: "secret",
+              }),
+              hit({ id: "s1", kind: "page", path: ".env", title: "Env", snippet: "KEY=1" }),
+              hit({ id: "p1", kind: "page", path: "docs/plan.md", title: "Plan", snippet: "Open" }),
+            ],
+            truncated: true,
+            complete: false,
+          }),
     );
     const result = await searchWorkspacePages(files, {
       workspaceId: "trip",
@@ -414,6 +501,32 @@ describe("searchWorkspacePages", () => {
       indexBuilding: false,
       truncated: false,
       complete: true,
+    });
+
+    // Incomplete engine response with a single dropped drawing must NOT turn into complete: true.
+    const incomplete = mockFiles(["docs/sketch.excalidraw"], () =>
+      searchResult({
+        results: [
+          hit({ id: "d1", kind: "page", path: "docs/sketch.excalidraw", title: "D", snippet: "x" }),
+        ],
+        truncated: false,
+        complete: false,
+      }),
+    );
+    expect(
+      await searchWorkspacePages(incomplete, {
+        workspaceId: "trip",
+        query: "x",
+        limit: 20,
+        member,
+        signal: new AbortController().signal,
+      }),
+    ).toEqual({
+      ok: true,
+      results: [],
+      indexBuilding: false,
+      truncated: false,
+      complete: false,
     });
   });
 

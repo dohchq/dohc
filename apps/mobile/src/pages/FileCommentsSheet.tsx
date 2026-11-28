@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { ProblemLine } from "../account/ProblemLine";
 import { useAccountName } from "../account/useAccountName";
 import { Composer, outboxProblem } from "../conversation/Composer";
 import {
@@ -32,7 +33,7 @@ import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { ripple, TOUCH } from "../touch";
-import { EmptyLine, HoldRow, RetryRow } from "../workspace/ListStates";
+import { EmptyLine, HoldRow } from "../workspace/ListStates";
 import { useView } from "../workspace/useView";
 
 const COMMENT_LANES: Lanes = { post: false, send: true };
@@ -150,7 +151,9 @@ export function FileCommentsSheet(props: {
         <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.list}>
           {state.value === null ? (
             state.problem ? (
-              <RetryRow label={documentWords.commentsFailed} onRetry={retry} />
+              <View style={styles.inset}>
+                <ProblemLine text={documentWords.commentsFailed} onRetry={retry} />
+              </View>
             ) : (
               <HoldRow />
             )
@@ -228,6 +231,7 @@ export function FileCommentsSheet(props: {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  inset: { paddingHorizontal: 16, paddingTop: 8 },
   list: { paddingVertical: 8, paddingBottom: 32 },
   row: {
     flexDirection: "row",

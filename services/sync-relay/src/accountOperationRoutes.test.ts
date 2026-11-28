@@ -5391,24 +5391,47 @@ describe("a Member's phone reads in a workspace they joined", () => {
       payloadAfterPath: "docs/plan.md",
     });
 
-    // Hidden/out-of-reach file returns 404.
-    expect(
-      (
-        await h(
-          op(
-            "trip",
-            "comment",
-            {
-              operationId: "op-file-hidden",
-              path: "private/budget.md",
-              expectedObjectId: "object-budget",
-              body: "Nope",
-            },
-            asBen,
-          ),
-        )
-      ).status,
-    ).toBe(404);
+    // Hidden/out-of-reach file returns missing identical to absent file (no hidden/missing oracle or 404 outbox poisoning).
+    const hiddenComment = await answer(
+      await h(
+        op(
+          "trip",
+          "comment",
+          {
+            operationId: "op-file-hidden",
+            path: "private/budget.md",
+            expectedObjectId: "object-budget",
+            body: "Nope",
+          },
+          asBen,
+        ),
+      ),
+    );
+    const missingComment = await answer(
+      await h(
+        op(
+          "trip",
+          "comment",
+          {
+            operationId: "op-file-absent",
+            path: "docs/absent.md",
+            expectedObjectId: "object-absent",
+            body: "Nope",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(hiddenComment).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at private/budget.md.",
+    });
+    expect(missingComment).toEqual({
+      ok: false,
+      refusal: "missing",
+      reason: "No document at docs/absent.md.",
+    });
 
     // Delete + replace docs/plan.md with a new objectId: stale expectedObjectId is refused and never writes.
     writeFileMoment("object-plan", "docs/plan.md", {
@@ -5610,6 +5633,12 @@ describe("a Member's phone reads in a workspace they joined", () => {
 
   it("enforces searchWorkspace auth, invalid-arg 400s, showOnPhone 404s, and Member reach isolation over HTTP", async () => {
     const { h, storage, engine } = await joinedChat();
+    engine.files.seedTextFile({
+      workspace: "trip",
+      path: "docs/plan.md",
+      text: "# Plan\n\nVisible quartz @[private/budget.md]\n",
+      objectId: "object-plan",
+    });
     vi.spyOn(engine, "sendRequest").mockImplementation(async (request) => {
       if (request.method === "retrieval.query") {
         const prefix = (request.params as { pathPrefix?: string } | undefined)?.pathPrefix;

@@ -140,7 +140,7 @@ describe("deriveSearchUiState", () => {
         matched: quartz,
         problem: "offline",
       }),
-    ).toEqual({ kind: "error", problem: "offline" });
+    ).toEqual({ kind: "error" });
     expect(
       deriveSearchUiState({
         workspaceId: "ws-2",
@@ -178,7 +178,21 @@ describe("deriveSearchUiState", () => {
         }),
         problem: null,
       }),
-    ).toEqual({ kind: "incomplete" });
+    ).toEqual({ kind: "incomplete", results: [] });
+    expect(
+      deriveSearchUiState({
+        workspaceId: "ws-1",
+        query: "plan",
+        loading: false,
+        matched: matched("plan", {
+          results: [hit],
+          indexBuilding: false,
+          truncated: true,
+          complete: false,
+        }),
+        problem: null,
+      }),
+    ).toEqual({ kind: "incomplete", results: [hit] });
     expect(
       deriveSearchUiState({
         workspaceId: "ws-1",

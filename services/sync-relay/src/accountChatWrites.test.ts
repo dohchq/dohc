@@ -1181,5 +1181,31 @@ describe("an answer whose decision the engine refused", () => {
       reason: "No document at missing.md.",
     });
     expect(f.engine.writes.length).toBe(beforeStale);
+
+    // An interrupted comment recorded before thread creation refuses cleanly if the file is replaced before replay.
+    f.engine.failing.set(CHATS_METHOD.threadCreate, new Error("interrupted before thread create"));
+    expect(
+      await f.run(
+        comment("op-comment-replay-stale", "README.md", "object-readme", "Before replace"),
+      ),
+    ).toMatchObject({ ok: true, state: "pending" });
+    f.engine.failing.clear();
+    f.engine.files.seedTextFile({
+      workspace: WORKSPACE,
+      path: "README.md",
+      text: "# Replaced\n",
+      objectId: "object-readme-v2",
+    });
+    const writesBeforeReplay = f.engine.writes.length;
+    expect(
+      await f.run(
+        comment("op-comment-replay-stale", "README.md", "object-readme", "Before replace"),
+      ),
+    ).toEqual({
+      ok: false,
+      refusal: "refused",
+      reason: "This file changed or was replaced",
+    });
+    expect(f.engine.writes.length).toBe(writesBeforeReplay);
   });
 });

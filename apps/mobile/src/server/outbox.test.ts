@@ -3202,7 +3202,7 @@ describe("fault schedules", () => {
       threadId: null,
       winnerMessageId: null,
     });
-    second.outbox.handoff(ME, "ws-1", [message("message-file-1")]);
+    second.outbox.handoffThreads(ME, "ws-1", ["thread-file-1"]);
     await vi.waitFor(() =>
       expect(second.outbox.state().records.map((r) => r.operationId)).toEqual([
         secondComment.operationId,

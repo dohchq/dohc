@@ -210,6 +210,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             list,
             cache,
             onMessages: (workspaceId, messages) => outbox.handoff(signIn, workspaceId, messages),
+            onThreads: (workspaceId, threadIds) =>
+              outbox.handoffThreads(signIn, workspaceId, threadIds),
             // A workspace that stops being the open one, here or from another device, ends its apps and live pages
             // before its store stops.
             beforeSwitch: teardown.open,

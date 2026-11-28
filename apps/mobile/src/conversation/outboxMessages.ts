@@ -192,8 +192,9 @@ export function fileCommentRows(
   return state.records.flatMap((record): LocalRow[] => {
     if (!here(record, scope) || record.write.operation !== "comment") return [];
     if (
-      record.write.args.path !== path &&
-      (expectedObjectId === null || record.write.args.expectedObjectId !== expectedObjectId)
+      expectedObjectId !== null
+        ? record.write.args.expectedObjectId !== expectedObjectId
+        : record.write.args.path !== path
     )
       return [];
     const savedThread = record.result?.kind === "saved" ? record.result.threadId : null;

@@ -350,6 +350,8 @@ describe("replies on this phone", () => {
         (r) => r.mark.body,
       ),
     ).toEqual(["Waiting comment"]);
+    // A replaced file at the same path with a new expectedObjectId never resurrects old comments.
+    expect(fileCommentRows(all, HERE, "docs/plan.md", "obj-replaced", new Set())).toEqual([]);
     expect(recoveryRows(all, { origin: HERE.origin, accountId: HERE.accountId }).rows).toEqual([
       expect.objectContaining({
         workspaceId: "ws-1",

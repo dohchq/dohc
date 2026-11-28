@@ -124,8 +124,9 @@ export function ServerConversation() {
   const { state: chatsState, retry: retryChats } = useView(views.chats);
   const chats = chatsState.value;
   const joined = data?.joined === true;
+  const elsewhere = workspace !== undefined && data?.workspaceId !== workspace;
   const isThread = thread === "1" || id.startsWith("thread-") || id.startsWith("browser-thread:");
-  const joinedThreadId = isThread && phoneWrites && joined ? id : null;
+  const joinedThreadId = !elsewhere && isThread && phoneWrites && joined ? id : null;
   const threadView = useMemo(
     () => (joinedThreadId !== null ? views.thread(joinedThreadId) : null),
     [joinedThreadId],
@@ -142,7 +143,7 @@ export function ServerConversation() {
     chatsState.problem,
     retryChats,
   );
-  if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
+  if (elsewhere) return <ElsewhereChat />;
   const listedGroup = isThread ? null : groupForStream(chats, id);
   const streamId = listedGroup?.id ?? id;
   const writesKey = `${data?.instance ?? 0}:${isThread ? id : streamId}`;

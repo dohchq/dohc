@@ -25,10 +25,10 @@ export type SearchUiState =
   | { readonly kind: "idle" }
   | { readonly kind: "loading" }
   | { readonly kind: "indexing"; readonly results: readonly SearchHit[] }
-  | { readonly kind: "incomplete" }
+  | { readonly kind: "incomplete"; readonly results: readonly SearchHit[] }
   | { readonly kind: "empty"; readonly query: string }
   | { readonly kind: "results"; readonly results: readonly SearchHit[] }
-  | { readonly kind: "error"; readonly problem: ServerProblemKind };
+  | { readonly kind: "error" };
 
 export function deriveSearchUiState(input: {
   readonly workspaceId: string | null;
@@ -45,11 +45,11 @@ export function deriveSearchUiState(input: {
     input.matched.query === trimmed
       ? input.matched.answer
       : null;
-  if (input.problem !== null && answer === null) return { kind: "error", problem: input.problem };
+  if (input.problem !== null && answer === null) return { kind: "error" };
   if (answer === null) return input.loading ? { kind: "loading" } : { kind: "idle" };
   if (answer.indexBuilding) return { kind: "indexing", results: answer.results };
-  if (answer.results.length === 0)
-    return answer.complete ? { kind: "empty", query: trimmed } : { kind: "incomplete" };
+  if (!answer.complete) return { kind: "incomplete", results: answer.results };
+  if (answer.results.length === 0) return { kind: "empty", query: trimmed };
   return { kind: "results", results: answer.results };
 }
 

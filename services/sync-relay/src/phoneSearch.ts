@@ -19,8 +19,14 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_PREFIXES = 512;
 const PREFIX_BUDGET_MS = 8_000;
+const SNIPPET_MAX_CHARS = 260;
+const REDACT_READ_MAX_BYTES = 256 * 1024;
 const MD_LINK_RE = /!?\[[^\]]*\]\(\s*(?:<([^>\r\n]+)>|([^)\s\r\n]+))(?:\s+[^)\r\n]*)?\)/gu;
 const WIKI_LINK_RE = /!?\[\[([^\]\r\n]+)\]\]/gu;
+const CLIPPED_TRAILING_RE =
+  /(?:@\[[^\]\r\n]*|!?\[[^\]]*\]\(\s*<?(?![a-zA-Z][a-zA-Z0-9+.-]*:)[^)\r\n]*|!?\[\[[^\]\r\n]*)$/gu;
+const CLIPPED_LEADING_MD_RE = /^(?:…|\.\.\.)[^(\r\n]*\)/u;
+const CLIPPED_LEADING_WIKI_RE = /^(?:…|\.\.\.)[^[\r\n]*\]\]/u;
 const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/u;
 
 export interface PhoneSearchHit {
@@ -43,6 +49,12 @@ export interface PhoneSearchFiles {
     workspaceId: string;
     versionId: string;
   }): Promise<readonly { path: string }[]>;
+  readTextFile?(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    maxBytes?: number;
+  }): Promise<{ contentKind: string; text: string | null } | null>;
   retrieveWorkspace(input: {
     query: string;
     surfaces: ["page"];
@@ -64,8 +76,10 @@ const pageShown = (member: PhoneMember | null, path: string) =>
   isMarkdownPage(path) && pathShown(member, path);
 
 function stemOf(path: string): string {
-  const base = posix.basename(path).toLowerCase();
-  return base.replace(/\.(md|markdown)$/iu, "");
+  return posix
+    .basename(path)
+    .toLowerCase()
+    .replace(/\.(md|markdown)$/iu, "");
 }
 
 function normalizeLinkTarget(raw: string): string {
@@ -99,6 +113,7 @@ function linkAllowed(
   } else {
     const key = stemOf(target);
     if (hiddenStems.has(key) && !visibleStems.has(key)) return false;
+    if (visibleStems.has(key) && !hiddenStems.has(key)) return true;
     candidates.push(posix.normalize(target));
   }
   const allowedPath = (p: string) => {
@@ -107,6 +122,33 @@ function linkAllowed(
     return p.includes(".") || pathShown(member, `${p}.md`);
   };
   return candidates.every(allowedPath);
+}
+
+function extractRedactedSnippet(text: string, tokens: readonly string[]): string {
+  let bestLine = "";
+  let bestScore = -1;
+  let firstLine = "";
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (!firstLine) firstLine = trimmed;
+    const lowered = trimmed.toLowerCase();
+    const score = tokens.reduce((sum, token) => sum + (lowered.includes(token) ? 1 : 0), 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestLine = trimmed;
+    }
+  }
+  const cleaned = (bestScore > 0 ? bestLine : firstLine).replace(/\s+/gu, " ").trim();
+  if (cleaned.length <= SNIPPET_MAX_CHARS) return cleaned;
+  const lowered = cleaned.toLowerCase();
+  const matchAt = tokens.map((t) => lowered.indexOf(t)).find((i) => i >= 0) ?? 0;
+  const start = Math.max(0, matchAt - Math.floor(SNIPPET_MAX_CHARS / 3));
+  const end = Math.min(cleaned.length, start + SNIPPET_MAX_CHARS);
+  let window = cleaned.slice(start, end).trim();
+  if (start > 0) window = `…${window}`;
+  if (end < cleaned.length) window = `${window}…`;
+  return window.slice(0, SNIPPET_MAX_CHARS);
 }
 
 function visiblePrefixes(
@@ -118,7 +160,7 @@ function visiblePrefixes(
   const ruled = member
     ? member.selector.reach.evaluated.rules.map(([f]) => pathCollisionKey(f)).filter(Boolean)
     : [];
-  const nonMdDirs = allPaths.filter((p) => !isMarkdownPage(p)).map((p) => pathCollisionKey(p));
+  const nonMdPaths = allPaths.filter((p) => !isMarkdownPage(p)).map((p) => pathCollisionKey(p));
   const folders = new Set<string>();
   const files = new Set<string>();
   for (const path of visiblePages) {
@@ -131,7 +173,7 @@ function visiblePrefixes(
       if (
         (member === null || member.selector.reach.folderLevel(dir) !== null) &&
         !ruled.some((r) => r.startsWith(prefix)) &&
-        !nonMdDirs.some((p) => p.startsWith(prefix))
+        !nonMdPaths.some((p) => p.startsWith(prefix))
       ) {
         clean = dir;
         break;
@@ -184,10 +226,26 @@ export async function searchWorkspacePages(
   const queryTokens = query
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length >= 2);
+    .filter((t) => t.length >= 2 || /[^\x00-\x7f]/u.test(t));
   let hiddenStems = new Set<string>();
   let visibleStems = new Set<string>();
-  const redact = (text: string, fromPath: string) => {
+  let cachedVersion: { versionId: string | null; allPaths: readonly string[] } | null = null;
+  const loadFiles = async () => {
+    if (cachedVersion !== null) return cachedVersion;
+    const version = await files.getActiveVersion({ workspaceId });
+    const allPaths = version
+      ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id })).map(
+          (f) => f.path,
+        )
+      : [];
+    cachedVersion = { versionId: version?.id ?? null, allPaths };
+    if (member !== null) {
+      hiddenStems = new Set(allPaths.filter((p) => !pathShown(member, p)).map(stemOf));
+      visibleStems = new Set(allPaths.filter((p) => pageShown(member, p)).map(stemOf));
+    }
+    return cachedVersion;
+  };
+  const redactText = (text: string, fromPath: string, clipped = false) => {
     if (!member || !reach) return text;
     let out = withheldLinkText(text, reach);
     out = out.replace(MD_LINK_RE, (full, angled?: string, bare?: string) =>
@@ -201,6 +259,15 @@ export async function searchWorkspacePages(
         ? full
         : CHAT_FILE_LINK_WITHHELD;
     });
+    if (clipped) {
+      out = out.replace(CLIPPED_TRAILING_RE, CHAT_FILE_LINK_WITHHELD);
+      out = out.replace(CLIPPED_LEADING_WIKI_RE, `…${CHAT_FILE_LINK_WITHHELD}`);
+      out = out.replace(CLIPPED_LEADING_MD_RE, (full) =>
+        URL_SCHEME_RE.test(full.replace(/^(?:…|\.\.\.)/u, ""))
+          ? full
+          : `…${CHAT_FILE_LINK_WITHHELD}`,
+      );
+    }
     return out;
   };
   const run = async (pathPrefix?: string): Promise<WorkspaceSearchResult | null> => {
@@ -218,7 +285,17 @@ export async function searchWorkspacePages(
       throw error;
     }
   };
-  const byPath = new Map<string, { hit: PhoneSearchHit; terms: number; rank: number }>();
+  const byPath = new Map<
+    string,
+    {
+      hit: PhoneSearchHit;
+      rawTitle: string;
+      rawSnippet: string;
+      matchedTerms: readonly string[];
+      terms: number;
+      rank: number;
+    }
+  >();
   let indexBuilding = false,
     anyTruncated = false,
     allComplete = true,
@@ -244,23 +321,11 @@ export async function searchWorkspacePages(
         dropped = true;
         continue;
       }
-      const title = redact(hit.title, hit.path);
-      const snippet = redact(hit.snippet, hit.path);
-      if (
-        member !== null &&
-        (title !== hit.title || snippet !== hit.snippet) &&
-        queryTokens.length > 0
-      ) {
-        const visibleText = `${hit.path}\n${title}\n${snippet}`
-          .replaceAll(CHAT_FILE_LINK_WITHHELD, " ")
-          .toLowerCase();
-        if (!queryTokens.some((token) => visibleText.includes(token))) {
-          dropped = true;
-          continue;
-        }
-      }
       const next = {
-        hit: { path: hit.path, title, snippet },
+        hit: { path: hit.path, title: hit.title, snippet: hit.snippet },
+        rawTitle: hit.title,
+        rawSnippet: hit.snippet,
+        matchedTerms: hit.matchedTerms,
         terms: hit.matchedTerms.length,
         rank,
       };
@@ -270,6 +335,9 @@ export async function searchWorkspacePages(
     }
   };
   const runScoped = async (allPaths: readonly string[], visible: readonly string[]) => {
+    anyTruncated = false;
+    allComplete = true;
+    dropped = false;
     const prefixes = visiblePrefixes(allPaths, visible, member, query);
     let ran = 0;
     for (const prefix of prefixes) {
@@ -284,33 +352,25 @@ export async function searchWorkspacePages(
   const restricted = member !== null && hasFolderRules(member);
   let scoped = restricted;
   if (restricted) {
-    const version = await files.getActiveVersion({ workspaceId });
-    const allPaths = version
-      ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id })).map(
-          (f) => f.path,
-        )
-      : [];
+    const { allPaths } = await loadFiles();
     const visible = allPaths.filter((p) => pageShown(member, p));
-    hiddenStems = new Set(allPaths.filter((p) => !pathShown(member, p)).map(stemOf));
-    visibleStems = new Set(visible.map(stemOf));
     if (visible.length === 0)
       return { ok: true, results: [], indexBuilding: false, truncated: false, complete: true };
     await runScoped(allPaths, visible);
   } else {
     const raw = await run();
     collect(raw);
-    if (raw?.truncated && droppedNonMd && byPath.size < limit) {
-      const version = await files.getActiveVersion({ workspaceId });
-      const allPaths = version
-        ? (await files.listTextFileMetadata({ workspaceId, versionId: version.id })).map(
-            (f) => f.path,
-          )
-        : [];
+    const crowded =
+      raw !== null &&
+      (raw.truncated || raw.results.length >= MAX_LIMIT) &&
+      byPath.size < limit &&
+      (droppedNonMd || (member !== null && dropped));
+    if (crowded) {
+      const { allPaths } = await loadFiles();
       const visible = allPaths.filter((p) => pageShown(member, p));
       if (visible.length > 0) {
         scoped = true;
-        anyTruncated = false;
-        allComplete = true;
+        byPath.clear();
         await runScoped(allPaths, visible);
       }
     }
@@ -320,14 +380,62 @@ export async function searchWorkspacePages(
         (a, b) => b.terms - a.terms || a.rank - b.rank || a.hit.path.localeCompare(b.hit.path),
       )
     : [...byPath.values()];
-  const isolated = member !== null && dropped;
-  const truncated = ordered.length > limit || prefixCapped || (!isolated && anyTruncated);
+  const finalHits: PhoneSearchHit[] = [];
+  const versionId = member !== null && files.readTextFile ? (await loadFiles()).versionId : null;
+  for (const entry of ordered) {
+    if (member === null) {
+      finalHits.push(entry.hit);
+      continue;
+    }
+    const title = redactText(entry.rawTitle, entry.hit.path, true);
+    const matchTerms =
+      entry.matchedTerms.length > 0
+        ? entry.matchedTerms.map((t) => t.toLowerCase()).filter(Boolean)
+        : queryTokens;
+    let snippet: string;
+    let changed = title !== entry.rawTitle;
+    let haystackSource: string | null = null;
+    if (files.readTextFile && versionId !== null) {
+      signal.throwIfAborted();
+      const loaded = await files.readTextFile({
+        workspaceId,
+        versionId,
+        path: entry.hit.path,
+        maxBytes: REDACT_READ_MAX_BYTES,
+      });
+      if (loaded?.contentKind === "text" && typeof loaded.text === "string") {
+        const redactedBody = redactText(loaded.text, entry.hit.path, false);
+        if (redactedBody !== loaded.text) {
+          changed = true;
+          haystackSource = redactedBody;
+          snippet = extractRedactedSnippet(redactedBody, matchTerms);
+        } else {
+          snippet = redactText(entry.rawSnippet, entry.hit.path, true);
+          if (snippet !== entry.rawSnippet) changed = true;
+        }
+      } else {
+        snippet = redactText(entry.rawSnippet, entry.hit.path, true);
+        if (snippet !== entry.rawSnippet) changed = true;
+      }
+    } else {
+      snippet = redactText(entry.rawSnippet, entry.hit.path, true);
+      if (snippet !== entry.rawSnippet) changed = true;
+    }
+    if (changed && matchTerms.length > 0) {
+      const visibleText = `${entry.hit.path}\n${title}\n${haystackSource ?? snippet}`
+        .replaceAll(CHAT_FILE_LINK_WITHHELD, " ")
+        .toLowerCase();
+      if (!matchTerms.some((token) => visibleText.includes(token))) continue;
+    }
+    finalHits.push({ path: entry.hit.path, title, snippet });
+  }
+  const truncated = finalHits.length > limit || prefixCapped || anyTruncated;
   return {
     ok: true,
-    results: ordered.slice(0, limit).map((e) => e.hit),
+    results: finalHits.slice(0, limit),
     indexBuilding,
     truncated,
-    complete: !indexBuilding && !truncated && (isolated || allComplete),
+    complete: !indexBuilding && !truncated && allComplete,
   };
 }
 

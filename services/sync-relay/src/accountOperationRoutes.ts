@@ -128,17 +128,12 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * when it ran, which its copy may not have pulled, so it never moves a
  * read's starting point.
  */
-class MemberTargetMissing extends Error {
-  readonly reason: string;
-  constructor(reason: string) {
+class MemberWriteRefusal extends Error {
+  constructor(
+    readonly refusal: "missing" | "refused",
+    readonly reason: string,
+  ) {
     super(reason);
-    this.reason = reason;
-  }
-}
-
-class MemberFileChanged extends Error {
-  constructor() {
-    super(FILE_CHANGED);
   }
 }
 
@@ -459,7 +454,12 @@ export function createAccountOperationRoute(options: {
         } else if (parsed.operation === "comment") {
           const validated = validateUserReadPath(parsed.args.path, { platform: process.platform });
           if (!validated.ok) throw badRequest("invalid path");
-          if (!pathShown(member, validated.normalized)) throw notFound();
+          if (!pathShown(member, validated.normalized))
+            return await replyAnswer({
+              ok: false,
+              refusal: "missing",
+              reason: `No document at ${validated.normalized}.`,
+            });
           fileTarget = { objectId: parsed.args.expectedObjectId, filePath: validated.normalized };
         } else {
           const found = storage.findThreadCreateChannelWireId(
@@ -498,13 +498,15 @@ export function createAccountOperationRoute(options: {
                 channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
               })
             )
-              throw new MemberTargetMissing(
+              throw new MemberWriteRefusal(
+                "missing",
                 parsed.operation === "post"
                   ? `no such group: ${channelWireId}`
                   : `chat thread not found: ${parsed.operation === "reply" ? parsed.args.threadId : ""}`,
               );
           } else if (parsed.operation === "comment") {
-            if (!pathShown(fresh, fileTarget!.filePath)) throw notFound();
+            if (!pathShown(fresh, fileTarget!.filePath))
+              throw new MemberWriteRefusal("missing", `No document at ${fileTarget!.filePath}.`);
           } else if (parsed.operation === "reply") {
             resolvedFile = commentFileOf(storage, route.workspaceId, parsed.args.threadId);
             if (
@@ -513,7 +515,10 @@ export function createAccountOperationRoute(options: {
               !pathShown(fresh, resolvedFile.filePath) ||
               !fresh.selector.reach.objectVisible(resolvedFile.objectId)
             )
-              throw new MemberTargetMissing(`chat thread not found: ${parsed.args.threadId}`);
+              throw new MemberWriteRefusal(
+                "missing",
+                `chat thread not found: ${parsed.args.threadId}`,
+              );
           }
           if (action === "read") {
             return {
@@ -546,25 +551,25 @@ export function createAccountOperationRoute(options: {
             )
               throw relayError("share_op_rejected");
           } else {
+            const missingReason =
+              parsed.operation === "reply"
+                ? `chat thread not found: ${parsed.args.threadId}`
+                : `No document at ${resolvedFile!.filePath}.`;
             const level = granted.effectiveSelector.reach.levelAt(resolvedFile!.filePath);
-            if (level === null) {
-              if (parsed.operation === "reply")
-                throw new MemberTargetMissing(`chat thread not found: ${parsed.args.threadId}`);
-              throw notFound();
-            }
+            if (level === null) throw new MemberWriteRefusal("missing", missingReason);
             if (level === "view") throw relayError("share_read_only");
             if (parsed.operation === "comment") {
               const live = currentFileAt(storage, route.workspaceId, resolvedFile!.filePath);
-              if (live === null)
-                throw new MemberTargetMissing(`No document at ${resolvedFile!.filePath}.`);
-              if (live.objectId !== resolvedFile!.objectId) throw new MemberFileChanged();
-              if (!granted.effectiveSelector.reach.objectVisible(live.objectId)) throw notFound();
+              if (live === null || !granted.effectiveSelector.reach.objectVisible(live.objectId))
+                throw new MemberWriteRefusal("missing", missingReason);
+              if (live.objectId !== resolvedFile!.objectId)
+                throw new MemberWriteRefusal("refused", FILE_CHANGED);
             } else if (
               parsed.operation === "reply" &&
               typeof storage.objectCurrentPath(route.workspaceId, resolvedFile!.objectId) !==
                 "string"
             ) {
-              throw new MemberTargetMissing(`chat thread not found: ${parsed.args.threadId}`);
+              throw new MemberWriteRefusal("missing", missingReason);
             }
           }
           return {
@@ -602,7 +607,7 @@ export function createAccountOperationRoute(options: {
             authorizeAppend: () => authorizeMemberWrite("append"),
             requireParentMessage: (tid, parentId) => {
               if (!storage.hasThreadMessage(route.workspaceId, tid, parentId))
-                throw new MemberTargetMissing(`chat message not found: ${parentId}`);
+                throw new MemberWriteRefusal("missing", `chat message not found: ${parentId}`);
             },
             afterNameLookup: () => check(false),
           });
@@ -613,10 +618,8 @@ export function createAccountOperationRoute(options: {
             messageId: saved.messageId,
           });
         } catch (error) {
-          if (error instanceof MemberFileChanged)
-            return await replyAnswer({ ok: false, refusal: "refused", reason: FILE_CHANGED });
-          if (error instanceof MemberTargetMissing)
-            return await replyAnswer({ ok: false, refusal: "missing", reason: error.reason });
+          if (error instanceof MemberWriteRefusal)
+            return await replyAnswer({ ok: false, refusal: error.refusal, reason: error.reason });
           if (
             error instanceof SyncRelayConflictError ||
             (error instanceof RelayError &&
