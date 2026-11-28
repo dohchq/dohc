@@ -1,6 +1,7 @@
 import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "../server/outbox";
+import { isWritableJoinedGroup, type GroupChatAccess } from "../server/phoneWrites";
 import type { OutboxScope } from "./outboxMessages";
 
 // What a conversation's write controls do, apart from how they look. The outbox is the only thing that keeps or sends a
@@ -20,6 +21,24 @@ export type OutboxRecord = OutboxState["records"][number];
 export interface Lanes {
   readonly post: boolean;
   readonly send: boolean;
+}
+
+export const JOINED_GROUP_LANES: Lanes = { post: true, send: false };
+
+export function groupForStream<
+  Group extends { readonly id: string; readonly channelWireId?: string },
+>(groups: readonly Group[] | null | undefined, id: string): Group | null {
+  return groups?.find((group) => group.id === id || group.channelWireId === id) ?? null;
+}
+
+export function writableJoinedThread(
+  groups:
+    | readonly (GroupChatAccess & { readonly threadIds: readonly string[] })[]
+    | null
+    | undefined,
+  threadId: string,
+): boolean {
+  return isWritableJoinedGroup(groups?.find((each) => each.threadIds.includes(threadId)));
 }
 
 /** The lanes the server says a stream takes. A DM or an agent's chat never offers New post. */

@@ -20,14 +20,20 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
-import { accountDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  chatMentionBodies,
+  type RefreshMentionAccountNames,
+} from "./accountDisplayName";
 import { browserWakeSources, resolveWakeTargets, TooManyWakeCandidates } from "./chatWakes";
 import {
+  assertChatAuthorship,
+  assertClientLogProvenance,
   linkChatOrigin,
   LINK_CHAT_MESSAGE_ID_PREFIX,
   namedShareOrigin,
   ownerBrowserOrigin,
+  parseNamedShareLogOps,
   personalAgentOrigin,
   PERSONAL_AGENT_ID_PREFIX,
   PERSONAL_AGENT_ORIGIN_PREFIX,
@@ -43,10 +49,12 @@ import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-m
 import {
   chatSideOf,
   filterOpForShare,
+  filterOpForShareAppend,
   isWorkspaceSelector,
   withheldLinkText,
   type AnyShareSelector,
   type ChatShareThreadResolver,
+  type ThreadFileBinding,
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
@@ -57,6 +65,7 @@ import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 import { workspaceChatAccess, workspaceFileReach, workspaceGroupReachable } from "./workspaceReach";
 
 const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
+const MAX_THREAD_TITLE_UNITS = 200;
 // About 100 people with two tabs each, and room to spare.
 export const MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE = 512;
 const cacheHeaders = { "cache-control": "private, no-store" };
@@ -284,10 +293,319 @@ function cursor(value: string | null): number {
   return Number(value);
 }
 
+export interface AppendNamedChatMessageInput {
+  storage: SyncRelayStorage;
+  workspaceId: string;
+  shareId: string;
+  userId: string;
+  owned?: boolean;
+  humanOnly?: boolean;
+  allowPostParent?: boolean;
+  redactFileLinks?: boolean;
+  channelWireId: string | null;
+  file?: CommentFile | null;
+  id: unknown;
+  body: unknown;
+  title?: unknown;
+  threadId?: unknown;
+  lane?: unknown;
+  parentMessageId?: unknown;
+  authorKind: unknown;
+  authorUserId?: unknown;
+  hasAuthorDisplayName?: boolean;
+  authorDisplayName?: unknown;
+  nowMs: () => number;
+  signal?: AbortSignal;
+  lookupUserDisplayName?: LogAuthorNameLookup;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
+  activity?: Pick<DiscussionActivityHub, "wakeLog">;
+  authorizeAppend(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
+    share: { shareId: string; workspaceId: string };
+  };
+  afterNameLookup?: () => Promise<void>;
+  recheckRead?: () => void;
+  checkDraft?: (draft: ThreadedChatMessage | null) => void;
+}
+
+/** Authorizes and appends one named-share chat post or reply directly into the workspace's named share log. */
+export async function appendNamedChatMessage(input: AppendNamedChatMessageInput): Promise<{
+  threadId: string;
+  messageId: string;
+  message: ThreadedChatMessage | null;
+}> {
+  const { storage, workspaceId, shareId, userId, channelWireId } = input;
+  const file = input.file ?? null;
+  const owned = input.owned === true;
+  if (channelWireId === null && !file) throw notFound();
+  input.authorizeAppend();
+  if (input.authorUserId !== undefined && input.authorUserId !== userId)
+    throw relayError("authorship_mismatch");
+  const id = parseString(input.id, "id", 256);
+  if (!id.isWellFormed()) throw badRequest("invalid id");
+  const { authorKind } = input;
+  if (authorKind !== "human" && (owned || input.humanOnly || authorKind !== "agent"))
+    throw badRequest("invalid author kind");
+  if (authorKind === "human" && input.hasAuthorDisplayName) throw relayError("share_op_rejected");
+  const agentName = authorKind === "agent" ? displayName(input.authorDisplayName) : undefined;
+  const rawAccountName = await accountDisplayName(input.lookupUserDisplayName, userId);
+  input.signal?.throwIfAborted();
+  await input.afterNameLookup?.();
+  const authorized = input.authorizeAppend();
+  if (authorized.share.workspaceId !== workspaceId) throw notFound();
+  const accountName = rawAccountName ?? "Unnamed";
+  const authorDisplayName = agentName ?? accountName;
+  const authorOwnerDisplayName = authorKind === "agent" ? accountName : undefined;
+  if (typeof input.body !== "string" || !input.body.isWellFormed())
+    throw badRequest("invalid body");
+  let body = input.body.replace(/\r\n?/gu, "\n").trimEnd();
+  if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
+  let rawTitle = "";
+  if (input.title !== undefined) {
+    if (typeof input.title !== "string" || !input.title.isWellFormed())
+      throw badRequest("invalid title");
+    rawTitle = input.title.trim();
+    if (rawTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
+  }
+  const redactFiles =
+    input.redactFileLinks && !owned
+      ? isWorkspaceSelector(authorized.effectiveSelector)
+        ? workspaceFileReach(authorized.effectiveSelector)
+        : null
+      : undefined;
+  if (redactFiles !== undefined) {
+    body = withheldLinkText(body, redactFiles);
+    if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
+    if (rawTitle) {
+      rawTitle = withheldLinkText(rawTitle, redactFiles).trim();
+      if (rawTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
+    }
+  }
+  const originId = "browser-chat";
+  const storedOrigin = owned
+    ? ownerBrowserOrigin(userId)
+    : namedShareOrigin(shareId, userId, originId);
+  const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, userId, id]))}`;
+  const replying = input.threadId !== undefined;
+  if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
+  if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
+  let lane: "posts" | "chat" | undefined;
+  if (!replying && !file) {
+    const type =
+      storage.listChannelCreates(workspaceId).find((group) => group.channelWireId === channelWireId)
+        ?.type ?? "both";
+    const asked = input.lane ?? (type === "chat" ? "chat" : "posts");
+    if ((asked !== "posts" && asked !== "chat") || (type !== "both" && type !== asked))
+      throw badRequest("invalid lane");
+    lane = asked;
+  }
+  const stored = storage.fetchChatMessage({ workspaceId, originId: storedOrigin, messageId });
+  const storedThread = stored && asRecord(JSON.parse(stored.payloadJson))?.threadId;
+  const ownThread = `browser-thread:${sha256Hex(JSON.stringify([shareId, userId, id]))}`;
+  const chatThread =
+    lane === "chat"
+      ? typeof storedThread === "string"
+        ? storedThread
+        : storage.findChannelChatThread(workspaceId, channelWireId!)
+      : null;
+  const createThread = !replying && (stored ? storedThread === ownThread : chatThread === null);
+  const threadId =
+    chatThread ?? (createThread ? ownThread : parseString(input.threadId, "threadId", 256));
+  if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
+  if (file && replying && commentFileOf(storage, workspaceId, threadId)?.objectId !== file.objectId)
+    throw notFound();
+  if (
+    !file &&
+    replying &&
+    storage.findThreadCreateChannelWireId(workspaceId, threadId) !== channelWireId
+  )
+    throw notFound();
+  const threadLane = file
+    ? "posts"
+    : (lane ?? storage.findThreadCreateLane(workspaceId, threadId) ?? "posts");
+  const threadTitle = createThread && !file && threadLane === "posts" ? rawTitle : "";
+  const parentMessageId =
+    input.parentMessageId === undefined
+      ? undefined
+      : parseString(input.parentMessageId, "parentMessageId", 256);
+  if (
+    parentMessageId !== undefined &&
+    (!replying ||
+      (!input.allowPostParent && threadLane !== "chat") ||
+      !parentMessageId.isWellFormed())
+  )
+    throw badRequest("invalid parent");
+  let wakes: BrowserPostWakes | undefined;
+  if (owned && !stored) {
+    const nowMs = input.nowMs();
+    const write = replying
+      ? { kind: "reply" as const, body, threadId, parentMessageId }
+      : { kind: "start" as const, body, lane: threadLane, channelId: channelWireId ?? "" };
+    const { targets } = await resolveWakeTargets(
+      browserWakeSources(storage, {
+        accountId: userId,
+        workspaceId,
+        threadId,
+        lane: threadLane,
+        nowMs,
+      }),
+      userId,
+      write,
+    );
+    input.signal?.throwIfAborted();
+    if (targets.length > 0) wakes = { accountId: userId, threadId, targets, nowMs };
+  }
+  const createdAtMs = input.nowMs();
+  const rawOps = [
+    ...(createThread
+      ? [
+          {
+            opKind: "chat.thread.create",
+            payload: file
+              ? {
+                  threadId,
+                  title: "",
+                  linkedPath: file.filePath,
+                  linkedAtMs: createdAtMs,
+                  createdAtMs,
+                }
+              : { threadId, title: threadTitle, channelWireId, lane: threadLane, createdAtMs },
+          },
+        ]
+      : []),
+    {
+      opKind: "chat.message.append",
+      payload: {
+        messageId,
+        threadId,
+        ...(parentMessageId === undefined ? {} : { parentMessageId }),
+        body,
+        authorKind,
+        authorDisplayName,
+        authorUserId: userId,
+        ...(authorOwnerDisplayName === undefined ? {} : { authorOwnerDisplayName }),
+        createdAtMs,
+      },
+    },
+  ].map((op, originSeq) => ({ ...op, originSeq, recordedAtMs: createdAtMs }));
+  const draftPayload = rawOps[rawOps.length - 1]!.payload;
+  const draft = messageFromOp(
+    { relaySeq: Number.MAX_SAFE_INTEGER, opKind: "chat.message.append", payload: draftPayload },
+    storedOrigin,
+  );
+  input.checkDraft?.(draft && threaded(draft, draftPayload, threadLane, createThread));
+  assertChatAuthorship(rawOps, userId);
+  assertClientLogProvenance(originId, rawOps);
+  let pendingChannel: string | undefined;
+  let pendingFile: ThreadFileBinding | undefined;
+  const resolver: ChatShareThreadResolver = {
+    channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+    threadChannelWireId: (tid) =>
+      storage.findThreadCreateChannelWireId(workspaceId, tid) ??
+      (tid === threadId ? pendingChannel : undefined),
+    threadFileBinding: (tid) =>
+      storage.findThreadCreateFileBinding(workspaceId, tid) ??
+      (tid === threadId ? pendingFile : undefined),
+    objectCurrentPath: (objectId) => storage.objectCurrentPath(workspaceId, objectId),
+    objectIdAtPath: (path) => storage.objectIdAtPath(workspaceId, path),
+    messageDeleted: (tid, msgId) => storage.messageDeleted(workspaceId, tid, msgId),
+  };
+  const ops = await parseNamedShareLogOps(rawOps, userId, () => rawAccountName);
+  for (const op of ops) {
+    const decision = filterOpForShareAppend(
+      authorized.effectiveSelector,
+      op.opKind,
+      op.payloadJson,
+      resolver,
+    );
+    if (!decision.allowed) throw relayError("share_op_rejected");
+    op.payloadJson = JSON.stringify(decision.payload);
+    if (op.opKind !== "chat.thread.create") continue;
+    const created = decision.payload as {
+      threadId?: unknown;
+      channelWireId?: unknown;
+      linkedPath?: unknown;
+    };
+    const boundChannel = isWorkspaceSelector(authorized.effectiveSelector)
+      ? typeof created.channelWireId === "string"
+        ? created.channelWireId
+        : null
+      : (chatSideOf(authorized.effectiveSelector)?.channelWireId ?? null);
+    if (boundChannel !== null) {
+      pendingChannel = boundChannel;
+    } else if (typeof created.linkedPath === "string" && created.linkedPath) {
+      const objectId = storage.objectIdAtPath(workspaceId, created.linkedPath);
+      if (!objectId) throw relayError("share_op_rejected");
+      const { linkedPath: _removed, ...rest } = created;
+      op.payloadJson = JSON.stringify({ ...rest, linkedObjectId: objectId });
+      pendingFile = { kind: "object", objectId };
+    }
+  }
+  const mentionBodies = input.refreshMentionAccountNames ? chatMentionBodies(ops) : [];
+  if (mentionBodies.length > 0) {
+    await input.refreshMentionAccountNames!(workspaceId, mentionBodies);
+    input.signal?.throwIfAborted();
+    await input.afterNameLookup?.();
+  }
+  const batchResult = storage.appendBrowserChatBatch({
+    workspaceId,
+    originId: storedOrigin,
+    messageId,
+    ops,
+    ...(wakes ? { wakes } : {}),
+    guard: () => {
+      const fresh = input.authorizeAppend();
+      if (fresh.share.workspaceId !== workspaceId) throw notFound();
+      if (input.redactFileLinks && !owned) {
+        const freshFiles = isWorkspaceSelector(fresh.effectiveSelector)
+          ? workspaceFileReach(fresh.effectiveSelector)
+          : null;
+        if (
+          withheldLinkText(body, freshFiles) !== body ||
+          (threadTitle && withheldLinkText(threadTitle, freshFiles) !== threadTitle)
+        )
+          throw new RelayError(
+            "server_busy",
+            "Your access to this workspace changed. Try again.",
+            503,
+          );
+      }
+      for (const op of ops) {
+        if (
+          !filterOpForShareAppend(fresh.effectiveSelector, op.opKind, op.payloadJson, resolver)
+            .allowed
+        )
+          throw relayError("share_op_rejected");
+      }
+    },
+  });
+  if (batchResult.inserted > 0) input.activity?.wakeLog(workspaceId);
+  const row = storage.fetchChatMessage({ workspaceId, originId: storedOrigin, messageId });
+  if (!row) throw notFound();
+  input.recheckRead?.();
+  const payload = JSON.parse(row.payloadJson) as unknown;
+  const parsedMessage = messageFromOp(
+    { relaySeq: row.relaySeq, opKind: row.opKind, payload },
+    row.originId,
+  );
+  const message =
+    parsedMessage &&
+    threaded(
+      redactFiles !== undefined && parsedMessage.body !== null
+        ? { ...parsedMessage, body: withheldLinkText(parsedMessage.body, redactFiles) }
+        : parsedMessage,
+      payload,
+      threadLane,
+      storage.findThreadFirstMessageId(workspaceId, parsedMessage.threadId) ===
+        parsedMessage.messageId,
+    );
+  return { threadId, messageId, message };
+}
+
 export function createNamedRecipientChat(options: {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   lookupUserDisplayName?: LogAuthorNameLookup;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
   claimPendingShares(userId: string, signal?: AbortSignal): Promise<void>;
   activity: Pick<DiscussionActivityHub, "wait" | "wakeLog">;
   publicOrigin: string;
@@ -299,7 +617,6 @@ export function createNamedRecipientChat(options: {
     userId: string,
     action: "read" | "append",
   ): AuthorizedShareAction;
-  transport: ReturnType<typeof createNamedShareTransportRoutes>;
   reads: Pick<ReturnType<typeof createShareReadQueries>, "chatResolverFor">;
 }) {
   const { storage, limits, requireShareAction } = options;
@@ -663,116 +980,40 @@ export function createNamedRecipientChat(options: {
           });
         }
         if (posting) {
-          if (channelWireId === null && !file) throw notFound();
-          action("append");
-          if (input.authorUserId !== undefined && input.authorUserId !== actor.userId)
-            throw relayError("authorship_mismatch");
-          const id = parseString(input.id, "id", 256);
-          if (!id.isWellFormed()) throw badRequest("invalid id");
-          const authorKind = input.authorKind;
-          // The owner's browser posts as the owner, never as an agent.
-          if (authorKind !== "human" && (owned || authorKind !== "agent"))
-            throw badRequest("invalid author kind");
-          if (authorKind === "human" && Object.hasOwn(input, "authorDisplayName"))
-            throw relayError("share_op_rejected");
-          const agentName =
-            authorKind === "agent" ? displayName(input.authorDisplayName) : undefined;
-          const accountName =
-            (await accountDisplayName(options.lookupUserDisplayName, actor.userId)) ?? "Unnamed";
-          controller.signal.throwIfAborted();
-          const authorDisplayName = agentName ?? accountName;
-          const authorOwnerDisplayName = authorKind === "agent" ? accountName : undefined;
-          if (typeof input.body !== "string" || !input.body.isWellFormed())
-            throw badRequest("invalid body");
-          const body = input.body.replace(/\r\n?/gu, "\n").trimEnd();
-          if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES)
-            throw badRequest("invalid body");
-          const originId = "browser-chat";
-          const storedOrigin = owned
-            ? ownerBrowserOrigin(actor.userId)
-            : namedShareOrigin(shareId, actor.userId, originId);
-          const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
-          // A new Group message starts a post, or joins the Group's chat, which is one conversation.
-          // A reply names its thread, and a reply in the chat may name the message it answers.
-          const replying = input.threadId !== undefined;
-          if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
-          if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
-          let lane: "posts" | "chat" | undefined;
-          if (!replying && !file) {
-            const type =
-              storage
-                .listChannelCreates(share.workspaceId)
-                .find((group) => group.channelWireId === channelWireId)?.type ?? "both";
-            const asked = input.lane ?? (type === "chat" ? "chat" : "posts");
-            if ((asked !== "posts" && asked !== "chat") || (type !== "both" && type !== asked))
-              throw badRequest("invalid lane");
-            lane = asked;
-          }
-          const stored = storage.fetchChatMessage({
-            workspaceId: share.workspaceId,
-            originId: storedOrigin,
-            messageId,
-          });
-          // A retry keeps the thread its first send chose, and makes it again only if that send made it.
-          const storedThread = stored && asRecord(JSON.parse(stored.payloadJson))?.threadId;
-          const ownThread = `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
-          const chatThread =
-            lane === "chat"
-              ? typeof storedThread === "string"
-                ? storedThread
-                : storage.findChannelChatThread(share.workspaceId, channelWireId!)
-              : null;
-          const createThread =
-            !replying && (stored ? storedThread === ownThread : chatThread === null);
-          const threadId =
-            chatThread ?? (createThread ? ownThread : parseString(input.threadId, "threadId", 256));
-          if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
-          // A reply on a file joins one of that file's threads, and a reply in a Group one of that Group's.
-          if (
-            file &&
-            replying &&
-            commentFileOf(storage, share.workspaceId, threadId)?.objectId !== file.objectId
-          )
-            throw notFound();
-          if (
-            !file &&
-            replying &&
-            storage.findThreadCreateChannelWireId(share.workspaceId, threadId) !== channelWireId
-          )
-            throw notFound();
-          const threadLane = file
-            ? "posts"
-            : (lane ?? storage.findThreadCreateLane(share.workspaceId, threadId) ?? "posts");
-          const parentMessageId =
-            input.parentMessageId === undefined
-              ? undefined
-              : parseString(input.parentMessageId, "parentMessageId", 256);
-          if (
-            parentMessageId !== undefined &&
-            (!replying || threadLane !== "chat" || !parentMessageId.isWellFormed())
-          )
-            throw badRequest("invalid parent");
-          let wakes: BrowserPostWakes | undefined;
-          if (owned && !stored) {
-            const nowMs = options.nowMs();
-            const write = replying
-              ? { kind: "reply" as const, body, threadId, parentMessageId }
-              : { kind: "start" as const, body, lane: threadLane, channelId: channelWireId ?? "" };
-            try {
-              const { targets } = await resolveWakeTargets(
-                browserWakeSources(storage, {
-                  accountId: actor.userId,
-                  workspaceId: share.workspaceId,
-                  threadId,
-                  lane: threadLane,
-                  nowMs,
-                }),
-                actor.userId,
-                write,
-              );
-              if (targets.length > 0) wakes = { accountId: actor.userId, threadId, targets, nowMs };
-            } catch (error) {
-              if (!(error instanceof TooManyWakeCandidates)) throw error;
+          try {
+            const { message } = await appendNamedChatMessage({
+              storage,
+              workspaceId: share.workspaceId,
+              shareId,
+              userId: actor.userId,
+              owned: Boolean(owned),
+              channelWireId,
+              file,
+              id: input.id,
+              body: input.body,
+              threadId: input.threadId,
+              lane: input.lane,
+              parentMessageId: input.parentMessageId,
+              authorKind: input.authorKind,
+              authorUserId: input.authorUserId,
+              hasAuthorDisplayName: Object.hasOwn(input, "authorDisplayName"),
+              authorDisplayName: input.authorDisplayName,
+              nowMs: options.nowMs,
+              signal: controller.signal,
+              lookupUserDisplayName: options.lookupUserDisplayName,
+              refreshMentionAccountNames: options.refreshMentionAccountNames,
+              activity: options.activity,
+              authorizeAppend: () => action("append"),
+              recheckRead: () => {
+                recheck();
+              },
+              checkDraft: (draft) => {
+                boundedJson({ shareId, ...place, message: draft });
+              },
+            });
+            return json({ shareId, ...place, message });
+          } catch (error) {
+            if (error instanceof TooManyWakeCandidates)
               return jsonResponse(
                 {
                   ok: false,
@@ -781,98 +1022,8 @@ export function createNamedRecipientChat(options: {
                 },
                 400,
               );
-            }
+            throw error;
           }
-
-          const append = async () => {
-            const createdAtMs = options.nowMs();
-            const ops = [
-              // The share's write binds a new thread on a file to the file's object, as the desktop's own Comments are.
-              ...(createThread
-                ? [
-                    {
-                      opKind: "chat.thread.create",
-                      payload: file
-                        ? {
-                            threadId,
-                            title: "",
-                            linkedPath: file.filePath,
-                            linkedAtMs: createdAtMs,
-                            createdAtMs,
-                          }
-                        : { threadId, title: "", channelWireId, lane: threadLane, createdAtMs },
-                    },
-                  ]
-                : []),
-              {
-                opKind: "chat.message.append",
-                payload: {
-                  messageId,
-                  threadId,
-                  ...(parentMessageId === undefined ? {} : { parentMessageId }),
-                  body,
-                  authorKind,
-                  authorDisplayName,
-                  authorUserId: actor.userId,
-                  ...(authorOwnerDisplayName === undefined ? {} : { authorOwnerDisplayName }),
-                  createdAtMs,
-                },
-              },
-            ].map((op, originSeq) => ({ ...op, originSeq, recordedAtMs: createdAtMs }));
-            const payload = ops[ops.length - 1]!.payload;
-            const draft = messageFromOp(
-              { relaySeq: Number.MAX_SAFE_INTEGER, opKind: "chat.message.append", payload },
-              storedOrigin,
-            );
-            boundedJson({
-              shareId,
-              ...place,
-              message: draft && threaded(draft, payload, threadLane, createThread),
-            });
-            return options.transport(
-              new Request(request.url, {
-                method: "POST",
-                signal: controller.signal,
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ originId, ops }),
-              }),
-              { route: "share-log", shareId },
-              actor,
-              messageId,
-              owned
-                ? { originId: storedOrigin, authorize: () => action("append"), wakes }
-                : undefined,
-            );
-          };
-          const result = await append();
-          if (!result.ok) return result;
-          await result.body?.cancel();
-          const row = storage.fetchChatMessage({
-            workspaceId: share.workspaceId,
-            originId: storedOrigin,
-            messageId,
-          });
-          if (!row) throw notFound();
-          recheck();
-          const payload = JSON.parse(row.payloadJson) as unknown;
-          const message = messageFromOp(
-            { relaySeq: row.relaySeq, opKind: row.opKind, payload },
-            row.originId,
-          );
-          return json({
-            shareId,
-            ...place,
-            message:
-              message &&
-              threaded(
-                message,
-                payload,
-                threadLane,
-                message !== null &&
-                  storage.findThreadFirstMessageId(share.workspaceId, message.threadId) ===
-                    message.messageId,
-              ),
-          });
         }
         const page = await readSharedChannelPage({
           storage,

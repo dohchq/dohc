@@ -6,6 +6,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { workspaceMemberGrantId } from "./storage/workspaceMembers";
 import {
+  workspaceChatAccess,
   workspaceFileReach,
   workspaceGroupReachable,
   type WorkspaceShareSelector,
@@ -18,6 +19,7 @@ import {
  */
 export interface PhoneMember {
   grantId: string;
+  shareId: string;
   selector: WorkspaceShareSelector;
 }
 
@@ -37,7 +39,7 @@ export function phoneMember(
   return authorized.ok &&
     authorized.share.workspaceId === workspaceId &&
     isWorkspaceSelector(authorized.effectiveSelector)
-    ? { grantId, selector: authorized.effectiveSelector }
+    ? { grantId, shareId: authorized.share.shareId, selector: authorized.effectiveSelector }
     : null;
 }
 
@@ -79,10 +81,19 @@ export function memberChatAnswer<Answer>(member: PhoneMember, answer: Answer): A
     if (key !== undefined && Object.hasOwn(OWNER_READ_STATE, key)) return OWNER_READ_STATE[key];
     if (typeof value === "string") return withheldLinkText(value, files);
     if (Array.isArray(value)) return value.map((item) => served(item));
-    if (value !== null && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([name, item]) => [name, served(item, name)]),
-      );
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      const entries = Object.entries(record).map(([name, item]) => [name, served(item, name)]);
+      if (record.kind === "group" && typeof record.channelWireId === "string") {
+        entries.push([
+          "access",
+          member.selector.reach.groupLevel(record.channelWireId) === null
+            ? "read-only"
+            : workspaceChatAccess(member.selector, record.channelWireId),
+        ]);
+      }
+      return Object.fromEntries(entries);
+    }
     return value;
   };
   return served(answer) as Answer;

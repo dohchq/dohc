@@ -3078,4 +3078,78 @@ describe("fault schedules", () => {
     expect(wait.pending).toHaveLength(0);
     stop();
   });
+
+  it("settles joined Member browser-prefixed posts, rewrites dependent reply parentMessageId, survives relaunch, and wipes on Sign out", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), "offline", {
+      status: 200,
+      body: {
+        ok: true,
+        result: {
+          ok: true,
+          state: "saved",
+          threadId: "browser-thread:abc",
+          messageId: "browser-message:post1",
+        },
+        cursor: "0.9.0.0123456789abcdef",
+      },
+    });
+    const replies = answerLater(server, "reply");
+    const first = launch(disk, server);
+    await ready(first.outbox);
+    const parent = await first.outbox.enqueue({
+      workspaceId: "ws-1",
+      write: { operation: "post", args: { groupId: "wire-team", title: "Hi", body: "First" } },
+    });
+    const child = await first.outbox.enqueue({
+      workspaceId: "ws-1",
+      write: {
+        operation: "reply",
+        args: { threadId: null, parentMessageId: parent.messageId!, body: "Follow up" },
+      },
+      dependsOn: parent.operationId,
+    });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+    first.stop();
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    expect(requests(server, "post")[1]).toEqual(requests(server, "post")[0]);
+    expect(replies[0]?.body).toEqual({
+      operationId: child.operationId,
+      threadId: "browser-thread:abc",
+      parentMessageId: "browser-message:post1",
+      body: "Follow up",
+    });
+    replies[0]?.answer({
+      status: 200,
+      body: {
+        ok: true,
+        result: {
+          ok: true,
+          state: "saved",
+          threadId: "browser-thread:abc",
+          messageId: "browser-message:reply1",
+        },
+        cursor: "0.10.0.0123456789abcdef",
+      },
+    });
+    await vi.waitFor(() => expect(record(second.outbox, child.sequence)?.stage).toBe("saved"));
+    second.outbox.handoff(ME, "ws-1", [
+      message("browser-message:post1"),
+      message("browser-message:reply1"),
+    ]);
+    await vi.waitFor(() => expect(second.outbox.state().records).toEqual([]));
+
+    await second.outbox.enqueue({
+      workspaceId: "ws-1",
+      write: { operation: "post", args: { groupId: "wire-team", body: "Wiped" } },
+    });
+    await second.outbox.signOut(async () => undefined);
+    expect(second.outbox.state().records).toEqual([]);
+    expect(onDisk(disk, 3)).toBeNull();
+    second.stop();
+  });
 });

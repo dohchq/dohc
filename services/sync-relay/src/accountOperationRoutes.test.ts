@@ -19,7 +19,10 @@ import {
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { asRecord } from "@dohc/workspace-core";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import { parseAccessRule } from "@dohc/security-contract/access-rules";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { namedShareOrigin } from "./relayLogInputs";
 import { PhoneChatContext } from "@dohc/workspace-contracts/chat-wakes";
 import {
   ChatsLoopbackEngine,
@@ -222,6 +225,7 @@ async function relay(
     activity?: DiscussionActivityHub;
     /** False for a server whose copies aren't running. */
     copies?: boolean;
+    lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   } = {},
 ) {
   const storage = await testStorage();
@@ -246,6 +250,9 @@ async function relay(
     resolvePhoneCapableAccountSession: options.resolve ?? resolveAccountSession,
     serverCopies: () => (options.copies === false ? undefined : run.copies),
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
+    ...(options.lookupUserDisplayName
+      ? { lookupUserDisplayName: options.lookupUserDisplayName }
+      : {}),
     discussionActivity: activity,
   });
   return { storage, engine, h, activity, ...run };
@@ -3991,11 +3998,19 @@ describe("a Member's phone reads in a workspace they joined", () => {
     const { storage, h } = await joined();
     const missing = await denialBytes(await h(op("notes", "groups", {}, asBen)));
     for (const operation of [
-      ...Object.keys(phoneWriteIds),
+      "send",
+      "react",
       "markRead",
       "retryWake",
       "chatContext",
       "openPage",
+      "createPage",
+      "renameFile",
+      "deleteFile",
+      "saveSketch",
+      "readSketch",
+      "listDocumentCollections",
+      "createDocumentCollectionRecord",
     ])
       expect(await denialBytes(await h(op("trip", operation, {}, asBen))), operation).toBe(missing);
     expect((await h(changes("0.0.0", { headers: asBen }))).status).toBe(200);
@@ -4224,5 +4239,540 @@ describe("a Member's phone reads in a workspace they joined", () => {
     const answer = await reading;
     expect(answer.status).toBe(503);
     expect(await json(answer)).toMatchObject({ code: "server_busy" });
+  });
+
+  async function joinedChat(options?: Parameters<typeof relay>[0]) {
+    const fixture = await relay(options);
+    const { storage, engine, activity } = fixture;
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    const seeded = await seedTrip(engine);
+    const write = logWriter(storage, activity);
+    write("moment.append", {
+      objectId: "object-plan",
+      path: "docs/plan.md",
+      versionId: "main",
+    });
+    write("moment.append", {
+      objectId: "object-budget",
+      path: "private/budget.md",
+      versionId: "main",
+    });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: { kind: "create", folder: "private", rule: RULE },
+        nowMs: 2,
+      }),
+    ).toMatchObject({ ok: true });
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const planningWire =
+      (await chats.getChannelWireId({
+        workspaceId: "trip",
+        channelId: seeded.planning.channelId,
+      })) ?? "wire-planning";
+    write("chat.channel.create", {
+      channelId: seeded.planning.channelId,
+      wireId: planningWire,
+      name: "Planning",
+      slug: "planning",
+      kind: "channel",
+      type: "both",
+      createdAtMs: 1,
+    });
+    write("chat.channel.create", {
+      channelId: "channel-readonly",
+      wireId: "wire-readonly",
+      name: "Announcements",
+      slug: "announcements",
+      kind: "channel",
+      type: "both",
+      createdAtMs: 1,
+    });
+    write("chat.channel.create", {
+      channelId: "channel-hidden",
+      wireId: "wire-hidden",
+      name: "Secret",
+      slug: "secret",
+      kind: "channel",
+      type: "both",
+      createdAtMs: 1,
+    });
+    write("chat.channel.create", {
+      channelId: "channel-dm",
+      wireId: "wire-dm",
+      name: "DM",
+      slug: "dm",
+      kind: "dm",
+      type: "chat",
+      createdAtMs: 1,
+    });
+    write("chat.channel.create", {
+      channelId: "channel-general",
+      wireId: GENERAL_CHANNEL_WIRE_ID,
+      name: "General",
+      slug: "general",
+      kind: "channel",
+      type: "both",
+      createdAtMs: 1,
+    });
+    write("chat.thread.create", {
+      threadId: "thread-stay",
+      title: "",
+      channelWireId: planningWire,
+      lane: "posts",
+      createdAtMs: 1,
+    });
+    write("chat.thread.create", {
+      threadId: "thread-hidden",
+      title: "",
+      channelWireId: "wire-hidden",
+      lane: "posts",
+      createdAtMs: 1,
+    });
+    write("chat.thread.create", {
+      threadId: "thread-file",
+      title: "",
+      linkedObjectId: "object-plan",
+      linkedAtMs: 1,
+      createdAtMs: 1,
+    });
+    expect(
+      storage.setWorkspaceGroupRule({
+        workspaceId: "trip",
+        channelWireId: "wire-readonly",
+        actorUserId: "ana",
+        level: "view",
+        nowMs: 3,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.setWorkspaceGroupRule({
+        workspaceId: "trip",
+        channelWireId: "wire-hidden",
+        actorUserId: "ana",
+        level: null,
+        nowMs: 4,
+      }),
+    ).toMatchObject({ ok: true });
+    return { ...fixture, ...seeded, planningWire };
+  }
+
+  it("exposes per-Group access on groupsFull and lets Members post and reply without ServerCopies", async () => {
+    let benName = "Ben";
+    const { storage, h, planningWire, engine } = await joinedChat({
+      copies: false,
+      lookupUserDisplayName: (userId) => (userId === "ben" ? benName : "Ana"),
+    });
+    const beforeCursor = (await feed(await h(changes("0.0.0", { headers: asBen })))).cursor;
+    const heldFeed = h(changes(String(beforeCursor), { hold: 5000, headers: asBen }));
+    const postRes = await answer(
+      await h(
+        op(
+          "trip",
+          "post",
+          {
+            operationId: "op-post-1",
+            groupId: planningWire,
+            title: "  Trains  ",
+            body: "Check @[docs/plan.md] and @[private/budget.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    const expectedThread = `browser-thread:${sha256Hex(JSON.stringify(["share-trip", "ben", "op-post-1"]))}`;
+    expect(await feed(await heldFeed)).toMatchObject({
+      changed: { chats: expect.arrayContaining([expectedThread]) },
+    });
+    const expectedMessage = `browser-message:${sha256Hex(JSON.stringify(["share-trip", "ben", "op-post-1"]))}`;
+    expect(postRes).toEqual({
+      ok: true,
+      state: "saved",
+      threadId: expectedThread,
+      messageId: expectedMessage,
+    });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const rows = storage
+      .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+      .rows.filter((row) => row.originId === memberOrigin);
+    expect(rows).toHaveLength(2);
+    expect(JSON.parse(rows[0]!.payloadJson)).toMatchObject({
+      threadId: expectedThread,
+      title: "Trains",
+      channelWireId: planningWire,
+      lane: "posts",
+    });
+    expect(JSON.parse(rows[1]!.payloadJson)).toMatchObject({
+      messageId: expectedMessage,
+      threadId: expectedThread,
+      authorKind: "human",
+      authorUserId: "ben",
+      authorDisplayName: "Ben",
+      body: "Check @[docs/plan.md] and (a file not shared here)",
+    });
+
+    // Idempotent retry with same operationId (even after display name changes) appends nothing.
+    benName = "Benjamin";
+    const retried = await answer(
+      await h(
+        op(
+          "trip",
+          "post",
+          {
+            operationId: "op-post-1",
+            groupId: planningWire,
+            title: "  Trains  ",
+            body: "Check @[docs/plan.md] and @[private/budget.md]",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(retried).toEqual(postRes);
+    expect(
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin),
+    ).toHaveLength(2);
+
+    // Reusing the same operationId with different content is refused without writing.
+    const conflict = await answer(
+      await h(
+        op(
+          "trip",
+          "post",
+          { operationId: "op-post-1", groupId: planningWire, body: "Changed body" },
+          asBen,
+        ),
+      ),
+    );
+    expect(conflict).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+
+    // Reply in reachable Group thread (including parentMessageId on posts lane).
+    const replyRes = await answer(
+      await h(
+        op(
+          "trip",
+          "reply",
+          {
+            operationId: "op-reply-1",
+            threadId: expectedThread,
+            parentMessageId: expectedMessage,
+            body: "Booked @[docs/plan.md] (not @[private/budget.md])",
+          },
+          asBen,
+        ),
+      ),
+    );
+    expect(replyRes).toMatchObject({ ok: true, state: "saved", threadId: expectedThread });
+    const afterReply = storage
+      .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+      .rows.filter((row) => row.originId === memberOrigin);
+    expect(afterReply).toHaveLength(3);
+    expect(JSON.parse(afterReply[2]!.payloadJson)).toMatchObject({
+      threadId: expectedThread,
+      parentMessageId: expectedMessage,
+      authorKind: "human",
+      authorUserId: "ben",
+      body: "Booked @[docs/plan.md] (not (a file not shared here))",
+    });
+
+    // Engine copies were never touched by Member writes.
+    expect(engine.methods()).not.toContain("chats.startChannelThread");
+    expect(engine.methods()).not.toContain("chats.sendMessage");
+
+    // groupsFull (with copies on) marks reachable Groups with per-Group read-write vs read-only access.
+    const readable = await joinedChat();
+    const chats = new ChatsLiveAdapter(readable.engine, "trip", { workspaceId: "trip" });
+    const ro = await chats.createChannel({ workspaceId: "trip", name: "Announcements" });
+    const roWire = (await chats.getChannelWireId({
+      workspaceId: "trip",
+      channelId: ro.channelId,
+    }))!;
+    readable.storage.appendLogBatch({
+      workspaceId: "trip",
+      originId: "origin-ro",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.channel.create",
+          recordedAtMs: 1,
+          payloadJson: JSON.stringify({
+            channelId: ro.channelId,
+            wireId: roWire,
+            name: "Announcements",
+            slug: "announcements",
+            kind: "channel",
+            type: "both",
+            createdAtMs: 1,
+          }),
+        },
+      ],
+    });
+    expect(
+      readable.storage.setWorkspaceGroupRule({
+        workspaceId: "trip",
+        channelWireId: roWire,
+        actorUserId: "ana",
+        level: "view",
+        nowMs: 10,
+      }),
+    ).toMatchObject({ ok: true });
+    const groupsFull = (await answer(await readable.h(op("trip", "groupsFull", {}, asBen))))
+      .groups as Array<{ channelWireId: string; access?: string }>;
+    expect(groupsFull.find((g) => g.channelWireId === readable.planningWire)?.access).toBe(
+      "read-write",
+    );
+    expect(groupsFull.find((g) => g.channelWireId === roWire)?.access).toBe("read-only");
+  });
+
+  it("refuses hidden, view-only, non-Group, file-comment, forged-author, decision, hidden-phone, and revoked Member writes", async () => {
+    let releaseLookup: (() => void) | undefined;
+    let enteredLookup: (() => void) | undefined;
+    const { storage, h, planningWire } = await joinedChat({
+      copies: false,
+      lookupUserDisplayName: async () => {
+        if (enteredLookup) {
+          enteredLookup();
+          await new Promise<void>((resolve) => {
+            releaseLookup = resolve;
+          });
+        }
+        return "Ben";
+      },
+    });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const countMemberRows = () =>
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin).length;
+
+    // Hidden Group, DM, General, nonexistent Group -> missing (no existence oracle).
+    for (const groupId of ["wire-hidden", "wire-dm", GENERAL_CHANNEL_WIRE_ID, "wire-none"]) {
+      expect(
+        await answer(
+          await h(op("trip", "post", { operationId: `op-${groupId}`, groupId, body: "hi" }, asBen)),
+        ),
+        groupId,
+      ).toMatchObject({ ok: false, refusal: "missing" });
+    }
+    // Hidden Group thread, file-comment thread, nonexistent thread -> missing.
+    for (const threadId of ["thread-hidden", "thread-file", "thread-none"]) {
+      expect(
+        await answer(
+          await h(
+            op("trip", "reply", { operationId: `op-${threadId}`, threadId, body: "hi" }, asBen),
+          ),
+        ),
+        threadId,
+      ).toMatchObject({ ok: false, refusal: "missing" });
+    }
+    // View-only Group -> refused.
+    expect(
+      await answer(
+        await h(
+          op("trip", "post", { operationId: "op-ro", groupId: "wire-readonly", body: "hi" }, asBen),
+        ),
+      ),
+    ).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+
+    // Forged author fields and decision fields -> 400.
+    for (const bad of [
+      { operationId: "op-a1", groupId: planningWire, body: "hi", authorKind: "agent" },
+      { operationId: "op-a2", groupId: planningWire, body: "hi", authorDisplayName: "Ana" },
+      { operationId: "op-a3", groupId: planningWire, body: "hi", authorUserId: "ana" },
+      { operationId: "op-d1", groupId: planningWire, body: "hi", needsDecision: true },
+      { operationId: "op-d2", groupId: planningWire, body: "hi", options: ["A", "B"] },
+    ]) {
+      expect((await h(op("trip", "post", bad, asBen))).status).toBe(400);
+    }
+    expect(
+      (
+        await h(
+          op(
+            "trip",
+            "reply",
+            {
+              operationId: "op-d3",
+              threadId: "thread-stay",
+              body: "A",
+              resolves: { messageId: "m-1", chosenOption: "A" },
+            },
+            asBen,
+          ),
+        )
+      ).status,
+    ).toBe(400);
+
+    // Mid-flight Show on phone off during lookup -> 404 and 0 rows written.
+    const waitLookup = new Promise<void>((resolve) => {
+      enteredLookup = resolve;
+    });
+    const inflight = h(
+      op(
+        "trip",
+        "post",
+        { operationId: "op-race-phone", groupId: planningWire, body: "hi" },
+        asBen,
+      ),
+    );
+    await waitLookup;
+    expect(storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false })).toBe(
+      true,
+    );
+    enteredLookup = undefined;
+    releaseLookup!();
+    expect((await inflight).status).toBe(404);
+    expect(countMemberRows()).toBe(0);
+
+    // Re-enable, then revoke mid-flight during lookup -> 404 and 0 rows written.
+    expect(storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: true })).toBe(
+      true,
+    );
+    const waitRevoke = new Promise<void>((resolve) => {
+      enteredLookup = resolve;
+    });
+    const revoking = h(
+      op(
+        "trip",
+        "post",
+        { operationId: "op-race-revoke", groupId: planningWire, body: "hi" },
+        asBen,
+      ),
+    );
+    await waitRevoke;
+    expect(
+      storage.removeWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        nowMs: 20,
+      }),
+    ).toMatchObject({ ok: true });
+    enteredLookup = undefined;
+    releaseLookup!();
+    expect((await revoking).status).toBe(404);
+    expect(countMemberRows()).toBe(0);
+
+    // Transaction-guard races: re-invite Ben and flip Show on phone off (and file reach) right inside appendBrowserChatBatch.
+    const raced = await joinedChat({ copies: false });
+    const racedOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const realAppend = raced.storage.appendBrowserChatBatch.bind(raced.storage);
+    const hideFileSpy = vi
+      .spyOn(raced.storage, "appendBrowserChatBatch")
+      .mockImplementationOnce((batch) => {
+        expect(
+          raced.storage.changeFolderRule({
+            workspaceId: "trip",
+            actorUserId: "ana",
+            change: { kind: "create", folder: "docs", rule: RULE },
+            nowMs: 30,
+          }),
+        ).toMatchObject({ ok: true });
+        return realAppend(batch);
+      });
+    expect(
+      (
+        await raced.h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-guard-file",
+              groupId: raced.planningWire,
+              body: "See @[docs/plan.md]",
+            },
+            asBen,
+          ),
+        )
+      ).status,
+    ).toBe(503);
+    hideFileSpy.mockRestore();
+
+    const hidePhoneSpy = vi
+      .spyOn(raced.storage, "appendBrowserChatBatch")
+      .mockImplementationOnce((batch) => {
+        raced.storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false });
+        return realAppend(batch);
+      });
+    expect(
+      (
+        await raced.h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-guard-phone",
+              groupId: raced.planningWire,
+              body: "Should roll back",
+            },
+            asBen,
+          ),
+        )
+      ).status,
+    ).toBe(404);
+    hidePhoneSpy.mockRestore();
+    expect(
+      raced.storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === racedOrigin),
+    ).toHaveLength(0);
+  });
+
+  it("refuses a joined Member's post to a chat-only Group without appending into its chat lane", async () => {
+    const { h, storage } = await joinedChat({ copies: false });
+    const chatOnlyWire = "wire-chat-only";
+    storage.appendLogBatch({
+      workspaceId: "trip",
+      originId: "owner-chat-only",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.channel.create",
+          payloadJson: JSON.stringify({
+            channelId: "channel-chat-only",
+            wireId: chatOnlyWire,
+            name: "Watercooler",
+            slug: "watercooler",
+            kind: "channel",
+            type: "chat",
+            createdAtMs: 5,
+          }),
+          recordedAtMs: 5,
+        },
+      ],
+    });
+    const res = await h(
+      op(
+        "trip",
+        "post",
+        { operationId: "op-chat-only", groupId: chatOnlyWire, body: "Should refuse" },
+        asBen,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await json(res)).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "refused", reason: "Couldn't send" },
+    });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    expect(
+      storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin),
+    ).toHaveLength(0);
   });
 });

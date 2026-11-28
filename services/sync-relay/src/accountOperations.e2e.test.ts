@@ -1,3 +1,4 @@
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -1185,6 +1186,159 @@ it.skipIf(engine.missing)(
     ]);
     await third.stop();
     expect(failures(errors)).toEqual([]);
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "lands a joined Member's phone Group post and reply on the owner's desktop with named provenance and redacted links",
+  async () => {
+    const { storage, owner, openCopy, relay, relayUrl } = await relayAndOwner((userId) =>
+      userId === "ben" ? "Ben" : "Ana",
+    );
+    await owner.request(
+      "chats.readState.seedAccount",
+      { accountUserId: "owner", seedLocal: true },
+      owner.workspace,
+    );
+    const ownerChats = new ChatsLiveAdapter(owner.client, owner.workspace, {
+      workspaceId: WORKSPACE,
+    });
+    const main = await owner.request("versions.ensureMain", {}, owner.workspace);
+    for (const [path, text] of [
+      ["docs/plan.md", "# Plan\n"],
+      ["private/budget.md", "# Secret\n"],
+    ] as const) {
+      await owner.request(
+        "versionedText.write",
+        {
+          versionId: main.id as string,
+          path,
+          text,
+          origin: "api",
+          publish: true,
+          createOnly: true,
+        },
+        owner.workspace,
+      );
+    }
+    await ownerChats.createChannel({
+      workspaceId: WORKSPACE,
+      name: "Planning",
+    });
+    await owner.sync();
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: WORKSPACE,
+        actorUserId: "owner",
+        workspaceName: "Trip",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: WORKSPACE,
+        actorUserId: "owner",
+        change: {
+          kind: "create",
+          folder: "private",
+          rule: parseAccessRule("people:\n  cara@dohc.test: edit\n")!,
+        },
+        nowMs: Date.now(),
+      }),
+    ).toMatchObject({ ok: true });
+    await openCopy();
+
+    const phoneCall = async (
+      userId: string,
+      operation: string,
+      args: Record<string, JsonValue>,
+    ) => {
+      const response = await relay(
+        new Request(`${relayUrl}/sync/${WORKSPACE}/ops/${operation}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer session:${userId}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(args),
+        }),
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      return ((await response.json()) as { result: Record<string, unknown> }).result;
+    };
+
+    const groupsFull = (await phoneCall("ben", "groupsFull", {})).groups as Array<{
+      id: string;
+      name: string;
+      channelWireId: string;
+      access?: string;
+    }>;
+    const listed = groupsFull.find((g) => g.name === "Planning")!;
+    expect(listed.channelWireId).toBeTruthy();
+    expect(listed.access).toBe("read-write");
+
+    const posted = await phoneCall("ben", "post", {
+      operationId: "member-e2e-post-1",
+      groupId: listed.channelWireId,
+      title: "Arrival",
+      body: "Read @[docs/plan.md] and @[private/budget.md]",
+    });
+    expect(posted).toMatchObject({ ok: true, state: "saved" });
+    const threadId = String(posted.threadId);
+    const postMessageId = String(posted.messageId);
+
+    const replied = await phoneCall("ben", "reply", {
+      operationId: "member-e2e-reply-1",
+      threadId,
+      parentMessageId: postMessageId,
+      body: "Landing at noon",
+    });
+    expect(replied).toMatchObject({ ok: true, state: "saved", threadId });
+
+    await owner.sync();
+    const ownerThread = await readChat(engineChats(owner.client, owner.workspace), { threadId });
+    expect(ownerThread).toMatchObject({
+      ok: true,
+      thread: { id: threadId, title: "Arrival" },
+      messages: [
+        expect.objectContaining({
+          id: postMessageId,
+          authorKind: "human",
+          authorDisplayName: "Ben",
+          body: "Read @[docs/plan.md] and (a file not shared here)",
+        }),
+        expect.objectContaining({
+          id: String(replied.messageId),
+          parentMessageId: postMessageId,
+          authorKind: "human",
+          authorDisplayName: "Ben",
+          body: "Landing at noon",
+        }),
+      ],
+    });
+    expect(await phoneCall("owner", "chat", { threadId })).toMatchObject({
+      ok: true,
+      messages: [
+        expect.objectContaining({ id: postMessageId }),
+        expect.objectContaining({ id: String(replied.messageId) }),
+      ],
+    });
+    expect(await phoneCall("ben", "chat", { threadId })).toMatchObject({
+      ok: true,
+      messages: [
+        expect.objectContaining({
+          id: postMessageId,
+          body: "Read @[docs/plan.md] and (a file not shared here)",
+        }),
+        expect.objectContaining({ id: String(replied.messageId), body: "Landing at noon" }),
+      ],
+    });
   },
   120_000,
 );

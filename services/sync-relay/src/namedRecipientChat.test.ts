@@ -1,6 +1,7 @@
 import { createShareSummaries } from "./shareSummaries";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
+import { appendNamedChatMessage } from "./namedRecipientChat";
 import {
   RELAY_EXCHANGE_KEY,
   SHARE_WEB_ORIGIN,
@@ -643,6 +644,71 @@ it("answers a relay deadline with 503 and never appends after a stalled name loo
     await pending;
     await vi.advanceTimersByTimeAsync(0);
   }
+  expect(f.storage.fetchLogPage({ workspaceId, sinceRelaySeq: 7, limit: 100 }).rows).toHaveLength(
+    0,
+  );
+});
+
+it("enforces human-only authorship and redacts out-of-reach file links in appendNamedChatMessage", async () => {
+  const f = await fixture();
+  const selector = {
+    kind: "workspace" as const,
+    role: "member" as const,
+    reach: f.storage.memberReach(workspaceId, "alice", "member", "edit"),
+  };
+  const authorizeAppend = () => ({
+    share: { shareId, workspaceId },
+    effectiveSelector: selector,
+  });
+  await expect(
+    appendNamedChatMessage({
+      storage: f.storage,
+      workspaceId,
+      shareId,
+      userId: "alice",
+      humanOnly: true,
+      channelWireId,
+      id: "agent-attempt",
+      body: "hi",
+      authorKind: "agent",
+      authorDisplayName: "Bot",
+      nowMs: () => 10,
+      authorizeAppend,
+    }),
+  ).rejects.toMatchObject({ statusCode: 400, code: "bad_request" });
+  await expect(
+    appendNamedChatMessage({
+      storage: f.storage,
+      workspaceId,
+      shareId,
+      userId: "alice",
+      humanOnly: true,
+      channelWireId,
+      id: "spoof-name",
+      body: "hi",
+      authorKind: "human",
+      hasAuthorDisplayName: true,
+      authorDisplayName: "Owner",
+      nowMs: () => 10,
+      authorizeAppend,
+    }),
+  ).rejects.toMatchObject({ code: "share_op_rejected" });
+  await expect(
+    appendNamedChatMessage({
+      storage: f.storage,
+      workspaceId,
+      shareId,
+      userId: "alice",
+      humanOnly: true,
+      channelWireId,
+      id: "spoof-user",
+      body: "hi",
+      authorKind: "human",
+      authorUserId: "owner",
+      nowMs: () => 10,
+      authorizeAppend,
+    }),
+  ).rejects.toMatchObject({ code: "authorship_mismatch" });
   expect(f.storage.fetchLogPage({ workspaceId, sinceRelaySeq: 7, limit: 100 }).rows).toHaveLength(
     0,
   );

@@ -966,7 +966,9 @@ export function createSyncRelayHandler({
         limiter: accountOperationRateLimiter,
         feedWaits: accountFeedWaits,
         wakeWaits: chatWakeWaits,
+        activity: discussionActivity,
         lookupUserDisplayName,
+        refreshMentionAccountNames,
         refreshAccountEmail: (userId, signal) =>
           claimPendingShares(userId, signal, MEMBER_IDENTITY_MAX_AGE_MS),
         serverUrl: relayPublicOrigin,
@@ -1054,11 +1056,11 @@ export function createSyncRelayHandler({
         limits: namedBrowserSessionLimits,
         resolveActor,
         lookupUserDisplayName,
+        refreshMentionAccountNames,
         claimPendingShares,
         activity: discussionActivity,
         nowMs,
         requireShareAction,
-        transport: respondToNamedShareTransport,
         reads: { chatResolverFor },
       })
     : undefined;

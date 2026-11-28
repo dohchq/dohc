@@ -144,15 +144,15 @@ export const MessageRow = memo(function MessageRow({
             {...(onReply ? { onReply } : {})}
             theme={theme}
           />
-        ) : message.reactions ? (
+        ) : message.reactions ||
+          (onReply && (message.replyable || (message.local === undefined && message.threadId))) ? (
           <View style={styles.reactions}>
-            {message.reactions.map((reaction) => (
+            {(message.reactions ?? []).map((reaction) => (
               <ReactionChip key={reaction.emoji} reaction={reaction} theme={theme} />
             ))}
-          </View>
-        ) : message.replyable && onReply ? (
-          <View style={styles.reactions}>
-            <ReplyButton onPress={() => onReply(message)} theme={theme} />
+            {onReply && (message.replyable || (message.local === undefined && message.threadId)) ? (
+              <ReplyButton onPress={() => onReply(message)} theme={theme} />
+            ) : null}
           </View>
         ) : null}
         {message.reactionMarks?.length && actions ? (

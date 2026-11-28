@@ -17,11 +17,13 @@ import {
   createConversationWrites,
   createWriteScope,
   fieldChanged,
+  groupForStream,
   lanesOf,
   replyParentGone,
   replyWrite,
   routeReply,
   threadReplyTarget,
+  writableJoinedThread,
   type Draft,
   type WriteActivation,
   type WriteOutbox,
@@ -985,6 +987,60 @@ describe("a reply's clear", () => {
       text: "",
       chosen: "post",
     });
+  });
+});
+
+describe("joined Member per-Group chat gating", () => {
+  const groups = [
+    {
+      id: "g-rw",
+      channelWireId: "wire-rw",
+      kind: "group" as const,
+      access: "read-write" as const,
+      threadIds: ["thread-rw"],
+    },
+    {
+      id: "g-ro",
+      channelWireId: "wire-ro",
+      kind: "group" as const,
+      access: "read-only" as const,
+      threadIds: ["thread-ro"],
+    },
+    { id: "g-nowire", kind: "group" as const, access: "read-write" as const, threadIds: ["t-nw"] },
+    {
+      id: "dm-1",
+      channelWireId: "wire-dm",
+      kind: "dm" as const,
+      access: "read-write" as const,
+      threadIds: ["thread-dm"],
+    },
+  ];
+
+  it("matches streams by engine ID or wire ID and allows writes only on read-write Groups", async () => {
+    expect(groupForStream(groups, "g-rw")?.id).toBe("g-rw");
+    expect(groupForStream(groups, "wire-rw")?.id).toBe("g-rw");
+    expect(groupForStream(groups, "missing")).toBeNull();
+    expect(writableJoinedThread(groups, "thread-rw")).toBe(true);
+    expect(writableJoinedThread(groups, "thread-ro")).toBe(false);
+    expect(writableJoinedThread(groups, "t-nw")).toBe(false);
+    expect(writableJoinedThread(groups, "thread-dm")).toBe(false);
+    expect(writableJoinedThread(groups, "thread-file-comment")).toBe(false);
+
+    vi.stubEnv("EXPO_PUBLIC_DOHC_PHONE_WRITES", "1");
+    vi.resetModules();
+    try {
+      const phone = await import("../server/phoneWrites");
+      expect(phone.writesIn({ joined: true })).toBe(false);
+      expect(phone.canWriteGroupChat({ joined: true }, groups[0])).toBe(true);
+      expect(phone.canWriteGroupChat({ joined: true }, groups[1])).toBe(false);
+      expect(phone.canWriteGroupChat({ joined: true }, groups[2])).toBe(false);
+      expect(phone.canWriteGroupChat({ joined: true }, groups[3])).toBe(false);
+      expect(phone.canWriteGroupChat({ joined: true }, null)).toBe(false);
+      expect(phone.canWriteGroupChat({ joined: false }, null)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });
 

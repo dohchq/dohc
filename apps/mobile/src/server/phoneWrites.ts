@@ -7,6 +7,24 @@
 // whatever this says, over its own in-memory outbox, and never reaches a server.
 export const phoneWrites = process.env.EXPO_PUBLIC_DOHC_PHONE_WRITES === "1";
 
-/** Whether the open workspace takes chat writes and live page edits: never one the account joined rather than owns. */
+/** Whether the open workspace takes owner writes (chat, files, sketches, live pages): never a joined workspace. */
 export const writesIn = (data: { readonly joined: boolean } | null) =>
   phoneWrites && data !== null && !data.joined;
+
+export interface GroupChatAccess {
+  readonly kind: "group" | "dm" | "agent";
+  readonly channelWireId?: string;
+  readonly access?: "read-write" | "read-only";
+}
+
+export const isWritableJoinedGroup = (group: GroupChatAccess | null | undefined): boolean =>
+  group != null &&
+  group.kind === "group" &&
+  group.channelWireId !== undefined &&
+  group.access === "read-write";
+
+/** Per-Group chat write gate: owners use `writesIn`; joined Members need a reachable read-write Group with a wire ID. */
+export const canWriteGroupChat = (
+  data: { readonly joined: boolean } | null,
+  group: GroupChatAccess | null | undefined,
+): boolean => phoneWrites && data !== null && (!data.joined || isWritableJoinedGroup(group));

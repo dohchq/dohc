@@ -499,4 +499,60 @@ describe("a joined workspace's cursor", () => {
     expect(earlierCursor(`0.5.2.${reach}`, "0.4.3.fedcba9876543210")).toBe("0.4.2");
     expect(earlierCursor(`0.5.2.${reach}`, "0.4.3")).toBe("0.4.2");
   });
+
+  it("preserves per-Group channelWireId and access from groupsFull", async () => {
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/groupsFull",
+      answered({
+        ok: true,
+        groups: [
+          {
+            id: "channel-1",
+            channelWireId: "wire-team",
+            name: "Team",
+            kind: "group",
+            access: "read-write",
+            threads: [],
+          },
+          {
+            id: "channel-2",
+            channelWireId: "wire-news",
+            name: "News",
+            kind: "group",
+            access: "read-only",
+            threads: [],
+          },
+          {
+            id: "channel-3",
+            name: "No wire",
+            kind: "group",
+            access: "unknown",
+            threads: [],
+          },
+        ],
+      }),
+    );
+    const client = createServerClient({
+      origin: server.origin,
+      token: "tok",
+      fetch: server.fetch,
+      signal: new AbortController().signal,
+    });
+    const read = await readChats(client, "ws-a", new AbortController().signal);
+    expect(read.value).toEqual([
+      expect.objectContaining({
+        id: "channel-1",
+        channelWireId: "wire-team",
+        access: "read-write",
+      }),
+      expect.objectContaining({
+        id: "channel-2",
+        channelWireId: "wire-news",
+        access: "read-only",
+      }),
+      expect.not.objectContaining({ channelWireId: expect.anything(), access: expect.anything() }),
+    ]);
+  });
 });
