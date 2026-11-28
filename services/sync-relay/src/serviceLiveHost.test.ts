@@ -33,6 +33,7 @@ import {
 } from "./storage/serviceActivation.js";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery.js";
 import { closeResolvedLineage } from "./storage/liveDocumentAuthority.js";
+import { liveJournalCut } from "./storage/liveUpdateJournal.js";
 import { initialAcceptedHistoryDigest } from "./liveAcceptedHistory.js";
 import { ServiceActivationDriver } from "./serviceActivationDriver.js";
 import { ServiceHostedReplication } from "./serviceHostedReplication.js";
@@ -4165,6 +4166,29 @@ it("records an adoption whose reply was lost before a replacement closed its not
   expect(
     o.raw.prepare("SELECT lineage_state,admission_state FROM sync_relay_live_documents").all(),
   ).toEqual([{ lineage_state: "current", admission_state: "closed" }]);
+});
+
+it("a retirement reads no closed note whose journal moved past the cursor it accepted", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.acceptEdit("typed");
+  const storage = o.f.storage as StorageContext;
+  storage.tx(() => closeResolvedLineage(storage, o.document, 20));
+  const open = readServiceActivationRetirement(storage, o.document)!;
+  const key = {
+    objectId: open.objectId,
+    lineageClaimId: open.lineageClaimId,
+    activationId: open.activationId,
+    restoreFenceGeneration: open.restoreFenceGeneration,
+    acceptedThrough: open.acceptedThrough,
+  };
+  expect(key.acceptedThrough).toBeGreaterThan(0);
+  expect(liveJournalCut(storage, o.document, key).kind).toBe("cut");
+  const earlier = { ...key, acceptedThrough: key.acceptedThrough - 1 };
+  storage.db
+    .prepare("UPDATE sync_relay_service_activations SET retire_accepted_cursor=?")
+    .run(earlier.acceptedThrough);
+  expect(liveJournalCut(storage, o.document, earlier).kind).toBe("refused");
 });
 
 // Proves: a retirement records what the engine applied a page at a time, at

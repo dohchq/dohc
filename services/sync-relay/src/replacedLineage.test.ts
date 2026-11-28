@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 import type { StorageContext } from "./storage/context.js";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
 import { pauseLiveRoom } from "./storage/liveRoomPauses.js";
-import { readServiceActivationRetirement } from "./storage/serviceActivationRetirement.js";
+import {
+  readServiceActivationRetirement,
+  type RetirementKey,
+} from "./storage/serviceActivationRetirement.js";
+import { liveJournalCut } from "./storage/liveUpdateJournal.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import {
   markdownToYDoc,
@@ -491,4 +495,58 @@ it("a claim the resolve did not name can't register against the retired row", as
   );
   expect(String((outcome as Error).message)).toMatch(/lineage-conflict/u);
   expect(liveDocumentRows(note)).toEqual(before);
+});
+
+describe("a retirement reading the journal of the note its resolve closed", () => {
+  async function retiring() {
+    const note = await sharedNote();
+    expect(await activate(note, validation())).toMatchObject({ replayed: false });
+    resolveTypedNote(
+      note,
+      successor(note.document, note.path, "Merged on the owner's desktop\n", 3),
+    );
+    const storage = note.deployment.storage as unknown as StorageContext;
+    const open = readServiceActivationRetirement(storage, note.document)!;
+    const key: RetirementKey = {
+      objectId: open.objectId,
+      lineageClaimId: open.lineageClaimId,
+      activationId: open.activationId,
+      restoreFenceGeneration: open.restoreFenceGeneration,
+      acceptedThrough: open.acceptedThrough,
+    };
+    const read = (change: Partial<RetirementKey> = {}) =>
+      liveJournalCut(storage, note.document, { ...key, ...change }).kind;
+    return { note, key, read };
+  }
+
+  it("reads it for the open retirement it names", async () => {
+    const { read } = await retiring();
+    expect(read()).toBe("cut");
+  });
+
+  it.each<[string, (key: RetirementKey) => Partial<RetirementKey>]>([
+    ["activation", () => ({ activationId: `ordinary-activation-${"c".repeat(64)}` })],
+    ["claim", () => ({ lineageClaimId: "c".repeat(64) })],
+    ["restore generation", (key) => ({ restoreFenceGeneration: key.restoreFenceGeneration + 1 })],
+    ["accepted cursor", (key) => ({ acceptedThrough: key.acceptedThrough + 1 })],
+  ])("refuses a retirement with another %s", async (_, change) => {
+    const { key, read } = await retiring();
+    expect(read(change(key))).toBe("refused");
+  });
+
+  it("refuses once the retirement completed", async () => {
+    const { note, read } = await retiring();
+    hostRetires(note);
+    expect(read()).toBe("refused");
+  });
+
+  it("refuses an activation from another replication stream", async () => {
+    const { note, read } = await retiring();
+    note.raw
+      .prepare(
+        `UPDATE ${SERVICE_ACTIVATIONS} SET source_json=json_set(source_json,'$.streamIdentity','another-stream')`,
+      )
+      .run();
+    expect(read()).toBe("refused");
+  });
 });
