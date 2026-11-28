@@ -1597,4 +1597,121 @@ describe("prefetching pages", () => {
     await settled();
     expect(reads(server)).toBe(1);
   });
+
+  it("promotes an in-flight read-ahead when a person opens that same view instead of aborting and restarting it", async () => {
+    const a = deferred<Answer>();
+    const b = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-promote/ops/documentRead",
+      () => a.promise,
+      () => b.promise,
+    );
+    server.on("GET", feedPath("ws-promote", "0.1.1"), held);
+    const { data } = open(server, "ws-promote");
+    data.prefetchPages(["a.md", "b.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    const [callA, callB] = server.calls.filter((call) => call.path.endsWith("/ops/documentRead"));
+
+    data.subscribe(views.page("a.md"), () => {});
+    expect(reads(server)).toBe(2);
+    expect(callA?.signal.aborted).toBe(false);
+    expect(callB?.signal.aborted).toBe(true);
+    expect(data.state(views.page("a.md")).loading).toBe(true);
+
+    a.resolve(page("Promoted"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md"))).toMatchObject({
+        value: { kind: "page", markdown: "Promoted" },
+        loading: false,
+      }),
+    );
+    expect(reads(server)).toBe(3);
+  });
+
+  it("surfaces errors when a promoted read-ahead fails", async () => {
+    const a = deferred<Answer>();
+    const server = testServer();
+    server.on("POST", "/sync/ws-promote-err/ops/documentRead", () => a.promise);
+    const { data } = open(server, "ws-promote-err");
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    data.subscribe(views.page("a.md"), () => {});
+    expect(data.state(views.page("a.md")).loading).toBe(true);
+    a.resolve({ status: 503, body: { ok: false, error: "busy", code: "server_busy" } });
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md"))).toMatchObject({
+        loading: false,
+        problem: "server-busy",
+        failures: 1,
+      }),
+    );
+  });
+
+  it("caps prefetchAhead views at PREFETCH_AT_ONCE, yields and requeues on a different tap, and ignores background errors", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const waiters: ReturnType<typeof deferred<Answer>>[] = [];
+    const foreground = deferred<Answer>();
+    const server = testServer();
+    server.on("POST", "/sync/ws-ahead/ops/chat", () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const wait = deferred<Answer>();
+      waiters.push(wait);
+      return wait.promise.finally(() => {
+        active -= 1;
+      });
+    });
+    server.on("POST", "/sync/ws-ahead/ops/documentRead", () => foreground.promise);
+    server.on("POST", "/sync/ws-ahead/ops/listFiles", {
+      status: 503,
+      body: { ok: false, error: "busy", code: "server_busy" },
+    });
+    server.on("GET", feedPath("ws-ahead", "0.1.1"), held);
+    const { data } = open(server, "ws-ahead");
+    data.prefetchAhead([
+      views.stream("g-1"),
+      views.stream("g-2"),
+      views.stream("g-3"),
+      views.files,
+    ]);
+    await vi.waitFor(() => expect(waiters).toHaveLength(PREFETCH_AT_ONCE));
+    expect(maxActive).toBe(PREFETCH_AT_ONCE);
+
+    const firstCalls = server.calls.filter((call) => call.path.endsWith("/ops/chat"));
+    data.subscribe(views.page("open.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    expect(firstCalls.every((call) => call.signal.aborted)).toBe(true);
+    waiters.shift()!.resolve({ status: 503 });
+    waiters.shift()!.resolve({ status: 503 });
+    foreground.resolve(page("Opened"));
+
+    const streamAnswer = (id: string): Answer =>
+      ops(
+        {
+          ok: true,
+          stream: {
+            group: { id, name: id, kind: "group" },
+            items: [],
+            readPosition: null,
+          },
+        },
+        "0.1.1",
+      );
+    await vi.waitFor(() => expect(waiters.length).toBeGreaterThanOrEqual(1));
+    while (
+      count(server, "/sync/ws-ahead/ops/listFiles") === 0 ||
+      waiters.length > 0 ||
+      !data.state(views.stream("g-1")).value ||
+      !data.state(views.stream("g-2")).value ||
+      !data.state(views.stream("g-3")).value
+    ) {
+      if (waiters.length > 0) waiters.shift()!.resolve(streamAnswer("g"));
+      await settled();
+    }
+    expect(maxActive).toBe(PREFETCH_AT_ONCE);
+    expect(data.state(views.files)).toMatchObject({ value: null, problem: null, failures: 0 });
+  });
 });

@@ -48,6 +48,7 @@ export const MessageRow = memo(function MessageRow({
   continued,
   afterExtras,
   onOpenReplies,
+  onPrefetchReplies,
   actions,
   react,
   onReply,
@@ -62,6 +63,7 @@ export const MessageRow = memo(function MessageRow({
   continued: boolean;
   afterExtras: boolean;
   onOpenReplies?(message: Message): void;
+  onPrefetchReplies?(message: Message): void;
   /** What a message only this phone has offers, and a reaction it keeps. */
   actions?: LocalActions;
   /** Reactions, where writes are on. */
@@ -161,6 +163,7 @@ export const MessageRow = memo(function MessageRow({
             style={styles.replies}
             hitSlop={slopTo(22)}
             accessibilityRole="button"
+            onPressIn={onPrefetchReplies ? () => onPrefetchReplies(message) : undefined}
             onPress={onOpenReplies ? () => onOpenReplies(message) : undefined}
             accessibilityLabel={`${message.replies.count} replies, last at ${message.replies.last}`}
           >

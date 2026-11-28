@@ -19,6 +19,26 @@ export type ShownValue =
 
 const EMPTY: ShownValue = { kind: "empty" };
 const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+let fieldOffset = Number.NaN;
+let dayFormat: Intl.DateTimeFormat;
+let momentFormat: Intl.DateTimeFormat;
+function ensureFieldFormats() {
+  const offset = new Date().getTimezoneOffset();
+  if (offset === fieldOffset) return;
+  fieldOffset = offset;
+  dayFormat = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+  momentFormat = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 const plain = (value: RecordValue): string =>
   Array.isArray(value)
@@ -29,21 +49,14 @@ const plain = (value: RecordValue): string =>
 
 /** A date as the phone's locale writes it: a day alone, or a day and time. Anything else as it is. */
 function date(value: string): string {
+  ensureFieldFormats();
   const day = DAY.exec(value);
   if (day) {
     const shown = new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]));
-    return shown.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    return dayFormat.format(shown);
   }
   const moment = new Date(value);
-  return Number.isNaN(moment.getTime())
-    ? value
-    : moment.toLocaleString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
+  return Number.isNaN(moment.getTime()) ? value : momentFormat.format(moment);
 }
 
 /** One field's value. `files` names attached files by ID; `relationLabels` maps JSON-encoded keys to labels. */

@@ -26,8 +26,20 @@ import { reviewControls, reviewStatus } from "./reviewControls";
 // an account-wide approval's way back. Answers land only while their request is the latest and their sign-in and
 // workspace are still open. Errors show in place, as on any screen outside the tabs.
 
-const publishedOn = (ms: number) =>
-  new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+let publishedOffset = Number.NaN;
+let publishedDate: Intl.DateTimeFormat;
+const publishedOn = (ms: number) => {
+  const offset = new Date().getTimezoneOffset();
+  if (offset !== publishedOffset) {
+    publishedOffset = offset;
+    publishedDate = new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  }
+  return publishedDate.format(ms);
+};
 export function AppReviewScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { apps, runner } = useAccount();
@@ -37,24 +49,54 @@ export function AppReviewScreen() {
   );
 }
 
-type Loaded<T> = { readonly value: T | null; readonly problem: ServerProblemKind | null };
+type Loaded<T> = {
+  readonly value: T | null;
+  readonly problem: ServerProblemKind | null;
+  readonly fresh: boolean;
+};
 
 /** Reads whose answers replace each other, landing only while `apps` is live. */
-function useLatest<T>(apps: WorkspaceApps, read: () => Promise<T>) {
-  const [state, setState] = useState<Loaded<T>>({ value: null, problem: null });
+function useLatest<T>(
+  apps: WorkspaceApps,
+  read: () => Promise<T>,
+  initial: T | null = null,
+  clearOnDenied = false,
+) {
+  const [state, setState] = useState<Loaded<T>>(() => ({
+    value: initial,
+    problem: null,
+    fresh: false,
+  }));
   const reads = useRef(requestGenerations());
+  const loading = useRef(false);
   const load = useCallback(() => {
     const request = reads.current.next();
+    loading.current = true;
     const lands = () => apps.isLive() && reads.current.isLatest(request);
     read().then(
-      (value) => lands() && setState({ value, problem: null }),
+      (value) => {
+        if (!lands()) return;
+        loading.current = false;
+        setState({ value, problem: null, fresh: true });
+      },
       (error: unknown) => {
         const problem = shownProblem(error);
-        if (lands() && problem !== null) setState((previous) => ({ ...previous, problem }));
+        if (!lands()) return;
+        loading.current = false;
+        if (problem === null) return;
+        const drop = clearOnDenied && problem === "refused";
+        setState((previous) => ({
+          value: drop ? null : previous.value,
+          problem,
+          fresh: drop ? false : previous.fresh,
+        }));
       },
     );
-  }, [apps, read]);
-  return { state, load };
+  }, [apps, read, clearOnDenied]);
+  const invalidate = useCallback(() => {
+    setState((previous) => (previous.fresh ? { ...previous, fresh: false } : previous));
+  }, []);
+  return { state, load, loading, invalidate };
 }
 
 function Review({
@@ -69,8 +111,9 @@ function Review({
   const theme = useTheme();
   const router = useRouter();
   const problemText = useProblemText();
-  const read = useCallback(() => apps.operations.review(publicationId), [apps, publicationId]);
-  const { state, load } = useLatest(apps, read);
+  const read = useCallback(() => apps.readReview(publicationId), [apps, publicationId]);
+  const [initial] = useState(() => apps.cachedReview(publicationId));
+  const { state, load, invalidate } = useLatest(apps, read, initial, true);
   useEffect(load, [load]);
   // Leaving the review ends a launch still on its way, and its move to the runner.
   const [leaving] = useState(() => new AbortController());
@@ -81,11 +124,12 @@ function Review({
     (app) => app.publicationId === publicationId,
   );
   const review = state.value;
+  const waiting = busy || !state.fresh;
   const name = review ? appName(review) : listed ? appName(listed) : "";
 
   // One action at a time. Its failure's Try again repeats it; a changed app's reads the review again.
-  const act = async (failed: string, run: (app: AppReview) => Promise<unknown>) => {
-    if (busy || !review) return;
+  const act = async (failed: string, run: (app: AppReview) => Promise<unknown>, mutates = true) => {
+    if (busy || !state.fresh || !review) return;
     setBusy(true);
     setFailure(null);
     const here = () => !leaving.signal.aborted && apps.isLive();
@@ -103,15 +147,21 @@ function Review({
                   load();
                 },
               }
-            : { text: `${failed} ${problemText(problem)}`, retry: () => void act(failed, run) },
+            : {
+                text: `${failed} ${problemText(problem)}`,
+                retry: () => void actRef.current(failed, run, mutates),
+              },
         );
     } finally {
       if (here()) {
         setBusy(false);
+        if (mutates) invalidate();
         load();
       }
     }
   };
+  const actRef = useRef(act);
+  actRef.current = act;
   const launch = (app: AppReview) => {
     const opening = apps.open({ ...app, name }, leaving.signal);
     if (!leaving.signal.aborted && apps.isLive()) router.push("/app-run");
@@ -124,7 +174,7 @@ function Review({
           if (canOpenApps) await launch(app);
         })
       : act(appWords.approveFailed, (app) => apps.approve(app));
-  const open = () => act(appWords.openFailed, launch);
+  const open = () => act(appWords.openFailed, launch, false);
   // This app's web process died while it ran: the runner's screen has left, and Try again opens it again. The runner
   // forgets it when its sign-in or workspace ends.
   const stopped = useSyncExternalStore(runner.subscribe, runner.stopped);
@@ -193,13 +243,18 @@ function Review({
       {canOpenApps ? null : (
         <Text style={[styles.note, { color: theme.muted }]}>{appWords.cantOpenHere}</Text>
       )}
-      {controls.open ? <Button label={appWords.open} onPress={open} disabled={busy} /> : null}
+      {controls.open ? <Button label={appWords.open} onPress={open} disabled={waiting} /> : null}
       {controls.approve ? (
-        <Button label={controls.approve} onPress={approve} disabled={busy} />
+        <Button label={controls.approve} onPress={approve} disabled={waiting} />
       ) : null}
       {controls.revoke ? (
         <View style={styles.row}>
-          <ActionPill label={appWords.revoke} onPress={revoke} busy={busy} />
+          <ActionPill
+            label={appWords.revoke}
+            onPress={revoke}
+            busy={busy}
+            disabled={!state.fresh}
+          />
         </View>
       ) : null}
       {failure ? (
@@ -268,15 +323,20 @@ function SourceFile(props: { apps: WorkspaceApps; publicationId: string; path: s
     () => apps.operations.source(publicationId, path),
     [apps, publicationId, path],
   );
-  const { state, load } = useLatest<AppSource>(apps, read);
+  const { state, load, loading } = useLatest<AppSource>(apps, read);
+  const prefetch = () => {
+    if (!open && !state.value && !loading.current) load();
+  };
   const toggle = () => {
-    if (!open && !state.value) load();
+    prefetch();
     setOpen(!open);
   };
   return (
     <View>
       <Pressable
+        onPressIn={prefetch}
         onPress={toggle}
+        android_ripple={{ color: theme.panel2 }}
         style={styles.file}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}

@@ -41,7 +41,7 @@ import { phoneWrites } from "../server/phoneWrites";
 import { pendingSignOuts } from "../server/pushRegistration";
 import { createAlerts, type Alerts } from "../push/alerts";
 import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
-import { createReadCache, type WorkspaceData } from "../server/workspaceData";
+import { cacheScope, createReadCache, type WorkspaceData } from "../server/workspaceData";
 import { pageTimings } from "../pages/pageTimings";
 import {
   createWorkspaceList,
@@ -83,6 +83,7 @@ interface AccountValue {
   readonly alerts: Alerts | null;
   readonly workspaceList: WorkspaceListStore | null;
   chooseWorkspace(workspaceId: string): void;
+  preloadWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
@@ -319,6 +320,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       alerts,
       workspaceList: list,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
+      preloadWorkspace: (workspaceId) => {
+        if (!signIn || workspaces.status !== "ready") return;
+        const entry = workspaces.workspaces.find((each) => each.workspaceId === workspaceId);
+        if (entry && entry.showOnPhone && entry.canOpen)
+          void cache.restore(cacheScope(signIn, entry.workspaceId, entry.role));
+      },
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {
         if (!showOnPhone) teardown.hide(workspaceId);
@@ -344,6 +351,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       alerts,
       list,
       open,
+      signIn,
+      cache,
     ],
   );
   return <Context value={value}>{children}</Context>;

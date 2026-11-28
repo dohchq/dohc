@@ -434,4 +434,112 @@ describe("the catalog", () => {
       code: "conflict",
     });
   });
+
+  it("deduplicates prefetched reviews, caches them, and clears on catalog change, refusal, mutation, and teardown", async () => {
+    const ends = createScopedEnds();
+    const { server, apps } = setup({ ends });
+    const reviewBody = (revision: number, approved = false) => ({
+      status: 200,
+      body: {
+        ok: true,
+        result: {
+          ...version(A, approved),
+          member: undefined,
+          author: null,
+          consent: null,
+          scopeDigest: null,
+          revocable: approved,
+          authorityRevision: revision,
+          createdAtMs: 1_700_000_000_000,
+          publishedByAgent: null,
+          capabilities: [],
+          sources: [{ path: "events/signup/index.ts", byteLength: 10 }],
+          approval: approved ? { approvalId: "f".repeat(32), approvedAtMs: 1 } : null,
+        },
+      },
+    });
+    const first = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appReview", () => first.promise, reviewBody(1, true));
+    apps.prefetchReview(A);
+    const joined = apps.readReview(A);
+    expect(server.paths().filter((path) => path.endsWith("/appReview"))).toHaveLength(1);
+    first.resolve(reviewBody(1, false));
+    expect((await joined).authorityRevision).toBe(1);
+    expect(apps.cachedReview(A)?.authorityRevision).toBe(1);
+
+    // Catalog change invalidates cached review whose approval or revision moved.
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)]));
+    await apps.refresh();
+    expect(apps.cachedReview(A)).toBeNull();
+
+    // A 404/refusal drops the cached review.
+    await apps.readReview(A);
+    expect(apps.cachedReview(A)?.approved).toBe(true);
+    server.on("POST", "/sync/ws-1/ops/appReview", { status: 404, body: { ok: false } });
+    await expect(apps.readReview(A)).rejects.toMatchObject({ problem: "not-found" });
+    expect(apps.cachedReview(A)).toBeNull();
+
+    // Teardown clears cached reviews and drops late in-flight results from before teardown.
+    const late = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appReview", () => late.promise);
+    const pending = apps.readReview(A);
+    appTeardown(ends).hide("ws-1");
+    late.resolve(reviewBody(2, true));
+    await pending;
+    expect(apps.cachedReview(A)).toBeNull();
+
+    // Approve invalidates in-flight reviews so post-mutation reads never join pre-mutation ones.
+    const preApprove = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appReview", () => preApprove.promise, reviewBody(1, true));
+    server.on("POST", "/sync/ws-1/ops/appApprove", {
+      status: 200,
+      body: {
+        ok: true,
+        result: { approvalId: "f".repeat(32), authorityRevision: 1, approvedAtMs: 1 },
+      },
+    });
+    const staleRead = apps.readReview(A);
+    await apps.approve(version(A));
+    preApprove.resolve(reviewBody(1, false));
+    await staleRead;
+    expect(apps.cachedReview(A)).toBeNull();
+    expect((await apps.readReview(A)).approved).toBe(true);
+
+    // Catalog removal invalidates pending in-flight review reads so already-joined callers revalidate and never recache stale data.
+    const pendingBeforeRemoval = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appReview", () => pendingBeforeRemoval.promise, {
+      status: 404,
+      body: { ok: false },
+    });
+    const joinedBeforeRemoval = apps.readReview(A);
+    server.on("POST", "/sync/ws-1/ops/apps", page([]));
+    await apps.refresh();
+    pendingBeforeRemoval.resolve(reviewBody(1, true));
+    await expect(joinedBeforeRemoval).rejects.toMatchObject({ problem: "not-found" });
+    expect(apps.cachedReview(A)).toBeNull();
+  });
+
+  it("warms the catalog silently once per store when empty, and reports failures if check joins the in-flight warm", async () => {
+    const ends = createScopedEnds();
+    const { server, apps } = setup({ ends });
+    server.on("POST", "/sync/ws-1/ops/apps", { status: 503 });
+    await apps.warm();
+    expect(server.paths().some((p) => p.endsWith("/apps"))).toBe(true);
+    expect(apps.state()).toEqual({ apps: null, problem: null, failures: 0 });
+
+    // A second warm() after failure does not burst the server again.
+    await apps.warm();
+    expect(server.paths().filter((p) => p.endsWith("/apps"))).toHaveLength(1);
+
+    // After teardown resets the store, warm() runs once again, and check() joining it reports errors.
+    appTeardown(ends).hide("ws-1");
+    const slowFail = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/apps", () => slowFail.promise);
+    const warming = apps.warm();
+    const checked = apps.check();
+    expect(server.paths().filter((p) => p.endsWith("/apps"))).toHaveLength(2);
+    slowFail.resolve({ status: 503 });
+    await Promise.all([warming, checked]);
+    expect(apps.state()).toMatchObject({ problem: "server-busy", failures: 1 });
+  });
 });

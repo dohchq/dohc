@@ -229,10 +229,13 @@ export function appOperations(client: ServerClient, workspaceId: string, signal:
 
   return {
     /** Every app the phone can open: the owner's own, then the Member apps within reach. */
-    list: async (): Promise<readonly PhoneApp[]> => [
-      ...(await all("apps", CATALOG_PAGES, readApp, isPublication)),
-      ...(await all("memberApps", CATALOG_PAGES, readMemberApp, isPublication)),
-    ],
+    list: async (): Promise<readonly PhoneApp[]> => {
+      const [own, member] = await Promise.all([
+        all("apps", CATALOG_PAGES, readApp, isPublication),
+        all("memberApps", CATALOG_PAGES, readMemberApp, isPublication),
+      ]);
+      return [...own, ...member];
+    },
 
     review: (publicationId: string) =>
       run("appReview", { publicationId }, (result) => readReview(result, publicationId)),

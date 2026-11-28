@@ -1478,3 +1478,240 @@ describe("search, sort, and relation labels", () => {
     });
   });
 });
+
+describe("warm-up and touch-down prefetch", () => {
+  it("joins a touch-down prefetch on open, clears prior search on reopen, re-describes on later reopen, and drops prefetch on teardown", async () => {
+    const { server, stores, collections } = setup();
+    const described = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => described.promise, description);
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      records(["a0", "a1"], null, { "f-name": { '"a0"': "Alpha" } }),
+    );
+    collections.prefetch(D);
+    await sent(server, 1);
+    const opening = collections.open(D);
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(1);
+    described.resolve(description);
+    await opening;
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    expect(collections.view()?.relations).toEqual({ "f-name": { '"a0"': "Alpha" } });
+
+    // Reopening a previously filtered Collection via prefetch resets search/sort and clears held filtered rows first.
+    await collections.setQuery({ search: "a0" });
+    collections.close(D);
+    const reopened = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => reopened.promise);
+    pages(server);
+    const beforeReopen = server.calls.length;
+    collections.prefetch(D);
+    await sent(server, beforeReopen + 1);
+    const reopenFromSearch = collections.open(D);
+    expect(collections.view()?.search).toBe("");
+    expect(collections.view()?.sort).toBeNull();
+    expect(collections.view()?.rows).toEqual([]);
+    reopened.resolve(description);
+    await reopenFromSearch;
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(2);
+
+    // Closing and reopening still re-reads description first.
+    const describeBefore = server.calls.filter((call) => call.path.endsWith("/collection")).length;
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, description);
+    await collections.open(D);
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(
+      describeBefore + 1,
+    );
+    collections.close(D);
+
+    // A cancelled press whose prefetch already finished is never reused on a later open.
+    server.on("POST", `${OPS}/collection`, description, { status: 404, body: { ok: false } });
+    await collections.prefetch(D);
+    await collections.open(D);
+    expect(collections.view()?.problem).toEqual({ cause: "refused", more: false });
+    expect(collections.view()?.rows).toEqual([]);
+    collections.close(D);
+
+    // Refused prefetch clears held view, while 413 keeps held view.
+    server.on("POST", `${OPS}/collection`, description);
+    await collections.open(D);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, { status: 413, body: { ok: false } });
+    await collections.prefetch(D);
+    const hold413 = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => hold413.promise);
+    const reopen413 = collections.open(D);
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    hold413.resolve(description);
+    await reopen413;
+    collections.close(D);
+
+    server.on("POST", `${OPS}/collection`, { status: 403, body: { ok: false } });
+    await collections.prefetch(D);
+    const hold403 = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => hold403.promise);
+    const reopen403 = collections.open(D);
+    expect(collections.view()?.rows).toEqual([]);
+    hold403.resolve(description);
+    await reopen403;
+    collections.close(D);
+
+    // A completed prefetch whose records answer is refused ("no-read") also clears held rows.
+    server.on("POST", `${OPS}/collection`, description);
+    server.on("POST", `${OPS}/collectionRecords`, ok({ status: "refused", reason: "no-read" }));
+    await collections.prefetch(D);
+    const holdOffline = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => holdOffline.promise);
+    const reopenRefused = collections.open(D);
+    expect(collections.view()?.rows).toEqual([]);
+    holdOffline.resolve({ status: 503, body: { ok: false } });
+    await reopenRefused;
+    collections.close(D);
+    pages(server);
+
+    // Pressing another Collection aborts the previous in-flight prefetch before records.
+    const D2 = "00000000-0000-4000-8000-000000000002";
+    const slowA = deferred<Answer>();
+    const slowB = deferred<Answer>();
+    server.on(
+      "POST",
+      `${OPS}/collection`,
+      () => slowA.promise,
+      () => slowB.promise,
+    );
+    const prefetchA = collections.prefetch(D);
+    const callA = server.calls.at(-1)!;
+    const prefetchB = collections.prefetch(D2);
+    expect(callA.signal.aborted).toBe(true);
+    slowA.resolve(description);
+    appTeardown(stores).hide("ws-1");
+    slowB.resolve(description);
+    await Promise.all([prefetchA, prefetchB]);
+    expect(collections.view()).toBeNull();
+  });
+
+  it("does not let a delayed refusal from a consumed prefetch evict a newer cached view", async () => {
+    const { server, collections } = setup();
+    const threeTables: Answer = ok({
+      datasetId: D,
+      name: "Registrations",
+      revision: 3,
+      revisionSha256: SHA,
+      tables: [table("t-people", "People"), table("t-notes", "Notes"), table("t-tasks", "Tasks")],
+    });
+    server.on("POST", `${OPS}/collection`, threeTables);
+    server.on("POST", `${OPS}/collectionRecords`, records(["a0"], null));
+    await collections.open(D);
+    await collections.chooseTable("t-notes");
+    collections.close(D);
+
+    const lateRefusal = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, (call) => {
+      const body = call.body as { tableId?: string };
+      return body.tableId === "t-notes" ? lateRefusal.promise : records(["t0"], null);
+    });
+    const prefetched = collections.prefetch(D);
+    const reopening = collections.open(D);
+    await collections.chooseTable("t-tasks");
+    await collections.setQuery({ search: "t" });
+    collections.close(D);
+
+    lateRefusal.resolve(ok({ status: "refused", reason: "no-read" }));
+    await Promise.all([prefetched, reopening]);
+
+    const hold = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => hold.promise);
+    const reopened = collections.open(D);
+    expect(collections.view()?.tableId).toBe("t-tasks");
+    hold.resolve(threeTables);
+    await reopened;
+    collections.close(D);
+
+    // Same when the consumed prefetch rejects with 403 after a table switch and close.
+    const late403 = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, threeTables);
+    server.on("POST", `${OPS}/collectionRecords`, (call) => {
+      const body = call.body as { tableId?: string };
+      return body.tableId === "t-tasks" ? late403.promise : records(["n0"], null);
+    });
+    const prefetched403 = collections.prefetch(D);
+    const reopening403 = collections.open(D);
+    await collections.chooseTable("t-notes");
+    collections.close(D);
+
+    late403.resolve({ status: 403, body: { ok: false } });
+    await Promise.all([prefetched403, reopening403]);
+
+    const holdAfter403 = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => holdAfter403.promise);
+    const reopenedAfter403 = collections.open(D);
+    expect(collections.view()?.tableId).toBe("t-notes");
+    holdAfter403.resolve(threeTables);
+    await reopenedAfter403;
+  });
+
+  it("evicts cached rows when a joined prefetch finishes refused after close, while keeping them on 413", async () => {
+    const { server, collections } = setup();
+    const cases: Array<{
+      readonly label: string;
+      readonly answer: Answer;
+      readonly evicts: boolean;
+    }> = [
+      { label: "no-read", answer: ok({ status: "refused", reason: "no-read" }), evicts: true },
+      { label: "403", answer: { status: 403, body: { ok: false } }, evicts: true },
+      { label: "404", answer: { status: 404, body: { ok: false } }, evicts: true },
+      { label: "413", answer: { status: 413, body: { ok: false } }, evicts: false },
+    ];
+    for (const entry of cases) {
+      server.on("POST", `${OPS}/collection`, description);
+      server.on("POST", `${OPS}/collectionRecords`, records(["a0", "a1"], null));
+      await collections.open(D);
+      collections.close(D);
+
+      const pending = deferred<Answer>();
+      if (entry.label === "no-read") {
+        server.on("POST", `${OPS}/collection`, description);
+        server.on("POST", `${OPS}/collectionRecords`, () => pending.promise);
+      } else {
+        server.on("POST", `${OPS}/collection`, () => pending.promise);
+      }
+      const prefetched = collections.prefetch(D);
+      const opening = collections.open(D);
+      collections.close(D);
+
+      pending.resolve(entry.answer);
+      await Promise.all([prefetched, opening]);
+
+      server.on("POST", `${OPS}/collection`, "offline");
+      await collections.open(D);
+      expect(names(collections.view()?.rows), entry.label).toEqual(
+        entry.evicts ? [] : ["a0", "a1"],
+      );
+      collections.close(D);
+    }
+  });
+
+  it("warms the Collections list silently once per store, and reports failures if check joins the warm", async () => {
+    const { server, stores, collections } = setup();
+    server.on("POST", `${OPS}/collections`, { status: 503 });
+    await collections.warm();
+    expect(server.calls.filter((c) => c.path.endsWith("/collections"))).toHaveLength(1);
+    expect(collections.state()).toEqual({ collections: null, problem: null, failures: 0 });
+
+    // Second warm() after failure does not retry.
+    await collections.warm();
+    expect(server.calls.filter((c) => c.path.endsWith("/collections"))).toHaveLength(1);
+
+    appTeardown(stores).hide("ws-1");
+    const slowFail = deferred<Answer>();
+    server.on("POST", `${OPS}/collections`, () => slowFail.promise);
+    const warming = collections.warm();
+    const checked = collections.check();
+    expect(server.calls.filter((c) => c.path.endsWith("/collections"))).toHaveLength(2);
+    slowFail.resolve({ status: 503 });
+    await Promise.all([warming, checked]);
+    expect(collections.state()).toMatchObject({ problem: "server-busy", failures: 1 });
+  });
+});

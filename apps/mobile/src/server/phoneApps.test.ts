@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ServerError } from "./client";
 import { appOperations } from "./phoneApps";
+import { deferred, type Answer } from "./testServer";
 import {
   A,
   appServer,
@@ -32,12 +33,14 @@ describe("the phone's app operations", () => {
     server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)], A), page([phoneOnly]));
     server.on("POST", "/sync/ws-1/ops/memberApps", memberPage([memberVersion(C, "changed")]));
     expect(await ops.list()).toEqual([version(A, true), phoneOnly, memberVersion(C, "changed")]);
-    expect(server.paths().map((path) => path.split("/").at(-1))).toEqual([
-      "apps",
-      "apps",
-      "memberApps",
-    ]);
-    expect(server.calls.map((call) => call.body)).toEqual([{}, { cursor: A }, {}]);
+    expect(server.calls.map((call) => [call.path.split("/").at(-1), call.body])).toEqual(
+      expect.arrayContaining([
+        ["apps", {}],
+        ["apps", { cursor: A }],
+        ["memberApps", {}],
+      ]),
+    );
+    expect(server.calls).toHaveLength(3);
     // A Member app with no name, author or allowing state is unreadable, and fails the whole read.
     server.on("POST", "/sync/ws-1/ops/apps", page([]));
     const listed = { ...version(C), member: undefined, name: "tracker", author: { name: "Ana" } };
@@ -48,6 +51,20 @@ describe("the phone's app operations", () => {
       });
       await expect(ops.list()).rejects.toMatchObject({ problem: "invalid" });
     }
+  });
+
+  it("reads the owner's apps and Member apps together, keeping owner apps first", async () => {
+    const { server, ops } = setup();
+    const C = "c".repeat(64);
+    const own = deferred<Answer>();
+    const member = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/apps", () => own.promise);
+    server.on("POST", "/sync/ws-1/ops/memberApps", () => member.promise);
+    const listed = ops.list();
+    expect(server.paths().map((path) => path.split("/").at(-1))).toEqual(["apps", "memberApps"]);
+    member.resolve(memberPage([memberVersion(C, "current", true)]));
+    own.resolve(page([version(A, true)]));
+    expect(await listed).toEqual([version(A, true), memberVersion(C, "current", true)]);
   });
 
   it("fails a read it can't finish or use, never answering part of the catalog", async () => {

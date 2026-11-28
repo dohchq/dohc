@@ -86,7 +86,7 @@ function chatRow(group: ChatGroup): ChatRowData {
 }
 
 function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
-  const { data } = useAccount();
+  const { data, apps, collections } = useAccount();
   const { state, retry } = useView(views.chats);
   const failed = workspaceWords.chatsFailed(workspace.name);
   useFailureNotice(`read:${workspace.id}:chats`, failed, state, retry);
@@ -115,8 +115,12 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
   }, [data]);
   useEffect(() => {
     if (sections) launchTimings?.mark("chats", state.fromCache ? "cache" : "server");
-    if (sections && data) warmUnread(data, sections);
-  }, [sections, state.fromCache, data, warmUnread]);
+    if (sections && data) {
+      warmUnread(data, sections);
+      void apps?.warm();
+      void collections?.warm();
+    }
+  }, [sections, state.fromCache, data, apps, collections, warmUnread]);
   return (
     <ChatsScreen
       current={workspace}

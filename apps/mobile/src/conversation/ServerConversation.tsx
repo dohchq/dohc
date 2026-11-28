@@ -694,6 +694,7 @@ function WritableThread({
 
 /** A thread takes replies, and never a post. */
 const REPLY_LANES: Lanes = { post: false, send: true };
+const EMPTY_MESSAGES: readonly Message[] = [];
 
 function Stream({
   groupId,
@@ -747,12 +748,13 @@ function Stream({
         : bases,
     [bases, stream, decorate, byId],
   );
+  const localOf = writes?.local;
   const local = useMemo(
     () =>
-      writes && stream
-        ? writes.local(new Set(byId.keys()), questionsIn([...byId.values()]))
+      localOf && stream
+        ? localOf(new Set(byId.keys()), questionsIn([...byId.values()]))
         : undefined,
-    [writes, stream, byId],
+    [localOf, stream, byId],
   );
   const posts = useMemo(
     () =>
@@ -764,7 +766,8 @@ function Stream({
     () => reply && ((message: Message) => reply(message, posts.has(message.id))),
     [reply, posts],
   );
-  const answers = useMemo(() => writes?.answers(byId, posts), [writes, byId, posts]);
+  const answersOf = writes?.answers;
+  const answers = useMemo(() => answersOf?.(byId, posts), [answersOf, byId, posts]);
   // The wakes of the items the stream shows, read again when its read changes or a thread among them changes.
   const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "stream", groupId }), [groupId]);
   const wakeThreads = useMemo(
@@ -789,7 +792,7 @@ function Stream({
       {...(writable ? { onRetryWake: wakes.retryWake } : {})}
       {...(writes && onReply && answers
         ? {
-            local: local ?? [],
+            local: local ?? EMPTY_MESSAGES,
             actions: writes.actions,
             react: writes.react,
             onReply,
@@ -845,13 +848,15 @@ function Thread({
         : bases,
     [bases, thread, decorate, byId],
   );
+  const localOf = writes?.local;
   const local = useMemo(
-    () => (writes && thread ? writes.local(new Set(byId.keys()), new Set()) : undefined),
-    [writes, thread, byId],
+    () => (localOf && thread ? localOf(new Set(byId.keys()), new Set()) : undefined),
+    [localOf, thread, byId],
   );
   const reply = writes?.reply;
   const onReply = useMemo(() => reply && ((message: Message) => reply(message, false)), [reply]);
-  const answers = useMemo(() => writes?.answers(byId, new Set()), [writes, byId]);
+  const answersOf = writes?.answers;
+  const answers = useMemo(() => answersOf?.(byId, new Set()), [answersOf, byId]);
   const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "thread", threadId }), [threadId]);
   const wakeThreads = useMemo(() => (thread ? new Set([threadId]) : null), [thread, threadId]);
   const writable = writes !== undefined && !writes.actions.blocked;
@@ -870,7 +875,7 @@ function Thread({
       {...(messageId === null ? {} : { onShown: addOnScreen })}
       {...(writes && onReply && answers
         ? {
-            local: local ?? [],
+            local: local ?? EMPTY_MESSAGES,
             actions: writes.actions,
             react: writes.react,
             onReply,
@@ -953,6 +958,12 @@ function Conversation({
     },
     [router, workspaceId],
   );
+  const prefetchReplies = useCallback(
+    (entry: Message) => {
+      if (data && entry.threadId) data.prefetch(views.thread(entry.threadId));
+    },
+    [data],
+  );
   const onViewableItemsChanged = useMemo(
     () =>
       onShown &&
@@ -985,6 +996,7 @@ function Conversation({
         continued={item.continued}
         afterExtras={item.afterExtras}
         onOpenReplies={openReplies}
+        onPrefetchReplies={prefetchReplies}
         {...(actions ? { actions } : {})}
         {...(react ? { react } : {})}
         {...(onReply ? { onReply } : {})}

@@ -137,6 +137,12 @@ export interface WorkspaceCollections {
   subscribe(listener: () => void): () => void;
   /** Reads the list again. Only the latest read lands. */
   refresh(): Promise<void>;
+  /** Joins a list read still running, or starts one. */
+  check(): Promise<void>;
+  /** Reads the list quietly in the background when empty, without reporting failures unless `check` joins it. */
+  warm(): Promise<void>;
+  /** Starts reading `datasetId` before it opens, so `open` joins it. */
+  prefetch(datasetId: string): Promise<void>;
   /** Puts `datasetId` on screen and reads it, replacing the last one. */
   open(datasetId: string): Promise<void>;
   /** Leaves `datasetId`, unless another Collection replaced it. */
@@ -186,6 +192,18 @@ export interface WorkspaceCollections {
 
 const NO_LIST: CollectionsState = { collections: null, problem: null, failures: 0 };
 
+interface PrefetchedCollection {
+  readonly datasetId: string;
+  readonly signal: AbortSignal;
+  readonly own: AbortController;
+  readonly done: Promise<void>;
+  readonly promise: Promise<{
+    readonly description: CollectionDescription;
+    readonly table: CollectionTable | undefined;
+    readonly page: Awaited<ReturnType<ReturnType<typeof collectionOperations>["records"]>> | null;
+  }>;
+}
+
 export function createWorkspaceCollections(
   signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">,
   workspaceId: string,
@@ -203,8 +221,17 @@ export function createWorkspaceCollections(
   const listeners = new Set<() => void>();
   const listed = cachedList(cache, signIn, workspaceId, views.collections, role);
   let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
+  let listReading: { promise: Promise<void>; report: boolean } | null = null;
+  let warmed = false;
   let view: CollectionView | null = null;
   const held = new Map<string, CollectionView>();
+  const latestRead = new Map<string, number>();
+  const nextRead = (datasetId: string) => {
+    const next = (latestRead.get(datasetId) ?? 0) + 1;
+    latestRead.set(datasetId, next);
+    return next;
+  };
+  let prefetched: PrefetchedCollection | null = null;
   let described: string | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
@@ -229,8 +256,13 @@ export function createWorkspaceCollections(
     viewReads.next();
     recordReads.next();
     list = NO_LIST;
+    listReading = null;
+    warmed = false;
     view = null;
     held.clear();
+    latestRead.clear();
+    prefetched?.own.abort();
+    prefetched = null;
     changes = new Map();
     actions = new Map();
     emit();
@@ -380,23 +412,32 @@ export function createWorkspaceCollections(
     }
   }
 
-  const refresh = async () => {
-    if (!isLive()) return;
+  const loadList = (report: boolean) => {
+    if (!isLive()) return Promise.resolve();
     const request = listReads.next();
     const lands = () => isLive() && listReads.isLatest(request);
-    try {
-      const [collections] = await Promise.all([operations.list(), listed.restored]);
-      if (!lands()) return;
-      listed.save(collections);
-      list = { collections, problem: null, failures: list.failures };
-      emit();
-    } catch (error) {
-      const problem = shownProblem(error);
-      if (!lands() || problem === null) return;
-      list = { ...list, problem, failures: list.failures + 1 };
-      emit();
-    }
+    const active = { promise: Promise.resolve(), report };
+    const promise = Promise.all([operations.list(), listed.restored]).then(
+      ([collections]) => {
+        if (listReads.isLatest(request)) listReading = null;
+        if (!lands()) return;
+        listed.save(collections);
+        list = { collections, problem: null, failures: list.failures };
+        emit();
+      },
+      (error: unknown) => {
+        if (listReads.isLatest(request)) listReading = null;
+        const problem = shownProblem(error);
+        if (!lands() || !active.report || problem === null) return;
+        list = { ...list, problem, failures: list.failures + 1 };
+        emit();
+      },
+    );
+    active.promise = promise;
+    listReading = active;
+    return promise;
   };
+  const refresh = () => loadList(true);
 
   // A page of the table on screen, after the Collection's tables when `describe` is set or none are known yet: from the
   // table's start, replacing what shows once it lands, or for `more` after the last, adding to it.
@@ -407,29 +448,52 @@ export function createWorkspaceCollections(
     const request = viewReads.next();
     const lands = () => isLive() && viewReads.isLatest(request) && view?.datasetId === datasetId;
     const more = mode === "more";
+    const reuse =
+      mode === "first" &&
+      describe &&
+      now.search === "" &&
+      now.sort === null &&
+      prefetched?.datasetId === datasetId &&
+      prefetched.signal === controller.signal
+        ? prefetched.promise
+        : null;
+    if (reuse) prefetched = null;
+    else nextRead(datasetId);
     update(datasetId, { reading: mode });
     try {
-      const description =
-        describe || !now.description || described !== datasetId
-          ? await operations.describe(datasetId)
-          : now.description;
-      if (!lands()) return;
-      const table =
-        description.tables.find((table) => table.tableId === now.tableId) ?? description.tables[0];
-      const activeSort =
-        table &&
-        now.sort &&
-        table.fields.some((f) => f.fieldId === now.sort!.fieldId && supportsSort(f))
-          ? now.sort
+      let description: CollectionDescription;
+      let table: CollectionTable | undefined;
+      let activeSort: RecordSort | null;
+      let sameSort: boolean;
+      let page: Awaited<ReturnType<typeof operations.records>> | null;
+      if (reuse) {
+        ({ description, table, page } = await reuse);
+        if (!lands() || !view) return;
+        activeSort = null;
+        sameSort = true;
+      } else {
+        description =
+          describe || !now.description || described !== datasetId
+            ? await operations.describe(datasetId)
+            : now.description;
+        if (!lands()) return;
+        table =
+          description.tables.find((each) => each.tableId === now.tableId) ?? description.tables[0];
+        activeSort =
+          table &&
+          now.sort &&
+          table.fields.some((f) => f.fieldId === now.sort!.fieldId && supportsSort(f))
+            ? now.sort
+            : null;
+        sameSort = activeSort === now.sort;
+        page = table
+          ? await operations.records(datasetId, table, more && sameSort ? now.next : null, {
+              search: now.search,
+              sort: activeSort,
+            })
           : null;
-      const sameSort = activeSort === now.sort;
-      const page = table
-        ? await operations.records(datasetId, table, more && sameSort ? now.next : null, {
-            search: now.search,
-            sort: activeSort,
-          })
-        : null;
-      if (!lands() || !view) return;
+        if (!lands() || !view) return;
+      }
       described = datasetId;
       if (page?.status === "unsupported-query") {
         update(datasetId, {
@@ -524,6 +588,69 @@ export function createWorkspaceCollections(
       return () => void listeners.delete(listener);
     },
     refresh,
+    check() {
+      if (listReading) {
+        listReading.report = true;
+        return listReading.promise;
+      }
+      return refresh();
+    },
+    warm() {
+      if (warmed || !isLive() || list.collections !== null || listReading !== null)
+        return Promise.resolve();
+      warmed = true;
+      return loadList(false);
+    },
+    prefetch(datasetId) {
+      if (!isLive() || view?.datasetId === datasetId) return Promise.resolve();
+      const signal = controller.signal;
+      if (prefetched && prefetched.datasetId === datasetId && prefetched.signal === signal)
+        return prefetched.done;
+      prefetched?.own.abort();
+      const readId = nextRead(datasetId);
+      const own = new AbortController();
+      const abort = () => own.abort();
+      signal.addEventListener("abort", abort);
+      const ops = collectionOperations(signIn.client, workspaceId, own.signal);
+      const promise = (async () => {
+        const description = await ops.describe(datasetId);
+        const preferred = held.get(datasetId)?.tableId ?? null;
+        const table =
+          description.tables.find((each) => each.tableId === preferred) ?? description.tables[0];
+        const page = table ? await ops.records(datasetId, table, null) : null;
+        return { description, table, page };
+      })();
+      const done = promise.then(
+        ({ page }) => {
+          signal.removeEventListener("abort", abort);
+          if (prefetched === entry) prefetched = null;
+          if (
+            !own.signal.aborted &&
+            !signal.aborted &&
+            isLive() &&
+            latestRead.get(datasetId) === readId &&
+            page?.status === "refused"
+          )
+            held.delete(datasetId);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          if (prefetched === entry) prefetched = null;
+          if (
+            !own.signal.aborted &&
+            !signal.aborted &&
+            isLive() &&
+            latestRead.get(datasetId) === readId &&
+            shownProblem(error) === "refused" &&
+            !(error instanceof ServerError && error.status === 413)
+          )
+            held.delete(datasetId);
+        },
+      );
+      const entry: PrefetchedCollection = { datasetId, signal, own, promise, done };
+      prefetched = entry;
+      return done;
+    },
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
       const last = held.get(datasetId);
@@ -671,6 +798,7 @@ export function createWorkspaceCollections(
       const key = recordKey(datasetId, tableId, id);
       // Reload clears the change it was asked for, never one made while it read.
       const asked = changes.get(key);
+      nextRead(datasetId);
       const request = recordReads.next();
       const lands = () =>
         isLive() &&

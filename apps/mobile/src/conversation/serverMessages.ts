@@ -22,8 +22,20 @@ export type ConversationItem =
       readonly afterExtras: boolean;
     };
 
-const timeOf = (ms: number) =>
-  new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+let formatOffset = Number.NaN;
+let timeFormat: Intl.DateTimeFormat;
+let dayFormat: Intl.DateTimeFormat;
+function ensureFormats() {
+  const offset = new Date().getTimezoneOffset();
+  if (offset === formatOffset) return;
+  formatOffset = offset;
+  timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+}
+const timeOf = (ms: number) => {
+  ensureFormats();
+  return timeFormat.format(ms);
+};
 
 /**
  * Who wrote a message. Its ID is the author's kind and display name, so a person and an agent that share a name are
@@ -134,7 +146,15 @@ export function withMentions(message: Message, candidates: readonly PhoneMention
   return body.some((segment) => "mention" in segment) ? { ...message, body } : message;
 }
 
-const dayKey = (ms: number) => new Date(ms).toDateString();
+const dayKey = (ms: number) => {
+  const date = new Date(ms);
+  return date.getFullYear() * 10_000 + date.getMonth() * 100 + date.getDate();
+};
+
+const sameRun = (previous: Message, entry: Message) =>
+  previous.author.kind === entry.author.kind &&
+  previous.author.id === entry.author.id &&
+  entry.minute - previous.minute <= 5;
 
 /**
  * Whether a message continues the one before it, as the desktop's continuesRun decides: the same day, the same kind
@@ -144,9 +164,7 @@ export function continuesRun(previous: Message | undefined, entry: Message): boo
   return (
     previous !== undefined &&
     dayKey(previous.minute * 60_000) === dayKey(entry.minute * 60_000) &&
-    previous.author.kind === entry.author.kind &&
-    previous.author.id === entry.author.id &&
-    entry.minute - previous.minute <= 5
+    sameRun(previous, entry)
   );
 }
 
@@ -158,8 +176,10 @@ export function conversationItems(
 ): ConversationItem[] {
   const today = dayKey(nowMs);
   const yesterday = dayKey(nowMs - 86_400_000);
+  ensureFormats();
   const items: ConversationItem[] = [];
-  let day: string | null = null;
+  let day: number | null = null;
+  let previousDay: number | null = null;
   for (const [index, entry] of messages.entries()) {
     const at = entry.minute * 60_000;
     const key = dayKey(at);
@@ -170,7 +190,7 @@ export function conversationItems(
           ? workspaceWords.today
           : key === yesterday
             ? workspaceWords.yesterday
-            : new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+            : dayFormat.format(at);
       items.push({ type: "day", key: `day:${key}`, label });
     }
     const previous = index > 0 ? messages[index - 1] : undefined;
@@ -179,9 +199,10 @@ export function conversationItems(
       type: "message",
       key: entry.id,
       message: entry,
-      continued: continuesRun(previous, entry),
+      continued: previous !== undefined && previousDay === key && sameRun(previous, entry),
       afterExtras: previous?.replies !== undefined,
     });
+    previousDay = key;
   }
   for (const [index, entry] of local.entries()) {
     const previous = index > 0 ? local[index - 1] : messages[messages.length - 1];

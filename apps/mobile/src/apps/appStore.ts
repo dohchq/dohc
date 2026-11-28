@@ -1,11 +1,12 @@
 import type { WorkspaceRole } from "../server/api";
 import type { ScopedEnds } from "../pages/pageLive";
 import type { Account, SignIn } from "../server/account";
-import { requestGenerations, shownProblem, type Fetch } from "../server/client";
+import { requestGenerations, ServerError, shownProblem, type Fetch } from "../server/client";
 import {
   appOperations,
   type AppLaunch,
   type AppOperations,
+  type AppReview,
   type PhoneApp,
 } from "../server/phoneApps";
 import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
@@ -168,6 +169,14 @@ export interface WorkspaceApps {
   refresh(): Promise<void>;
   /** A periodic check: joins a read still running instead of replacing it, so a slow read can finish. */
   check(): Promise<void>;
+  /** Reads the catalog quietly in the background when empty, without reporting failures unless `check` joins it. */
+  warm(): Promise<void>;
+  /** The last review read for `publicationId` in this store, or null. */
+  cachedReview(publicationId: string): AppReview | null;
+  /** Reads `publicationId`'s review, joining an in-flight read of the same generation. */
+  readReview(publicationId: string): Promise<AppReview>;
+  /** Starts reading `publicationId`'s review before the screen opens. */
+  prefetchReview(publicationId: string): void;
   /** Whether answers for this store still count: its sign-in is current and it hasn't stopped. */
   isLive(): boolean;
   approve(
@@ -219,25 +228,65 @@ export function createWorkspaceApps(options: {
     if (isLive() && state.apps === null && apps) set({ ...state, apps });
   });
 
-  let reading: Promise<void> | null = null;
+  let reading: { promise: Promise<void>; report: boolean } | null = null;
+  let warmed = false;
+  let reviewEpoch = 0;
+  const reviews = new Map<string, AppReview>();
+  const reviewReads = new Map<
+    string,
+    { readonly epoch: number; readonly version: number; readonly promise: Promise<AppReview> }
+  >();
+  const reviewVersions = new Map<string, number>();
+  const reviewVersion = (id: string) => reviewVersions.get(id) ?? 0;
+  const dropReview = (id: string) => {
+    reviewVersions.set(id, reviewVersion(id) + 1);
+    reviews.delete(id);
+    reviewReads.delete(id);
+  };
+  const clearReviews = () => {
+    reviewEpoch += 1;
+    reviews.clear();
+    reviewReads.clear();
+    reviewVersions.clear();
+  };
   const remove = options.ends.add(
     { signIn, workspaceId },
     {
       end() {
         reads.next();
         reading = null;
+        warmed = false;
+        clearReviews();
         set({ apps: null, problem: null, failures: 0 });
       },
     },
   );
   // A failed or incomplete read rejects, so only a complete catalog can end the running app.
-  const refresh = () => {
+  const load = (report: boolean) => {
     const request = reads.next();
     const lands = () => isLive() && reads.isLatest(request);
+    const active = { promise: Promise.resolve(), report };
     const read = Promise.all([operations.list(), saved.restored]).then(
       ([apps]) => {
+        if (reads.isLatest(request)) reading = null;
         if (!lands()) return;
         saved.save(apps);
+        const byId = new Map(apps.map((entry) => [entry.publicationId, entry]));
+        const priorById = new Map(state.apps?.map((entry) => [entry.publicationId, entry]) ?? []);
+        for (const id of new Set([...reviews.keys(), ...reviewReads.keys()])) {
+          const entry = byId.get(id);
+          const cached = reviews.get(id);
+          const prior = priorById.get(id);
+          const baseline = cached ?? prior;
+          if (
+            !entry ||
+            !baseline ||
+            entry.authorityRevision !== baseline.authorityRevision ||
+            entry.approved !== baseline.approved ||
+            entry.member?.consent !== baseline.member?.consent
+          )
+            dropReview(id);
+        }
         const running = runner.state();
         const listed = apps.find((app) => app.publicationId === running?.publicationId);
         const replaced =
@@ -249,14 +298,49 @@ export function createWorkspaceApps(options: {
         set({ apps, problem: null, failures: state.failures });
       },
       (error: unknown) => {
+        if (reads.isLatest(request)) reading = null;
         const problem = shownProblem(error);
-        if (lands() && problem !== null) set({ ...state, problem, failures: state.failures + 1 });
+        if (lands() && active.report && problem !== null)
+          set({ ...state, problem, failures: state.failures + 1 });
       },
     );
-    reading = read.finally(() => {
-      if (reads.isLatest(request)) reading = null;
-    });
+    active.promise = read;
+    reading = active;
     return read;
+  };
+  const refresh = () => load(true);
+  const readReview = (publicationId: string): Promise<AppReview> => {
+    const epoch = reviewEpoch;
+    const version = reviewVersion(publicationId);
+    const inFlight = reviewReads.get(publicationId);
+    if (inFlight && inFlight.epoch === epoch && inFlight.version === version)
+      return inFlight.promise;
+    const stillCurrent = () =>
+      isLive() && reviewEpoch === epoch && reviewVersion(publicationId) === version;
+    const promise: Promise<AppReview> = operations.review(publicationId).then(
+      (review) => {
+        if (reviewReads.get(publicationId) === tracked) reviewReads.delete(publicationId);
+        if (stillCurrent()) {
+          reviews.set(publicationId, review);
+          return review;
+        }
+        if (isLive() && reviewEpoch === epoch) return readReview(publicationId);
+        return review;
+      },
+      (error: unknown) => {
+        if (reviewReads.get(publicationId) === tracked) reviewReads.delete(publicationId);
+        if (
+          stillCurrent() &&
+          error instanceof ServerError &&
+          (error.problem === "not-found" || error.problem === "refused")
+        )
+          reviews.delete(publicationId);
+        throw error;
+      },
+    );
+    const tracked = { epoch, version, promise };
+    reviewReads.set(publicationId, tracked);
+    return promise;
   };
 
   return {
@@ -268,15 +352,36 @@ export function createWorkspaceApps(options: {
       return () => void listeners.delete(listener);
     },
     refresh,
-    check: () => reading ?? refresh(),
+    check() {
+      if (reading) {
+        reading.report = true;
+        return reading.promise;
+      }
+      return refresh();
+    },
+    warm() {
+      if (warmed || !isLive() || state.apps !== null || reading !== null) return Promise.resolve();
+      warmed = true;
+      return load(false);
+    },
+    cachedReview: (publicationId) => (isLive() ? (reviews.get(publicationId) ?? null) : null),
+    readReview,
+    prefetchReview(publicationId) {
+      if (!isLive() || reviewReads.has(publicationId)) return;
+      void readReview(publicationId).catch(() => undefined);
+    },
     isLive,
     async approve(app) {
+      clearReviews();
       await operations.approve(app);
+      clearReviews();
       if (isLive()) await refresh();
     },
     async revoke(publicationId) {
+      clearReviews();
       runner.end(mine(publicationId));
       await operations.revoke(publicationId);
+      clearReviews();
       if (isLive()) await refresh();
     },
     async open(app, leaving) {
@@ -308,6 +413,7 @@ export function createWorkspaceApps(options: {
     },
     stop() {
       remove();
+      clearReviews();
       runner.end(mine());
       controller.abort();
     },
