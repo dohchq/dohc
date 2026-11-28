@@ -1668,6 +1668,7 @@ fn a_local_only_note_waits_while_new_notes_are_written_in_format_one() {
             &mut store,
             "ws",
             None,
+            None,
             10,
             &NoLiveLeases,
             &NoLiveLeases,
@@ -1706,6 +1707,7 @@ fn a_local_only_note_in_format_two_is_not_listed_while_new_notes_are_format_one(
         convert_notes_to_format_two(
             &mut store,
             "ws",
+            None,
             None,
             10,
             &NoLiveLeases,

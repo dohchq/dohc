@@ -139,6 +139,7 @@ fn a_replicating_workspace_without_a_relay_check_is_refused() {
             &mut cache,
             "ws",
             None,
+            None,
             10,
             &here,
             None,
