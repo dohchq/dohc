@@ -44,6 +44,7 @@ import {
 import { datasetOperations } from "./ipc/datasetOperations";
 import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { releaseChannelFromArgv } from "./updates/updateMachine";
+import { convertsNotes } from "./workspaces/noteConversion";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -130,6 +131,7 @@ import {
   ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
+  NoteConversionProgress,
   ChatDispatchNoticesEvent,
   AgentRunStateEvent,
   workspaceSearchOperations,
@@ -226,6 +228,7 @@ const bridge: DohcDesktopBridge = {
   devTools: devToolsGranted(process.argv),
   releaseChannel: releaseChannelFromArgv(process.argv),
   insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
+  convertsNotes: convertsNotes(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager" ? "manager" : "workspace",
   reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
@@ -618,6 +621,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.setAsideDraftChanged, SetAsideDraftChange, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
+  onNoteConversionProgress: (listener) =>
+    onEvent(CHANNELS.noteConversionProgress, NoteConversionProgress, listener),
   onChatDispatchNotices: (listener) =>
     onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
   ...operationBridge(agentRunStateOperations, invoke),

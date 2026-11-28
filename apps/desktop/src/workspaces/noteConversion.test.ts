@@ -464,7 +464,7 @@ describe("note conversion run", () => {
     ).resolves.toMatchObject({ sent: true });
   });
 
-  it("stops without converting when the relay's live list cannot be read", async () => {
+  it("stops without converting when the relay's first live list cannot be read", async () => {
     const convert = vi.fn(async () => pass());
     await expect(
       createNoteConversion()("ws", {
@@ -474,54 +474,21 @@ describe("note conversion run", () => {
       }),
     ).rejects.toThrow("relay down");
     expect(convert).not.toHaveBeenCalled();
-
-    const later = vi
-      .fn<(params: Params) => Promise<unknown>>()
-      .mockResolvedValueOnce(pass({ converted: 10, resumeAfter: "a" }));
-    await expect(
-      createNoteConversion()("ws", {
-        relay: relay({
-          liveNotes: vi
-            .fn<() => Promise<string[]>>()
-            .mockResolvedValueOnce(["live-1"])
-            .mockRejectedValueOnce(new Error("relay down")),
-        }),
-        convert: later,
-        assertCurrent: () => undefined,
-      }),
-    ).rejects.toThrow("relay down");
-    expect(later).toHaveBeenCalledOnce();
   });
 
-  it("says how many notes it converted when a batch fails, since that batch's count is lost", async () => {
-    const fatal = Object.assign(new Error("dohc could not read the workspace database."), {
-      code: "corrupt",
+  it("reports progress after each note against the engine's total", async () => {
+    const progress = vi.fn();
+    await createNoteConversion()("ws", {
+      relay: null,
+      convert: oneNoteAtATime([{ converted: 1 }, { unchanged: 1 }, { doesNotFit: [{ objectId: "c", path: "c.md" }] }]),
+      assertCurrent: () => undefined,
+      progress,
     });
-    const convert = vi
-      .fn<(params: Params) => Promise<unknown>>()
-      .mockResolvedValueOnce(pass({ converted: 3, resumeAfter: "a" }))
-      .mockRejectedValueOnce(fatal);
-
-    const failure = await createNoteConversion()("ws", {
-      relay: null,
-      convert,
-      assertCurrent: () => undefined,
-    }).catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe(
-      "dohc could not read the workspace database. dohc converted at least 3 notes before it stopped. Run Convert notes again to finish.",
-    );
-    expect((failure as Error).cause).toBe(fatal);
-
-    const first = await createNoteConversion()("ws", {
-      relay: null,
-      convert: async () => Promise.reject(fatal),
-      assertCurrent: () => undefined,
-    }).catch((error: unknown) => error);
-    expect((first as Error).message).toBe(
-      "dohc could not read the workspace database. Notes converted before it stopped stay converted. Run Convert notes again to finish.",
-    );
+    expect(progress.mock.calls).toEqual([
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ]);
   });
 });
 

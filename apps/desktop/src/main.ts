@@ -869,6 +869,7 @@ import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   NOTE_CONVERSION_PAUSED,
   createNoteConversion,
+  noteConversionReach,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./workspaces/noteConversion";
@@ -2266,7 +2267,12 @@ const convertNotesInWorkspace = createNoteConversion();
 async function relayForNoteConversion(
   workspace: RegistryEntry,
 ): Promise<NoteConversionRelay | null> {
-  if (!workspace.remote && !workspace.pausedRemote) return null;
+  await warmCredentialCache();
+  const reach = noteConversionReach(
+    { ...workspace, sharedView: shareViewIsPresent(workspace.shareView) },
+    cachedCredentials?.userId ?? null,
+  );
+  if (reach === "local") return null;
   const syncing = async () => {
     const current = findWorkspace(workspace.workspaceId);
     if (!current?.remote) throw new Error(NOTE_CONVERSION_PAUSED);
@@ -2288,20 +2294,23 @@ async function convertNotesForOperation(operation: {
   assertCurrent(): void;
 }): Promise<ConvertNotesResult> {
   operation.assertCurrent();
-  if (shareViewIsPresent(operation.workspace.shareView))
-    throw new Error("This is a shared view. Only the original workspace converts its notes.");
   const sessions = desktopEngine.sessions;
   if (!sessions) throw new Error("Rust engine workspace sessions are unavailable.");
   const relay = await relayForNoteConversion(operation.workspace);
   const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
-  return convertNotesInWorkspace(operation.workspace.workspaceId, {
+  const { workspaceId } = operation.workspace;
+  return convertNotesInWorkspace(workspaceId, {
     relay,
     assertCurrent: relay
       ? () => operation.assertCurrent()
       : stopsOnceSyncStarts(
           () => operation.assertCurrent(),
-          () => Boolean(findWorkspace(operation.workspace.workspaceId)?.remote),
+          () => Boolean(findWorkspace(workspaceId)?.remote),
         ),
+    progress: (done, total) => {
+      for (const window of BrowserWindow.getAllWindows())
+        window.webContents.send(CHANNELS.noteConversionProgress, { workspaceId, done, total });
+    },
     convert: (params) =>
       sessions.run(engineWorkspace, ({ client, workspace }) =>
         new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),

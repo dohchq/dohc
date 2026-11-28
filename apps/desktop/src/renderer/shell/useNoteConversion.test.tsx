@@ -109,8 +109,12 @@ describe("the Notices row for notes a conversion left", () => {
         "Converted 1,980 notes. dohc could not send them to the server yet. It sends them on the next sync.",
       tone: "warning",
     });
-    expect(noteConversionNotice({ ...clean, converted: 1, skipped: [{ path: "a.md", reason: "held" }] }))
-      .toMatchObject({ title: "1 note was not converted", message: expect.stringMatching(/^Converted 1 note\. /) });
+    expect(
+      noteConversionNotice({ ...clean, converted: 1, skipped: [{ path: "a.md", reason: "held" }] }),
+    ).toMatchObject({
+      title: "1 note was not converted",
+      message: expect.stringMatching(/^Converted 1 note\. /),
+    });
   });
 });
 

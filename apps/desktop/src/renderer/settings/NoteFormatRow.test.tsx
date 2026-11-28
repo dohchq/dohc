@@ -5,7 +5,10 @@ import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 import type { NoteConversionState } from "../shell/useNoteConversion";
 import { NoteFormatRow } from "./NoteFormatRow";
 
-function show(state: NoteConversionState, options: { converts?: boolean; sharedView?: boolean } = {}) {
+function show(
+  state: NoteConversionState,
+  options: { converts?: boolean; sharedView?: boolean } = {},
+) {
   window.dohcDesktop = { convertsNotes: options.converts ?? true } as unknown as DohcDesktopBridge;
   const start = vi.fn();
   render(

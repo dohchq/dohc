@@ -12,6 +12,38 @@ const NOTE_CONVERSION_SYNC_STARTED = "Sync was turned on while dohc converted no
 export const RELAY_UNREACHABLE = "dohc could not reach the relay. Check your connection.";
 const NOTE_CONVERSION_STUCK =
   "dohc could not convert notes because the engine did not move past the last note it read.";
+export const NOTE_CONVERSION_NOT_OWNER =
+  "dohc could not convert notes. Only the person who owns this workspace can convert its notes.";
+export const NOTE_CONVERSION_SHARED_VIEW =
+  "This is a shared view. Only the original workspace converts its notes.";
+
+/** True when the engine main starts reads and writes notes in the new format. */
+export function convertsNotes(env: Readonly<Record<string, string | undefined>>): boolean {
+  return (
+    env.DOHC_ENGINE_NOTE_BODY_SEQUENCE === "1" && env.DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE === "1"
+  );
+}
+
+/**
+ * Whether a run converts this workspace alone or through its relay. Only the
+ * owner's own synced workspace reaches the relay; a member's full copy, a
+ * shared view and a paused workspace are refused.
+ */
+export function noteConversionReach(
+  workspace: {
+    sharedView: boolean;
+    remote?: { ownerUserId: string };
+    pausedRemote?: { ownerUserId: string };
+  },
+  signedInUserId: string | null,
+): "local" | "relay" {
+  if (workspace.sharedView) throw new Error(NOTE_CONVERSION_SHARED_VIEW);
+  if (!workspace.remote && !workspace.pausedRemote) return "local";
+  if (!workspace.remote) throw new Error(NOTE_CONVERSION_PAUSED);
+  if (signedInUserId !== null && workspace.remote.ownerUserId !== signedInUserId)
+    throw new Error(NOTE_CONVERSION_NOT_OWNER);
+  return "relay";
+}
 
 const Note = z.object({ objectId: z.string(), path: z.string() });
 const EnginePass = z.object({
@@ -39,6 +71,7 @@ export interface NoteConversionRun {
   relay: NoteConversionRelay | null;
   convert(params: { after?: string; budget: number; relayLive: string[] }): Promise<unknown>;
   assertCurrent(): void;
+  progress?(done: number, total: number): void;
 }
 
 export function stopsOnceSyncStarts(assertCurrent: () => void, syncing: () => boolean): () => void {
@@ -128,6 +161,13 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
             result.skipped.push(...pass.skipped.map(({ path, reason }) => ({ path, reason })));
             result.doesNotFit.push(...pass.doesNotFit.map(({ path }) => ({ path })));
             result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
+            const done =
+              result.converted +
+              result.unchanged +
+              result.skipped.length +
+              result.doesNotFit.length +
+              result.failed.length;
+            run.progress?.(done, Math.max(done, pass.total));
             if (pass.resumeAfter === null) more = false;
             else if (pass.resumeAfter === after) throw new Error(NOTE_CONVERSION_STUCK);
             else after = pass.resumeAfter;

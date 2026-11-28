@@ -8360,6 +8360,15 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+// How many of a workspace's notes a Convert notes run has gone through.
+export const NoteConversionProgress = z
+  .object({
+    workspaceId: z.string().min(1).max(256),
+    done: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  })
+  .strict();
+export type NoteConversionProgress = z.infer<typeof NoteConversionProgress>;
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   // The wake reasons are about a message from your phone this computer won or
@@ -9594,6 +9603,9 @@ export interface DohcDesktopBridge
   // Constant: the e2e switch that lets sign-in use a plain http server on
   // this machine. The address field checks with it; main decides again.
   insecureLoopbackServersForTests: boolean;
+  // Constant: whether the engine main starts writes notes in the new format,
+  // so Settings offers Convert notes. The engine still refuses when it does not.
+  convertsNotes: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;
@@ -9813,6 +9825,7 @@ export interface DohcDesktopBridge
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
+  onNoteConversionProgress(listener: (event: NoteConversionProgress) => void): () => void;
   onChatDispatchNotices(listener: (event: ChatDispatchNoticesEvent) => void): () => void;
   // Live push: this computer's agent started or stopped in a workspace this
   // window shows.
