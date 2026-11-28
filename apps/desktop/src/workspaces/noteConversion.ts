@@ -8,6 +8,7 @@ export const NOTE_CONVERSION_OFF =
 export const NOTE_CONVERSION_RUNNING = "dohc is already converting notes in this workspace.";
 export const NOTE_CONVERSION_PAUSED =
   "dohc could not convert notes because sync is paused. Resume sync in Settings, then try again.";
+const NOTE_CONVERSION_SYNC_STARTED = "Sync was turned on while dohc converted notes.";
 export const RELAY_UNREACHABLE = "dohc could not reach the relay. Check your connection.";
 const NOTE_CONVERSION_STUCK =
   "dohc could not convert notes because the engine did not move past the last note it read.";
@@ -38,6 +39,13 @@ export interface NoteConversionRun {
   relay: NoteConversionRelay | null;
   convert(params: { after?: string; budget: number; relayLive: string[] }): Promise<unknown>;
   assertCurrent(): void;
+}
+
+export function stopsOnceSyncStarts(assertCurrent: () => void, syncing: () => boolean): () => void {
+  return () => {
+    assertCurrent();
+    if (syncing()) throw new Error(NOTE_CONVERSION_SYNC_STARTED);
+  };
 }
 
 function floorRefusal(found: string): Error {

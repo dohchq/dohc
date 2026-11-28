@@ -869,6 +869,7 @@ import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   NOTE_CONVERSION_PAUSED,
   createNoteConversion,
+  stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./workspaces/noteConversion";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
@@ -2295,7 +2296,12 @@ async function convertNotesForOperation(operation: {
   const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
   return convertNotesInWorkspace(operation.workspace.workspaceId, {
     relay,
-    assertCurrent: () => operation.assertCurrent(),
+    assertCurrent: relay
+      ? () => operation.assertCurrent()
+      : stopsOnceSyncStarts(
+          () => operation.assertCurrent(),
+          () => Boolean(findWorkspace(operation.workspace.workspaceId)?.remote),
+        ),
     convert: (params) =>
       sessions.run(engineWorkspace, ({ client, workspace }) =>
         new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),
