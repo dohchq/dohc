@@ -328,7 +328,7 @@ export async function showExplorerFiles(page: Page): Promise<void> {
   await expect(files).toHaveAttribute("aria-selected", "true");
 }
 
-/** Switches the Explorer to Home, where Apps, Pinned, Pages and Collections live. */
+/** Switches the Explorer to Home, where Apps, Pinned, Collections and Pages live. */
 export async function openExplorerHome(page: Page): Promise<void> {
   await openExplorerView(page);
   await page.getByTestId("explorer-mode-home").click();

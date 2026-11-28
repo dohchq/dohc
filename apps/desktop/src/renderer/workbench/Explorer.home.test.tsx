@@ -260,7 +260,7 @@ describe("Explorer Files", () => {
 });
 
 describe("Explorer Home", () => {
-  it("orders its sections Open editors, Apps, Pinned, Pages, Sketches, Collections, Other files", () => {
+  it("orders its sections Open editors, Apps, Pinned, Collections, Sketches, Pages, Other files", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
@@ -268,9 +268,9 @@ describe("Explorer Home", () => {
       "Open editors",
       "Apps",
       "Pinned",
-      "Pages",
-      "Sketches",
       "Collections",
+      "Sketches",
+      "Pages",
       "Other files",
     ]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
@@ -394,9 +394,9 @@ describe("Explorer Home", () => {
 
     screen.getByTestId("explorer-apps-toggle").focus();
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
-    await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
     await user.keyboard("{Home}");
     expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
 
@@ -600,9 +600,11 @@ describe("Explorer Home", () => {
     await user.keyboard("{Enter}");
     expect(onOpenFile).toHaveBeenLastCalledWith("budget.csv");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
     await user.keyboard("{ArrowLeft}");
-    expect(screen.getByTestId("explorer-pages-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByTestId("explorer-collections-toggle").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
     await user.keyboard("{End}");
     expect((document.activeElement as HTMLElement).dataset.section).toBe("other");
   });
@@ -944,14 +946,14 @@ describe("selecting several rows in Home", () => {
   it("selects a range over Home's rows in order, across sections, and counts a pinned page once", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
     fireEvent.click(homeRow("pinned:notes.md"));
-    fireEvent.click(homeRow("collections:tasks/"), { shiftKey: true });
+    fireEvent.click(homeRow("pages:notes.md"), { shiftKey: true });
     expect(picked()).toEqual([
       "pinned:notes.md",
-      "pages:Plans/",
-      "pages:notes.md",
-      "sketches:plans/board.excalidraw",
       `collections:d:${TABLE}`,
       "collections:tasks/",
+      "sketches:plans/board.excalidraw",
+      "pages:Plans/",
+      "pages:notes.md",
     ]);
     expect(bar()?.textContent).toBe("5 selected");
   });
@@ -959,11 +961,15 @@ describe("selecting several rows in Home", () => {
   it("extends the selection with Shift and the arrows, past a heading", async () => {
     const user = userEvent.setup();
     render(<Explorer {...explorerProps()} />);
-    await user.click(homeRow("pages:Plans/"));
-    expect(picked()).toEqual(["pages:Plans/"]);
+    await user.click(homeRow(`collections:d:${TABLE}`));
+    expect(picked()).toEqual([`collections:d:${TABLE}`]);
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
     expect(document.activeElement).toBe(homeRow("sketches:plans/board.excalidraw"));
-    expect(picked()).toEqual(["pages:Plans/", "pages:notes.md", "sketches:plans/board.excalidraw"]);
+    expect(picked()).toEqual([
+      `collections:d:${TABLE}`,
+      "collections:tasks/",
+      "sketches:plans/board.excalidraw",
+    ]);
   });
 
   it("selects every row with a path with Ctrl+A, and Escape clears it", async () => {

@@ -294,37 +294,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     });
   }
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
-  const addsPages = explorer.creates?.pages ?? true;
-  if (pages.length > 0 || !explorer.shareView || explorer.creates?.pages) {
-    sections.push({
-      id: "pages",
-      label: "Pages",
-      count: kinds.pages.length,
-      countLabel: (count) => plural(count, "page", "pages"),
-      rows: pages,
-      ...(addsPages ? { add: { label: "New page", onClick: () => explorer.onNewPage("") } } : {}),
-      ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
-    });
-  }
-  if (sketches.length > 0) {
-    sections.push({
-      id: "sketches",
-      label: "Sketches",
-      count: kinds.sketches.count,
-      countLabel: (count) => plural(count, "sketch", "sketches"),
-      rows: sketches,
-      ...(kinds.sketches.count > FILES_SHOWN
-        ? {
-            more: {
-              key: "sketches:more",
-              label: "Show all in Files",
-              testId: "sketches-show-all",
-              onActivate: () => props.onShowInFiles(null),
-            },
-          }
-        : {}),
-    });
-  }
   if (showCollections) {
     const more = refusal ? undefined : explorer.onMoreDataCollections;
     sections.push({
@@ -366,6 +335,37 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       collections.length === 0
         ? { empty: "No Collections yet." }
         : {}),
+    });
+  }
+  if (sketches.length > 0) {
+    sections.push({
+      id: "sketches",
+      label: "Sketches",
+      count: kinds.sketches.count,
+      countLabel: (count) => plural(count, "sketch", "sketches"),
+      rows: sketches,
+      ...(kinds.sketches.count > FILES_SHOWN
+        ? {
+            more: {
+              key: "sketches:more",
+              label: "Show all in Files",
+              testId: "sketches-show-all",
+              onActivate: () => props.onShowInFiles(null),
+            },
+          }
+        : {}),
+    });
+  }
+  const addsPages = explorer.creates?.pages ?? true;
+  if (pages.length > 0 || !explorer.shareView || explorer.creates?.pages) {
+    sections.push({
+      id: "pages",
+      label: "Pages",
+      count: kinds.pages.length,
+      countLabel: (count) => plural(count, "page", "pages"),
+      rows: pages,
+      ...(addsPages ? { add: { label: "New page", onClick: () => explorer.onNewPage("") } } : {}),
+      ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
     });
   }
   if (others.length > 0) {
