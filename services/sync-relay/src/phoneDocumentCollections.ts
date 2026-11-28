@@ -501,10 +501,23 @@ async function createIdempotentFile(
       versionId: "main",
       path: input.path,
     });
-    if (!existing) throw error;
-    return existing.metadataCorrelationId === input.correlationId
-      ? { ok: true, objectId: existing.objectId }
-      : { ok: false };
+    if (existing)
+      return existing.metadataCorrelationId === input.correlationId
+        ? { ok: true, objectId: existing.objectId }
+        : { ok: false };
+    if (
+      error.message === "target-path-exists" ||
+      error.message === "invalid-input" ||
+      (
+        await files.listTextFileMetadata({
+          workspaceId: input.workspaceId,
+          versionId: "main",
+          under: input.path,
+        })
+      ).length > 0
+    )
+      return { ok: false };
+    throw error;
   }
 }
 
@@ -725,7 +738,7 @@ export async function runPhoneDocumentCollectionWrite(
     const result = await withCopy(async (replica, files) => {
       await files.ensureMainVersion({ workspaceId });
       await assertOutsideCollection(files, workspaceId, INBOX_SCHEMA_PATH, true);
-      const confirmCapture = async (path: string, objectId: string, createdInbox: boolean) => {
+      const confirmCapture = async (path: string, objectId: string) => {
         await seedRichDocLineage(deps.storage, replica, { workspaceId, path, objectId });
         await replica.sync(signal);
         if (
@@ -733,25 +746,34 @@ export async function runPhoneDocumentCollectionWrite(
           !deps.storage.mainLiveLineageExists({ workspaceId, objectId })
         )
           throw unconfirmed("the captured note");
-        return { ok: true, path, objectId, recordId, title, createdInbox };
+        return { ok: true, path, objectId, recordId };
       };
       const ctx = deps.storage as StorageContext;
-      const indexedPath = ctx.readTx(() => {
+      const prior = ctx.readTx(() => {
         const hit = ctx.db
           .prepare(
-            "SELECT path FROM sync_relay_current_record_ids WHERE workspace_id=? AND version_id='main' AND record_id=? LIMIT 1",
+            `SELECT json_extract(payload_json, '$.path') AS path, json_extract(payload_json, '$.objectId') AS object_id
+             FROM sync_relay_log
+             WHERE workspace_id = ? AND op_kind = 'moment.append'
+               AND json_extract(payload_json, '$.versionId') = 'main'
+               AND json_extract(payload_json, '$.operation') = 'write'
+               AND json_extract(payload_json, '$.metadata.correlationId') = ?
+             ORDER BY relay_seq DESC LIMIT 1`,
           )
-          .get(workspaceId, recordId);
-        return typeof hit?.path === "string" ? hit.path : null;
+          .get(workspaceId, correlationId);
+        return typeof hit?.path === "string" && typeof hit?.object_id === "string"
+          ? { path: hit.path, objectId: hit.object_id }
+          : null;
       });
-      const indexedObjectId = indexedPath ? objectAt(indexedPath) : null;
-      if (indexedPath && indexedObjectId)
-        return await confirmCapture(indexedPath, indexedObjectId, false);
+      if (prior) {
+        if (objectAt(prior.path) === prior.objectId)
+          return await confirmCapture(prior.path, prior.objectId);
+        return { ok: true, path: prior.path, objectId: prior.objectId, recordId };
+      }
       const rootHit = (
         await files.resolveFiles({ workspaceId, targets: [{ path: INBOX_COLLECTION_PATH }] })
       ).results[0];
       if (rootHit?.status === "found") return occupied("A file named Inbox already exists.");
-      let createdInbox = false;
       const schemaFile = await files.readTextFile({
         workspaceId,
         versionId: "main",
@@ -761,6 +783,16 @@ export async function runPhoneDocumentCollectionWrite(
         if (schemaFile.contentKind !== "text")
           return occupied("Inbox cannot be used as a Collection.");
       } else {
+        if (
+          (
+            await files.listTextFileMetadata({
+              workspaceId,
+              versionId: "main",
+              under: INBOX_SCHEMA_PATH,
+            })
+          ).length > 0
+        )
+          return occupied("Inbox cannot be used as a Collection.");
         const createdSchema = await createIdempotentFile(files, {
           workspaceId,
           path: INBOX_SCHEMA_PATH,
@@ -769,8 +801,8 @@ export async function runPhoneDocumentCollectionWrite(
           correlationId: `phone-inbox-schema:${requestId}`,
           author,
         });
-        if (createdSchema.ok) createdInbox = true;
-        else if (
+        if (
+          !createdSchema.ok &&
           (await files.readTextFile({ workspaceId, versionId: "main", path: INBOX_SCHEMA_PATH }))
             ?.contentKind !== "text"
         )
@@ -787,7 +819,7 @@ export async function runPhoneDocumentCollectionWrite(
           correlationId,
           author,
         });
-        if (created.ok) return await confirmCapture(candidate, created.objectId, createdInbox);
+        if (created.ok) return await confirmCapture(candidate, created.objectId);
       }
       throw unconfirmed("the captured note");
     });

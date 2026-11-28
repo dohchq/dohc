@@ -3,7 +3,7 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import * as Haptics from "expo-haptics";
-import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import { Ellipsis, Plus } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -38,7 +38,7 @@ import { views, type ReadProblem, type WorkspaceData } from "../server/workspace
 import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
-import { useProblemText } from "../workspace/useView";
+import { useProblemText, useView } from "../workspace/useView";
 import { draftOf, rowText, shownValue, type Draft } from "./collectionFields";
 import { FieldInput, type FieldInputSpec } from "./FieldInput";
 import { RelationPicker } from "./RelationPicker";
@@ -147,11 +147,19 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
     [collectionPath, data, mounted, signIn],
   );
 
+  const focused = useIsFocused();
+  const { state: filesState } = useView(views.files);
+  const prevFilesRef = useRef(filesState.value);
   useFocusEffect(
     useCallback(() => {
       void load(loadedRef.current ? "refresh" : "first");
     }, [load]),
   );
+  useEffect(() => {
+    if (prevFilesRef.current === filesState.value) return;
+    prevFilesRef.current = filesState.value;
+    if (focused && loadedRef.current) void load("refresh");
+  }, [filesState.value, focused, load]);
 
   const removeRecord = (record: DocumentCollectionRecord) => {
     if (!canEdit) return;

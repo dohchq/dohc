@@ -87,7 +87,7 @@ function SignedInToastEffects({ clearUndo }: { clearUndo(): void }) {
       });
     } else {
       const id = `capture:refused:${ev.seq}`;
-      const title = workspaceWords.captureFailed(ev.title);
+      const title = workspaceWords.captureFailed(ev.title ?? "Captured item");
       const body = ev.reason ?? "";
       show({ id, tone: "failure", title, body });
       notices?.add({

@@ -1,9 +1,10 @@
+import { defaultInboxCaptureTitle } from "@dohc/workspace-contracts/inbox";
 import type { AccountState, SignIn } from "./account";
 import { isFields, okAnswer, segment, text } from "./api";
 import { ServerError } from "./client";
 import { sleep as timerSleep } from "./deviceFlow";
 import { FILE_WRITE_TIMEOUT_MS, newFileRequestId } from "./fileWrites";
-import type { KeptStore, Row, SqlValue } from "./keptStore";
+import { StoreError, type KeptStore, type Row, type SqlValue } from "./keptStore";
 
 export const CAPTURE_MAX_BODY_BYTES = 256 * 1024;
 
@@ -20,14 +21,14 @@ export interface QueuedCapture extends CaptureDraft {
   readonly origin: string;
   readonly accountId: string;
   readonly requestId: string;
-  readonly stage: "queued" | "sending" | "refused";
+  readonly stage: "withheld" | "queued" | "sending" | "refused";
   readonly reason: string | null;
 }
 
 export interface CaptureEvent {
   readonly seq: number;
   readonly kind: "saved" | "queued" | "refused";
-  readonly title: string;
+  readonly title?: string;
   readonly reason?: string;
 }
 
@@ -53,13 +54,12 @@ export interface CaptureQueue {
   }): () => void;
 }
 
-type CaptureReply =
-  | { readonly ok: true; readonly title: string }
-  | { readonly ok: false; readonly reason: string };
+type CaptureReply = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 const isTerminal = (error: unknown) =>
   error instanceof ServerError && (error.status === 400 || error.status === 413);
 const isNotFound = (error: unknown) => error instanceof ServerError && error.status === 404;
+const isUncertain = (error: unknown) => error instanceof StoreError && error.kind === "uncertain";
 
 export function captureRequestBody(
   draft: Pick<CaptureDraft, "title" | "body" | "url" | "kind">,
@@ -79,26 +79,13 @@ export const capturePayloadBytes = (
 ): number =>
   new TextEncoder().encode(JSON.stringify(captureRequestBody(draft, "0".repeat(36)))).byteLength;
 
-export const captureLabel = (draft: Pick<CaptureDraft, "title" | "url" | "body">): string =>
-  draft.title?.trim() ||
-  draft.url?.trim() ||
-  draft.body
-    ?.split(/\r?\n/u)
-    .map((l) => l.trim())
-    .find(Boolean)
-    ?.slice(0, 80) ||
-  "Captured item";
-
 function readReply(body: unknown): CaptureReply | null {
   const answer = okAnswer(body);
   const res = answer && isFields(answer.result) ? answer.result : null;
   if (!res || typeof res.ok !== "boolean") return null;
   if (res.ok)
-    return text(res.path, 1024) &&
-      text(res.objectId, 256) &&
-      text(res.recordId, 64) &&
-      text(res.title, 512)
-      ? { ok: true, title: res.title }
+    return text(res.path, 1024) && text(res.objectId, 256) && text(res.recordId, 64)
+      ? { ok: true }
       : null;
   return text(res.refusal, 64) && text(res.reason, 512) ? { ok: false, reason: res.reason } : null;
 }
@@ -111,7 +98,7 @@ function decodeRow(row: Row): QueuedCapture | null {
     typeof row.workspace_id !== "string" ||
     typeof row.request_id !== "string" ||
     typeof row.payload !== "string" ||
-    (row.stage !== "queued" && row.stage !== "refused")
+    (row.stage !== "withheld" && row.stage !== "queued" && row.stage !== "refused")
   )
     return null;
   try {
@@ -173,7 +160,10 @@ export function createCaptureQueue(options: {
     return out;
   };
   const isHeld = () => signingOut || held();
-  const sorted = () => [...items.values()].sort((a, b) => a.sequence - b.sequence);
+  const visible = () =>
+    [...items.values()]
+      .filter((item) => item.stage !== "withheld")
+      .sort((a, b) => a.sequence - b.sequence);
   const changed = () => {
     snapshot = null;
     for (const fn of listeners) fn();
@@ -201,26 +191,32 @@ export function createCaptureQueue(options: {
       return epoch === at && !isHeld();
     });
 
+  const readPersisted = async (at: number) => {
+    if (epoch !== at || isHeld()) return false;
+    const rows = await store.read(
+      "SELECT sequence, origin, account_id, workspace_id, request_id, payload, stage, reason FROM captures ORDER BY sequence",
+      [],
+    );
+    if (epoch !== at || isHeld()) return false;
+    items.clear();
+    for (const row of rows) {
+      const decoded = decodeRow(row);
+      if (decoded) items.set(decoded.requestId, decoded);
+    }
+    status = "ready";
+    return true;
+  };
+
   const load = () => {
     if (loading || status === "ready") return Promise.resolve();
     loading = true;
     const at = epoch;
     return serial(async () => {
       try {
-        if (epoch !== at || isHeld()) return;
-        const rows = await store.read(
-          "SELECT sequence, origin, account_id, workspace_id, request_id, payload, stage, reason FROM captures ORDER BY sequence",
-          [],
-        );
-        if (epoch !== at || isHeld()) return;
-        items.clear();
-        for (const row of rows) {
-          const decoded = decodeRow(row);
-          if (decoded) items.set(decoded.requestId, decoded);
+        if (await readPersisted(at)) {
+          changed();
+          pump();
         }
-        status = "ready";
-        changed();
-        pump();
       } catch {
         if (epoch === at) {
           status = "failed";
@@ -235,7 +231,7 @@ export function createCaptureQueue(options: {
   function pump() {
     if (!sends || status !== "ready" || isHeld() || !session?.isCurrent()) return;
     const seen = new Set<string>();
-    for (const item of sorted()) {
+    for (const item of visible()) {
       if (
         item.stage === "refused" ||
         item.origin !== session.origin ||
@@ -272,22 +268,25 @@ export function createCaptureQueue(options: {
       !isHeld() &&
       session === signIn &&
       signIn.isCurrent();
-    const failRefused = async (reason: string) => {
+    const failRefused = async (reason: string): Promise<boolean> => {
       const ok = await mutateDb(
         at,
         "UPDATE captures SET stage = 'refused', reason = ? WHERE request_id = ?",
         [reason, requestId],
       ).catch(() => false);
-      const cur = ok ? items.get(requestId) : undefined;
-      if (!cur) return;
-      items.set(requestId, { ...cur, stage: "refused", reason });
-      emit({ kind: "refused", title: captureLabel(cur), reason });
+      if (!ok) return false;
+      const cur = items.get(requestId);
+      if (cur) {
+        items.set(requestId, { ...cur, stage: "refused", reason });
+        emit({ kind: "refused", title: defaultInboxCaptureTitle(cur), reason });
+      }
+      return true;
     };
     let failures = 0;
     try {
       while (live()) {
         const cur = items.get(requestId);
-        if (!cur || cur.stage === "refused") return;
+        if (!cur || cur.stage === "refused" || cur.stage === "withheld") return;
         items.set(requestId, { ...cur, stage: "sending" });
         changed();
         let reply: CaptureReply;
@@ -300,22 +299,20 @@ export function createCaptureQueue(options: {
             { signal: abort.signal, timeoutMs: FILE_WRITE_TIMEOUT_MS },
           );
         } catch (error) {
-          const reset = items.get(requestId);
-          if (!live()) {
-            if (reset?.stage === "sending") {
-              items.set(requestId, { ...reset, stage: "queued" });
-              changed();
-            }
-            return;
+          if (!live()) return;
+          if (isTerminal(error)) {
+            if (await failRefused(error instanceof Error ? error.message : "Could not send."))
+              return;
+            await pause(retryMs(++failures), abort.signal);
+            continue;
           }
-          if (isTerminal(error))
-            return await failRefused(error instanceof Error ? error.message : "Could not send.");
+          const reset = items.get(requestId);
           if (reset?.stage === "sending") {
             items.set(requestId, { ...reset, stage: "queued" });
             if (notified.has(requestId)) changed();
             else {
               notified.add(requestId);
-              emit({ kind: "queued", title: captureLabel(reset) });
+              emit({ kind: "queued" });
             }
           }
           if (isNotFound(error)) {
@@ -326,7 +323,11 @@ export function createCaptureQueue(options: {
           continue;
         }
         if (!live()) return;
-        if (!reply.ok) return await failRefused(reply.reason);
+        if (!reply.ok) {
+          if (await failRefused(reply.reason)) return;
+          await pause(retryMs(++failures), abort.signal);
+          continue;
+        }
         const deleted = await mutateDb(at, "DELETE FROM captures WHERE request_id = ?", [
           requestId,
         ]).catch(() => false);
@@ -337,10 +338,15 @@ export function createCaptureQueue(options: {
         items.delete(requestId);
         notified.delete(requestId);
         onSaved?.(cur.workspaceId);
-        emit({ kind: "saved", title: reply.title });
+        emit({ kind: "saved" });
         return;
       }
     } finally {
+      const cur = items.get(requestId);
+      if (cur?.stage === "sending") {
+        items.set(requestId, { ...cur, stage: "queued" });
+        changed();
+      }
       if (active.get(workspaceId)?.abort === abort) active.delete(workspaceId);
       pump();
     }
@@ -354,7 +360,7 @@ export function createCaptureQueue(options: {
   };
 
   return {
-    state: () => (snapshot ??= { status, items: sorted(), lastEvent }),
+    state: () => (snapshot ??= { status, items: visible(), lastEvent }),
     subscribe: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
     enqueue(input) {
       const signIn = session;
@@ -372,32 +378,57 @@ export function createCaptureQueue(options: {
       return serial(async () => {
         if (epoch !== at || isHeld() || !signIn.isCurrent())
           throw new Error("Capture queue is unavailable.");
-        const seq = await store.transaction(async (sql) => {
-          if (epoch !== at || isHeld()) throw new Error("Capture queue is unavailable.");
-          await sql.run(
-            "INSERT OR IGNORE INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason) VALUES (?, ?, ?, ?, ?, 'queued', NULL)",
-            [signIn.origin, signIn.userId, input.workspaceId, requestId, payload],
-          );
-          const rows = await sql.all("SELECT sequence FROM captures WHERE request_id = ?", [
-            requestId,
-          ]);
-          if (typeof rows[0]?.sequence !== "number") throw new Error("Could not store capture.");
-          return rows[0].sequence;
-        });
-        const item: QueuedCapture = {
-          sequence: seq,
+        if (status !== "ready") {
+          const loaded = await readPersisted(at);
+          if (!loaded) throw new Error("Capture queue is unavailable.");
+        }
+        let seq = items.get(requestId)?.sequence ?? -1;
+        const placeholder = (sequence: number): QueuedCapture => ({
+          sequence,
           origin: signIn.origin,
           accountId: signIn.userId,
           workspaceId: input.workspaceId,
           requestId,
           ...fields,
-          stage: "queued",
+          stage: "withheld",
           reason: null,
-        };
+        });
+        try {
+          seq = await store.transaction(async (sql) => {
+            if (epoch !== at || isHeld()) throw new Error("Capture queue is unavailable.");
+            await sql.run(
+              "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason) VALUES (?, ?, ?, ?, ?, 'withheld', NULL) ON CONFLICT(request_id) DO UPDATE SET payload = excluded.payload, stage = 'withheld', reason = NULL",
+              [signIn.origin, signIn.userId, input.workspaceId, requestId, payload],
+            );
+            const rows = await sql.all("SELECT sequence FROM captures WHERE request_id = ?", [
+              requestId,
+            ]);
+            if (typeof rows[0]?.sequence !== "number") throw new Error("Could not store capture.");
+            return rows[0].sequence;
+          });
+        } catch (error) {
+          if (isUncertain(error) && epoch === at && !isHeld()) {
+            items.set(requestId, placeholder(seq));
+            changed();
+          }
+          throw error;
+        }
+        try {
+          await store.transaction(async (sql) => {
+            if (epoch !== at || isHeld()) throw new Error("Capture queue is unavailable.");
+            await sql.run("UPDATE captures SET stage = 'queued' WHERE request_id = ?", [requestId]);
+          });
+        } catch (error) {
+          if (epoch === at && !isHeld()) {
+            items.set(requestId, placeholder(seq));
+            changed();
+          }
+          throw error;
+        }
+        const item: QueuedCapture = { ...placeholder(seq), stage: "queued" };
         if (epoch === at && !isHeld()) {
           parked.delete(scope(signIn.origin, signIn.userId, input.workspaceId));
           items.set(requestId, item);
-          if (status === "loading") status = "ready";
           changed();
           pump();
         }

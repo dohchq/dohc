@@ -47,8 +47,9 @@ import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
 import { choose } from "../confirm";
 import { appState } from "../apps/reviewControls";
+import { defaultInboxCaptureTitle } from "@dohc/workspace-contracts/inbox";
 import { shownProblem } from "../server/client";
-import { captureLabel, type QueuedCapture } from "../server/captureQueue";
+import type { QueuedCapture } from "../server/captureQueue";
 import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
@@ -467,7 +468,7 @@ function Files({
           style={[styles.captureRow, { backgroundColor: theme.panel, borderColor: theme.line }]}
         >
           <Text style={[styles.captureText, { color: theme.danger }]} numberOfLines={2}>
-            {workspaceWords.captureFailed(captureLabel(item))} {item.reason ?? ""}
+            {workspaceWords.captureFailed(defaultInboxCaptureTitle(item))} {item.reason ?? ""}
           </Text>
           {canEditFiles ? (
             <Pressable

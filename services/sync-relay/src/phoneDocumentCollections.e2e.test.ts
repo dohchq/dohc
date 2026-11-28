@@ -786,8 +786,6 @@ describe.skipIf(engine.missing)(
           path: string;
           objectId: string;
           recordId: string;
-          title: string;
-          createdInbox: boolean;
         }>("captureInboxItem", {
           title: "Flight receipts",
           body: "Check boarding pass PDF",
@@ -795,11 +793,7 @@ describe.skipIf(engine.missing)(
           kind: "link",
           requestId: "cap-req-1",
         });
-        expect(first).toMatchObject({
-          ok: true,
-          title: "Flight receipts",
-          createdInbox: true,
-        });
+        expect(first.ok).toBe(true);
         expect(first.path).toMatch(/^Inbox\/\d{4}-\d{2}-\d{2}-flight-receipts-[a-z0-9]{6}\.md$/u);
         expect(isRecordId(first.recordId)).toBe(true);
 
@@ -811,13 +805,7 @@ describe.skipIf(engine.missing)(
           kind: "link",
           requestId: "cap-req-1",
         });
-        expect(replay).toMatchObject({
-          ok: true,
-          path: first.path,
-          objectId: first.objectId,
-          recordId: first.recordId,
-          createdInbox: false,
-        });
+        expect(replay).toEqual(first);
 
         // Captured Inbox note opens live immediately on phone with zero desktop running.
         const live = await stack.openPhoneLive(first.path);
@@ -831,11 +819,7 @@ describe.skipIf(engine.missing)(
           kind: "note",
           requestId: "cap-req-2",
         });
-        expect(second).toMatchObject({
-          ok: true,
-          title: "Buy espresso beans",
-          createdInbox: false,
-        });
+        expect(second.ok).toBe(true);
 
         // Phone Document Collection view shows both Inbox items with their Title: frontmatter.
         const phoneInbox = await stack.phoneOp<{
@@ -895,8 +879,64 @@ describe.skipIf(engine.missing)(
         const firstMd = await readFile(join(desktop.root, first.path), "utf8");
         expect(firstMd).toContain("URL: https://example.com/trips/lisbon");
         expect(firstMd).toContain("Added on phone right after capture");
+
+        // Sol B3: deleting a captured record and replaying the original requestId acknowledges it without 503 or reviving the file.
+        expect(
+          await stack.phoneOp("deleteFile", {
+            path: second.path,
+            expectedObjectId: second.objectId,
+            requestId: "cap-del-second",
+          }),
+        ).toMatchObject({ ok: true, path: second.path, objectId: second.objectId });
+        expect(
+          await stack.phoneOp("captureInboxItem", {
+            body: "Buy espresso beans",
+            kind: "note",
+            requestId: "cap-req-2",
+          }),
+        ).toEqual(second);
+        expect(
+          stack.storage.objectIdAtPathInVersion({
+            workspaceId: WORKSPACE,
+            versionId: "main",
+            path: second.path,
+          }),
+        ).toBeUndefined();
       },
       REAL_DAEMON_DEADLINE_MS * 3,
+    );
+
+    it(
+      "Sol B2: a synced folder at Inbox/collection.yaml/ returns folder-occupied instead of 500",
+      async () => {
+        const stack = await startRealStack();
+        const desktop = await stack.connectDesktop("desktop-inbox-dir-collision");
+        await desktop.desktop.sessions.run(
+          desktop.desktop.workspace,
+          async ({ client, workspace }) => {
+            await new VersionedLiveAdapter(client, workspace, {
+              workspaceId: WORKSPACE,
+            }).writeTextFile({
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              path: "Inbox/collection.yaml/nested.md",
+              text: "blocker\n",
+              publish: true,
+              createOnly: true,
+              metadata: { origin: "api" },
+            });
+          },
+        );
+        await desktop.push();
+        expect(
+          await stack.phoneOp("captureInboxItem", {
+            body: "Should be refused cleanly",
+            kind: "note",
+            requestId: "cap-dir-collision",
+          }),
+        ).toMatchObject({ ok: false, refusal: "folder-occupied" });
+      },
+      REAL_DAEMON_DEADLINE_MS * 2,
     );
   },
 );

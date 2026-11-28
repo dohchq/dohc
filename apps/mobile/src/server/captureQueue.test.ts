@@ -10,17 +10,15 @@ import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testSer
 
 const ORIGIN = "https://dohc.example.com";
 const CAPTURE_PATH = "/sync/ws-1/ops/captureInboxItem";
-const okCapture = (title = "Quick note"): Answer => ({
+const okCapture = (): Answer => ({
   status: 200,
   body: {
     ok: true,
     result: {
       ok: true,
-      path: "Inbox/2026-11-28-quick-note.md",
+      path: "Inbox/2026-11-28-quick-note-aaaaaa.md",
       objectId: "obj-1",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
-      title,
-      createdInbox: true,
     },
     cursor: "0.1.1",
   },
@@ -107,7 +105,7 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     disk.crash();
 
     const savedWorkspaces: string[] = [];
-    server.on("POST", CAPTURE_PATH, () => okCapture("Offline thought"));
+    server.on("POST", CAPTURE_PATH, () => okCapture());
     const store2 = disk.launch();
     const q2 = createCaptureQueue({
       store: store2,
@@ -165,7 +163,7 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
 
     // Another account signing in does NOT send u-1's capture.
     const acc2 = await signedInAccount(server, { userId: "u-2" });
-    server.on("POST", CAPTURE_PATH, () => okCapture("Held across 401"));
+    server.on("POST", CAPTURE_PATH, () => okCapture());
     const callsBeforeU2 = server.calls.length;
     fake.set(acc2.state());
     await new Promise<void>((r) => setTimeout(r, 30));
@@ -323,9 +321,9 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     const server = testServer();
     let hiddenVisible = false;
     server.on("POST", "/sync/ws-hidden/ops/captureInboxItem", () =>
-      hiddenVisible ? okCapture("Hidden note") : { status: 404, body: { ok: false } },
+      hiddenVisible ? okCapture() : { status: 404, body: { ok: false } },
     );
-    server.on("POST", "/sync/ws-visible/ops/captureInboxItem", () => okCapture("Visible note"));
+    server.on("POST", "/sync/ws-visible/ops/captureInboxItem", () => okCapture());
     const account = await signedInAccount(server);
     const queue = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
     const stop = queue.follow(account);
@@ -351,21 +349,21 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     stop();
   });
 
-  it("B3: retrying with the same draft requestId after an uncertain SQLite commit never creates two rows", async () => {
+  it("Sol B1: uncertain SQLite commit keeps withheld draft counted for Sign out, never sends on relaunch, and replaces in place on edit", async () => {
     const disk = keptDisk();
     const server = testServer();
-    server.on("POST", CAPTURE_PATH, () => okCapture("Once only"));
+    server.on("POST", CAPTURE_PATH, () => okCapture());
     const account = await signedInAccount(server);
     const real = disk.launch();
-    let failOnce = true;
+    let failFirstCommit = true;
     const flakyStore: typeof real = {
       read: (s, p) => real.read(s, p),
       checkpoint: () => real.checkpoint(),
       destroy: () => real.destroy(),
       async transaction(body) {
         const res = await real.transaction(body);
-        if (failOnce) {
-          failOnce = false;
+        if (failFirstCommit) {
+          failFirstCommit = false;
           throw new StoreError("uncertain", "Injected uncertain commit failure");
         }
         return res;
@@ -379,22 +377,37 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     await expect(
       q1.enqueue({
         workspaceId: "ws-1",
-        title: "Once only",
-        body: "Exact once",
+        title: "Superseded draft",
+        body: "Wrong text",
         kind: "note",
         requestId: draftRequestId,
       }),
     ).rejects.toThrow("Injected uncertain commit failure");
+    // Sign-out count sees the withheld row, and pump never sends it.
+    expect(q1.signOutCount()).toBe(1);
+    expect(q1.state().items).toEqual([]);
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(0);
 
-    await q1.enqueue({
+    // Relaunch before user retries still never sends the withheld draft, while Sign-out counts it.
+    stop1();
+    const qMid = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
+    const stopMid = qMid.follow(account);
+    await waitFor(() => qMid.state().status === "ready");
+    await new Promise<void>((r) => setTimeout(r, 25));
+    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(0);
+    expect(qMid.signOutCount()).toBe(1);
+
+    // Editing and re-submitting with the same draft requestId replaces the withheld draft in place.
+    await qMid.enqueue({
       workspaceId: "ws-1",
-      title: "Once only",
-      body: "Exact once",
+      title: "Corrected draft",
+      body: "Right text",
       kind: "note",
       requestId: draftRequestId,
     });
-    await waitFor(() => q1.state().items.length === 0);
-    stop1();
+    await waitFor(() => qMid.state().items.length === 0 && qMid.signOutCount() === 0);
+    stopMid();
 
     const q2 = createCaptureQueue({ store: disk.launch(), retryMs: () => 5 });
     const stop2 = q2.follow(account);
@@ -402,8 +415,100 @@ describe("captureQueue durability, offline retry, 401 hold, and Sign-out wipe", 
     await new Promise<void>((r) => setTimeout(r, 25));
     stop2();
 
-    expect(server.calls.filter((c) => c.path === CAPTURE_PATH)).toHaveLength(1);
+    const sent = server.calls
+      .filter((c) => c.path === CAPTURE_PATH)
+      .map((c) => c.body as Record<string, unknown>);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      requestId: draftRequestId,
+      title: "Corrected draft",
+      body: "Right text",
+    });
     expect(disk.sql("SELECT request_id FROM captures")).toEqual([]);
+  });
+
+  it("Neon B2 & B3: backs off if refusal persistence fails, resets sending on abort, and loads persisted rows when enqueue runs after load failure", async () => {
+    const disk = keptDisk();
+    disk.sql(
+      "INSERT INTO captures (origin, account_id, workspace_id, request_id, payload, stage, reason) VALUES (?, ?, ?, ?, ?, 'queued', NULL)",
+      ORIGIN,
+      "u-1",
+      "ws-1",
+      "req-preexisting",
+      JSON.stringify({ title: "Preexisting", kind: "note" }),
+    );
+    const server = testServer();
+    server.on("POST", CAPTURE_PATH, (req) => {
+      const b = req.body as Record<string, unknown>;
+      if (b.title === "Refused once")
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            result: { ok: false, refusal: "folder-occupied", reason: "Occupied." },
+            cursor: "0.1.1",
+          },
+        };
+      return okCapture();
+    });
+    const account = await signedInAccount(server);
+    const real = disk.launch();
+    let failFirstRead = true;
+    let failRefusalWrite = true;
+    const flakyStore: typeof real = {
+      checkpoint: () => real.checkpoint(),
+      destroy: () => real.destroy(),
+      async read(s, p) {
+        if (failFirstRead) {
+          failFirstRead = false;
+          throw new StoreError("locked", "Locked before first unlock");
+        }
+        return real.read(s, p);
+      },
+      async transaction(body) {
+        if (failRefusalWrite) {
+          return real.transaction(async (sql) =>
+            body({
+              all: (q, p) => sql.all(q, p),
+              run: async (q, p) => {
+                if (q.includes("stage = 'refused'")) {
+                  failRefusalWrite = false;
+                  throw new StoreError("failed", "Transient refusal DB failure");
+                }
+                await sql.run(q, p);
+              },
+            }),
+          );
+        }
+        return real.transaction(body);
+      },
+    };
+    const retryDelays: number[] = [];
+    const queue = createCaptureQueue({
+      store: flakyStore,
+      retryMs: (n) => {
+        retryDelays.push(n);
+        return 15;
+      },
+    });
+    const stop = queue.follow(account);
+    await waitFor(() => queue.state().status === "failed");
+
+    // Enqueue after failed initial load reads preexisting rows, promotes ready, and sends both.
+    await queue.enqueue({ workspaceId: "ws-1", title: "Refused once", kind: "note" });
+    await waitFor(
+      () =>
+        queue.state().status === "ready" &&
+        queue.state().items.length === 1 &&
+        queue.state().items[0]?.stage === "refused",
+    );
+    expect(retryDelays).toEqual([1]);
+    expect(
+      server.calls.some(
+        (c) => (c.body as Record<string, unknown>)?.requestId === "req-preexisting",
+      ),
+    ).toBe(true);
+    stop();
   });
 
   it("B4: measures serialized JSON request bytes so quote-heavy notes cannot exceed relay body limit", () => {

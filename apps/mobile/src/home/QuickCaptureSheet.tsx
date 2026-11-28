@@ -41,7 +41,6 @@ export function QuickCaptureSheet(props: {
   const edit = (set: (next: string) => void) => (next: string) => {
     set(next);
     setError(null);
-    requestId.current = null;
   };
   const fail = (message: string) => {
     setError(message);
