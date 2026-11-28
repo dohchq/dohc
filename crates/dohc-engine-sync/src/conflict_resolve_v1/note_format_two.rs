@@ -398,6 +398,7 @@ pub fn convert_notes_to_format_two(
     store: &mut EngineStore,
     workspace_id: &str,
     after: Option<&str>,
+    only: Option<&str>,
     budget: usize,
     here: &dyn LeaseProbe,
     elsewhere: &dyn LeaseProbe,
@@ -424,7 +425,7 @@ pub fn convert_notes_to_format_two(
                  LEFT JOIN snapshots s ON s.workspace_id=d.workspace_id \
                  AND s.version_id=d.version_id AND s.object_id=d.object_id \
                  WHERE d.workspace_id=?1 AND d.version_id='main' AND d.content_kind='richdoc' \
-                 AND (?2 IS NULL OR d.object_id > ?2) ORDER BY d.object_id LIMIT ?3",
+                 AND (?2 IS NULL OR d.object_id > ?2) AND (?4 IS NULL OR d.object_id = ?4) \n                 ORDER BY d.object_id LIMIT ?3",
             )
             .and_then(|mut statement| {
                 statement
@@ -432,7 +433,8 @@ pub fn convert_notes_to_format_two(
                         params![
                             workspace_id,
                             after,
-                            i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1)
+                            i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1),
+                            only
                         ],
                         |row| {
                             let path = row.get_ref(1)?.as_bytes().map_err(|error| {
