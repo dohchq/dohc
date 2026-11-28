@@ -2183,15 +2183,14 @@ function readJournalCut(
   const history = journalAuthorityHistory(storage, document);
   if (!history.length) return { kind: "refused", reason: "baseline-missing" };
   const stored = history.find((row) => row.current);
-  if (
-    !stored ||
-    !(stored.open || (retirement && retiringRead(storage, document, stored, retirement)))
-  )
+  const retiring =
+    !!stored && !stored.open && !!retirement && retiringRead(storage, document, stored, retirement);
+  if (!stored || !(stored.open || retiring))
     return { kind: "refused", reason: "authority-refused" };
   if (
     stored.binding.lineageClaimId !== document.lineageClaimId ||
     stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId) ||
-    !currentLiveDocumentMoment(storage, document, stored.binding.currentPath)
+    (!retiring && !currentLiveDocumentMoment(storage, document, stored.binding.currentPath))
   )
     return { kind: "refused", reason: "stale-binding" };
   const high = storage.db
