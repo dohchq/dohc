@@ -2350,6 +2350,71 @@ pub(super) mod tests {
         assert_eq!(HEADS_HELD.with(Cell::get), (0, 1));
     }
 
+    #[test]
+    fn a_page_that_writes_a_recovered_copy_ends_its_queued_writes() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        for (now_ms, moment, text, preimage) in [
+            (2, "ydoc-recovery-moment-a", "first\n", Preimage::Absent),
+            (
+                3,
+                "ydoc-inactive-recovery-b",
+                "second\n",
+                Preimage::Present(dohc_engine_storage::hex_sha256(b"first\n")),
+            ),
+        ] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    let result = dohc_engine_domain::write_text_in_tx(
+                        tx,
+                        &WriteText {
+                            workspace_id: "ws".to_owned(),
+                            version_id: "main".to_owned(),
+                            object_id: "copy".to_owned(),
+                            path: "copy.md".to_owned(),
+                            text: text.to_owned(),
+                            moment_id: moment.to_owned(),
+                            metadata_origin: "sync".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms,
+                            request_id: None,
+                        },
+                    )?;
+                    dohc_engine_domain::enqueue_write(tx, &result, preimage, "sync")
+                })
+                .unwrap();
+        }
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![MomentMaterializationChange {
+                version_id: "main".to_owned(),
+                path: "copy.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("copy.md")).unwrap(),
+            "second\n"
+        );
+        let pending = store
+            .read_with(|conn| {
+                conn.prepare("SELECT job_id FROM materialization_jobs WHERE status='pending'")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()
+            })
+            .unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_case_alias_page_publishes_the_new_spelling_even_with_equal_bytes() {
