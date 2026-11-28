@@ -645,21 +645,25 @@ fn a_crash_at_each_commit_converts_once() {
 #[test]
 fn a_note_format_two_cannot_hold_is_left_in_format_one() {
     let linked = "Run [`npm install`](https://example.com) first\n";
-    let (_scratch, _path, mut store) = open_store();
-    let key = seed_note(
-        &mut store,
-        linked,
-        "moment-linked",
-        Some(&base_of(&[linked])),
-    );
-    let before = claim(&store, &key);
-    assert_eq!(
-        on(|| convert(&mut store, &key, &NoLiveLeases)),
-        FormatTwoConversion::DoesNotFit(None)
-    );
-    assert_eq!(claim(&store, &key), before);
-    assert_eq!(note(&store, &key), (1, linked.to_owned()));
-    assert!(carriers(&store).is_empty());
+    let proto = "---\nnested:\n  __proto__: preserved\n---\n\nBody\n";
+    for markdown in [linked, proto] {
+        let (_scratch, _path, mut store) = open_store();
+        let key = seed_note(
+            &mut store,
+            markdown,
+            "moment-linked",
+            Some(&base_of(&[markdown])),
+        );
+        let before = claim(&store, &key);
+        assert_eq!(
+            on(|| convert(&mut store, &key, &NoLiveLeases)),
+            FormatTwoConversion::DoesNotFit(None),
+            "{markdown:?}"
+        );
+        assert_eq!(claim(&store, &key), before, "{markdown:?}");
+        assert_eq!(note(&store, &key), (1, markdown.to_owned()));
+        assert!(carriers(&store).is_empty(), "{markdown:?}");
+    }
 }
 
 #[test]

@@ -308,6 +308,35 @@
       "format": 1
     },
     {
+      "name": "a shared map holding a plain map of 3,000 keys and 23,900 paragraphs",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n  constructor: 1\n  values:\n"
+        ],
+        [
+          3000,
+          "    kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          23900,
+          "a\n\n"
+        ]
+      ],
+      "structs": 95613,
+      "rootEntries": 8,
+      "keySorts": 1476028,
+      "astral": 0,
+      "indexOperations": 99264688,
+      "format": 2
+    },
+    {
       "name": "20,000 keys in a map and overlapping marks just under the limit",
       "frontmatter": [
         [
@@ -325,12 +354,12 @@
       ],
       "body": [
         [
-          3700,
+          3699,
           "**a *b* c** d "
         ],
         [
           1,
-          "\n"
+          "**a *b* c** d\n"
         ]
       ],
       "structs": 44411,

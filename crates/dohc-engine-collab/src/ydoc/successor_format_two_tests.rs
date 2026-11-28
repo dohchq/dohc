@@ -170,10 +170,30 @@ fn a_successor_keeps_room_for_a_kept_source_under_the_struct_limit() {
             (24_993, 4, "\n\n", 100_000, 2),
         ] {
             let artifact = note(paragraphs, headings, end);
-            let note = loaded(&successor(&artifact));
-            assert_eq!(note.schema_version, schema_version, "{structs} structs");
+            let base = successor(&artifact);
+            let refused = base.does_not_fit.map(|over| over.limit);
+            let note = loaded(&base);
+            assert_eq!(
+                (note.schema_version, refused),
+                (
+                    schema_version,
+                    (schema_version == 1).then_some("maxStructVisits")
+                ),
+                "{structs} structs"
+            );
             assert_eq!(note.file, artifact, "{structs} structs");
         }
+    });
+}
+
+#[test]
+fn a_successor_with_a_proto_key_in_a_frontmatter_map_is_written_in_format_one() {
+    let artifact = "---\nnested:\n  __proto__: preserved\n---\n\nBody\n";
+    reading_body_sequence_here(|| {
+        let base = successor(artifact);
+        assert_eq!(base.does_not_fit, None);
+        let note = loaded(&base);
+        assert_eq!((note.schema_version, note.file.as_str()), (1, artifact));
     });
 }
 
@@ -394,11 +414,10 @@ fn each_recipe_gets_its_typescript_format_and_where_read_alike_at_least_its_inde
     let read_differently = [
         "mark-dense lines at the struct cap",
         "a table of 1,000 cells",
-        "20,000 keys in a map and overlapping marks just under the limit",
         "a realistic note near the struct cap",
     ];
     let fit: Fit = serde_json::from_str(FIT).expect("the fit fixture parses");
-    assert_eq!(fit.notes.len(), 14);
+    assert_eq!(fit.notes.len(), 15);
     let unlike: Vec<String> = reading_body_sequence_here(|| {
         fit.notes
             .iter()
@@ -420,12 +439,6 @@ fn each_recipe_gets_its_typescript_format_and_where_read_alike_at_least_its_inde
                 let refused = base.does_not_fit.map(|over| (over.limit, over.used));
                 let expected = (note.format == 1).then_some(("maxIndexOperations", counted));
                 let read_alike = !read_differently.contains(&note.name.as_str());
-                if !read_alike {
-                    eprintln!(
-                        "{}: the engine counts {counted}, TypeScript {}",
-                        note.name, note.index_operations
-                    );
-                }
                 let alike = made.note_schema_version() == note.format
                     && (!read_alike || counted >= note.index_operations)
                     && refused == expected;

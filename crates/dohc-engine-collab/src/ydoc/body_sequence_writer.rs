@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_structs_and_elements_the_relay_counts_and_at_least_its_values_and_bytes() {
+    fn counts_structs_and_elements_as_typescript_writes_an_upper_bound_when_runs_share_marks() {
         for note in written_notes() {
             let weight = Weight::of(&opened(&note.update).doc);
             assert_eq!(
@@ -614,6 +614,83 @@ mod tests {
                 weight.bytes >= note.decoded_payload_byte_visits,
                 "{}",
                 note.name
+            );
+        }
+    }
+
+    #[test]
+    fn counts_a_frontmatter_value_as_typescript_stores_it() {
+        let number = |value: f64| Any::Number(value);
+        let list = |values: &[Any]| Any::from(values.to_vec());
+        let map = |entries: &[(&str, Any)]| {
+            Any::from(
+                entries
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+        for (value, structs, key_sorts) in [
+            (
+                list(&[
+                    number(1.0),
+                    number(2.0),
+                    list(&[number(3.0), number(4.0)]),
+                    map(&[("a", number(1.0))]),
+                    Any::BigInt(5),
+                    Any::from("x"),
+                    map(&[("constructor", number(1.0))]),
+                ]),
+                10,
+                3,
+            ),
+            (
+                map(&[
+                    ("constructor", number(1.0)),
+                    (
+                        "plain",
+                        map(&[("x", number(1.0)), ("y", list(&[number(1.0), number(2.0)]))]),
+                    ),
+                    ("big", Any::BigInt(7)),
+                    ("$dohcBigInt", number(1.0)),
+                ]),
+                4,
+                128,
+            ),
+            (
+                map(&[("a", map(&[("constructor", map(&[("b", number(1.0))]))]))]),
+                2,
+                3,
+            ),
+            (
+                list(&[
+                    list(&[
+                        number(1.0),
+                        list(&[number(2.0), map(&[("k", number(1.0)), ("kk", number(2.0))])]),
+                    ]),
+                    Any::BigInt(9),
+                ]),
+                0,
+                10,
+            ),
+            (
+                list(&[map(&[
+                    ("$dohcBigInt", number(1.0)),
+                    ("$$dohcBigInt", number(2.0)),
+                    ("constructor", number(1.0)),
+                ])]),
+                4,
+                96,
+            ),
+        ] {
+            let doc = Doc::new();
+            let frontmatter = doc.get_or_insert_map(ROOT_FRONTMATTER);
+            frontmatter.insert(&mut doc.transact_mut(), "v", value.clone());
+            let weight = Weight::of(&doc);
+            assert_eq!(
+                (weight.structs, weight.key_sorts),
+                (1 + structs, key_sorts),
+                "{value:?}"
             );
         }
     }

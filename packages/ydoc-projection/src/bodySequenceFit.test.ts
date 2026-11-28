@@ -96,11 +96,20 @@ const RECIPES: Recipe[] = [
     body: paragraphs(23_900),
   },
   {
+    name: "a shared map holding a plain map of 3,000 keys and 23,900 paragraphs",
+    frontmatter: [
+      [1, "---\ntable:\n  constructor: 1\n  values:\n"],
+      [3_000, `    ${"k".repeat(34)}{i}: {i}\n`],
+      [1, "---\n"],
+    ],
+    body: paragraphs(23_900),
+  },
+  {
     name: "20,000 keys in a map and overlapping marks just under the limit",
     frontmatter: keys(20_000, LONG_KEY),
     body: [
-      [3_700, "**a *b* c** d "],
-      [1, "\n"],
+      [3_699, "**a *b* c** d "],
+      [1, "**a *b* c** d\n"],
     ],
   },
   {
@@ -262,6 +271,7 @@ describe("the index operations a new note is counted at", () => {
       "20,000 keys in a map and paragraphs just under the limit": 2,
       "20,000 keys in a map and paragraphs just over the limit": 1,
       "a shared map of 3,000 keys and 23,900 paragraphs": 1,
+      "a shared map holding a plain map of 3,000 keys and 23,900 paragraphs": 2,
       "20,000 keys in a map and overlapping marks just under the limit": 2,
       "2,000 keys of 100 bytes in a map": 2,
       "a map with a constructor key, written as a shared map": 2,
