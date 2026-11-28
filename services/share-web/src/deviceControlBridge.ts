@@ -14,13 +14,13 @@ import {
 } from "@dohc/live-session-contract/device-control";
 import {
   BoundedSendQueue,
+  clientAddress,
   DeviceControlWriter,
   DeviceCreditWindow,
   createDeviceControlRequestParser,
   refuseDeviceControl,
   TokenBucketLimiter,
 } from "@dohc/service-http";
-import { clientAddress } from "./clientAddress.js";
 
 export function createDeviceControlBridge(options: {
   publicHosts: ReadonlySet<string>;

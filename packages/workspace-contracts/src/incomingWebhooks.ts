@@ -17,6 +17,14 @@ export const INCOMING_WEBHOOK_BURST_CAPACITY = 30;
 export const INCOMING_WEBHOOK_REFILL_PER_SECOND = 0.5;
 export const INCOMING_WEBHOOK_MAX_CHAIN_DEPTH = 4;
 export const MAX_INCOMING_WEBHOOK_NAME_CHARS = 120;
+// A website form webhook: anyone who reads the page can post, so each sender
+// gets a small share and only the listed fields are kept.
+export const INCOMING_WEBHOOK_FORM_SENDER_BURST = 5;
+export const INCOMING_WEBHOOK_FORM_SENDER_DAILY = 20;
+export const MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES = 8 * 1024;
+export const MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT = 20;
+const MAX_INCOMING_WEBHOOK_FORM_FIELDS = 10;
+const MAX_INCOMING_WEBHOOK_FORM_VALUE_CHARS = 500;
 const MAX_INCOMING_WEBHOOK_COLLECTION_PATH_CHARS = 1024;
 const MAX_INCOMING_WEBHOOK_HEADER_VALUE_CHARS = 512;
 
@@ -66,6 +74,27 @@ const IncomingWebhookCollectionPath = z
   )
   .refine((value) => !CONTROL_CHARS.test(value), "Collection path contains control characters.");
 
+export const IncomingWebhookForm = z
+  .object({
+    fields: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z][A-Za-z0-9_-]{0,39}$/u,
+            "Field names are letters, digits, - and _, starting with a letter.",
+          ),
+      )
+      .min(1, "List at least one field.")
+      .max(
+        MAX_INCOMING_WEBHOOK_FORM_FIELDS,
+        `List at most ${MAX_INCOMING_WEBHOOK_FORM_FIELDS} fields.`,
+      )
+      .refine((fields) => new Set(fields).size === fields.length, "List each field once."),
+  })
+  .strict();
+export type IncomingWebhookForm = z.infer<typeof IncomingWebhookForm>;
+
 export const IncomingWebhookDeliveryState = z.enum([
   "pending",
   "accepted",
@@ -99,6 +128,7 @@ export const IncomingWebhookSummary = z
     createdAtMs: z.number().int().nonnegative(),
     updatedAtMs: z.number().int().nonnegative(),
     lastDeliveryAtMs: z.number().int().nonnegative().nullable(),
+    form: IncomingWebhookForm.optional(),
     pendingCount: z.number().int().nonnegative(),
     recentDeliveries: z.array(IncomingWebhookRecentDelivery).max(20),
   })
@@ -109,6 +139,7 @@ export const IncomingWebhookCreateInput = z
   .object({
     name: IncomingWebhookName,
     collectionPath: IncomingWebhookCollectionPath.default(INBOX_COLLECTION_PATH),
+    form: IncomingWebhookForm.optional(),
   })
   .strict();
 export type IncomingWebhookCreateInput = z.infer<typeof IncomingWebhookCreateInput>;
@@ -144,6 +175,7 @@ export const AgentIncomingWebhookCreateInput = z
       (path) => /[^\s/\\]/u.test(path),
       "Choose a Collection folder, not the workspace root.",
     ),
+    form: IncomingWebhookForm.optional(),
   })
   .strict();
 export const AgentIncomingWebhookCreated = IncomingWebhookCreatedResult.pick({
@@ -198,6 +230,42 @@ export function extractAllowedIncomingWebhookHeaders(
     }
   }
   return result;
+}
+
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+
+/**
+ * Keeps only a form webhook's listed fields, so the record, its title, and
+ * whatever reads them never see other text a sender added. Extra fields, such
+ * as a named submit button, are dropped rather than refused.
+ */
+export function keepIncomingWebhookFormFields(
+  form: IncomingWebhookForm,
+  bodyText: string,
+): { readonly ok: true; readonly body: string } | { readonly ok: false; readonly error: string } {
+  const sent = new URLSearchParams(bodyText);
+  const kept = new URLSearchParams();
+  for (const name of form.fields) {
+    const values = sent.getAll(name);
+    if (values.length > 1) return { ok: false, error: `field ${name} appears more than once` };
+    const value = values[0]?.trim();
+    if (!value) continue;
+    if (value.length > MAX_INCOMING_WEBHOOK_FORM_VALUE_CHARS) {
+      return {
+        ok: false,
+        error: `field ${name} exceeds ${MAX_INCOMING_WEBHOOK_FORM_VALUE_CHARS} characters`,
+      };
+    }
+    if (name === "email" && !EMAIL_SHAPE.test(value)) {
+      return { ok: false, error: "field email is not an email address" };
+    }
+    kept.append(name, value);
+  }
+  const body = kept.toString();
+  if (body === "") {
+    return { ok: false, error: `send at least one of these fields: ${form.fields.join(", ")}` };
+  }
+  return { ok: true, body };
 }
 
 const TITLE_KEYS = ["title", "subject", "summary", "event", "name", "email"];

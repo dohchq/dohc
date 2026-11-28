@@ -151,6 +151,67 @@ describe("WorkspaceWebhooksSettings", () => {
     expect(await screen.findByTestId("incoming-webhooks-empty")).toBeTruthy();
   });
 
+  it("creates a website form that keeps only the named fields and shows a form to paste", async () => {
+    const user = userEvent.setup();
+    const token = "c".repeat(43);
+    const formHook = {
+      webhookId: "whk_bbbbbbbbbbbbbbbbbbbbbbbb",
+      name: "Waitlist",
+      collectionPath: "Inbox",
+      collectionId: null,
+      paused: false,
+      pauseReason: null,
+      createdAtMs: 1_700_000_000_000,
+      updatedAtMs: 1_700_000_000_000,
+      lastDeliveryAtMs: null,
+      form: { fields: ["email", "source"] },
+      pendingCount: 0,
+      recentDeliveries: [],
+    };
+    bridgeMock.listIncomingWebhooks.mockResolvedValue({
+      kind: "ready",
+      serverOrigin: "https://sync.example.com",
+      webhooks: [],
+      limit: 20,
+    });
+    bridgeMock.createIncomingWebhook.mockResolvedValueOnce({
+      webhook: formHook,
+      token,
+      endpointUrl: `https://sync.example.com/sync/hooks/${token}`,
+      webhooks: [formHook],
+      limit: 20,
+    });
+
+    render(<WorkspaceWebhooksSettings workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("incoming-webhooks-add"));
+    await user.type(screen.getByTestId("incoming-webhook-name-input"), "Waitlist");
+    await user.click(screen.getByRole("switch", { name: "Website form" }));
+    const fields = screen.getByTestId("incoming-webhook-form-fields-input");
+    await user.clear(fields);
+    await user.type(fields, "email, email");
+    await user.click(screen.getByTestId("incoming-webhook-create-submit"));
+    expect(screen.getByTestId("incoming-webhook-form-fields-error")).toBeTruthy();
+    expect(bridgeMock.createIncomingWebhook).not.toHaveBeenCalled();
+
+    await user.clear(fields);
+    await user.type(fields, "email, source");
+    await user.click(screen.getByTestId("incoming-webhook-create-submit"));
+    expect(bridgeMock.createIncomingWebhook).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      input: { name: "Waitlist", collectionPath: "Inbox", form: { fields: ["email", "source"] } },
+    });
+    const example = (await screen.findByTestId("incoming-webhook-reveal-curl")).textContent;
+    expect(example).toContain(
+      `<form method="post" action="https://sync.example.com/sync/hooks/${token}">`,
+    );
+    expect(example).toContain(`<label>email <input name="email" type="email" required></label>`);
+    expect(example).toContain(`<label>source <input name="source"></label>`);
+    await user.click(screen.getByTestId("incoming-webhook-reveal-done"));
+    expect(screen.getByTestId(`incoming-webhook-row-${formHook.webhookId}`).textContent).toContain(
+      "Website form",
+    );
+  });
+
   it("shows unavailable state for local-only workspaces and ignores slow workspace A responses after switching to B", async () => {
     bridgeMock.listIncomingWebhooks.mockImplementation(async ({ workspaceId }) =>
       workspaceId === "ws-a"
