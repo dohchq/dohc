@@ -92,6 +92,7 @@ fn converting_a_note_forgets_only_its_writer_cache_entry() {
                 &mut cache,
                 "ws",
                 None,
+                None,
                 10,
                 &here,
                 Some(&HashSet::new()),

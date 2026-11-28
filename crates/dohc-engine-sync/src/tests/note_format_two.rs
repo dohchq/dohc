@@ -1232,6 +1232,7 @@ fn convert_all_elsewhere(
             store,
             "ws",
             after,
+            None,
             budget,
             here,
             elsewhere,
@@ -1269,6 +1270,7 @@ fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
         &mut store,
         "ws",
         None,
+        None,
         2,
         &NoLiveLeases,
         &NoLiveLeases,
@@ -1300,6 +1302,45 @@ fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
     assert_eq!((again.converted.len(), again.unchanged), (0, 5));
     assert_eq!(changes(&store), before);
     assert_eq!(carriers(&store).len(), 5);
+}
+
+#[test]
+fn the_pass_converts_only_the_note_it_names() {
+    let (_scratch, _path, mut store) = open_store();
+    let keys: Vec<DocKey> = (1..=2)
+        .map(|n| {
+            let text = format!("Note {n}.\n");
+            let (object, path) = (format!("note-{n}"), format!("note-{n}.md"));
+            seed_at(
+                &mut store,
+                (&object, &path),
+                &text,
+                &format!("moment-{n}"),
+                Some(&base_of(&[&text])),
+            )
+        })
+        .collect();
+    let pass = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            Some("note-2"),
+            1,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        (pass.converted.as_slice(), pass.resume_after),
+        (&keys[1..], None)
+    );
+    assert_eq!(note(&store, &keys[0]).0, 1);
+    assert_eq!(note(&store, &keys[1]).0, 2);
 }
 
 #[test]
@@ -1514,6 +1555,7 @@ fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
             &mut store,
             "ws",
             None,
+            None,
             10,
             &NoLiveLeases,
             &NoLiveLeases,
@@ -1699,6 +1741,7 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
             &mut store,
             "ws",
             None,
+            None,
             10,
             &NoLiveLeases,
             &NoLiveLeases,
@@ -1720,6 +1763,7 @@ fn a_zero_budget_is_refused_and_converts_nothing() {
         convert_notes_to_format_two(
             &mut store,
             "ws",
+            None,
             None,
             0,
             &NoLiveLeases,
@@ -1927,6 +1971,7 @@ fn a_damaged_unsent_edit_stops_the_pass_instead_of_failing_a_note() {
             &mut store,
             "ws",
             None,
+            None,
             10,
             &NoLiveLeases,
             &NoLiveLeases,
@@ -1993,6 +2038,7 @@ fn a_storage_failure_reading_the_file_proof_stops_the_pass() {
         convert_notes_to_format_two(
             &mut store,
             "ws",
+            None,
             None,
             10,
             &NoLiveLeases,
