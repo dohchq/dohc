@@ -469,6 +469,20 @@ describe("portable export", () => {
     const exportedArrow = exported.elements.find((e) => e.id === "arr")!;
     expect(exportedArrow.lastCommittedPoint).toBeNull();
     expect(exportedArrow.startBinding).toBeNull();
+
+    // Long anchors (256 KiB of 'z') rebase compactly instead of overflowing the stack or budget.
+    const longAnchor = `${"z".repeat(27)}${"z".repeat(256 * 1024)}`;
+    const longScene = JSON.parse(
+      canonicalPortableScene(
+        [element("anchor", 1, 1, { index: longAnchor }), { ...element("next", 1, 2), index: null }],
+        {},
+        {},
+        longAnchor.length + 200,
+      ),
+    ) as { elements: { id: string; index: string }[] };
+    expect(longScene.elements.map((e) => e.id)).toEqual(["anchor", "next"]);
+    expect(longScene.elements[0]!.index.length).toBeLessThan(8);
+    expect(longScene.elements[0]!.index < longScene.elements[1]!.index).toBe(true);
   });
 });
 

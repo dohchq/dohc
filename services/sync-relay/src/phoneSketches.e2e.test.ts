@@ -910,53 +910,158 @@ it.skipIf(engine.missing)(
       await afterOrder.evict().catch(() => undefined);
     }
 
-    // Never-opened sketch with a malformed referenced image entry (missing mimeType) is refused
-    // before rewriting so embedded bytes are never erased.
-    const badAssetText = JSON.stringify({
-      type: "excalidraw",
-      version: 2,
-      elements: [
+    // Never-opened sketch with a malformed referenced image entry (missing mimeType or non-canonical
+    // base64 with nonzero trailing bits like "gh==") is refused before rewriting so bytes stay intact.
+    for (const [name, badFile] of [
+      ["BadAsset.excalidraw", { id: "bad-f", dataURL: PNG_DATA_URL, created: 1_700_000_000_000 }],
+      [
+        "BadBase64.excalidraw",
         {
-          ...rect("img-bad", 1, 1),
-          type: "image",
-          fileId: "bad-f",
-          status: "saved",
-          scale: [1, 1],
+          id: "bad-f",
+          mimeType: "image/png",
+          dataURL: "data:image/png;base64,gh==",
+          created: 1_700_000_000_000,
         },
       ],
-      appState: {},
-      files: { "bad-f": { id: "bad-f", dataURL: PNG_DATA_URL, created: 1_700_000_000_000 } },
-    });
-    const badAssetWrite = await owner.files.writeTextFile({
+    ] as const) {
+      const badAssetText = JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          {
+            ...rect("img-bad", 1, 1),
+            type: "image",
+            fileId: "bad-f",
+            status: "saved",
+            scale: [1, 1],
+          },
+        ],
+        appState: {},
+        files: { "bad-f": badFile },
+      });
+      const badAssetWrite = await owner.files.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: owner.versionId,
+        path: name,
+        text: badAssetText,
+        publish: true,
+        createOnly: true,
+        metadata: { origin: "api", summary: `Seed ${name}` },
+      });
+      await owner.sync();
+      const beforeBadSave = logCount();
+      expect(
+        await op("saveSketch", {
+          path: name,
+          objectId: badAssetWrite.moment.objectId,
+          requestId: `req-bad-${name}`,
+          elements: [rect("new-box", 1, 9, { index: "a1" })],
+        }),
+        name,
+      ).toMatchObject({ ok: false, refusal: "invalid" });
+      expect(logCount(), name).toBe(beforeBadSave);
+      await owner.sync();
+      expect(
+        (
+          await owner.files.readTextFile({
+            workspaceId: WORKSPACE,
+            versionId: owner.versionId,
+            path: name,
+          })
+        )?.text,
+        name,
+      ).toBe(badAssetText);
+    }
+
+    // Never-opened legacy sketch with a 256 KiB anchor followed by an unindexed element rebases
+    // compactly without stack overflow and syncs cleanly to desktop.
+    const longAnchor = `${"z".repeat(27)}${"z".repeat(256 * 1024)}`;
+    const longWrite = await owner.files.writeTextFile({
       workspaceId: WORKSPACE,
       versionId: owner.versionId,
-      path: "BadAsset.excalidraw",
-      text: badAssetText,
+      path: "LongAnchor.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          rect("anchor", 1, 1, { index: longAnchor }),
+          { ...rect("unindexed", 1, 2), index: undefined },
+        ],
+        appState: {},
+        files: {},
+      }),
       publish: true,
       createOnly: true,
-      metadata: { origin: "api", summary: "Seed malformed asset sketch" },
+      metadata: { origin: "api", summary: "Seed long-anchor sketch" },
     });
     await owner.sync();
-    const beforeBadSave = logCount();
     expect(
       await op("saveSketch", {
-        path: "BadAsset.excalidraw",
-        objectId: badAssetWrite.moment.objectId,
-        requestId: "req-bad-asset-save",
-        elements: [rect("new-box", 1, 9, { index: "a1" })],
+        path: "LongAnchor.excalidraw",
+        objectId: longWrite.moment.objectId,
+        requestId: "req-long-anchor-save",
+        elements: [rect("after-long", 1, 3, { index: "a9" })],
       }),
-    ).toMatchObject({ ok: false, refusal: "invalid" });
-    expect(logCount()).toBe(beforeBadSave);
+    ).toMatchObject({ ok: true, lostElementIds: [] });
     await owner.sync();
-    expect(
-      (
-        await owner.files.readTextFile({
-          workspaceId: WORKSPACE,
-          versionId: owner.versionId,
-          path: "BadAsset.excalidraw",
-        })
-      )?.text,
-    ).toBe(badAssetText);
+    const afterLong = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "LongAnchor.excalidraw",
+      expectedObjectId: longWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterLong.doc).elements.map((e) => e.id)).toEqual([
+        "anchor",
+        "unindexed",
+        "after-long",
+      ]);
+    } finally {
+      await afterLong.evict().catch(() => undefined);
+    }
+
+    // A valid 4 MiB embedded PNG parses cleanly without regex stack overflow on Node 24.
+    const fourMbDataUrl = `data:image/png;base64,${Buffer.alloc(4 * 1024 * 1024, 0x42).toString("base64")}`;
+    await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "LargePng.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          {
+            ...rect("img-4mb", 1, 1),
+            type: "image",
+            fileId: "f-4mb",
+            status: "saved",
+            scale: [1, 1],
+          },
+        ],
+        appState: {},
+        files: {
+          "f-4mb": {
+            id: "f-4mb",
+            mimeType: "image/png",
+            dataURL: fourMbDataUrl,
+            created: 1_700_000_000_000,
+          },
+        },
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed 4 MiB PNG sketch" },
+    });
+    await owner.sync();
+    expect(await op("readSketch", { path: "LargePng.excalidraw" })).toMatchObject({
+      ok: true,
+      missingAssets: 0,
+      files: { "f-4mb": { id: "f-4mb", mimeType: "image/png", dataURL: fourMbDataUrl } },
+    });
 
     // Joined Member gets 404 on every sketch op.
     expect(

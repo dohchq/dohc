@@ -237,6 +237,7 @@ type ParsedPortable = {
   readonly rawFiles: Readonly<Record<string, JsonObject>>;
   readonly unseedableAsset: boolean;
   readonly headSha256?: string;
+  readonly byteLength?: number;
 };
 
 const EMPTY_FILES: Readonly<Record<string, JsonObject>> = {};
@@ -249,7 +250,6 @@ const EMBEDDED_FILE_FIELDS = new Set([
   "mimeType",
   "version",
 ]);
-const STANDARD_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 function parseRustImportFile(id: string, entry: unknown): HydratedSketchFile | null {
   const f = asRecord(entry);
@@ -269,12 +269,13 @@ function parseRustImportFile(id: string, entry: unknown): HydratedSketchFile | n
   const prefix = `data:${f.mimeType};base64,`;
   if (!f.dataURL.startsWith(prefix)) return null;
   const encoded = f.dataURL.slice(prefix.length);
-  if (!STANDARD_BASE64.test(encoded)) return null;
-  const canonicalDataURL = `${prefix}${Buffer.from(encoded, "base64").toString("base64")}`;
+  if (encoded.length % 4 !== 0) return null;
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.toString("base64") !== encoded) return null;
   return {
     id,
     mimeType: f.mimeType,
-    dataURL: canonicalDataURL,
+    dataURL: f.dataURL,
     created: f.created,
     ...(f.lastRetrieved === undefined ? {} : { lastRetrieved: f.lastRetrieved }),
     ...(f.version === undefined ? {} : { version: f.version }),
@@ -385,6 +386,7 @@ function parsePortableSketch(
     rawFiles,
     unseedableAsset,
     headSha256,
+    byteLength: Buffer.byteLength(text, "utf8"),
   };
 }
 
@@ -581,6 +583,7 @@ async function ensureClaimedSceneLineage(
       input.portable.allElements,
       input.portable.result.appState,
       input.portable.rawFiles,
+      input.portable.byteLength,
     );
     const canonicalSha = createHash("sha256").update(canonical, "utf8").digest("hex");
     if (input.portable.headSha256 && input.portable.headSha256 !== canonicalSha) {

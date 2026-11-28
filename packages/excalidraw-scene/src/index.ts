@@ -431,10 +431,22 @@ function indexIsValid(current: string | null, lower: string | null, upper: strin
   return true;
 }
 
-function repairImportedIndices(elements: readonly ElementSnapshot[]): ElementSnapshot[] {
+function repairImportedIndices(
+  elements: readonly ElementSnapshot[],
+  indexByteBudget?: number,
+): ElementSnapshot[] {
+  const rebaseCompact = () => {
+    const compact = generateNKeysBetween(null, null, elements.length);
+    return elements.map((e, idx) => ({ ...e, index: compact[idx]! }));
+  };
   const indices: (string | null)[] = elements.map((e) =>
     typeof e.index === "string" && validFractionalIndex(e.index) ? e.index : null,
   );
+  const preservedBytes = indices.reduce((total, key) => total + (key ? key.length : 0), 0);
+  let remainingBytes =
+    indexByteBudget === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, indexByteBudget - preservedBytes);
   const nextLower = (cached: number | null, i: number): number | null => {
     const prev = i > 0 ? indices[i - 1]! : null;
     const cur = cached !== null ? indices[cached]! : null;
@@ -477,11 +489,19 @@ function repairImportedIndices(elements: readonly ElementSnapshot[]): ElementSna
       group.push(i);
       i += 1;
     }
-    const keys = generateNKeysBetween(
-      lower !== null ? indices[lower]! : null,
-      upper !== null && upper < indices.length ? indices[upper]! : null,
-      group.length,
-    );
+    const lowerKey = lower !== null ? indices[lower]! : null;
+    const upperKey = upper !== null && upper < indices.length ? indices[upper]! : null;
+    const anchorFloor = Math.max(lowerKey?.length ?? 0, upperKey?.length ?? 0);
+    if (anchorFloor > 0 && group.length * anchorFloor > remainingBytes) return rebaseCompact();
+    let keys: string[];
+    try {
+      keys = generateNKeysBetween(lowerKey, upperKey, group.length);
+    } catch {
+      return rebaseCompact();
+    }
+    const addedBytes = keys.reduce((total, key) => total + key.length, 0);
+    if (addedBytes > remainingBytes) return rebaseCompact();
+    remainingBytes -= addedBytes;
     group.forEach((pos, idx) => {
       out[pos] = { ...out[pos]!, index: keys[idx]! };
     });
@@ -493,8 +513,9 @@ export function canonicalPortableScene(
   elements: readonly ElementSnapshot[],
   appState: JsonObject,
   files: Readonly<Record<string, JsonObject>>,
+  indexByteBudget?: number,
 ): string {
-  const repaired = repairImportedIndices(elements);
+  const repaired = repairImportedIndices(elements, indexByteBudget);
   const live = repaired.filter((e) => !e.isDeleted).sort(compareElementOrder);
   const liveIds = new Set(live.map((e) => e.id));
   const assetIds = new Set(Object.keys(files));
