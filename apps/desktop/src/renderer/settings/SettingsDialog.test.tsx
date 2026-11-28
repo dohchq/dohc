@@ -42,6 +42,7 @@ import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { useInstallationNotices } from "../shell/installationNotices";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
+import type { NoteConversion } from "../shell/useNoteConversion";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 // The workspace shell provides the session in production.
@@ -170,7 +171,6 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 type CloudSessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 
 const bridge = {
-  readNoteConversionOffered: vi.fn(async () => ({ offered: false })),
   onWorkspaceActivity: vi.fn(() => () => {}),
   listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({
@@ -1737,15 +1737,12 @@ it("shows Members in a joined workspace, which lists the owner's people", async 
 });
 
 describe("Settings › Advanced › Note format", () => {
-  const noteConversion = {
-    state: { status: "idle" as const },
+  const conversion = (offer: Partial<NoteConversion["offer"]>): NoteConversion => ({
+    state: { status: "idle" },
     start: vi.fn(),
-  };
-  const open = (
-    initialSection: "advanced" | "general",
-    onError = vi.fn(),
-    onClearError = vi.fn(),
-  ) =>
+    offer: { value: undefined, failed: false, retry: vi.fn(), ...offer },
+  });
+  const open = (initialSection: "advanced" | "general", noteConversion: NoteConversion) =>
     render(
       <SettingsDialog
         workspaceIsReady
@@ -1753,99 +1750,37 @@ describe("Settings › Advanced › Note format", () => {
         workspacePath="/x/Trip"
         initialSection={initialSection}
         noteConversion={noteConversion}
-        onError={onError}
-        onClearError={onClearError}
         onClose={vi.fn()}
       />,
     );
 
-  it("hides the row unless main says this account converts the workspace's notes", async () => {
-    open("advanced");
-    await screen.findByTestId("settings-row-reset-workspace");
-    await waitFor(() =>
-      expect(bridge.readNoteConversionOffered).toHaveBeenCalledWith({ workspaceId: "ws-1" }),
-    );
-    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
-    cleanup();
+  it("shows the row only once the shell says this account converts the workspace's notes", async () => {
+    for (const value of [undefined, false]) {
+      open("advanced", conversion({ value }));
+      await screen.findByTestId("settings-row-reset-workspace");
+      expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
+      cleanup();
+    }
 
-    bridge.readNoteConversionOffered.mockResolvedValueOnce({ offered: true });
-    open("advanced");
-    expect(await screen.findByTestId("settings-row-note-format")).toBeTruthy();
+    open("advanced", conversion({ value: true }));
+    expect(await screen.findByRole("button", { name: "Convert notes…" })).toBeTruthy();
   });
 
-  it("shows Try again and reports it when main could not say whether to offer the row", async () => {
-    const lost = new Error("dohc could not reach the engine.");
-    bridge.readNoteConversionOffered
-      .mockRejectedValueOnce(lost)
-      .mockResolvedValueOnce({ offered: true });
-    const onError = vi.fn();
-    const onClearError = vi.fn();
-    open("advanced", onError, onClearError);
+  it("shows Try again when the shell could not say whether to offer the row, and asks again", async () => {
+    const offered = conversion({ failed: true });
+    open("advanced", offered);
 
     const retry = await screen.findByTestId("settings-note-format-retry");
-    expect(onError).toHaveBeenCalledWith(
-      "dohc could not reach the engine.",
-      lost,
-      expect.any(Function),
-      undefined,
-      "note-conversion-offered",
-    );
     fireEvent.click(within(retry).getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("button", { name: "Convert notes…" })).toBeTruthy();
-    expect(screen.queryByTestId("settings-note-format-retry")).toBeNull();
-    expect(onClearError).toHaveBeenCalledWith("note-conversion-offered");
-  });
-
-  it("keeps the offer check's Try again working in Notices after Settings closes", async () => {
-    bridge.readNoteConversionOffered
-      .mockRejectedValueOnce(new Error("dohc could not reach the engine."))
-      .mockResolvedValueOnce({ offered: true });
-    const onError = vi.fn();
-    const onClearError = vi.fn();
-    open("advanced", onError, onClearError);
-    await screen.findByTestId("settings-note-format-retry");
-    const retry = onError.mock.calls.find(
-      (call) => call[4] === "note-conversion-offered",
-    )![2] as () => Promise<void>;
-    cleanup();
-
-    await act(async () => retry());
-    expect(bridge.readNoteConversionOffered).toHaveBeenCalledTimes(2);
-    expect(onClearError).toHaveBeenCalledWith("note-conversion-offered");
-  });
-
-  it("hides the row while the account changes, and asks main again once it is ready", async () => {
-    const listeners: CloudSessionListener[] = [];
-    bridge.onCloudSessionChanged.mockImplementation((listener) => {
-      listeners.push(listener);
-      return () => undefined;
-    });
-    bridge.readNoteConversionOffered.mockResolvedValueOnce({ offered: true });
-    open("advanced");
-    expect(await screen.findByTestId("settings-row-note-format")).toBeTruthy();
-    const reads = bridge.readNoteConversionOffered.mock.calls.length;
-
-    act(() => listeners.forEach((listener) => listener({ sessionKey: null, phase: "changing" })));
-    expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
-    expect(bridge.readNoteConversionOffered).toHaveBeenCalledTimes(reads);
-
-    bridge.readNoteConversionOffered.mockResolvedValueOnce({ offered: true });
-    act(() => listeners.forEach((listener) => listener({ sessionKey: "b", phase: "ready" })));
-    expect(await screen.findByTestId("settings-row-note-format")).toBeTruthy();
-    expect(bridge.readNoteConversionOffered).toHaveBeenCalledTimes(reads + 1);
+    expect(offered.offer.retry).toHaveBeenCalledOnce();
   });
 
   it.each(["Note format", "convert"])("finds the row when someone searches %s", async (term) => {
-    bridge.readNoteConversionOffered.mockResolvedValue({ offered: true });
-    try {
-      open("general");
-      await screen.findByTestId("settings-dialog");
-      fireEvent.change(screen.getByTestId("settings-search"), { target: { value: term } });
-      expect(screen.getByTestId(settingsSectionPin("advanced"))).toBeTruthy();
-      const row = await screen.findByTestId("settings-row-note-format");
-      expect(row.getAttribute("data-search-match")).toBe("true");
-    } finally {
-      bridge.readNoteConversionOffered.mockResolvedValue({ offered: false });
-    }
+    open("general", conversion({ value: true }));
+    await screen.findByTestId("settings-dialog");
+    fireEvent.change(screen.getByTestId("settings-search"), { target: { value: term } });
+    expect(screen.getByTestId(settingsSectionPin("advanced"))).toBeTruthy();
+    const row = await screen.findByTestId("settings-row-note-format");
+    expect(row.getAttribute("data-search-match")).toBe("true");
   });
 });

@@ -7,6 +7,8 @@ import {
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import type { ErrorDetailField } from "./copyDetails";
 import type { useShellError } from "./useShellError";
 
@@ -19,12 +21,21 @@ export type NoteConversionState =
   | { status: "unsent"; converted: number; left: number }
   | { status: "failed" };
 
+export interface NoteConversionOffer {
+  value: boolean | undefined;
+  failed: boolean;
+  retry(): void;
+}
+
 export interface NoteConversion {
   state: NoteConversionState;
   start(): void;
+  offer: NoteConversionOffer;
 }
 
 const KIND = "note-conversion";
+const OFFER_KIND = "note-conversion-offered";
+const OFFER_UNREAD = "dohc could not check whether this workspace's notes can be converted.";
 const IDLE: NoteConversionState = { status: "idle" };
 const SHOWN_PER_GROUP = 3;
 
@@ -78,6 +89,39 @@ export function noteConversionNotice(result: ConvertNotesResult): {
   };
 }
 
+function useNoteConversionOffer(
+  workspaceId: string,
+  report: Shell["reportShellFailure"],
+  clear: Shell["clearKind"],
+): NoteConversionOffer {
+  const [account, setAccount] = useState({ generation: 0, ready: true });
+  useEffect(
+    () =>
+      bridge().onCloudSessionChanged(({ phase }) =>
+        setAccount((current) => ({ generation: current.generation + 1, ready: phase === "ready" })),
+      ),
+    [],
+  );
+  const { value, pending, error, retry } = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${workspaceId}:${account.generation}`,
+    manual: !account.ready,
+    load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
+  });
+  useEffect(() => {
+    if (error === null) return;
+    report({
+      message: ipcErrorMessage(error, OFFER_UNREAD),
+      cause: error,
+      retry: () => void retry(),
+      kind: OFFER_KIND,
+    });
+  }, [error, report, retry]);
+  useEffect(() => {
+    if (!pending && error === null && value !== undefined) clear(OFFER_KIND);
+  }, [pending, error, value, clear]);
+  return { value, failed: error !== null, retry: () => void retry() };
+}
+
 export function useNoteConversion(input: {
   workspaceId: string;
   report: Shell["reportShellFailure"];
@@ -85,6 +129,7 @@ export function useNoteConversion(input: {
   clear: Shell["clearKind"];
 }): NoteConversion {
   const { workspaceId, report, success, clear } = input;
+  const offer = useNoteConversionOffer(workspaceId, report, clear);
   const requests = useRequestSequence([workspaceId]);
   const [shown, setShown] = useState({ workspaceId, state: IDLE });
   const state = shown.workspaceId === workspaceId ? shown.state : IDLE;
@@ -169,5 +214,5 @@ export function useNoteConversion(input: {
     return convert;
   }, [workspaceId, requests, report, success, clear]);
 
-  return { state, start: convert };
+  return { state, start: convert, offer };
 }

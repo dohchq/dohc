@@ -118,6 +118,7 @@ export type ShellErrorKind =
   | "reports"
   | "schedule-host"
   | "note-conversion"
+  | "note-conversion-offered"
   | "update"
   | DirectWriteNoticeKind
   | SettingsFileKind;

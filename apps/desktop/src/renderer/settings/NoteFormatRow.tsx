@@ -1,12 +1,8 @@
 import { FileText } from "lucide-react";
-import { useEffect, useState } from "react";
-import { bridge } from "../bridge";
-import { ipcErrorMessage } from "../ipcError";
+import { useState } from "react";
 import { convertedWords, finishedWords, type NoteConversion } from "../shell/useNoteConversion";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { RetryRow, SecondaryButton } from "../ui/controls";
-import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
-import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SettingRow } from "./SettingRow";
 
 export function convertNotesConfirm(workspaceName: string) {
@@ -24,69 +20,25 @@ export function convertNotesConfirm(workspaceName: string) {
   };
 }
 
-const OFFER_CHECK = "note-conversion-offered";
-const OFFER_UNREAD = "dohc could not check whether this workspace's notes can be converted.";
+type RowProps = {
+  conversion: Pick<NoteConversion, "state" | "start">;
+  workspaceName: string;
+  searchMatch?: boolean;
+};
 
-type RowProps = { conversion: NoteConversion; workspaceName: string; searchMatch?: boolean };
-
-export function OfferedNoteFormatRow(
-  props: RowProps & {
-    workspaceId: string;
-    onError?: (
-      message: string,
-      cause?: unknown,
-      retry?: () => Promise<void>,
-      details?: undefined,
-      identity?: string,
-    ) => void;
-    onClearError?: (identity: string) => void;
-  },
-) {
-  const { workspaceId, onError, onClearError, ...row } = props;
-  const [account, setAccount] = useState({ generation: 0, ready: true });
-  useEffect(
-    () =>
-      bridge().onCloudSessionChanged(({ phase }) =>
-        setAccount((current) => ({ generation: current.generation + 1, ready: phase === "ready" })),
-      ),
-    [],
-  );
-  const offered = useWorkspaceQuery(useWorkspaceSession(), {
-    key: `${workspaceId}:${account.generation}`,
-    manual: !account.ready,
-    load: async () => (await bridge().readNoteConversionOffered({ workspaceId })).offered,
-  });
-  const { error, pending, value, retry } = offered;
-  useEffect(() => {
-    if (error === null) return;
-    const notice = (cause: unknown) =>
-      onError?.(ipcErrorMessage(cause, OFFER_UNREAD), cause, readAgain, undefined, OFFER_CHECK);
-    async function readAgain() {
-      try {
-        await bridge().readNoteConversionOffered({ workspaceId });
-      } catch (again) {
-        notice(again);
-        return;
-      }
-      onClearError?.(OFFER_CHECK);
-      void retry();
-    }
-    notice(error);
-  }, [error, onError, onClearError, retry, workspaceId]);
-  useEffect(() => {
-    if (!pending && error === null && value !== undefined) onClearError?.(OFFER_CHECK);
-  }, [pending, error, value, onClearError]);
-  if (error !== null)
+export function OfferedNoteFormatRow(props: RowProps & { conversion: NoteConversion }) {
+  const { value, failed, retry } = props.conversion.offer;
+  if (failed)
     return (
       <SettingRow
         title="Note format"
         testId="settings-row-note-format"
-        searchMatch={row.searchMatch === true}
+        searchMatch={props.searchMatch === true}
       >
-        <RetryRow testId="settings-note-format-retry" onRetry={() => void retry()} />
+        <RetryRow testId="settings-note-format-retry" onRetry={retry} />
       </SettingRow>
     );
-  return offered.value === true ? <NoteFormatRow {...row} /> : null;
+  return value === true ? <NoteFormatRow {...props} /> : null;
 }
 
 export function NoteFormatRow(props: RowProps) {
