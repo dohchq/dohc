@@ -47,6 +47,8 @@ import { KeyboardSettings } from "./KeyboardSettings";
 import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
+import { OfferedNoteFormatRow } from "./NoteFormatRow";
+import type { NoteConversion } from "../shell/useNoteConversion";
 import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
 import { WorkspaceWebhooksSettings } from "./WorkspaceWebhooksSettings";
 import {
@@ -164,6 +166,7 @@ export function SettingsDialog(props: {
    * shared view never has.
    */
   sharedView?: boolean;
+  noteConversion?: NoteConversion;
   membership?: boolean;
   // A joined workspace's id on the relay, which its agent link names.
   membersWorkspaceId?: string;
@@ -1178,6 +1181,15 @@ export function SettingsDialog(props: {
                 workspaceId={props.workspaceId}
                 {...(props.onError ? { onError: props.onError } : {})}
               />
+              {props.noteConversion ? (
+                <OfferedNoteFormatRow
+                  conversion={props.noteConversion}
+                  searchMatch={rowSearchMatch("Note format", "convert notes")}
+                  workspaceName={
+                    props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
+                  }
+                />
+              ) : null}
               <SettingRow
                 title="Settings file"
                 searchMatch={rowSearchMatch("Settings file", "json")}

@@ -27,7 +27,11 @@ import {
 } from "../../workspaces/workspaceSettings";
 import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
-import type { ScheduleHostResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import type {
+  DohcDesktopBridge,
+  ScheduleHostResult,
+  UpdateStateEvent,
+} from "../../ipc/bridgeContract";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
@@ -38,6 +42,7 @@ import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { useInstallationNotices } from "../shell/installationNotices";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
+import type { NoteConversion } from "../shell/useNoteConversion";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 // The workspace shell provides the session in production.
@@ -163,6 +168,8 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
   };
 }
 
+type CloudSessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
+
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
   listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
@@ -259,7 +266,7 @@ const bridge = {
   getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
   readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   onScheduleHostChanged: vi.fn(() => () => undefined),
-  onCloudSessionChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn((_listener: CloudSessionListener) => () => undefined),
   chooseScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   takeOverScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   listWorkspaceSecrets: vi.fn(async () => ({
@@ -1727,4 +1734,53 @@ it("shows Members in a joined workspace, which lists the owner's people", async 
   expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
   fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
   expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
+});
+
+describe("Settings › Advanced › Note format", () => {
+  const conversion = (offer: Partial<NoteConversion["offer"]>): NoteConversion => ({
+    state: { status: "idle" },
+    start: vi.fn(),
+    offer: { value: undefined, failed: false, retry: vi.fn(), ...offer },
+  });
+  const open = (initialSection: "advanced" | "general", noteConversion: NoteConversion) =>
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x/Trip"
+        initialSection={initialSection}
+        noteConversion={noteConversion}
+        onClose={vi.fn()}
+      />,
+    );
+
+  it("shows the row only once the shell says this account converts the workspace's notes", async () => {
+    for (const value of [undefined, false]) {
+      open("advanced", conversion({ value }));
+      await screen.findByTestId("settings-row-reset-workspace");
+      expect(screen.queryByTestId("settings-row-note-format")).toBeNull();
+      cleanup();
+    }
+
+    open("advanced", conversion({ value: true }));
+    expect(await screen.findByRole("button", { name: "Convert notes…" })).toBeTruthy();
+  });
+
+  it("shows Try again when the shell could not say whether to offer the row, and asks again", async () => {
+    const offered = conversion({ failed: true });
+    open("advanced", offered);
+
+    const retry = await screen.findByTestId("settings-note-format-retry");
+    fireEvent.click(within(retry).getByRole("button", { name: "Try again" }));
+    expect(offered.offer.retry).toHaveBeenCalledOnce();
+  });
+
+  it.each(["Note format", "convert"])("finds the row when someone searches %s", async (term) => {
+    open("general", conversion({ value: true }));
+    await screen.findByTestId("settings-dialog");
+    fireEvent.change(screen.getByTestId("settings-search"), { target: { value: term } });
+    expect(screen.getByTestId(settingsSectionPin("advanced"))).toBeTruthy();
+    const row = await screen.findByTestId("settings-row-note-format");
+    expect(row.getAttribute("data-search-match")).toBe("true");
+  });
 });

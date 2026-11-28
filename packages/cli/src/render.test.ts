@@ -442,3 +442,17 @@ it("counts converted notes in the right number and says how to send what could n
     "Converted 2 notes. 0 were already converted.",
   );
 });
+
+it("fails with what a run converted when it stopped partway", () => {
+  const run = { ok: true as const, skipped: [], doesNotFit: [], failed: [], unchanged: 0 };
+  expect(() =>
+    renderCliResult("notesConvert", {
+      ...run,
+      converted: 10,
+      sent: false,
+      stopped: "dohc could not reach your server.",
+    }),
+  ).toThrow(
+    "dohc could not reach your server. dohc converted 10 notes before it stopped. Run it again to finish.",
+  );
+});

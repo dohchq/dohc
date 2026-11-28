@@ -501,6 +501,8 @@ function makeBaseBridge(
     answerVersionRound: vi.fn(async () => undefined),
     onChatDispatchNotices: vi.fn(() => () => {}),
     onScheduleHostChanged: vi.fn(() => () => {}),
+    onNoteConversionProgress: vi.fn(() => () => {}),
+    readNoteConversionOffered: vi.fn(async () => ({ offered: false })),
     readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
     // This computer's agent is idle until a test pushes a run.
     readAgentRunState: vi.fn(

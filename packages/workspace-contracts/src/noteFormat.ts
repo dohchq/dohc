@@ -12,6 +12,7 @@ export const ConvertNotesResult = z
     doesNotFit: z.array(z.object({ path: z.string() }).strict()),
     failed: z.array(LeftNote),
     sent: z.boolean(),
+    stopped: z.string().min(1).optional(),
   })
   .strict();
 export type ConvertNotesResult = z.output<typeof ConvertNotesResult>;

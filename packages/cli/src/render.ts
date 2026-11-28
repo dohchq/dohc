@@ -609,6 +609,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "notesConvert": {
       const run = result as Extract<CliResultByVerb["notesConvert"], { ok: true }>;
+      if (run.stopped)
+        throw new DohcCliError(
+          `${run.stopped} dohc converted ${counted(run.converted, "note", "notes")} before it stopped. Run it again to finish.`,
+        );
       const lines = [
         `Converted ${counted(run.converted, "note", "notes")}. ${run.unchanged === 1 ? "1 was" : `${run.unchanged} were`} already converted.`,
         ...(run.sent

@@ -8360,6 +8360,25 @@ export const RetryAutomationNoticeResult = z.union([
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+export const NoteConversionProgress = z
+  .object({
+    workspaceId: z.string().min(1).max(256),
+    done: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  })
+  .strict();
+export type NoteConversionProgress = z.infer<typeof NoteConversionProgress>;
+export const noteConversionOperations = {
+  readNoteConversionOffered: {
+    capabilityId: "workspace.notes.convert.offer.read",
+    channel: "desktop:read-note-conversion-offered",
+    payload: WorkspaceIdPayload,
+    result: z.object({ offered: z.boolean() }).strict(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "Open this workspace to see whether it can convert its notes.",
+  },
+} satisfies OperationTable;
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   // The wake reasons are about a message from your phone this computer won or
@@ -9554,6 +9573,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof noteFormatOperations>,
+    OperationBridge<typeof noteConversionOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof liveNoteOperations>,
     OperationBridge<typeof memberAppsReadOperations>,
@@ -9813,6 +9833,7 @@ export interface DohcDesktopBridge
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
+  onNoteConversionProgress(listener: (event: NoteConversionProgress) => void): () => void;
   onChatDispatchNotices(listener: (event: ChatDispatchNoticesEvent) => void): () => void;
   // Live push: this computer's agent started or stopped in a workspace this
   // window shows.

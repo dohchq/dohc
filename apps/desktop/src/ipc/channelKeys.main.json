@@ -217,6 +217,7 @@
   "runnerSelfTest",
   "saveChatBookmark",
   "scheduleHostChanged",
+  "noteConversionProgress",
   "searchResults",
   "sendChatMessage",
   "setAppPinned",

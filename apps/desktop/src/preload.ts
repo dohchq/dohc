@@ -116,6 +116,7 @@ import {
   setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
+  noteConversionOperations,
   chatDispatchNoticeOperations,
   phoneAppOperations,
   agentRunStateOperations,
@@ -130,6 +131,7 @@ import {
   ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
+  NoteConversionProgress,
   ChatDispatchNoticesEvent,
   AgentRunStateEvent,
   workspaceSearchOperations,
@@ -618,6 +620,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.setAsideDraftChanged, SetAsideDraftChange, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
+  onNoteConversionProgress: (listener) =>
+    onEvent(CHANNELS.noteConversionProgress, NoteConversionProgress, listener),
   onChatDispatchNotices: (listener) =>
     onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
   ...operationBridge(agentRunStateOperations, invoke),
@@ -625,6 +629,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
   ...operationBridge(noteFormatOperations, invoke),
+  ...operationBridge(noteConversionOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
   ...operationBridge(liveNoteOperations, invoke),
   ...operationBridge(memberAppsReadOperations, invoke),

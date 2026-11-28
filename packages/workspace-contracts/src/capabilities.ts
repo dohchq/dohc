@@ -1882,6 +1882,10 @@ const LISTED_CAPABILITIES = {
     ipc: [],
     mcp: {},
   }),
+  "workspace.notes.convert.offer.read": capability(
+    "Read whether main offers Convert notes for the admitted workspace.",
+    { ipc: ["readNoteConversionOffered"] },
+  ),
   "workspace.name.suggest": capability(
     "Suggest a new workspace's folder name that is free in a location dohc offered.",
     { ipc: ["suggestWorkspaceFolderName"] },

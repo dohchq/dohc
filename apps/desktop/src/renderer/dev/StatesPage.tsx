@@ -99,6 +99,8 @@ import {
   type CloudSettings,
 } from "../settings/CloudSyncSettings";
 import { KeyboardSettings } from "../settings/KeyboardSettings";
+import { NoteFormatRow, convertNotesConfirm } from "../settings/NoteFormatRow";
+import type { NoteConversionState } from "../shell/useNoteConversion";
 import {
   ColorControl,
   HueControl,
@@ -368,6 +370,17 @@ function Swatch(props: { label: string; className: string }) {
 }
 
 const noop = () => undefined;
+
+const NOTE_FORMAT_STATES: ReadonlyArray<readonly [string, NoteConversionState]> = [
+  ["ready", { status: "idle" }],
+  ["checking open notes", { status: "running", done: 0, total: 0 }],
+  ["converting", { status: "running", done: 400, total: 2000 }],
+  ["converted", { status: "done", converted: 1980, left: 0 }],
+  ["nothing to convert", { status: "done", converted: 0, left: 0 }],
+  ["all left", { status: "done", converted: 0, left: 12 }],
+  ["not sent", { status: "unsent", converted: 1980, left: 0 }],
+  ["failed", { status: "failed" }],
+];
 
 const NO_RECOVERY: ReadonlySet<string> = new Set();
 
@@ -5329,6 +5342,26 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="w-[640px]">
             <KeyboardSettings platform="darwin" devTools />
           </div>
+        </Specimen>
+      </Section>
+
+      <Section part="settings-note-format" title="Settings: Note format">
+        {NOTE_FORMAT_STATES.map(([label, state]) => (
+          <Specimen key={label} label={label}>
+            <div className="w-[640px]">
+              <NoteFormatRow conversion={{ state, start: noop }} workspaceName="Trip" />
+            </div>
+          </Specimen>
+        ))}
+        <Specimen label="asks first">
+          <ConfirmDialogCard
+            {...convertNotesConfirm("Trip")}
+            onCancel={noop}
+            onConfirm={noop}
+            testId="states-convert-notes"
+            cancelTestId="states-convert-notes-cancel"
+            confirmTestId="states-convert-notes-confirm"
+          />
         </Specimen>
       </Section>
 

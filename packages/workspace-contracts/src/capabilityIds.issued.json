@@ -361,6 +361,7 @@
   "workspace.list",
   "workspace.name.suggest",
   "workspace.notes.convert",
+  "workspace.notes.convert.offer.read",
   "workspace.open.failures.take",
   "workspace.open.retry",
   "workspace.search",

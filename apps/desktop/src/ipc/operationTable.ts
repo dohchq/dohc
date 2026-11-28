@@ -100,6 +100,7 @@ export function declaredRows<Key extends keyof Families>(
 // The window's row of each declared write that the app offers.
 type WriteFamilies = typeof WRITE_DECLARATION_FAMILIES;
 type WrittenInApp = { readonly ipc: { readonly channel: string } };
+type Fields<Input> = string extends keyof Input ? Record<never, never> : Input;
 type DeclaredWriteRow<Declaration> = Declaration extends {
   readonly ipc: {
     readonly channel: infer Channel extends `desktop:${string}`;
@@ -114,8 +115,8 @@ type DeclaredWriteRow<Declaration> = Declaration extends {
       readonly guard: "active-workspace";
       readonly inactiveMessage: string;
       readonly payload: z.ZodType<
-        z.output<Input> & { workspaceId: string },
-        z.input<Input> & { workspaceId: string }
+        Fields<z.output<Input>> & { workspaceId: string },
+        Fields<z.input<Input>> & { workspaceId: string }
       >;
       readonly result: Result;
     }

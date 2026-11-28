@@ -436,6 +436,7 @@ import {
   usageRecordOperations,
   noticeOperations,
   scheduleHostOperations,
+  noteConversionOperations,
   chatDispatchNoticeOperations,
   phoneAppOperations,
   agentRunStateOperations,
@@ -869,6 +870,8 @@ import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   NOTE_CONVERSION_PAUSED,
   createNoteConversion,
+  noteConversionOffered,
+  noteConversionReach,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./workspaces/noteConversion";
@@ -2266,7 +2269,9 @@ const convertNotesInWorkspace = createNoteConversion();
 async function relayForNoteConversion(
   workspace: RegistryEntry,
 ): Promise<NoteConversionRelay | null> {
-  if (!workspace.remote && !workspace.pausedRemote) return null;
+  await warmCredentialCache();
+  const reach = noteConversionReach(workspace, cachedCredentials);
+  if (reach === "local") return null;
   const syncing = async () => {
     const current = findWorkspace(workspace.workspaceId);
     if (!current?.remote) throw new Error(NOTE_CONVERSION_PAUSED);
@@ -2288,20 +2293,27 @@ async function convertNotesForOperation(operation: {
   assertCurrent(): void;
 }): Promise<ConvertNotesResult> {
   operation.assertCurrent();
-  if (shareViewIsPresent(operation.workspace.shareView))
-    throw new Error("This is a shared view. Only the original workspace converts its notes.");
   const sessions = desktopEngine.sessions;
   if (!sessions) throw new Error("Rust engine workspace sessions are unavailable.");
   const relay = await relayForNoteConversion(operation.workspace);
   const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
-  return convertNotesInWorkspace(operation.workspace.workspaceId, {
+  const { workspaceId } = operation.workspace;
+  return convertNotesInWorkspace(workspaceId, {
     relay,
     assertCurrent: relay
       ? () => operation.assertCurrent()
       : stopsOnceSyncStarts(
           () => operation.assertCurrent(),
-          () => Boolean(findWorkspace(operation.workspace.workspaceId)?.remote),
+          () => Boolean(findWorkspace(workspaceId)?.remote),
         ),
+    progress: (done, total) => {
+      for (const window of BrowserWindow.getAllWindows())
+        if (
+          !window.isDestroyed() &&
+          rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId
+        )
+          sendIfOpen(window, CHANNELS.noteConversionProgress, { workspaceId, done, total });
+    },
     convert: (params) =>
       sessions.run(engineWorkspace, ({ client, workspace }) =>
         new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),
@@ -11408,6 +11420,15 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, liveNoteOperations, relayShareHandlers);
   registerOperations(operationBoundary, noteFormatOperations, {
     convertNotes: (_input, { operation }) => convertNotesForOperation(operation),
+  });
+  registerOperations(operationBoundary, noteConversionOperations, {
+    readNoteConversionOffered: async (_input, { operation }) => {
+      await warmCredentialCache();
+      const { workspace } = operation;
+      return {
+        offered: noteConversionOffered(process.env, workspace, cachedCredentials),
+      };
+    },
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;

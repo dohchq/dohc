@@ -102,6 +102,7 @@ const PARTS = [
   "theme-picker",
   "zoom-stepper",
   "settings-keyboard",
+  "settings-note-format",
   "settings-privacy",
   "rails",
   "composer-sending",

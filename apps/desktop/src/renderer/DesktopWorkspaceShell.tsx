@@ -152,6 +152,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
+import { useNoteConversion } from "./shell/useNoteConversion";
 import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
@@ -1213,6 +1214,12 @@ function WorkspaceShell(props: {
     ready: workspaceIsReady,
     show: showScheduleHostNotice,
     report: reportShellFailure,
+  });
+  const noteConversion = useNoteConversion({
+    workspaceId,
+    report: reportShellFailure,
+    success: showSuccessNotice,
+    clear: clearKind,
   });
   const reportCollectionCopiesLeft = useCallback(
     (notice: { message: string; toast: boolean; retry: () => void }) =>
@@ -10812,6 +10819,7 @@ function WorkspaceShell(props: {
                                 ? { membersWorkspaceId: shareView.membersWorkspaceId }
                                 : {})}
                               sharedView={!!shareView}
+                              noteConversion={noteConversion}
                               // Main's own decision, not the renderer's settings read:
                               // only main knows whether a recorder exists for this session, and
                               // a failed capture build leaves none.

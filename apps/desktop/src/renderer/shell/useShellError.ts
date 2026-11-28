@@ -117,6 +117,8 @@ export type ShellErrorKind =
   | "record-history-run"
   | "reports"
   | "schedule-host"
+  | "note-conversion"
+  | "note-conversion-offered"
   | "update"
   | DirectWriteNoticeKind
   | SettingsFileKind;
