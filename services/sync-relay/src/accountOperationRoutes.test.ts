@@ -5085,7 +5085,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
             threadId: derivedThreadId,
             title: "Plan notes",
             linkedObjectId: "object-plan",
-            linkedPath: "docs/plan.md",
             linkedAtMs: 3,
             createdAtMs: 3,
           }),
@@ -5171,8 +5170,9 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .rows.filter((row) => row.originId === memberOrigin),
     ).toHaveLength(0);
 
-    // B3: redaction that would expand a valid title past 200 units or body past 64 KiB uses compact placeholder and saves.
-    const crowdedTitle = `${"@[private/a] ".repeat(9)}Trip plan`;
+    // B3: redaction that would expand a valid title past 200 units or body past 64 KiB uses compact placeholder
+    // only on withheld spans, preserving permitted links and user-typed placeholder text.
+    const crowdedTitle = `${"@[private/a] ".repeat(9)}@[docs/plan.md#(a file not shared here)] (a file not shared here)`;
     expect(crowdedTitle.length).toBeLessThanOrEqual(200);
     const crowdedBody = `${"@[private/x] ".repeat(4_500)}done`;
     expect(Buffer.byteLength(crowdedBody)).toBeLessThanOrEqual(64 * 1024);
@@ -5198,7 +5198,9 @@ describe("a Member's phone reads in a workspace they joined", () => {
     const createdTitle = (JSON.parse(rows[0]!.payloadJson) as { title: string }).title;
     const savedBody = (JSON.parse(rows[1]!.payloadJson) as { body: string }).body;
     expect(createdTitle.length).toBeLessThanOrEqual(200);
-    expect(createdTitle).not.toContain("@[");
+    expect(createdTitle).not.toContain("@[private/");
+    expect(createdTitle).toContain("@[docs/plan.md#(a file not shared here)]");
+    expect(createdTitle.endsWith("(a file not shared here)")).toBe(true);
     expect(Buffer.byteLength(savedBody)).toBeLessThanOrEqual(64 * 1024);
     expect(savedBody).not.toContain("@[");
   });

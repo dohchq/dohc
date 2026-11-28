@@ -335,6 +335,27 @@ export interface AppendNamedChatMessageInput {
 const fileReachOf = (selector: AnyShareSelector) =>
   isWorkspaceSelector(selector) ? workspaceFileReach(selector) : null;
 
+function redactWithPlaceholder(
+  raw: string,
+  files: ShareSelector | null,
+  placeholder: string,
+): string {
+  if (!raw.includes("@[")) return raw;
+  let out = "";
+  let at = 0;
+  for (let start = raw.indexOf("@[", at); start >= 0; start = raw.indexOf("@[", at)) {
+    let stop = start + 2;
+    while (stop < raw.length && raw[stop] !== "]" && raw[stop] !== "\n" && raw[stop] !== "\r")
+      stop++;
+    const end = raw[stop] === "]" ? stop + 1 : stop;
+    const span = raw.slice(start, end);
+    const replaced = withheldLinkText(span, files);
+    out += raw.slice(at, start) + (replaced === CHAT_FILE_LINK_WITHHELD ? placeholder : replaced);
+    at = end;
+  }
+  return out + raw.slice(at);
+}
+
 function redactBounded(
   raw: string,
   files: ShareSelector | null,
@@ -342,8 +363,8 @@ function redactBounded(
 ): string {
   const redacted = withheldLinkText(raw, files);
   if (fits(redacted)) return redacted;
-  const shorter = redacted.replaceAll(CHAT_FILE_LINK_WITHHELD, "(hidden)");
-  return fits(shorter) ? shorter : redacted.replaceAll(CHAT_FILE_LINK_WITHHELD, "--");
+  const shorter = redactWithPlaceholder(raw, files, "(hidden)");
+  return fits(shorter) ? shorter : redactWithPlaceholder(raw, files, "--");
 }
 
 export type ShareAppendStorage = Pick<
