@@ -488,6 +488,8 @@ export interface WorkspaceData {
    * whatever a later read does.
    */
   refresh(view: View<unknown>): Promise<void>;
+  /** Marks a view stale (or drops it) and reads it again if a screen is subscribed. */
+  invalidate(view: View<unknown>, drop?: boolean): void;
   feed(): FeedState;
   subscribeFeed(listener: () => void): () => void;
   /** Starts the feed again at once, with its backoff from the start. */
@@ -1001,6 +1003,24 @@ export function createWorkspaceData(options: {
         if (live()) await read(target);
       };
       return restoring && restored ? restored.then(start) : start();
+    },
+    invalidate(view, drop = false) {
+      if (view.id.startsWith("page:")) tried.delete(view.id.slice("page:".length));
+      const target = entries.get(view.id);
+      const cached = cache.get(scope, view.id);
+      if (cached) cache.set(scope, { ...cached, stale: true });
+      if (!target) return;
+      if (!drop && target.listeners.size > 0) {
+        target.stale = true;
+        if (live()) void read(target);
+        return;
+      }
+      forget(target);
+      if (drop) {
+        entries.delete(view.id);
+        return;
+      }
+      target.stale = true;
     },
     feed: () => feedState,
     subscribeFeed(listener) {

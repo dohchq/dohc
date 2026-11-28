@@ -79,11 +79,25 @@ describe("Home's rows", () => {
     expect(sketches.count).toBe(1);
   });
 
-  it("show the first other files and count them all", () => {
+  it("show the first other files and count them all, and show every other file when asked", () => {
     const many = Array.from({ length: FILES_SHOWN + 5 }, (_, index) => file(`data/${index}.csv`));
     const { others } = homeRows(many, new Set());
     expect(others.shown).toHaveLength(FILES_SHOWN);
     expect(others.count).toBe(FILES_SHOWN + 5);
+    const expanded = homeRows(many, new Set(), { showAllOthers: true });
+    expect(expanded.others.shown).toHaveLength(FILES_SHOWN + 5);
+  });
+
+  it("carries objectId on page, sketch, and other rows", () => {
+    const rows = homeRows(files, new Set());
+    expect(rows.pages.find((row) => row.kind === "page" && row.path === "notes.md")).toMatchObject({
+      objectId: "object:notes.md",
+    });
+    expect(rows.sketches.shown[0]).toMatchObject({
+      kind: "sketch",
+      path: "trip/route.excalidraw",
+      objectId: "object:trip/route.excalidraw",
+    });
   });
 });
 

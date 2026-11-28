@@ -27,6 +27,7 @@ describe("sketch list helpers", () => {
       kind: "sketch",
       key: "sketch:diagrams/Sketch 1.excalidraw",
       path: "diagrams/Sketch 1.excalidraw",
+      objectId: "object:diagrams/Sketch 1.excalidraw",
       name: "Sketch 1.excalidraw",
       folder: "diagrams",
     });

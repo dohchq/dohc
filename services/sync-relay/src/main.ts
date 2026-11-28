@@ -766,6 +766,11 @@ const presence = new PresenceHub();
 let liveRooms: LiveRooms | undefined;
 let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
+let liveHost: Parameters<typeof createSyncRelayHandler>[0]["liveHost"] extends
+  | (() => infer Host)
+  | undefined
+  ? Host
+  : undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ...(analytics ? { onWorkspaceCreated: () => analytics.track("sync_workspace_activated") } : {}),
@@ -865,6 +870,7 @@ const relayApplication = createSyncRelayHandler({
   noticePostRateLimiter,
   serverCopies: () => copies,
   phonePages: () => phonePages,
+  liveHost: () => liveHost,
   relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? { automationServer } : {}),
 });
@@ -1362,6 +1368,7 @@ const selfHost = selfHostedLive
         console.error("[sync-relay] self-host live service:", serverLogLine(error)),
     })
   : undefined;
+liveHost = selfHost;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
 // Browsers are told why live editing stopped while the self-hosted session host cannot continue the document.
 const sessionHostBlocked = selfHost

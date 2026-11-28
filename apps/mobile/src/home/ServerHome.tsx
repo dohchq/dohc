@@ -1,5 +1,6 @@
 import { appWords } from "@dohc/interface-words/apps";
 import { collectionWords } from "@dohc/interface-words/collections";
+import { documentWords } from "@dohc/interface-words/documents";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Crypto from "expo-crypto";
 import * as Haptics from "expo-haptics";
@@ -7,6 +8,7 @@ import { Stack, useIsFocused, useRouter } from "expo-router";
 import {
   AppWindow,
   ChevronRight,
+  Ellipsis,
   File,
   FileText,
   Folder,
@@ -37,15 +39,16 @@ import {
 } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { SettingsButton } from "../account/SettingsButton";
+import { HeaderButton } from "../AndroidHeader";
 import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
 import { appState } from "../apps/reviewControls";
 import { shownProblem } from "../server/client";
+import { canWriteFiles } from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
-import { writesIn } from "../server/phoneWrites";
 import { views, type ReadProblem } from "../server/workspaceData";
 import { allSketchRows, uniqueSketchPath } from "../sketches/sketchList";
 import { useTheme } from "../theme";
@@ -53,6 +56,7 @@ import { ripple, TOUCH } from "../touch";
 import { WorkspaceButton } from "../WorkspaceButton";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
+import { useFileLifecycle } from "./FileNameSheet";
 import { appGroups, homeRows, revealedPages, type FirstFiles, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
@@ -68,6 +72,9 @@ const nothing = () => () => undefined;
 export function ServerHome() {
   const theme = useTheme();
   const { current } = useWorkspaces();
+  const { data } = useAccount();
+  const canEditFiles = canWriteFiles(data, current);
+  const openCreateRef = useRef<(() => void) | null>(null);
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -79,11 +86,32 @@ export function ServerHome() {
         options={{
           title: "Home",
           headerLeft: () => <WorkspaceButton />,
-          headerRight: Platform.OS === "android" ? () => <SettingsButton /> : undefined,
+          headerRight:
+            Platform.OS === "android"
+              ? () => (
+                  <View style={styles.headerRight}>
+                    {canEditFiles ? (
+                      <HeaderButton
+                        icon={Plus}
+                        label={workspaceWords.newPage}
+                        onPress={() => openCreateRef.current?.()}
+                      />
+                    ) : null}
+                    <SettingsButton />
+                  </View>
+                )
+              : undefined,
         }}
       />
       {Platform.OS === "ios" ? (
         <Stack.Toolbar placement="right">
+          {canEditFiles ? (
+            <Stack.Toolbar.Button
+              icon="plus"
+              accessibilityLabel={workspaceWords.newPage}
+              onPress={() => openCreateRef.current?.()}
+            />
+          ) : null}
           <Stack.Toolbar.View hidesSharedBackground>
             <SettingsButton />
           </Stack.Toolbar.View>
@@ -91,13 +119,31 @@ export function ServerHome() {
       ) : null}
       <NoWorkspace />
       {current ? (
-        <Files key={current.id} workspaceId={current.id} workspace={current.name} />
+        <Files
+          key={current.id}
+          workspaceId={current.id}
+          workspace={current.name}
+          canEditFiles={canEditFiles}
+          openCreateRef={openCreateRef}
+        />
       ) : null}
     </ScrollView>
   );
 }
 
-function Files({ workspaceId, workspace }: { workspaceId: string; workspace: string }) {
+type EditableRow = Extract<HomeRow, { kind: "page" | "sketch" }>;
+
+function Files({
+  workspaceId,
+  workspace,
+  canEditFiles,
+  openCreateRef,
+}: {
+  workspaceId: string;
+  workspace: string;
+  canEditFiles: boolean;
+  openCreateRef: { current: (() => void) | null };
+}) {
   const router = useRouter();
   const { state, retry } = useView(views.files);
   const failed = workspaceWords.filesFailed(workspace);
@@ -105,6 +151,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set(["other"]));
   const [showAllSketches, setShowAllSketches] = useState(false);
+  const [showAllOthers, setShowAllOthers] = useState(false);
   const [creatingSketch, setCreatingSketch] = useState(false);
   const [sketchFailure, setSketchFailure] = useState<{
     problem: ReadProblem | null;
@@ -116,14 +163,29 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const createAbort = useRef<AbortController | null>(null);
   const createAttempt = useRef<{ path: string; requestId: string } | null>(null);
   const rows = useMemo(
-    () => (state.value ? homeRows(state.value, expanded) : null),
-    [state.value, expanded],
+    () => (state.value ? homeRows(state.value, expanded, { showAllOthers }) : null),
+    [state.value, expanded, showAllOthers],
   );
   const { data, apps, collections } = useAccount();
   const signIn = useSignIn();
+  const lifecycle = useFileLifecycle(workspace);
+  const openRowActions = useCallback(
+    (item: EditableRow) =>
+      lifecycle.openActions({ title: item.name, path: item.path, objectId: item.objectId }),
+    [lifecycle.openActions],
+  );
+  useEffect(() => {
+    openCreateRef.current = () =>
+      lifecycle.openCreate((path) =>
+        router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
+      );
+    return () => {
+      openCreateRef.current = null;
+    };
+  }, [lifecycle, openCreateRef, router]);
   const canOpenSketch = data !== null && !data.joined;
   const canCreateSketch =
-    writesIn(data) && rows !== null && !state.fromCache && state.problem === null;
+    canEditFiles && rows !== null && !state.fromCache && state.problem === null;
   useEffect(() => () => createAbort.current?.abort(), []);
   const toggle = useCallback((set: typeof setExpanded, key: string) => {
     void Haptics.selectionAsync();
@@ -247,7 +309,12 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
-  const fileSection = (id: string, title: string, list: FirstFiles | undefined) => {
+  const fileSection = (
+    id: string,
+    title: string,
+    list: FirstFiles | undefined,
+    onShowAll?: () => void,
+  ) => {
     if (!list?.count) return null;
     return (
       <>
@@ -258,9 +325,30 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           first={false}
           onToggle={() => toggle(setCollapsed, id)}
         />
-        {collapsed.has(id)
-          ? null
-          : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
+        {collapsed.has(id) ? null : (
+          <>
+            {list.shown.map((row) => (
+              <Row key={row.key} row={row} onPress={press} />
+            ))}
+            {onShowAll && list.count > list.shown.length ? (
+              <Pressable
+                onPress={onShowAll}
+                android_ripple={ripple(theme)}
+                style={({ pressed }) => [
+                  styles.row,
+                  styles.app,
+                  pressed ? { backgroundColor: theme.panel2 } : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel={workspaceWords.showAll(list.count)}
+              >
+                <Text style={[styles.name, { color: theme.accent }]} numberOfLines={1}>
+                  {workspaceWords.showAll(list.count)}
+                </Text>
+              </Pressable>
+            ) : null}
+          </>
+        )}
       </>
     );
   };
@@ -330,7 +418,14 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
         <EmptyLine text={workspaceWords.noPages} />
       ) : (
         rows.pages.map((row) => (
-          <Row key={row.key} row={row} onPress={press} onPressIn={pressInRow} />
+          <Row
+            key={row.key}
+            row={row}
+            onPress={press}
+            onPressIn={pressInRow}
+            onActions={canEditFiles && row.kind === "page" ? openRowActions : undefined}
+            busy={lifecycle.deletingPath === row.path}
+          />
         ))
       )}
       {canCreateSketch || (rows?.sketches.count ?? 0) > 0 ? (
@@ -345,7 +440,14 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           {collapsed.has("sketches") ? null : (
             <>
               {shownSketches.map((row) => (
-                <Row key={row.key} row={row} onPress={press} openable={canOpenSketch} />
+                <Row
+                  key={row.key}
+                  row={row}
+                  onPress={press}
+                  openable={canOpenSketch}
+                  onActions={canEditFiles ? openRowActions : undefined}
+                  busy={lifecycle.deletingPath === row.path}
+                />
               ))}
               {!showAllSketches && rows && rows.sketches.count > rows.sketches.shown.length ? (
                 <Pressable
@@ -423,7 +525,8 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
               </Text>
             </Pressable>
           ))}
-      {fileSection("other", workspaceWords.otherFiles, rows?.others)}
+      {fileSection("other", workspaceWords.otherFiles, rows?.others, () => setShowAllOthers(true))}
+      {lifecycle.sheet}
     </>
   );
 }
@@ -505,11 +608,15 @@ const Row = memo(function Row({
   onPress,
   onPressIn,
   openable,
+  onActions,
+  busy,
 }: {
   row: HomeRow;
   onPress(row: HomeRow): void;
   onPressIn?(row: HomeRow): void;
   openable?: boolean;
+  onActions?(row: EditableRow): void;
+  busy?: boolean;
 }) {
   const theme = useTheme();
   const listed = row.kind === "other" || (row.kind === "sketch" && !openable);
@@ -547,19 +654,38 @@ const Row = memo(function Row({
       ) : null}
     </>
   );
-  const style = [styles.row, { paddingLeft: 8 + depth * 20 }];
-  // A file the phone can't open is no button: it only says the file is there.
-  if (listed)
-    return (
-      <View
-        style={style}
-        accessible
-        accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}
-      >
-        {content}
-      </View>
-    );
-  return (
+  const actionButton =
+    onActions && (row.kind === "page" || row.kind === "sketch") ? (
+      busy ? (
+        <View style={styles.rowMenu}>
+          <ActivityIndicator size="small" accessibilityLabel={documentWords.deleting} />
+        </View>
+      ) : (
+        <Pressable
+          onPress={() => onActions(row)}
+          android_ripple={ripple(theme, true)}
+          style={styles.rowMenu}
+          accessibilityRole="button"
+          accessibilityLabel={workspaceWords.fileActions(row.name)}
+        >
+          <Ellipsis size={18} color={theme.muted} strokeWidth={2} />
+        </Pressable>
+      )
+    ) : null;
+  const style = [
+    styles.row,
+    { paddingLeft: 8 + depth * 20, paddingRight: actionButton ? 4 : 16 },
+    actionButton ? styles.rowMain : null,
+  ];
+  const main = listed ? (
+    <View
+      style={style}
+      accessible
+      accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}
+    >
+      {content}
+    </View>
+  ) : (
     <Pressable
       onPressIn={onPressIn ? () => onPressIn(row) : undefined}
       onPress={() => onPress(row)}
@@ -572,10 +698,22 @@ const Row = memo(function Row({
       {content}
     </Pressable>
   );
+  return actionButton ? (
+    <View style={styles.rowWrap}>
+      {main}
+      {actionButton}
+    </View>
+  ) : (
+    main
+  );
 });
 
 const styles = StyleSheet.create({
   content: { flexGrow: 1, paddingBottom: 120 },
+  headerRight: { flexDirection: "row", alignItems: "center" },
+  rowWrap: { flexDirection: "row", alignItems: "center", paddingRight: 4 },
+  rowMain: { flex: 1 },
+  rowMenu: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
   row: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: TOUCH, paddingRight: 16 },
   chevron: { width: 16, alignItems: "center" },
   name: { flexShrink: 1, fontSize: 17 },

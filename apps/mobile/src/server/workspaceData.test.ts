@@ -1714,4 +1714,37 @@ describe("prefetching pages", () => {
     expect(maxActive).toBe(PREFETCH_AT_ONCE);
     expect(data.state(views.files)).toMatchObject({ value: null, problem: null, failures: 0 });
   });
+
+  it("invalidate re-reads subscribed views and drops cached unsubscribed views", async () => {
+    const server = testServer();
+    let filesReads = 0;
+    server.on("POST", "/sync/ws-inv/ops/listFiles", () => {
+      filesReads += 1;
+      return ops(
+        filesReads === 1 ? files(["a.md", "obj-a"]) : files(["b.md", "obj-b"]),
+        `0.1.${filesReads}`,
+      );
+    });
+    server.on(
+      "POST",
+      "/sync/ws-inv/ops/documentRead",
+      ops({ ok: true, kind: "page", markdown: "hi" }, "0.1.1"),
+    );
+    server.on("GET", feedPath("ws-inv", "0.1.1"), held);
+    server.on("GET", feedPath("ws-inv", "0.1.2"), held);
+    const { data } = open(server, "ws-inv");
+    data.subscribe(views.files, () => {});
+    const unsubPage = data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => {
+      expect(data.state(views.files).value?.map((f) => f.path)).toEqual(["a.md"]);
+      expect(data.state(views.page("a.md")).value).toMatchObject({ kind: "page", markdown: "hi" });
+    });
+    unsubPage();
+    data.invalidate(views.page("a.md"), true);
+    expect(data.state(views.page("a.md")).value).toBeNull();
+    data.invalidate(views.files);
+    await vi.waitFor(() =>
+      expect(data.state(views.files).value?.map((f) => f.path)).toEqual(["b.md"]),
+    );
+  });
 });

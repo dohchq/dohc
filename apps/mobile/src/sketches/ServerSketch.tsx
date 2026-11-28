@@ -3,16 +3,20 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Crypto from "expo-crypto";
-import { Stack, useLocalSearchParams, usePreventRemove } from "expo-router";
+import { Stack, useLocalSearchParams, usePreventRemove, useRouter } from "expo-router";
+import { EllipsisVertical } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, Alert, Platform, StyleSheet, useColorScheme, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
+import { useShownWorkspaces } from "../chats/Workspaces";
+import { useFileLifecycle } from "../home/FileNameSheet";
 import { isOutOfSpace } from "../pages/editorFile";
 import { LoadingLines, pageStyles, Strip } from "../pages/pageParts";
 import { shownProblem } from "../server/client";
+import { canWriteFiles } from "../server/fileWrites";
 import {
   nextSaveAttempt,
   preserveLostElements,
@@ -25,7 +29,7 @@ import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
-import { useProblemText } from "../workspace/useView";
+import { useProblemText, useView } from "../workspace/useView";
 import { sketchFolderUri, sketchHtmlUri } from "./sketchFile";
 import { sketchTitle } from "./sketchList";
 
@@ -66,11 +70,15 @@ export function ServerSketch() {
 
 function SketchScreen({ path }: { path: string }) {
   const theme = useTheme();
+  const router = useRouter();
   const scheme = useColorScheme() === "dark" ? "dark" : "light";
   const reduceMotion = useReducedMotion();
   const problemText = useProblemText();
   const { data } = useAccount();
   const signIn = useSignIn();
+  const { current: currentWorkspace } = useShownWorkspaces();
+  const { state: filesState } = useView(views.files);
+  const lifecycle = useFileLifecycle(currentWorkspace?.name ?? "");
   const gap = useWorkspaceGap();
   const web = useRef<ComponentRef<typeof WebView>>(null);
 
@@ -390,6 +398,34 @@ function SketchScreen({ path }: { path: string }) {
       : null,
   ].filter((s): s is NonNullable<typeof s> => s !== null);
 
+  const objectId =
+    readState.kind === "ready"
+      ? readState.scene.objectId
+      : (filesState.value?.find((file) => file.path === path)?.objectId ?? null);
+  const canEditFiles =
+    canWriteFiles(data, currentWorkspace) &&
+    objectId !== null &&
+    !edit.saving &&
+    lifecycle.deletingPath === null;
+  const guardDirty = () => {
+    if (!edit.dirty) return false;
+    Alert.alert(workspaceWords.sketchUnsavedTitle, workspaceWords.sketchUnsavedBody, [
+      { text: confirmWords.cancel, style: "cancel" },
+    ]);
+    return true;
+  };
+  const onRenamed = (nextPath: string) =>
+    router.replace({ pathname: "/sketch", params: { path: nextPath } });
+  const onDeleted = () => (router.canGoBack() ? router.back() : router.replace("/"));
+  const startRename = () => {
+    if (canEditFiles && objectId && !guardDirty())
+      lifecycle.openRename({ path, objectId, onDone: onRenamed });
+  };
+  const startDelete = () => {
+    if (canEditFiles && objectId && !guardDirty())
+      lifecycle.confirmDelete({ path, objectId, onDone: onDeleted });
+  };
+
   return (
     <View style={[pageStyles.screen, { backgroundColor: theme.bg }]}>
       <Stack.Screen
@@ -399,32 +435,65 @@ function SketchScreen({ path }: { path: string }) {
           headerStyle: { backgroundColor: theme.bg },
           headerShadowVisible: false,
           headerRight:
-            Platform.OS === "android" && canSave
-              ? () =>
-                  edit.saving ? (
-                    <View style={styles.spinner}>
-                      <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
-                    </View>
-                  ) : (
-                    <HeaderButton
-                      label={workspaceWords.sketchSave}
-                      onPress={() => void performSave()}
-                    />
-                  )
+            Platform.OS === "android" && (canSave || canEditFiles)
+              ? () => (
+                  <View style={styles.headerRight}>
+                    {canSave ? (
+                      edit.saving ? (
+                        <View style={styles.spinner}>
+                          <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
+                        </View>
+                      ) : (
+                        <HeaderButton
+                          label={workspaceWords.sketchSave}
+                          onPress={() => void performSave()}
+                        />
+                      )
+                    ) : null}
+                    {canEditFiles && objectId ? (
+                      <HeaderButton
+                        icon={EllipsisVertical}
+                        label={documentWords.documentActions}
+                        onPress={() =>
+                          lifecycle.openActions({
+                            title: documentWords.documentActions,
+                            path,
+                            objectId,
+                            guard: guardDirty,
+                            onRenamed,
+                            onDeleted,
+                          })
+                        }
+                      />
+                    ) : null}
+                  </View>
+                )
               : undefined,
         }}
       />
-      {Platform.OS === "ios" && canSave ? (
+      {Platform.OS === "ios" && (canSave || canEditFiles) ? (
         <Stack.Toolbar placement="right">
-          {edit.saving ? (
-            <Stack.Toolbar.View>
-              <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
-            </Stack.Toolbar.View>
-          ) : (
-            <Stack.Toolbar.Button variant="done" onPress={() => void performSave()}>
-              {workspaceWords.sketchSave}
-            </Stack.Toolbar.Button>
-          )}
+          {canSave ? (
+            edit.saving ? (
+              <Stack.Toolbar.View>
+                <ActivityIndicator accessibilityLabel={workspaceWords.sketchSaving} />
+              </Stack.Toolbar.View>
+            ) : (
+              <Stack.Toolbar.Button variant="done" onPress={() => void performSave()}>
+                {workspaceWords.sketchSave}
+              </Stack.Toolbar.Button>
+            )
+          ) : null}
+          {canEditFiles ? (
+            <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel={documentWords.documentActions}>
+              <Stack.Toolbar.MenuAction icon="pencil" onPress={startRename}>
+                {documentWords.rename}
+              </Stack.Toolbar.MenuAction>
+              <Stack.Toolbar.MenuAction icon="trash" destructive onPress={startDelete}>
+                {confirmWords.delete}
+              </Stack.Toolbar.MenuAction>
+            </Stack.Toolbar.Menu>
+          ) : null}
         </Stack.Toolbar>
       ) : null}
       {failure ?? (
@@ -462,10 +531,12 @@ function SketchScreen({ path }: { path: string }) {
           )}
         </>
       )}
+      {lifecycle.sheet}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  headerRight: { flexDirection: "row", alignItems: "center" },
   spinner: { minWidth: 48, minHeight: 48, alignItems: "center", justifyContent: "center" },
 });

@@ -107,6 +107,7 @@ function phoneWorkspace(workspace: AccountWorkspace): PhoneWorkspace {
     color: workspaceMarkFills[hash % workspaceMarkFills.length]!,
     canOpen: workspace.canOpen,
     role: workspace.role,
+    fileWritesAvailable: workspace.fileWritesAvailable,
     sections: [],
   };
 }

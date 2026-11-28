@@ -924,6 +924,19 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(
     input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput,
   ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  retireIdleServiceHostEnrollment(
+    input: Parameters<typeof import("./serviceHostEnrollment").retireIdleServiceHostEnrollment>[1],
+  ): import("./serviceHostEnrollment").RetireIdleServiceHostEnrollmentResult;
+  rebindRetiredServiceHostEnrollment(
+    input: Parameters<
+      typeof import("./serviceHostEnrollment").rebindRetiredServiceHostEnrollment
+    >[1],
+  ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  clearDrainedDeletedServiceHostEnrollment(
+    input: Parameters<
+      typeof import("./serviceHostEnrollment").clearDrainedDeletedServiceHostEnrollment
+    >[1],
+  ): boolean;
   /** The enrolled documents an active Edit grant on the share covers. */
   serviceHostEnrollmentsCoveredByShare(
     shareId: string,

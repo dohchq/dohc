@@ -22,6 +22,7 @@ export function allSketchRows(files: readonly WorkspaceFile[]): HomeRow[] {
       kind: "sketch" as const,
       key: `sketch:${f.path}`,
       path: f.path,
+      objectId: f.objectId,
       name: base(f.path),
       folder: dir(f.path),
     }));

@@ -15,13 +15,23 @@ export type HomeRow =
       readonly kind: "page";
       readonly key: string;
       readonly path: string;
+      readonly objectId: string;
       readonly name: string;
       readonly depth: number;
     }
   | {
-      readonly kind: "sketch" | "other";
+      readonly kind: "sketch";
       readonly key: string;
       readonly path: string;
+      readonly objectId: string;
+      readonly name: string;
+      readonly folder: string;
+    }
+  | {
+      readonly kind: "other";
+      readonly key: string;
+      readonly path: string;
+      readonly objectId: string;
       readonly name: string;
       readonly folder: string;
     };
@@ -74,6 +84,7 @@ export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): st
 export function homeRows(
   files: readonly WorkspaceFile[],
   expanded: ReadonlySet<string>,
+  options?: { readonly showAllOthers?: boolean },
 ): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
   // A dataset's folder holds its dataset.json; everything under it belongs to the Collection.
   const owners = new Set(
@@ -121,34 +132,40 @@ export function homeRows(
       if (open) walk(child, depth + 1);
     }
     const titled = folder.pages
-      .map((page) => ({ path: page.path, name: pageTitle(page.path) }))
+      .map((page) => ({ path: page.path, objectId: page.objectId, name: pageTitle(page.path) }))
       .sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.path, b.path));
     for (const page of titled)
       pages.push({
         kind: "page",
         key: `page:${page.path}`,
         path: page.path,
+        objectId: page.objectId,
         name: page.name,
         depth,
       });
   };
   walk(root, 0);
 
-  const first = (kind: "sketch" | "other", list: WorkspaceFile[]): FirstFiles => ({
+  const first = (kind: "sketch" | "other", list: WorkspaceFile[], showAll = false): FirstFiles => ({
     shown: list
       .sort(
         (a, b) =>
           collator.compare(basename(a.path), basename(b.path)) || collator.compare(a.path, b.path),
       )
-      .slice(0, FILES_SHOWN)
+      .slice(0, showAll ? list.length : FILES_SHOWN)
       .map((file): HomeRow => ({
         kind,
         key: `${kind}:${file.path}`,
         path: file.path,
+        objectId: file.objectId,
         name: basename(file.path),
         folder: dirname(file.path),
       })),
     count: list.length,
   });
-  return { pages, sketches: first("sketch", sketches), others: first("other", others) };
+  return {
+    pages,
+    sketches: first("sketch", sketches),
+    others: first("other", others, options?.showAllOthers),
+  };
 }

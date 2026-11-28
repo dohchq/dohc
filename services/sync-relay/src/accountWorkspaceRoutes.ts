@@ -70,6 +70,8 @@ export function createAccountWorkspaceRoutes(options: {
   sockets: Pick<OwnerLiveSockets, "stopPhoneWorkspace">;
   /** Runs once a workspace stops showing on the person's phone. */
   hidden?(userId: string, workspaceId: string): void;
+  /** Whether this server can perform owner file lifecycle writes through ServerCopies. */
+  fileWritesAvailable?(): boolean;
 }) {
   const { storage } = options;
   const account = async (request: Request) =>
@@ -82,7 +84,14 @@ export function createAccountWorkspaceRoutes(options: {
     if (route.route === "account-workspaces") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const userId = await account(request);
-      return jsonResponse({ ok: true, workspaces: storage.listAccountWorkspaces(userId) });
+      const fileWritesAvailable = options.fileWritesAvailable?.() ?? false;
+      return jsonResponse({
+        ok: true,
+        workspaces: storage.listAccountWorkspaces(userId).map((workspace) => ({
+          ...workspace,
+          fileWritesAvailable: fileWritesAvailable && workspace.role === "owner",
+        })),
+      });
     }
     if (request.method !== "PATCH") throw relayError("method_not_allowed");
     const userId = await account(request);
