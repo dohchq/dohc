@@ -11,7 +11,7 @@ import {
   noteConversionOffered,
   noteConversionReach,
   engineNoteBodySequence,
-  stopsOnceSyncStarts,
+  stopsOnceSyncChanges,
   type NoteConversionRelay,
 } from "./noteConversion";
 
@@ -443,8 +443,9 @@ describe("note conversion run", () => {
     const run = await createNoteConversion(2)("ws", {
       relay: null,
       convert,
-      assertCurrent: stopsOnceSyncStarts(
+      assertCurrent: stopsOnceSyncChanges(
         () => undefined,
+        false,
         () => syncing,
       ),
     });
@@ -454,6 +455,29 @@ describe("note conversion run", () => {
       sent: false,
       stopped: "Sync was turned on while dohc converted notes.",
     });
+    expect(convert).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops before the next note once sync is paused in a synced workspace", async () => {
+    let syncing = true;
+    const outcomes = oneNoteAtATime(converted(4));
+    const convert = vi.fn(async (params: Params) => {
+      const answer = await outcomes(params);
+      if (outcomes.mock.calls.length === 2) syncing = false;
+      return answer;
+    });
+
+    const run = await createNoteConversion(10)("ws", {
+      relay: relay(),
+      convert,
+      assertCurrent: stopsOnceSyncChanges(
+        () => undefined,
+        true,
+        () => syncing,
+      ),
+    });
+
+    expect(run).toMatchObject({ converted: 2, sent: false, stopped: NOTE_CONVERSION_PAUSED });
     expect(convert).toHaveBeenCalledTimes(2);
   });
 
@@ -634,15 +658,41 @@ describe("converting a note once its editor closes", () => {
     expect(later.convert).not.toHaveBeenCalled();
   });
 
-  it("moves a note whose retry fails into the failed group with the reason, and retries it later", async () => {
+  it("moves a note whose retry fails into the failed group with the reason, and leaves it to Convert remaining", async () => {
     const conversion = await afterRun([skippedAs("a", "open-here")]);
-    await expect(closing(conversion, "a.md", new Error("engine stopped")).done).resolves.toEqual({
-      result: result({ failed: [{ path: "a.md", reason: "engine stopped" }] }),
+    await expect(
+      closing(conversion, "a.md", new Error(NOTE_CONVERSION_PAUSED)).done,
+    ).resolves.toEqual({
+      result: result({ failed: [{ path: "a.md", reason: NOTE_CONVERSION_PAUSED }] }),
       drained: false,
     });
-    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toMatchObject({
-      result: { converted: 1 },
+    const later = closing(conversion, "a.md", { converted: 1 });
+    await expect(later.done).resolves.toBeNull();
+    expect(later.convert).not.toHaveBeenCalled();
+  });
+
+  it("stops a retry whose sync is paused after it read the live notes, before the engine converts", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    let syncing = true;
+    const remote = relay({
+      liveNotes: vi.fn(async () => ((syncing = false), live([]))),
     });
+    const convert = vi.fn(async () => pass({ converted: 1 }));
+    const done = conversion.closed("ws", "a.md", (use) =>
+      use({
+        relay: remote,
+        convert,
+        assertCurrent: stopsOnceSyncChanges(
+          () => undefined,
+          true,
+          () => syncing,
+        ),
+      }),
+    );
+    await expect(done).resolves.toMatchObject({
+      result: { failed: [{ path: "a.md", reason: NOTE_CONVERSION_PAUSED }] },
+    });
+    expect(convert).not.toHaveBeenCalled();
   });
 
   it("keeps retrying a note the engine could not read this time", async () => {
@@ -665,6 +715,7 @@ describe("converting a note once its editor closes", () => {
       result: result({ failed: [{ path: "a.md", reason: "This workspace was closed." }] }),
       drained: false,
     });
+    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toBeNull();
   });
 
   it("drops the retry quietly when the workspace it closed in is gone", async () => {

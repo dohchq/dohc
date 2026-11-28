@@ -412,7 +412,7 @@ describe("converting notes from this window", () => {
     const converted = (path: string, drained = true) =>
       retried?.({ workspaceId: "ws-a", path, result: { ...none, converted: 1 }, drained });
 
-    it("takes a converted note off the row without a toast, and clears the row with one once none are left", async () => {
+    it("takes a converted note off the row, and clears the row once none are left, with no toast", async () => {
       const shell = await afterRun();
       act(() => converted("Day 1.md"));
       expect(shell.report).toHaveBeenCalledExactlyOnceWith(
@@ -423,13 +423,55 @@ describe("converting notes from this window", () => {
           action: expect.objectContaining({ label: "Convert remaining" }),
         }),
       );
+      shell.success.mockClear();
       act(() => converted("Day 2.md"));
       expect(shell.clear).toHaveBeenLastCalledWith("note-conversion");
-      expect(shell.success).toHaveBeenCalledExactlyOnceWith(
-        "Converted 1,982 notes",
-        undefined,
-        "note-conversion",
+      expect(shell.success).not.toHaveBeenCalled();
+      expect(shell.conversion().state).toEqual({ status: "done", converted: 1982, left: 0 });
+    });
+
+    it("raises a toast when a retry converted the note but could not send it", async () => {
+      const shell = await afterRun();
+      act(() =>
+        retried?.({
+          workspaceId: "ws-a",
+          path: "Day 1.md",
+          result: { ...none, converted: 1, sent: false },
+          drained: false,
+        }),
       );
+      expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          message: expect.stringContaining("dohc could not send them to the server yet."),
+          quiet: false,
+          retry: expect.any(Function),
+        }),
+      );
+      expect(shell.conversion().state).toMatchObject({ status: "unsent" });
+    });
+
+    it("keeps a stopped run's message and Try again, and shows the notes left under it", async () => {
+      const stopped = "dohc could not reach your server.";
+      const shell = await afterRun({ ...left, converted: 5, sent: false, stopped });
+      const failed = [{ path: "Day 1.md", reason: "engine stopped" }];
+      act(() =>
+        retried?.({
+          workspaceId: "ws-a",
+          path: "Day 1.md",
+          result: { ...none, failed },
+          drained: true,
+        }),
+      );
+      expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          message: expect.stringContaining(stopped),
+          rows: ["Open on this computer: Day 2.md", "Could not be read: Day 1.md"],
+          details: expect.arrayContaining([["Could not be read", "Day 1.md: engine stopped"]]),
+          quiet: false,
+          retry: expect.any(Function),
+        }),
+      );
+      expect(shell.conversion().state).toEqual({ status: "unsent", converted: 5, left: 2 });
     });
 
     it("moves a note whose retry failed into Could not be read with a toast, still offering Convert remaining", async () => {
