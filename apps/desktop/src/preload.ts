@@ -132,6 +132,7 @@ import {
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   NoteConversionProgress,
+  NoteConversionRetried,
   ChatDispatchNoticesEvent,
   AgentRunStateEvent,
   workspaceSearchOperations,
@@ -622,6 +623,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onNoteConversionProgress: (listener) =>
     onEvent(CHANNELS.noteConversionProgress, NoteConversionProgress, listener),
+  onNoteConversionRetried: (listener) =>
+    onEvent(CHANNELS.noteConversionRetried, NoteConversionRetried, listener),
   onChatDispatchNotices: (listener) =>
     onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
   ...operationBridge(agentRunStateOperations, invoke),

@@ -242,6 +242,7 @@ export const CHANNELS = {
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   noteConversionProgress: "desktop:note-conversion-progress",
+  noteConversionRetried: "desktop:note-conversion-retried",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",

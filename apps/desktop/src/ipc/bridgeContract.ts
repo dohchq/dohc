@@ -12,6 +12,7 @@ import type { incomingWebhooksOperations } from "./incomingWebhooksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
+import { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import { isSafeRelativePath } from "@dohc/workspace-contracts/workspace-paths";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -8368,6 +8369,14 @@ export const NoteConversionProgress = z
   })
   .strict();
 export type NoteConversionProgress = z.infer<typeof NoteConversionProgress>;
+export const NoteConversionRetried = z
+  .object({
+    workspaceId: z.string().min(1).max(256),
+    path: z.string(),
+    result: ConvertNotesResult,
+  })
+  .strict();
+export type NoteConversionRetried = z.infer<typeof NoteConversionRetried>;
 export const noteConversionOperations = {
   readNoteConversionOffered: {
     capabilityId: "workspace.notes.convert.offer.read",
@@ -9834,6 +9843,7 @@ export interface DohcDesktopBridge
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
   onNoteConversionProgress(listener: (event: NoteConversionProgress) => void): () => void;
+  onNoteConversionRetried(listener: (event: NoteConversionRetried) => void): () => void;
   onChatDispatchNotices(listener: (event: ChatDispatchNoticesEvent) => void): () => void;
   // Live push: this computer's agent started or stopped in a workspace this
   // window shows.

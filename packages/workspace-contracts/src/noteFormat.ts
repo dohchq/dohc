@@ -55,6 +55,22 @@ export function leftNoteGroups(result: ConvertNotesResult): LeftNoteGroup[] {
   return [...groups].map(([title, notes]) => ({ title, notes }));
 }
 
+export function withNoteRetried(
+  last: ConvertNotesResult,
+  path: string,
+  retried: ConvertNotesResult,
+): ConvertNotesResult {
+  const other = (note: { path: string }) => note.path !== path;
+  return {
+    converted: last.converted + retried.converted,
+    unchanged: last.unchanged + retried.unchanged,
+    skipped: [...last.skipped.filter(other), ...retried.skipped],
+    doesNotFit: [...last.doesNotFit.filter(other), ...retried.doesNotFit],
+    failed: [...last.failed.filter(other), ...retried.failed],
+    sent: last.sent && retried.sent,
+  };
+}
+
 export function leftNoteCount(result: ConvertNotesResult): number {
   return result.skipped.length + result.doesNotFit.length + result.failed.length;
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   leftNoteCount,
   leftNoteGroups,
+  withNoteRetried,
   type ConvertNotesResult,
 } from "@dohc/workspace-contracts/note-format";
 import { bridge } from "../bridge";
@@ -151,10 +152,12 @@ export function useNoteConversion(input: {
 
   const unsent = useRef<{ workspaceId: string; converted: number } | null>(null);
   const inFlight = useRef(new Set<string>());
-  const convert = useMemo(() => {
+  const last = useRef<{ workspaceId: string; result: ConvertNotesResult } | null>(null);
+  const { convert, settle } = useMemo(() => {
     const show = (next: NoteConversionState) => setShown({ workspaceId, state: next });
 
     function settle(result: ConvertNotesResult) {
+      last.current = { workspaceId, result };
       const left = leftNoteCount(result);
       unsent.current = result.sent ? null : { workspaceId, converted: result.converted };
       show({ status: result.sent ? "done" : "unsent", converted: result.converted, left });
@@ -215,8 +218,19 @@ export function useNoteConversion(input: {
         .finally(() => inFlight.current.delete(workspaceId));
     }
 
-    return convert;
+    return { convert, settle };
   }, [workspaceId, requests, report, success, clear]);
+
+  useEffect(
+    () =>
+      bridge().onNoteConversionRetried(({ workspaceId: from, path, result }) => {
+        const shown = last.current;
+        if (from !== workspaceId || shown?.workspaceId !== from || inFlight.current.has(from))
+          return;
+        settle(withNoteRetried(shown.result, path, result));
+      }),
+    [workspaceId, settle],
+  );
 
   return { state, start: convert, offer };
 }
