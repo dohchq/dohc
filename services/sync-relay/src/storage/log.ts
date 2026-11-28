@@ -76,6 +76,8 @@ const LOG_PAGE_ROWS = "FROM sync_relay_log WHERE workspace_id = ? AND relay_seq 
 
 /** Every copy of retained work's creation moment ID starts with this. */
 export const RELEASED_COPY_MOMENT_PREFIX = "released-copy-moment-";
+const RECOVERY_MOMENT_PREFIX = "ydoc-recovery-moment-";
+const INACTIVE_RECOVERY_MOMENT_PREFIX = "ydoc-inactive-recovery-";
 
 /**
  * A copy of retained work's creation, by what identical creations on two
@@ -117,6 +119,49 @@ function releasedCopyCreation(
       metadata.correlationId,
       payload.authors ?? null,
       payload.attributionUnavailable ?? null,
+    ]),
+  };
+}
+
+function ydocRecovery(
+  payloadJson: string,
+): { objectId: string; momentId: string; key: string } | null {
+  let payload: Record<string, unknown> | null;
+  try {
+    payload = asRecord(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
+  const metadata = asRecord(payload?.metadata);
+  if (
+    !payload ||
+    typeof payload.momentId !== "string" ||
+    typeof payload.objectId !== "string" ||
+    payload.operation !== "write" ||
+    (payload.payloadAfterContentKind != null && payload.payloadAfterContentKind !== "text") ||
+    typeof metadata?.correlationId !== "string"
+  )
+    return null;
+  const continuation = payload.momentId.startsWith(INACTIVE_RECOVERY_MOMENT_PREFIX);
+  if (continuation) {
+    if (payload.beforePresent !== "present" || typeof payload.beforeBlobSha256 !== "string")
+      return null;
+  } else if (
+    !payload.momentId.startsWith(RECOVERY_MOMENT_PREFIX) ||
+    (payload.beforePresent !== "absent" && payload.beforePresent !== "null")
+  )
+    return null;
+  return {
+    objectId: payload.objectId,
+    momentId: payload.momentId,
+    key: stableJsonStringify([
+      payload.versionId,
+      payload.objectId,
+      payload.momentId,
+      continuation ? payload.beforeBlobSha256 : null,
+      payload.payloadAfterBlobSha256,
+      payload.payloadAfterByteLength,
+      metadata.correlationId,
     ]),
   };
 }
@@ -212,17 +257,24 @@ export function appendLogBatchInTransaction(
   // The log's first accepted creation of a copy is its only projected one,
   // so the first object moment with its ID names it, on every retry alike.
   const redundant = new Map<number, RedundantRecovery>();
-  const firstCreationStmt = input.classifyRedundantRecoveries
-    ? storage.db.prepare(
-        `SELECT l.origin_id, l.origin_seq, l.relay_seq, l.payload_json
-         FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq = m.relay_seq
-         WHERE m.workspace_id = ? AND m.object_id = ? AND m.moment_id = ?
-           AND l.op_kind = 'moment.append' AND l.relay_admission IS NULL
-         ORDER BY m.relay_seq LIMIT 1`,
-      )
-    : undefined;
+  const duplicateRecoveries = new Set<number>();
+  const firstCreationStmt = storage.db.prepare(
+    `SELECT l.origin_id, l.origin_seq, l.relay_seq, l.payload_json
+     FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq = m.relay_seq
+     WHERE m.workspace_id = ? AND m.object_id = ? AND m.moment_id = ?
+       AND l.op_kind = 'moment.append' AND l.relay_admission IS NULL
+     ORDER BY m.relay_seq LIMIT 1`,
+  );
   const classify = (op: SyncRelayLogInput) => {
-    if (!firstCreationStmt || op.opKind !== "moment.append") return;
+    if (op.opKind !== "moment.append") return;
+    const recovery = ydocRecovery(op.payloadJson);
+    if (recovery) {
+      const first = firstCreationStmt.get(input.workspaceId, recovery.objectId, recovery.momentId);
+      if (first && ydocRecovery(String(first.payload_json))?.key === recovery.key)
+        duplicateRecoveries.add(op.originSeq);
+      return;
+    }
+    if (!input.classifyRedundantRecoveries) return;
     const creation = releasedCopyCreation(op.payloadJson);
     if (!creation) return;
     const first = firstCreationStmt.get(input.workspaceId, creation.objectId, creation.momentId);
@@ -402,7 +454,8 @@ export function appendLogBatchInTransaction(
     if (
       op.settlementAdmission?.status === "refused" ||
       op.relayAdmission !== undefined ||
-      redundant.has(op.originSeq)
+      redundant.has(op.originSeq) ||
+      duplicateRecoveries.has(op.originSeq)
     )
       continue;
     if (op.opKind === "chat.message.append") chatMessages.push(Number(result.lastInsertRowid));
