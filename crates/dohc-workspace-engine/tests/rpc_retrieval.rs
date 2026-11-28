@@ -321,9 +321,12 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retrieval_query_refuses_received_share_and_passive_handles() {
+    // Declared before the transport so its stores close before their folders go.
+    let share_scratch = ScratchDir::new().expect("share scratch");
+    let durable_share_scratch = ScratchDir::new().expect("durable share scratch");
+    let passive_scratch = ScratchDir::new().expect("passive scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
 
-    let share_scratch = ScratchDir::new().expect("share scratch");
     let share_handle = open_with(
         &transport,
         &share_scratch,
@@ -348,7 +351,6 @@ async fn retrieval_query_refuses_received_share_and_passive_handles() {
 
     // Even if a raw client reopens a store containing a durable share_view_cursors row
     // without setting projectCollections: true, retrieval.query must refuse with Forbidden.
-    let durable_share_scratch = ScratchDir::new().expect("durable share scratch");
     let durable_handle = open_with(
         &transport,
         &durable_share_scratch,
@@ -381,7 +383,6 @@ async fn retrieval_query_refuses_received_share_and_passive_handles() {
     .expect_err("durable received-share store must be refused even without projectCollections");
     assert_eq!(durable_err.code, ErrorCode::Forbidden);
 
-    let passive_scratch = ScratchDir::new().expect("passive scratch");
     let passive_handle = open_with(
         &transport,
         &passive_scratch,
