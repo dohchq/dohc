@@ -153,3 +153,49 @@ fn a_continuation_from_a_different_state_still_collides() {
     receive(&mut server_copy, &ops[0]).expect("creation");
     assert_invalid_refusal!(receive(&mut server_copy, &ops[1]));
 }
+
+#[test]
+fn a_replica_that_recovered_itself_reports_its_copy_when_the_matching_moments_arrive() {
+    let (_a_scratch, device_a) = recovered_twice("device-a", "service");
+    let (_b_scratch, mut owner) = recovered_twice("owner", "owner");
+    let ops = served(&device_a, "device-a", &mut owner);
+    let copy: String = owner
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT path FROM snapshots WHERE metadata_correlation_id GLOB 'ydoc-inactive-recovery:*'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("the copy");
+    let client = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            next_cursor: i64::try_from(ops.len()).unwrap(),
+            ops,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let outcome = client
+        .pull_chat_workspace(
+            &mut owner,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
+        .expect("the pull goes on");
+    let SyncPassOutcome::Complete { changed_paths, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        changed_paths
+            .iter()
+            .any(|change| change.path == copy && change.operation == "write"),
+        "{changed_paths:?}"
+    );
+}
