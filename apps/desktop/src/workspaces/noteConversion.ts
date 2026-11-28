@@ -144,7 +144,7 @@ function addPass(result: ConvertNotesResult, pass: EnginePass): void {
   result.failed.push(...pass.failed.map(({ path, reason }) => ({ path, reason })));
 }
 
-type Retried = ConvertNotesResult | null;
+type Retried = { result: ConvertNotesResult; drained: boolean } | null;
 
 export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const running = new Set<string>();
@@ -153,34 +153,41 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
   const inTurn = <T>(workspaceId: string, work: () => Promise<T>): Promise<T> => {
     const turn = (turns.get(workspaceId) ?? Promise.resolve()).catch(() => undefined).then(work);
     turns.set(workspaceId, turn);
+    const clean = () => {
+      if (turns.get(workspaceId) === turn) turns.delete(workspaceId);
+    };
+    void turn.then(clean, clean);
     return turn;
   };
 
   const closed = (
     workspaceId: string,
     path: string,
-    withRun: (use: (run: NoteConversionRun) => Promise<Retried>) => Promise<Retried>,
+    withRun: (use: (run: NoteConversionRun) => Promise<Retried>) => Promise<Retried | undefined>,
   ): Promise<Retried> =>
     inTurn(workspaceId, async () => {
       const objectId = openHere.get(workspaceId)?.get(path);
       if (objectId === undefined) return null;
-      return withRun(async (run) => {
-        run.assertCurrent();
-        const { relay } = run;
-        if (relay) await relay.drainRecorded();
-        const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
-        run.assertCurrent();
-        const pass = EnginePass.parse(await run.convert({ objectId, budget: 1, ...relayLive }));
-        if (pass.skipped.some(({ reason }) => reason === "open-here")) return null;
-        const result = emptyResult();
-        addPass(result, pass);
-        openHere.get(workspaceId)?.delete(path);
-        if (relay && result.converted > 0) result.sent = await sent(relay);
-        return result;
-      }).catch((error: unknown) => ({
-        ...emptyResult(),
-        failed: [{ path, reason: error instanceof Error ? error.message : String(error) }],
-      }));
+      try {
+        const retried = await withRun(async (run) => {
+          run.assertCurrent();
+          const { relay } = run;
+          if (relay) await relay.drainRecorded();
+          const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
+          run.assertCurrent();
+          const pass = EnginePass.parse(await run.convert({ objectId, budget: 1, ...relayLive }));
+          if (pass.skipped.some(({ reason }) => reason === "open-here")) return null;
+          const result = emptyResult();
+          addPass(result, pass);
+          if (pass.failed.length === 0) openHere.get(workspaceId)?.delete(path);
+          if (relay && result.converted > 0) result.sent = await sent(relay);
+          return { result, drained: result.sent };
+        });
+        return retried ?? null;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return { result: { ...emptyResult(), failed: [{ path, reason }] }, drained: false };
+      }
     });
 
   async function convertNotes(

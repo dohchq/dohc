@@ -59,6 +59,7 @@ export function withNoteRetried(
   last: ConvertNotesResult,
   path: string,
   retried: ConvertNotesResult,
+  drained: boolean,
 ): ConvertNotesResult {
   const other = (note: { path: string }) => note.path !== path;
   return {
@@ -67,7 +68,8 @@ export function withNoteRetried(
     skipped: [...last.skipped.filter(other), ...retried.skipped],
     doesNotFit: [...last.doesNotFit.filter(other), ...retried.doesNotFit],
     failed: [...last.failed.filter(other), ...retried.failed],
-    sent: last.sent && retried.sent,
+    sent: drained || (last.sent && retried.sent),
+    ...(last.stopped === undefined ? {} : { stopped: last.stopped }),
   };
 }
 

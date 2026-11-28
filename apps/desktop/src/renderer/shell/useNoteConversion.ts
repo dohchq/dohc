@@ -156,7 +156,7 @@ export function useNoteConversion(input: {
   const { convert, settle } = useMemo(() => {
     const show = (next: NoteConversionState) => setShown({ workspaceId, state: next });
 
-    function settle(result: ConvertNotesResult) {
+    function settle(result: ConvertNotesResult, quiet = false) {
       last.current = { workspaceId, result };
       const left = leftNoteCount(result);
       unsent.current = result.sent ? null : { workspaceId, converted: result.converted };
@@ -165,6 +165,7 @@ export function useNoteConversion(input: {
         report({
           message: `${result.stopped} dohc converted ${countWords(result.converted, "note", "notes")} before it stopped. Try again to finish.`,
           kind: KIND,
+          quiet,
           retry: convert,
         });
         return;
@@ -178,6 +179,7 @@ export function useNoteConversion(input: {
       report({
         ...notice,
         kind: KIND,
+        quiet,
         retry: result.sent ? null : convert,
         ...(result.sent &&
         (result.failed.length > 0 ||
@@ -223,11 +225,11 @@ export function useNoteConversion(input: {
 
   useEffect(
     () =>
-      bridge().onNoteConversionRetried(({ workspaceId: from, path, result }) => {
+      bridge().onNoteConversionRetried(({ workspaceId: from, path, result, drained }) => {
         const shown = last.current;
         if (from !== workspaceId || shown?.workspaceId !== from || inFlight.current.has(from))
           return;
-        settle(withNoteRetried(shown.result, path, result));
+        settle(withNoteRetried(shown.result, path, result, drained), result.failed.length === 0);
       }),
     [workspaceId, settle],
   );

@@ -8374,6 +8374,7 @@ export const NoteConversionRetried = z
     workspaceId: z.string().min(1).max(256),
     path: z.string(),
     result: ConvertNotesResult,
+    drained: z.boolean(),
   })
   .strict();
 export type NoteConversionRetried = z.infer<typeof NoteConversionRetried>;

@@ -2322,20 +2322,20 @@ async function noteConversionRun(operation: {
 const convertNotesForOperation = async (operation: Parameters<typeof noteConversionRun>[0]) =>
   convertNotesInWorkspace(operation.workspace.workspaceId, await noteConversionRun(operation));
 
-function convertClosedNote(workspaceId: string, path: string): void {
+function convertClosedNote(
+  workspace: { workspaceId: string; attachmentId: symbol },
+  path: string,
+): void {
+  const { workspaceId, attachmentId } = workspace;
   void convertNotesInWorkspace
     .closed(workspaceId, path, (use) =>
-      withPhysicalWorkspaceOperation(workspaceId, async (operation) =>
+      withCurrentWorkspaceAttachmentOperation(workspace, async (operation) =>
         use(await noteConversionRun(operation)),
       ),
     )
-    .then((result) => {
-      if (result)
-        sendToWorkspaceWindows(CHANNELS.noteConversionRetried, {
-          workspaceId,
-          path,
-          result,
-        });
+    .then((retried) => {
+      if (retried && workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId))
+        sendToWorkspaceWindows(CHANNELS.noteConversionRetried, { workspaceId, path, ...retried });
     });
 }
 
