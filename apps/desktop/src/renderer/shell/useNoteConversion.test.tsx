@@ -401,29 +401,29 @@ describe("converting notes from this window", () => {
       ],
     };
 
-    async function afterRun() {
-      install(vi.fn<DohcDesktopBridge["convertNotes"]>().mockResolvedValueOnce(left));
+    async function afterRun(first: ConvertNotesResult = left) {
+      install(vi.fn<DohcDesktopBridge["convertNotes"]>().mockResolvedValueOnce(first));
       const shell = mount();
       await act(async () => shell.conversion().start());
       shell.report.mockClear();
       return shell;
     }
 
-    it("takes a converted note off the row, and clears the row with a toast once none are left", async () => {
+    const converted = (path: string, drained = true) =>
+      retried?.({ workspaceId: "ws-a", path, result: { ...none, converted: 1 }, drained });
+
+    it("takes a converted note off the row without a toast, and clears the row with one once none are left", async () => {
       const shell = await afterRun();
-      act(() =>
-        retried?.({ workspaceId: "ws-a", path: "Day 1.md", result: { ...none, converted: 1 } }),
-      );
+      act(() => converted("Day 1.md"));
       expect(shell.report).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
           title: "1 note was not converted",
           rows: ["Open on this computer: Day 2.md"],
+          quiet: true,
           action: expect.objectContaining({ label: "Convert remaining" }),
         }),
       );
-      act(() =>
-        retried?.({ workspaceId: "ws-a", path: "Day 2.md", result: { ...none, converted: 1 } }),
-      );
+      act(() => converted("Day 2.md"));
       expect(shell.clear).toHaveBeenLastCalledWith("note-conversion");
       expect(shell.success).toHaveBeenCalledExactlyOnceWith(
         "Converted 1,982 notes",
@@ -432,23 +432,45 @@ describe("converting notes from this window", () => {
       );
     });
 
-    it("moves a note whose retry failed into Could not be read, still offering Convert remaining", async () => {
+    it("moves a note whose retry failed into Could not be read with a toast, still offering Convert remaining", async () => {
       const shell = await afterRun();
       const failed = [{ path: "Day 1.md", reason: "engine stopped" }];
-      act(() => retried?.({ workspaceId: "ws-a", path: "Day 1.md", result: { ...none, failed } }));
+      act(() =>
+        retried?.({
+          workspaceId: "ws-a",
+          path: "Day 1.md",
+          result: { ...none, failed },
+          drained: false,
+        }),
+      );
       expect(shell.report).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
           title: "2 notes were not converted",
           rows: ["Open on this computer: Day 2.md", "Could not be read: Day 1.md"],
+          quiet: false,
           action: expect.objectContaining({ label: "Convert remaining" }),
         }),
       );
     });
 
+    it("stops saying earlier notes were not sent once a retry drained the workspace", async () => {
+      const shell = await afterRun({ ...left, sent: false });
+      expect(shell.conversion().state).toMatchObject({ status: "unsent" });
+      act(() => converted("Day 1.md", false));
+      expect(shell.conversion().state).toMatchObject({ status: "unsent" });
+      act(() => converted("Day 2.md"));
+      expect(shell.conversion().state).toEqual({ status: "done", converted: 1982, left: 0 });
+    });
+
     it("ignores a note retried in another workspace", async () => {
       const shell = await afterRun();
       act(() =>
-        retried?.({ workspaceId: "ws-b", path: "Day 1.md", result: { ...none, converted: 1 } }),
+        retried?.({
+          workspaceId: "ws-b",
+          path: "Day 1.md",
+          result: { ...none, converted: 1 },
+          drained: true,
+        }),
       );
       expect(shell.report).not.toHaveBeenCalled();
     });

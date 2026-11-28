@@ -531,6 +531,15 @@ describe("converting a note once its editor closes", () => {
   const skippedAs = (objectId: string, reason: string) => ({
     skipped: [{ objectId, path: `${objectId}.md`, reason }],
   });
+  const result = (overrides: Record<string, unknown> = {}) => ({
+    converted: 0,
+    unchanged: 0,
+    skipped: [],
+    doesNotFit: [],
+    failed: [],
+    sent: true,
+    ...overrides,
+  });
 
   async function afterRun(outcomes: Outcome[]) {
     const conversion = createNoteConversion();
@@ -545,11 +554,10 @@ describe("converting a note once its editor closes", () => {
   function closing(
     conversion: Awaited<ReturnType<typeof afterRun>>,
     path: string,
-    answer: Outcome | (() => Promise<unknown>),
+    answer: Outcome,
     remote = relay(),
   ) {
     const convert = vi.fn(async (_params: Params) => {
-      if (typeof answer === "function") return answer();
       if (answer instanceof Error) throw answer;
       return pass(answer);
     });
@@ -567,14 +575,7 @@ describe("converting a note once its editor closes", () => {
       liveNotes: vi.fn(async () => (order.push("live"), live(["live-1"]))),
     });
     const { convert, done } = closing(conversion, "a.md", { converted: 1 }, remote);
-    await expect(done).resolves.toEqual({
-      converted: 1,
-      unchanged: 0,
-      skipped: [],
-      doesNotFit: [],
-      failed: [],
-      sent: true,
-    });
+    await expect(done).resolves.toEqual({ result: result({ converted: 1 }), drained: true });
     expect(convert).toHaveBeenCalledExactlyOnceWith({
       objectId: "a",
       budget: 1,
@@ -582,6 +583,21 @@ describe("converting a note once its editor closes", () => {
     });
     expect(order).toEqual(["push", "live", "push"]);
     await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toBeNull();
+  });
+
+  it("says the workspace is not drained when the push after the conversion fails", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    let pushes = 0;
+    const remote = relay({
+      drainRecorded: vi.fn(async () => {
+        pushes += 1;
+        if (pushes === 2) throw new Error("relay down");
+      }),
+    });
+    await expect(closing(conversion, "a.md", { converted: 1 }, remote).done).resolves.toEqual({
+      result: result({ converted: 1, sent: false }),
+      drained: false,
+    });
   });
 
   it("does not retry a note skipped as open elsewhere when the same path closes here", async () => {
@@ -603,7 +619,7 @@ describe("converting a note once its editor closes", () => {
     const conversion = await afterRun([skippedAs("a", "open-here")]);
     await expect(closing(conversion, "a.md", skippedAs("a", "open-here")).done).resolves.toBeNull();
     const again = closing(conversion, "a.md", { converted: 1 });
-    await expect(again.done).resolves.toMatchObject({ converted: 1 });
+    await expect(again.done).resolves.toMatchObject({ result: { converted: 1 } });
     expect(again.convert).toHaveBeenCalledOnce();
   });
 
@@ -611,8 +627,7 @@ describe("converting a note once its editor closes", () => {
     const conversion = await afterRun([skippedAs("a", "open-here")]);
     const overweight = { doesNotFit: [{ objectId: "a", path: "a.md" }] };
     await expect(closing(conversion, "a.md", overweight).done).resolves.toMatchObject({
-      converted: 0,
-      doesNotFit: [{ path: "a.md" }],
+      result: { converted: 0, doesNotFit: [{ path: "a.md" }] },
     });
     const later = closing(conversion, "a.md", { converted: 1 });
     await expect(later.done).resolves.toBeNull();
@@ -621,17 +636,42 @@ describe("converting a note once its editor closes", () => {
 
   it("moves a note whose retry fails into the failed group with the reason, and retries it later", async () => {
     const conversion = await afterRun([skippedAs("a", "open-here")]);
-    const failed = closing(conversion, "a.md", new Error("engine stopped"));
-    await expect(failed.done).resolves.toEqual({
-      converted: 0,
-      unchanged: 0,
-      skipped: [],
-      doesNotFit: [],
-      failed: [{ path: "a.md", reason: "engine stopped" }],
-      sent: true,
+    await expect(closing(conversion, "a.md", new Error("engine stopped")).done).resolves.toEqual({
+      result: result({ failed: [{ path: "a.md", reason: "engine stopped" }] }),
+      drained: false,
     });
     await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toMatchObject({
-      converted: 1,
+      result: { converted: 1 },
+    });
+  });
+
+  it("keeps retrying a note the engine could not read this time", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const unread = { failed: [{ objectId: "a", path: "a.md", reason: "busy" }] };
+    await expect(closing(conversion, "a.md", unread).done).resolves.toMatchObject({
+      result: { failed: [{ path: "a.md", reason: "busy" }] },
+    });
+    const later = closing(conversion, "a.md", { converted: 1 });
+    await expect(later.done).resolves.toMatchObject({ result: { converted: 1 } });
+    expect(later.convert).toHaveBeenCalledOnce();
+  });
+
+  it("files a failure, rather than rejecting, when the workspace cannot be reached at all", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const done = conversion.closed("ws", "a.md", () => {
+      throw new Error("This workspace was closed.");
+    });
+    await expect(done).resolves.toEqual({
+      result: result({ failed: [{ path: "a.md", reason: "This workspace was closed." }] }),
+      drained: false,
+    });
+  });
+
+  it("drops the retry quietly when the workspace it closed in is gone", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    await expect(conversion.closed("ws", "a.md", async () => undefined)).resolves.toBeNull();
+    await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toMatchObject({
+      result: { converted: 1 },
     });
   });
 
@@ -650,7 +690,7 @@ describe("converting a note once its editor closes", () => {
     const { convert, done } = closing(conversion, "a.md", { converted: 1 });
     release();
     await running;
-    await expect(done).resolves.toMatchObject({ converted: 1 });
+    await expect(done).resolves.toMatchObject({ result: { converted: 1 } });
     expect(convert).toHaveBeenCalledOnce();
   });
 });

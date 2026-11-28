@@ -163,7 +163,7 @@ interface TestHarnessOptions {
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
   onOwnerOpened?: (workspaceId: string, path: string) => void;
-  onOwnerClosed?: (workspaceId: string, path: string) => void;
+  onOwnerClosed?: (workspace: { workspaceId: string; attachmentId: symbol }, path: string) => void;
   livePaused?: (
     workspaceId: string,
     binding: { readonly objectId: string; readonly lineageClaimId: string },
@@ -327,7 +327,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it.each([
     ["an owner-bound note", { ownerBound: true }, false, true],
-    ["a note with no owner binding", { ownerBound: false }, false, false],
+    ["a plain unshared note", { ownerBound: false }, false, true],
     ["a shared view's note", { ownerBound: true }, true, false],
     [
       "a close the engine refused",
@@ -352,7 +352,17 @@ describe("engine Y.Doc IPC adapter", () => {
         expect(onOwnerClosed).not.toHaveBeenCalled();
         await h.ipc.close(sender, { sessionId: openPayload.sessionId });
         expect(onOwnerClosed.mock.calls).toEqual(
-          reported ? [[DOCUMENT.workspaceId, DOCUMENT.path]] : [],
+          reported
+            ? [
+                [
+                  expect.objectContaining({
+                    workspaceId: DOCUMENT.workspaceId,
+                    attachmentId: AUTHORITY_ID,
+                  }),
+                  DOCUMENT.path,
+                ],
+              ]
+            : [],
         );
       } finally {
         await h.ipc.shutdown();
