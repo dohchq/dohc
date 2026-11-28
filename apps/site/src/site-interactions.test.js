@@ -560,7 +560,7 @@ describe("Drive invite requests", () => {
     return form;
   };
 
-  it("posts the email and source to Loops, copies them to the dohc webhook, and confirms", async () => {
+  it("posts the email and source to the Loops form endpoint and confirms", async () => {
     const outcomes = [];
     const onOutcome = (event) => outcomes.push(event.detail.outcome);
     document.addEventListener("dohc:waitlist-submitted", onOutcome);
@@ -581,31 +581,11 @@ describe("Drive invite requests", () => {
       );
       expect(document.activeElement).toBe(document.querySelector("[data-waitlist-status]"));
       expect(outcomes).toEqual(["succeeded"]);
-      const [copyUrl, copy] = vi.mocked(fetch).mock.calls[1];
-      expect(copyUrl).toMatch(/^https:\/\/drive\.dohc\.computer\/sync\/hooks\/[\w-]+$/);
-      expect(copy).toMatchObject({ method: "POST", body: request.body, keepalive: true });
-      expect(copy.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
-      expect(fetch).toHaveBeenCalledTimes(2);
+      // Loops forwards the signup to Drive, so the page holds no Drive address.
+      expect(fetch).toHaveBeenCalledOnce();
     } finally {
       document.removeEventListener("dohc:waitlist-submitted", onOutcome);
     }
-  });
-
-  it.each([
-    ["fails", () => Promise.reject(new TypeError("offline"))],
-    ["never answers", () => new Promise(() => {})],
-  ])("confirms the signup when the dohc copy %s", async (_, copy) => {
-    vi.mocked(fetch).mockImplementation(async (url) =>
-      String(url).startsWith("https://drive.dohc.computer/")
-        ? copy()
-        : Response.json({ success: true }),
-    );
-    const form = await join();
-    await vi.waitFor(() => expect(form.dataset.state).toBe("joined"));
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
-      "Request received",
-    );
   });
 
   it("leaves focus alone when the visitor moved on before the signup finished", async () => {
@@ -692,6 +672,5 @@ describe("Drive invite requests", () => {
     expect(document.querySelector("[data-waitlist-status]").textContent).not.toContain(
       "Request received",
     );
-    expect(fetch).toHaveBeenCalledOnce();
   });
 });

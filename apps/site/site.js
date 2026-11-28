@@ -988,15 +988,13 @@ if (agentDemo) {
   }
 }
 
-// Drive invite requests: posts to the Loops form endpoint in the form's action,
-// then copies a request Loops accepted to the dohc Collection webhook.
+// Drive invite requests: posts to the Loops form endpoint in the form's action.
 const waitlist = document.querySelector("[data-waitlist]");
 
 if (waitlist) {
   const status = waitlist.querySelector("[data-waitlist-status]");
   const submit = waitlist.querySelector('button[type="submit"]');
   const submitLabel = submit.textContent;
-  const copyTo = waitlist.dataset.waitlistCopy;
   let pending = false;
 
   const failure = async (response) => {
@@ -1026,19 +1024,14 @@ if (waitlist) {
     submit.setAttribute("aria-disabled", "true");
     submit.textContent = "Sending…";
     status.textContent = "Sending your request…";
-    const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-    const body = new URLSearchParams(new FormData(waitlist)).toString();
     try {
       const response = await fetch(waitlist.action, {
         method: "POST",
-        headers,
-        body,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(new FormData(waitlist)).toString(),
         signal: AbortSignal.timeout?.(10000),
       });
       const result = await failure(response);
-      if (!result && copyTo) {
-        fetch(copyTo, { method: "POST", headers, body, keepalive: true }).catch(() => {});
-      }
       const focused = waitlist.contains(document.activeElement);
       waitlist.dataset.state = result ? "error" : "joined";
       status.textContent =
