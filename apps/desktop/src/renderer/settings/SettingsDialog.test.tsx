@@ -1741,7 +1741,11 @@ describe("Settings › Advanced › Note format", () => {
     state: { status: "idle" as const },
     start: vi.fn(),
   };
-  const open = (initialSection: "advanced" | "general", onError = vi.fn()) =>
+  const open = (
+    initialSection: "advanced" | "general",
+    onError = vi.fn(),
+    onClearError = vi.fn(),
+  ) =>
     render(
       <SettingsDialog
         workspaceIsReady
@@ -1750,6 +1754,7 @@ describe("Settings › Advanced › Note format", () => {
         initialSection={initialSection}
         noteConversion={noteConversion}
         onError={onError}
+        onClearError={onClearError}
         onClose={vi.fn()}
       />,
     );
@@ -1774,17 +1779,39 @@ describe("Settings › Advanced › Note format", () => {
       .mockRejectedValueOnce(lost)
       .mockResolvedValueOnce({ offered: true });
     const onError = vi.fn();
-    open("advanced", onError);
+    const onClearError = vi.fn();
+    open("advanced", onError, onClearError);
 
     const retry = await screen.findByTestId("settings-note-format-retry");
     expect(onError).toHaveBeenCalledWith(
       "dohc could not reach the engine.",
       lost,
       expect.any(Function),
+      undefined,
+      "note-conversion-offered",
     );
     fireEvent.click(within(retry).getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("button", { name: "Convert notes…" })).toBeTruthy();
     expect(screen.queryByTestId("settings-note-format-retry")).toBeNull();
+    expect(onClearError).toHaveBeenCalledWith("note-conversion-offered");
+  });
+
+  it("keeps the offer check's Try again working in Notices after Settings closes", async () => {
+    bridge.readNoteConversionOffered
+      .mockRejectedValueOnce(new Error("dohc could not reach the engine."))
+      .mockResolvedValueOnce({ offered: true });
+    const onError = vi.fn();
+    const onClearError = vi.fn();
+    open("advanced", onError, onClearError);
+    await screen.findByTestId("settings-note-format-retry");
+    const retry = onError.mock.calls.find(
+      (call) => call[4] === "note-conversion-offered",
+    )![2] as () => Promise<void>;
+    cleanup();
+
+    await act(async () => retry());
+    expect(bridge.readNoteConversionOffered).toHaveBeenCalledTimes(2);
+    expect(onClearError).toHaveBeenCalledWith("note-conversion-offered");
   });
 
   it("hides the row while the account changes, and asks main again once it is ready", async () => {

@@ -231,6 +231,39 @@ describe("converting notes from this window", () => {
     );
   });
 
+  it("keeps the notes a stopped run converted in the count, and adds them to the next run", async () => {
+    const convertNotes = vi
+      .fn<DohcDesktopBridge["convertNotes"]>()
+      .mockResolvedValueOnce({ ...clean, converted: 11, sent: false })
+      .mockResolvedValueOnce({
+        ...clean,
+        converted: 10,
+        sent: false,
+        stopped: "dohc could not reach your server.",
+      })
+      .mockResolvedValueOnce({ ...clean, converted: 4 });
+    install(convertNotes);
+    const shell = mount();
+
+    await act(async () => shell.conversion().start());
+    await act(async () => shell.report.mock.calls[0]![0].retry());
+    expect(shell.conversion().state).toEqual({ status: "unsent", converted: 21, left: 0 });
+    expect(shell.report.mock.calls[1]![0]).toMatchObject({
+      kind: "note-conversion",
+      message:
+        "dohc could not reach your server. dohc converted 21 notes before it stopped. Try again to finish.",
+      retry: expect.any(Function),
+    });
+
+    await act(async () => shell.report.mock.calls[1]![0].retry());
+    expect(shell.conversion().state).toEqual({ status: "done", converted: 25, left: 0 });
+    expect(shell.success).toHaveBeenCalledExactlyOnceWith(
+      "Converted 25 notes",
+      undefined,
+      "note-conversion",
+    );
+  });
+
   it("runs once for a double click, from Settings or Notices, and keeps that run's result", async () => {
     const call = held();
     const convertNotes = vi

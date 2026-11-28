@@ -232,14 +232,17 @@ describe("note conversion run", () => {
     const fatal = new Error("dohc could not read the workspace database.");
     const convert = oneNoteAtATime([{ converted: 1 }, fatal, { converted: 1 }]);
 
-    const error = await failure(
-      createNoteConversion()("ws", { relay: null, convert, assertCurrent: () => undefined }),
-    );
+    const run = await createNoteConversion()("ws", {
+      relay: null,
+      convert,
+      assertCurrent: () => undefined,
+    });
 
-    expect(error.message).toBe(
-      "dohc could not read the workspace database. dohc converted 1 note before it stopped. Run Convert notes again to finish.",
-    );
-    expect(error.cause).toBe(fatal);
+    expect(run).toMatchObject({
+      converted: 1,
+      sent: false,
+      stopped: "dohc could not read the workspace database.",
+    });
     expect(convert).toHaveBeenCalledTimes(2);
 
     const first = await failure(
@@ -254,45 +257,46 @@ describe("note conversion run", () => {
 
   it("carries the running count into a live list failure after earlier batches", async () => {
     const convert = oneNoteAtATime(converted(12));
-    const error = await failure(
-      createNoteConversion()("ws", {
-        relay: relay({
-          liveNotes: vi
-            .fn<NoteConversionRelay["liveNotes"]>()
-            .mockResolvedValueOnce(live([]))
-            .mockResolvedValueOnce(live(["live-1"]))
-            .mockRejectedValueOnce(new Error("dohc could not reach your server.")),
-        }),
-        convert,
-        assertCurrent: () => undefined,
+    const run = await createNoteConversion()("ws", {
+      relay: relay({
+        liveNotes: vi
+          .fn<NoteConversionRelay["liveNotes"]>()
+          .mockResolvedValueOnce(live([]))
+          .mockResolvedValueOnce(live(["live-1"]))
+          .mockRejectedValueOnce(new Error("dohc could not reach your server.")),
       }),
-    );
+      convert,
+      assertCurrent: () => undefined,
+    });
 
-    expect(error.message).toBe(
-      "dohc could not reach your server. dohc converted 10 notes before it stopped. Run Convert notes again to finish.",
-    );
+    expect(run).toMatchObject({
+      converted: 10,
+      sent: false,
+      stopped: "dohc could not reach your server.",
+    });
     expect(convert).toHaveBeenCalledTimes(10);
   });
 
   it("stops when a later live list drops the engine floor to 1, and says what it converted", async () => {
     const convert = oneNoteAtATime(converted(12));
-    const error = await failure(
-      createNoteConversion()("ws", {
-        relay: relay({
-          liveNotes: vi
-            .fn<NoteConversionRelay["liveNotes"]>()
-            .mockResolvedValueOnce(live([]))
-            .mockResolvedValueOnce(live(["live-1"]))
-            .mockResolvedValueOnce(live(["live-1"], 1)),
-        }),
-        convert,
-        assertCurrent: () => undefined,
+    const run = await createNoteConversion()("ws", {
+      relay: relay({
+        liveNotes: vi
+          .fn<NoteConversionRelay["liveNotes"]>()
+          .mockResolvedValueOnce(live([]))
+          .mockResolvedValueOnce(live(["live-1"]))
+          .mockResolvedValueOnce(live(["live-1"], 1)),
       }),
-    );
+      convert,
+      assertCurrent: () => undefined,
+    });
 
-    expect(error.message).toBe(
-      "dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is 1; it must be 2. dohc converted 10 notes before it stopped. Run Convert notes again to finish.",
-    );
+    expect(run).toMatchObject({
+      converted: 10,
+      sent: false,
+      stopped:
+        "dohc could not convert notes. The relay's DOHC_RELAY_ENGINE_API_MIN is 1; it must be 2.",
+    });
     expect(convert).toHaveBeenCalledTimes(10);
   });
 
@@ -325,44 +329,40 @@ describe("note conversion run", () => {
 
   it("stops at the next batch once sync is paused, and says what it converted", async () => {
     const convert = oneNoteAtATime(converted(12));
-    const error = await failure(
-      createNoteConversion()("ws", {
-        relay: relay({
-          liveNotes: vi
-            .fn<NoteConversionRelay["liveNotes"]>()
-            .mockResolvedValueOnce(live([]))
-            .mockResolvedValueOnce(live([]))
-            .mockRejectedValueOnce(new Error(NOTE_CONVERSION_PAUSED)),
-        }),
-        convert,
-        assertCurrent: () => undefined,
+    const run = await createNoteConversion()("ws", {
+      relay: relay({
+        liveNotes: vi
+          .fn<NoteConversionRelay["liveNotes"]>()
+          .mockResolvedValueOnce(live([]))
+          .mockResolvedValueOnce(live([]))
+          .mockRejectedValueOnce(new Error(NOTE_CONVERSION_PAUSED)),
       }),
-    );
+      convert,
+      assertCurrent: () => undefined,
+    });
 
-    expect(error.message).toBe(
-      `${NOTE_CONVERSION_PAUSED} dohc converted 10 notes before it stopped. Run Convert notes again to finish.`,
-    );
+    expect(run).toMatchObject({ converted: 10, sent: false, stopped: NOTE_CONVERSION_PAUSED });
     expect(convert).toHaveBeenCalledTimes(10);
   });
 
   it("stops when a drain between batches fails, and says what it converted", async () => {
     const convert = oneNoteAtATime(converted(12));
-    const error = await failure(
-      createNoteConversion()("ws", {
-        relay: relay({
-          drainRecorded: vi
-            .fn<() => Promise<void>>()
-            .mockResolvedValueOnce(undefined)
-            .mockRejectedValueOnce(new Error("Another account already claimed this workspace.")),
-        }),
-        convert,
-        assertCurrent: () => undefined,
+    const run = await createNoteConversion()("ws", {
+      relay: relay({
+        drainRecorded: vi
+          .fn<() => Promise<void>>()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("Another account already claimed this workspace.")),
       }),
-    );
+      convert,
+      assertCurrent: () => undefined,
+    });
 
-    expect(error.message).toBe(
-      "Another account already claimed this workspace. dohc converted 10 notes before it stopped. Run Convert notes again to finish.",
-    );
+    expect(run).toMatchObject({
+      converted: 10,
+      sent: false,
+      stopped: "Another account already claimed this workspace.",
+    });
     expect(convert).toHaveBeenCalledTimes(10);
   });
 
@@ -383,12 +383,17 @@ describe("note conversion run", () => {
       .fn(async (_params: Params) => pass({ converted: 1, resumeAfter: null }))
       .mockResolvedValueOnce(pass({ converted: 1, resumeAfter: "n1" }))
       .mockResolvedValueOnce(pass({ converted: 1, resumeAfter: "n1" }));
-    const error = await failure(
-      createNoteConversion()("ws", { relay: null, convert, assertCurrent: () => undefined }),
-    );
-    expect(error.message).toBe(
-      "dohc could not convert notes because the engine did not move past the last note it read. dohc converted 2 notes before it stopped. Run Convert notes again to finish.",
-    );
+    const run = await createNoteConversion()("ws", {
+      relay: null,
+      convert,
+      assertCurrent: () => undefined,
+    });
+    expect(run).toMatchObject({
+      converted: 2,
+      sent: false,
+      stopped:
+        "dohc could not convert notes because the engine did not move past the last note it read.",
+    });
     expect(convert).toHaveBeenCalledTimes(2);
   });
 
@@ -399,20 +404,20 @@ describe("note conversion run", () => {
       return pass({ converted: 1, resumeAfter: "a" });
     });
 
-    const error = await failure(
-      createNoteConversion()("ws", {
-        relay: relay(),
-        convert,
-        assertCurrent: () => {
-          if (!current)
-            throw new Error("Converting notes stopped because this window changed workspaces.");
-        },
-      }),
-    );
+    const run = await createNoteConversion()("ws", {
+      relay: relay(),
+      convert,
+      assertCurrent: () => {
+        if (!current)
+          throw new Error("Converting notes stopped because this window changed workspaces.");
+      },
+    });
 
-    expect(error.message).toBe(
-      "Converting notes stopped because this window changed workspaces. dohc converted 1 note before it stopped. Run Convert notes again to finish.",
-    );
+    expect(run).toMatchObject({
+      converted: 1,
+      sent: false,
+      stopped: "Converting notes stopped because this window changed workspaces.",
+    });
     expect(convert).toHaveBeenCalledOnce();
   });
 
@@ -513,6 +518,8 @@ describe("note conversion run", () => {
 });
 
 describe("who converts a workspace's notes", () => {
+  const signedOut =
+    "dohc could not convert notes. Sign in to the account that synced this workspace, then try again.";
   const remote = { serverUrl: "https://relay.example", ownerUserId: "owner" };
   const owner: CloudCredentials = {
     serverUrl: "https://relay.example",
@@ -535,9 +542,11 @@ describe("who converts a workspace's notes", () => {
     expect(noteConversionReach({ remote }, owner)).toBe("relay");
   });
 
-  it("refuses a member's copy, a signed-out owner, another server, a shared view, and paused sync", () => {
-    for (const credentials of [member, null, elsewhere])
+  it("refuses a member's copy, another server, a shared view, and paused sync, and asks a signed-out owner to sign in", () => {
+    for (const credentials of [member, elsewhere])
       expect(() => noteConversionReach({ remote }, credentials)).toThrow(NOTE_CONVERSION_NOT_OWNER);
+    expect(() => noteConversionReach({ remote }, null)).toThrow(signedOut);
+    expect(() => noteConversionReach({ pausedRemote: remote }, null)).toThrow(signedOut);
     expect(() => noteConversionReach({ remote, shareView }, owner)).toThrow(
       NOTE_CONVERSION_SHARED_VIEW,
     );
