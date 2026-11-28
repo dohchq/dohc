@@ -106,9 +106,15 @@ function successor(
 function pushResolve(
   storage: Pick<Note["deployment"]["storage"], "appendLogBatch">,
   putBlob: (bytes: Uint8Array) => void,
-  input: { predecessor: LiveDocumentKey; path: string; current: Buffer; next: Successor },
+  input: {
+    predecessor: LiveDocumentKey;
+    path: string;
+    current: Buffer;
+    next: Successor;
+    originSeq?: number;
+  },
 ) {
-  const { predecessor, path, current, next } = input;
+  const { predecessor, path, current, next, originSeq = 0 } = input;
   for (const bytes of [
     current,
     next.markdown,
@@ -147,7 +153,7 @@ function pushResolve(
     originId: "owner-desktop",
     ops: [
       {
-        originSeq: 0,
+        originSeq,
         opKind: "conflict.resolve",
         payloadJson: JSON.stringify(payload),
         recordedAtMs: 20,
@@ -156,7 +162,11 @@ function pushResolve(
   });
 }
 
-function resolveTypedNote(note: Note, next: Successor) {
+function resolveTypedNote(
+  note: Note,
+  next: Successor,
+  chain?: { originSeq: number; predecessor: LiveDocumentKey; current: Buffer },
+) {
   const blob = note.raw.prepare(
     "INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)",
   );
@@ -164,18 +174,19 @@ function resolveTypedNote(note: Note, next: Successor) {
     note.deployment.storage,
     (bytes) => blob.run(sha256(bytes), bytes.length, bytes),
     {
-      predecessor: note.document,
+      predecessor: chain?.predecessor ?? note.document,
       path: note.path,
-      current: markdownOf(note.note.fullState),
+      current: chain?.current ?? markdownOf(note.note.fullState),
       next,
+      originSeq: chain?.originSeq,
     },
   );
   const baseRelaySeq = Number(
     note.raw
       .prepare(
-        "SELECT relay_seq FROM sync_relay_log WHERE origin_id='owner-desktop' AND origin_seq=0",
+        "SELECT relay_seq FROM sync_relay_log WHERE origin_id='owner-desktop' AND origin_seq=?",
       )
-      .get()!.relay_seq,
+      .get(chain?.originSeq ?? 0)!.relay_seq,
   );
   note.appendWrite(
     "moment-resolved",
@@ -381,6 +392,71 @@ it("a successor takes over a note an Edit share keeps live, once its predecessor
   });
   expect(liveDocumentRows(note).map((row) => row.lineage_state)).toEqual(["retired", "current"]);
   expect(enrolment(note)).toEqual([{ state: "live", retired: 0 }]);
+});
+
+it("a successor registers after a second resolve replaced the first successor before it registered", async () => {
+  const note = await sharedNote();
+  const validate = validation();
+  expect(await activate(note, validate)).toMatchObject({ replayed: false });
+  const first = successor(note.document, note.path, "Merged on the owner's desktop\n", 3);
+  resolveTypedNote(note, first);
+  const next = successor(first.document, note.path, "Merged again on the owner's desktop\n", 4);
+  const { baseRelaySeq } = resolveTypedNote(note, next, {
+    originSeq: 1,
+    predecessor: first.document,
+    current: first.markdown,
+  });
+  hostRetires(note);
+
+  const capture = captureOf(note, next, {
+    baseOriginId: "owner-desktop",
+    baseOriginSeq: 1,
+    baseRelaySeq,
+  });
+  expect(await activate(note, validate, capture)).toEqual({
+    document: next.document,
+    replayed: false,
+    completed: false,
+  });
+  expect(liveDocumentRows(note)).toEqual([
+    {
+      lineage_claim_id: note.document.lineageClaimId,
+      lineage_state: "retired",
+      admission_state: "closed",
+      replaces_lineage_claim_id: null,
+    },
+    {
+      lineage_claim_id: next.document.lineageClaimId,
+      lineage_state: "current",
+      admission_state: "open",
+      replaces_lineage_claim_id: note.document.lineageClaimId,
+    },
+  ]);
+});
+
+it("a second resolve that does not continue the first can't replace the retired row", async () => {
+  const note = await sharedNote();
+  const validate = validation();
+  expect(await activate(note, validate)).toMatchObject({ replayed: false });
+  const first = successor(note.document, note.path, "Merged on the owner's desktop\n", 3);
+  resolveTypedNote(note, first);
+  const stranger = successor(note.document, note.path, "Typed somewhere else\n", 5);
+  const next = successor(stranger.document, note.path, "Merged again on the owner's desktop\n", 4);
+  const { baseRelaySeq } = resolveTypedNote(note, next, {
+    originSeq: 1,
+    predecessor: stranger.document,
+    current: first.markdown,
+  });
+  hostRetires(note);
+  const before = liveDocumentRows(note);
+
+  const outcome = await activate(
+    note,
+    validate,
+    captureOf(note, next, { baseOriginId: "owner-desktop", baseOriginSeq: 1, baseRelaySeq }),
+  );
+  expect(String((outcome as Error).message)).toMatch(/lineage-conflict/u);
+  expect(liveDocumentRows(note)).toEqual(before);
 });
 
 it("a claim the resolve did not name can't register against the retired row", async () => {
