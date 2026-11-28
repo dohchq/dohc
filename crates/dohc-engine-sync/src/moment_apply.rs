@@ -878,7 +878,7 @@ fn apply_moment_append(
                     }
             }
         };
-        if history_only || saved_on_replaced_claim(tx, envelope, payload)? {
+        if history_only {
             ensure_file_object(tx, &envelope.workspace_id, payload)?;
             insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
             return Ok(MomentApplyResult {
@@ -887,6 +887,8 @@ fn apply_moment_append(
                 record_facts: None,
             });
         }
+        tx.execute_batch("SAVEPOINT moment_resulting_head")
+            .map_err(SyncError::persist)?;
     }
 
     if mode.ordinary()
@@ -1219,7 +1221,7 @@ fn apply_moment_append(
                 MomentBefore::Present(Box::new(snapshot.clone()))
             })
         } else {
-            remote_before
+            remote_before.clone()
         };
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
@@ -1387,7 +1389,22 @@ fn apply_moment_append(
                             reason: "ydoc-resulting-head-pending",
                         },
                     ) => {
-                        return Err(protected.map_or(pending, SyncError::ReleasedLineageUnsettled));
+                        if !saved_on_replaced_claim(tx, envelope, payload)? {
+                            return Err(
+                                protected.map_or(pending, SyncError::ReleasedLineageUnsettled)
+                            );
+                        }
+                        tx.execute_batch(
+                            "ROLLBACK TO moment_resulting_head; RELEASE moment_resulting_head",
+                        )
+                        .map_err(SyncError::persist)?;
+                        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+                        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+                        return Ok(MomentApplyResult {
+                            conflicts_opened: 0,
+                            materialization_changes: Vec::new(),
+                            record_facts: None,
+                        });
                     }
                     reconciled => reconciled?,
                 }
