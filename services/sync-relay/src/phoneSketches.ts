@@ -8,6 +8,7 @@ import {
   canonicalPortableScene,
   foldScene,
   lostElementRevisions,
+  repairImportedIndices,
   validateSceneElements,
   type ElementSnapshot,
   type JsonObject,
@@ -323,8 +324,7 @@ function parsePortableSketch(
   ) {
     return emptyPortable(invalidSketch(path));
   }
-  const allElements: ElementSnapshot[] = [];
-  const elements: ElementSnapshot[] = [];
+  const rawAllElements: ElementSnapshot[] = [];
   for (const raw of (rawElements as unknown[] | null | undefined) ?? []) {
     try {
       assertRestorableElement(raw);
@@ -340,10 +340,16 @@ function parsePortableSketch(
     const isDeleted = raw.isDeleted === undefined || raw.isDeleted === null ? false : raw.isDeleted;
     if (!isNonNegInt(version) || !isNonNegInt(versionNonce) || typeof isDeleted !== "boolean")
       return emptyPortable(invalidSketch(path));
-    const normalizedEl = { ...raw, version, versionNonce, isDeleted } as ElementSnapshot;
-    allElements.push(normalizedEl);
-    if (!isDeleted) elements.push(normalizedEl);
+    rawAllElements.push({ ...raw, version, versionNonce, isDeleted } as ElementSnapshot);
   }
+  const byteLength = Buffer.byteLength(text, "utf8");
+  let allElements: ElementSnapshot[];
+  try {
+    allElements = repairImportedIndices(rawAllElements, byteLength);
+  } catch {
+    return emptyPortable(invalidSketch(path));
+  }
+  const elements = allElements.filter((e) => !e.isDeleted);
   const appRecord = asRecord(rawApp);
   const appState: JsonObject = {};
   for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
@@ -386,7 +392,7 @@ function parsePortableSketch(
     rawFiles,
     unseedableAsset,
     headSha256,
-    byteLength: Buffer.byteLength(text, "utf8"),
+    byteLength,
   };
 }
 

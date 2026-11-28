@@ -1,4 +1,4 @@
-import { generateNKeysBetween } from "fractional-indexing";
+import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 
@@ -431,7 +431,143 @@ function indexIsValid(current: string | null, lower: string | null, upper: strin
   return true;
 }
 
-function repairImportedIndices(
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const MIN_ORDER_INT = `A${"0".repeat(26)}`;
+const MAX_ORDER_INT = `z${"z".repeat(26)}`;
+const BUDGET_EXCEEDED = Symbol("budget-exceeded");
+
+function integerPart(key: string): string {
+  const code = key.charCodeAt(0);
+  const length = code >= 97 && code <= 122 ? code - 97 + 2 : 90 - code + 2;
+  return key.slice(0, length);
+}
+
+function fractionalMidpoint(lower: string, upper: string | null, maxBytes: number): string {
+  if (upper !== null && lower >= upper) throw new Error(`${lower} >= ${upper}`);
+  if (lower.endsWith("0") || (upper !== null && upper.endsWith("0")))
+    throw new Error("trailing zero");
+  const chunks: string[] = [];
+  let outLen = 0;
+  let loOffset = 0;
+  let hi: string | null = upper;
+  let hiOffset = 0;
+  for (;;) {
+    if (hi !== null) {
+      let prefix = 0;
+      while (
+        hiOffset + prefix < hi.length &&
+        (lower[loOffset + prefix] ?? "0") === hi[hiOffset + prefix]
+      ) {
+        prefix += 1;
+      }
+      if (prefix > 0) {
+        if (outLen + prefix > maxBytes) throw BUDGET_EXCEEDED;
+        chunks.push(hi.slice(hiOffset, hiOffset + prefix));
+        outLen += prefix;
+        loOffset = Math.min(lower.length, loOffset + prefix);
+        hiOffset += prefix;
+        continue;
+      }
+    }
+    const loDigit = loOffset < lower.length ? BASE62.indexOf(lower[loOffset]!) : 0;
+    const hiDigit =
+      hi !== null && hiOffset < hi.length ? BASE62.indexOf(hi[hiOffset]!) : BASE62.length;
+    if (outLen + 1 > maxBytes) throw BUDGET_EXCEEDED;
+    if (hiDigit - loDigit > 1) {
+      chunks.push(BASE62[Math.ceil((loDigit + hiDigit) / 2)]!);
+      return chunks.join("");
+    }
+    if (hi !== null && hi.length - hiOffset > 1) {
+      chunks.push(hi[hiOffset]!);
+      return chunks.join("");
+    }
+    chunks.push(BASE62[loDigit]!);
+    outLen += 1;
+    if (loOffset < lower.length) loOffset += 1;
+    hi = null;
+  }
+}
+
+function generateKeyBetweenBounded(
+  lower: string | null,
+  upper: string | null,
+  maxBytes: number,
+): string {
+  if (lower === null && upper === null) return "a0";
+  if (lower === null) {
+    const ib = integerPart(upper!);
+    if (ib === MIN_ORDER_INT) {
+      if (ib.length > maxBytes) throw BUDGET_EXCEEDED;
+      return ib + fractionalMidpoint("", upper!.slice(ib.length), maxBytes - ib.length);
+    }
+    return ib < upper! ? ib : generateKeyBetween(null, ib);
+  }
+  if (upper === null) {
+    const ia = integerPart(lower);
+    if (ia === MAX_ORDER_INT) {
+      if (ia.length > maxBytes) throw BUDGET_EXCEEDED;
+      return ia + fractionalMidpoint(lower.slice(ia.length), null, maxBytes - ia.length);
+    }
+    return generateKeyBetween(ia, null);
+  }
+  if (lower >= upper) throw new Error(`${lower} >= ${upper}`);
+  const ia = integerPart(lower);
+  const ib = integerPart(upper);
+  if (ia === ib) {
+    if (ia.length > maxBytes) throw BUDGET_EXCEEDED;
+    return (
+      ia + fractionalMidpoint(lower.slice(ia.length), upper.slice(ib.length), maxBytes - ia.length)
+    );
+  }
+  const inc = generateKeyBetween(ia, null);
+  if (inc < upper) return inc;
+  if (ia.length > maxBytes) throw BUDGET_EXCEEDED;
+  return ia + fractionalMidpoint(lower.slice(ia.length), null, maxBytes - ia.length);
+}
+
+function generateNKeysBetweenBounded(
+  lower: string | null,
+  upper: string | null,
+  count: number,
+  budget: { remaining: number },
+): string[] {
+  const nextKey = (lo: string | null, hi: string | null): string => {
+    const key = generateKeyBetweenBounded(lo, hi, budget.remaining);
+    if (key.length > budget.remaining) throw BUDGET_EXCEEDED;
+    budget.remaining -= key.length;
+    return key;
+  };
+  if (count === 0) return [];
+  if (count === 1) return [nextKey(lower, upper)];
+  if (upper === null) {
+    let key = nextKey(lower, null);
+    const keys = [key];
+    for (let i = 1; i < count; i += 1) {
+      key = nextKey(key, null);
+      keys.push(key);
+    }
+    return keys;
+  }
+  if (lower === null) {
+    let key = nextKey(null, upper);
+    const keys = [key];
+    for (let i = 1; i < count; i += 1) {
+      key = nextKey(null, key);
+      keys.push(key);
+    }
+    keys.reverse();
+    return keys;
+  }
+  const middle = Math.floor(count / 2);
+  const key = nextKey(lower, upper);
+  return [
+    ...generateNKeysBetweenBounded(lower, key, middle, budget),
+    key,
+    ...generateNKeysBetweenBounded(key, upper, count - middle - 1, budget),
+  ];
+}
+
+export function repairImportedIndices(
   elements: readonly ElementSnapshot[],
   indexByteBudget?: number,
 ): ElementSnapshot[] {
@@ -443,10 +579,12 @@ function repairImportedIndices(
     typeof e.index === "string" && validFractionalIndex(e.index) ? e.index : null,
   );
   const preservedBytes = indices.reduce((total, key) => total + (key ? key.length : 0), 0);
-  let remainingBytes =
-    indexByteBudget === undefined
-      ? Number.POSITIVE_INFINITY
-      : Math.max(0, indexByteBudget - preservedBytes);
+  const budget = {
+    remaining:
+      indexByteBudget === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, indexByteBudget - preservedBytes),
+  };
   const nextLower = (cached: number | null, i: number): number | null => {
     const prev = i > 0 ? indices[i - 1]! : null;
     const cur = cached !== null ? indices[cached]! : null;
@@ -491,17 +629,13 @@ function repairImportedIndices(
     }
     const lowerKey = lower !== null ? indices[lower]! : null;
     const upperKey = upper !== null && upper < indices.length ? indices[upper]! : null;
-    const anchorFloor = Math.max(lowerKey?.length ?? 0, upperKey?.length ?? 0);
-    if (anchorFloor > 0 && group.length * anchorFloor > remainingBytes) return rebaseCompact();
     let keys: string[];
     try {
-      keys = generateNKeysBetween(lowerKey, upperKey, group.length);
-    } catch {
-      return rebaseCompact();
+      keys = generateNKeysBetweenBounded(lowerKey, upperKey, group.length, budget);
+    } catch (error) {
+      if (error === BUDGET_EXCEEDED) return rebaseCompact();
+      throw error;
     }
-    const addedBytes = keys.reduce((total, key) => total + key.length, 0);
-    if (addedBytes > remainingBytes) return rebaseCompact();
-    remainingBytes -= addedBytes;
     group.forEach((pos, idx) => {
       out[pos] = { ...out[pos]!, index: keys[idx]! };
     });

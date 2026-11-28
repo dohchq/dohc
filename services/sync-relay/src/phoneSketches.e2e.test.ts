@@ -973,8 +973,60 @@ it.skipIf(engine.missing)(
       ).toBe(badAssetText);
     }
 
+    // Never-opened sketch with [a9, null, "z".repeat(2048)] fills the missing key as aA without
+    // falsely rebasing, so moving the first shape preserves stacking order.
+    const longTail = "z".repeat(2048);
+    const shortGapWrite = await owner.files.writeTextFile({
+      workspaceId: WORKSPACE,
+      versionId: owner.versionId,
+      path: "ShortGap.excalidraw",
+      text: JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        elements: [
+          rect("first", 1, 1, { index: "a9" }),
+          { ...rect("middle", 1, 2), index: null },
+          rect("tail", 1, 3, { index: longTail }),
+        ],
+        appState: {},
+        files: {},
+      }),
+      publish: true,
+      createOnly: true,
+      metadata: { origin: "api", summary: "Seed short-gap long-tail sketch" },
+    });
+    await owner.sync();
+    expect(
+      await op("saveSketch", {
+        path: "ShortGap.excalidraw",
+        objectId: shortGapWrite.moment.objectId,
+        requestId: "req-short-gap-move",
+        elements: [rect("first", 2, 11, { index: "a9", x: 99 })],
+      }),
+    ).toMatchObject({ ok: true, lostElementIds: [] });
+    await owner.sync();
+    const afterShortGap = await openEngineYdocProviderSession({
+      transport: owner.client,
+      workspace: owner.workspace,
+      versionId: owner.versionId,
+      path: "ShortGap.excalidraw",
+      expectedObjectId: shortGapWrite.moment.objectId,
+      contentKind: "scene",
+      seedAbsentLineage: false,
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      expect(foldScene(afterShortGap.doc).elements.map((e) => [e.id, e.index])).toEqual([
+        ["first", "a9"],
+        ["middle", "aA"],
+        ["tail", longTail],
+      ]);
+    } finally {
+      await afterShortGap.evict().catch(() => undefined);
+    }
+
     // Never-opened legacy sketch with a 256 KiB anchor followed by an unindexed element rebases
-    // compactly without stack overflow and syncs cleanly to desktop.
+    // compactly on read and save so moving the first shape preserves stacking order.
     const longAnchor = `${"z".repeat(27)}${"z".repeat(256 * 1024)}`;
     const longWrite = await owner.files.writeTextFile({
       workspaceId: WORKSPACE,
@@ -995,12 +1047,23 @@ it.skipIf(engine.missing)(
       metadata: { origin: "api", summary: "Seed long-anchor sketch" },
     });
     await owner.sync();
+    const readLong = (await op("readSketch", { path: "LongAnchor.excalidraw" })) as {
+      ok: true;
+      elements: { id: string; index?: string }[];
+    };
+    expect(readLong.ok).toBe(true);
+    const readAnchorIndex = readLong.elements[0]?.index;
+    expect(typeof readAnchorIndex).toBe("string");
+    expect(readAnchorIndex!.length).toBeLessThan(8);
     expect(
       await op("saveSketch", {
         path: "LongAnchor.excalidraw",
         objectId: longWrite.moment.objectId,
         requestId: "req-long-anchor-save",
-        elements: [rect("after-long", 1, 3, { index: "a9" })],
+        elements: [
+          rect("anchor", 2, 12, { index: readAnchorIndex, x: 42 }),
+          rect("after-long", 1, 3, { index: "a9" }),
+        ],
       }),
     ).toMatchObject({ ok: true, lostElementIds: [] });
     await owner.sync();
@@ -1024,7 +1087,7 @@ it.skipIf(engine.missing)(
       await afterLong.evict().catch(() => undefined);
     }
 
-    // A valid 4 MiB embedded PNG parses cleanly without regex stack overflow on Node 24.
+    // A valid 4 MiB base64 payload parses cleanly without regex stack overflow on Node 24.
     const fourMbDataUrl = `data:image/png;base64,${Buffer.alloc(4 * 1024 * 1024, 0x42).toString("base64")}`;
     await owner.files.writeTextFile({
       workspaceId: WORKSPACE,

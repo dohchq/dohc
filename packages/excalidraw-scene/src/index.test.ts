@@ -470,6 +470,26 @@ describe("portable export", () => {
     expect(exportedArrow.lastCommittedPoint).toBeNull();
     expect(exportedArrow.startBinding).toBeNull();
 
+    // Long upper anchor with a short gap keeps original keys without falsely rebasing.
+    const longUpper = "z".repeat(2048);
+    const shortGapScene = JSON.parse(
+      canonicalPortableScene(
+        [
+          element("first", 1, 1, { index: "a9" }),
+          { ...element("middle", 1, 2), index: null },
+          element("tail", 1, 3, { index: longUpper }),
+        ],
+        {},
+        {},
+        longUpper.length + 550,
+      ),
+    ) as { elements: { id: string; index: string }[] };
+    expect(shortGapScene.elements.map((e) => [e.id, e.index])).toEqual([
+      ["first", "a9"],
+      ["middle", "aA"],
+      ["tail", longUpper],
+    ]);
+
     // Long anchors (256 KiB of 'z') rebase compactly instead of overflowing the stack or budget.
     const longAnchor = `${"z".repeat(27)}${"z".repeat(256 * 1024)}`;
     const longScene = JSON.parse(
