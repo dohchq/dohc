@@ -5,6 +5,7 @@ import {
   NOTE_CONVERSION_RUNNING,
   RELAY_UNREACHABLE,
   createNoteConversion,
+  stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./noteConversion";
 
@@ -408,6 +409,32 @@ describe("note conversion run", () => {
       "Converting notes stopped because this window changed workspaces. dohc converted 1 note before it stopped. Run Convert notes again to finish.",
     );
     expect(convert).toHaveBeenCalledOnce();
+  });
+
+  it("stops after the batch in which a local-only workspace starts syncing, and says what it converted", async () => {
+    let syncing = false;
+    const outcomes = oneNoteAtATime(converted(4));
+    const convert = vi.fn(async (params: Params) => {
+      const answer = await outcomes(params);
+      if (outcomes.mock.calls.length === 2) syncing = true;
+      return answer;
+    });
+
+    const error = await failure(
+      createNoteConversion(2)("ws", {
+        relay: null,
+        convert,
+        assertCurrent: stopsOnceSyncStarts(
+          () => undefined,
+          () => syncing,
+        ),
+      }),
+    );
+
+    expect(error.message).toBe(
+      "Sync was turned on while dohc converted notes. dohc converted 2 notes before it stopped. Run Convert notes again to finish.",
+    );
+    expect(convert).toHaveBeenCalledTimes(2);
   });
 
   it("refuses a second run in the same workspace while one runs, and allows another workspace", async () => {
