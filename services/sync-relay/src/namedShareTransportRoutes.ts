@@ -19,9 +19,9 @@ import {
   assertClientLogProvenance,
   MESSAGE_TOMBSTONE_OP_KIND,
   namedShareOrigin,
-  parseNamedShareLogOps,
   type LogAuthorNameLookup,
 } from "./relayLogInputs";
+import { prepareNamedShareAppendOps } from "./namedRecipientChat";
 import {
   assertSha256,
   parseCursor,
@@ -33,19 +33,15 @@ import {
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
-  chatSideOf,
   fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
   type AnyShareSelector,
-  type ChatShareThreadResolver,
-  type ThreadFileBinding,
 } from "./shareFilter";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
-import type { BrowserPostWakes } from "./storage/chatWakes";
 import type { MemberReach } from "./storage/memberReach";
 import { StaleReferenceCollection } from "./storage/workReferences";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -56,18 +52,6 @@ export const MEMBER_IDENTITY_MAX_AGE_MS = 60_000;
 export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
-
-/**
- * The owner's browser post, which only the relay's named chat sends. `authorize` throws once the owner's access ends.
- * `wakes` become rows with a new message, in its append.
- */
-export interface OwnerBrowserPost {
-  originId: string;
-  authorize(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
-    share: { shareId: string; workspaceId: string };
-  };
-  wakes?: BrowserPostWakes;
-}
 
 /** What a share reaches, without its level. */
 function shareScopeKey(selector: AnyShareSelector): string {
@@ -152,7 +136,6 @@ export function createNamedShareTransportRoutes(
     | "messageDeleted"
     | "deletedMessageCount"
     | "appendLogBatch"
-    | "appendBrowserChatBatch"
     | "putBlob"
     | "listWorkReferences"
     | "shareLogHead"
@@ -185,8 +168,6 @@ export function createNamedShareTransportRoutes(
     request: Request,
     route: NamedShareTransportRoute,
     actor: { userId: string },
-    browserMessageId?: string,
-    owner?: OwnerBrowserPost,
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
@@ -475,9 +456,8 @@ export function createNamedShareTransportRoutes(
     // replicas: the fail-closed share/channel filter governs their appends,
     // so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
-      if (browserMessageId === undefined) await claimPendingShares(actor.userId);
-      const appendable = () =>
-        owner ? owner.authorize() : requireShareAction(route.shareId, actor.userId, "append");
+      await claimPendingShares(actor.userId);
+      const appendable = () => requireShareAction(route.shareId, actor.userId, "append");
       const authorized = appendable();
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const input = await readJsonObject(request);
@@ -489,7 +469,7 @@ export function createNamedShareTransportRoutes(
       if (originId.startsWith(PROPOSAL_ORIGIN_PREFIX)) {
         throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
       }
-      if (originId === "browser-chat" && browserMessageId === undefined) {
+      if (originId === "browser-chat") {
         throw badRequest("originId is reserved for browser chat");
       }
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -498,108 +478,23 @@ export function createNamedShareTransportRoutes(
       // freezes a payload whose claimed author is missing or forged.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops);
-      // Batch-aware channel scoping: a thread created earlier in this batch
-      // is a valid target for later ops in the same batch (the composer's
-      // thread.create + first message.append), but the log's earliest
-      // binding always wins over the batch — a batch cannot re-bind an
-      // existing thread.
-      const pendingThreadBindings = new Map<string, string>();
-      // The path sibling of the same rule, for a file share. A
-      // recipient's `chat.thread.create` names the granted PATH (its own
-      // object ids mean nothing here), and the message it composes with
-      // rides in the same batch.
-      const pendingThreadFiles = new Map<string, ThreadFileBinding>();
-      const resolver: ChatShareThreadResolver = {
-        channelKind: (channelWireId) =>
-          storage.findChannelCreateKind(share.workspaceId, channelWireId),
-        threadChannelWireId: (threadId) => {
-          const stored = storage.findThreadCreateChannelWireId(share.workspaceId, threadId);
-          return stored !== undefined ? stored : pendingThreadBindings.get(threadId);
-        },
-        threadFileBinding: (threadId) => {
-          const stored = storage.findThreadCreateFileBinding(share.workspaceId, threadId);
-          return stored !== undefined ? stored : pendingThreadFiles.get(threadId);
-        },
-        objectCurrentPath: (objectId) => storage.objectCurrentPath(share.workspaceId, objectId),
-        objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
-        messageDeleted: (threadId, messageId) =>
-          storage.messageDeleted(share.workspaceId, threadId, messageId),
-      };
-      const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
-      for (const op of ops) {
-        // The write filter, never the read one: what a recipient may see is
-        // not what it may push into the granter's log.
-        const decision = filterOpForShareAppend(
-          share.selector,
-          op.opKind,
-          op.payloadJson,
-          resolver,
-        );
-        if (!decision.allowed) throw relayError("share_op_rejected");
-        // Persist the filter's (possibly redacted) copy, never the pusher's
-        // original bytes: the owner bucket is read back over the UNfiltered
-        // owner lane, so any field the filter withholds (e.g. a member
-        // attachment's objectId/pathHint) must not survive the append.
-        op.payloadJson = JSON.stringify(decision.payload);
-        if (op.opKind === "chat.thread.create") {
-          // Read back from the served copy assigned above, which carries the
-          // path this relay proved — never the pusher's own string.
-          const created = JSON.parse(op.payloadJson) as {
-            threadId?: unknown;
-            channelWireId?: unknown;
-            linkedPath?: unknown;
-          };
-          const threadId = created.threadId;
-          // A workspace share's thread sits in the Group the filter just
-          // admitted, or on a file when it names none.
-          const boundChannel = isWorkspaceSelector(share.selector)
-            ? typeof created.channelWireId === "string"
-              ? created.channelWireId
-              : null
-            : (chatSideOf(share.selector)?.channelWireId ?? null);
-          if (typeof threadId === "string" && threadId.length > 0) {
-            if (boundChannel !== null) {
-              pendingThreadBindings.set(threadId, boundChannel);
-            } else if (typeof created.linkedPath === "string" && created.linkedPath.length > 0) {
-              // The accept door converts the binding.
-              //
-              // A recipient names its file by path because its own object
-              // ids mean nothing here. This is the one moment the relay can
-              // turn that into the granter's own object id: the filter just
-              // proved an object sits at this exact path. Persisting the
-              // object id instead of the path is what makes a recipient's
-              // thread behave like the granter's — it follows the file
-              // through a rename inside the share, and stops at one that
-              // leaves it, because both answers come from the same
-              // object→path lookup.
-              //
-              // Rewriting a payload before persisting is what this route
-              // already does: the served copy above is a redaction, and the
-              // path in it was normalized by the filter.
-              const objectId = storage.objectIdAtPath(share.workspaceId, created.linkedPath);
-              // The filter admitted this op by proving an object is there,
-              // so this is unreachable through the filter's own path. A
-              // batch that reaches it is refused whole rather than stored as
-              // a thread bound to nothing.
-              if (!objectId) throw relayError("share_op_rejected");
-              const bound: Record<string, unknown> = { ...created };
-              delete bound.linkedPath;
-              bound.linkedObjectId = objectId;
-              op.payloadJson = JSON.stringify(bound);
-              pendingThreadFiles.set(threadId, { kind: "object", objectId });
-            }
-          }
-        }
-      }
+      const { ops, resolver } = await prepareNamedShareAppendOps(
+        storage,
+        share.workspaceId,
+        share.selector,
+        input.ops,
+        actor.userId,
+        lookupUserDisplayName,
+      );
       if (refreshMentionAccountNames) {
         const mentionBodies = chatMentionBodies(ops);
         if (mentionBodies.length > 0)
           await refreshMentionAccountNames(share.workspaceId, mentionBodies);
       }
-      const batch = {
+      const result = storage.appendLogBatch({
         workspaceId: share.workspaceId,
         // Authentication, not the caller, selects the member sequence space.
-        originId: owner?.originId ?? namedShareOrigin(share.shareId, actor.userId, originId),
+        originId: namedShareOrigin(share.shareId, actor.userId, originId),
         ops,
         // Close the revoke race completely: the share is re-verified inside
         // the append's own BEGIN IMMEDIATE transaction (the same write lock
@@ -611,7 +506,7 @@ export function createNamedShareTransportRoutes(
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
         guard: () => {
-          if (!owner) shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
+          shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
           const fresh = appendable();
           for (const op of ops) {
             if (
@@ -621,15 +516,7 @@ export function createNamedShareTransportRoutes(
               throw relayError("share_op_rejected");
           }
         },
-      };
-      const result =
-        browserMessageId === undefined
-          ? storage.appendLogBatch(batch)
-          : storage.appendBrowserChatBatch({
-              ...batch,
-              messageId: browserMessageId,
-              ...(owner?.wakes ? { wakes: owner.wakes } : {}),
-            });
+      });
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }

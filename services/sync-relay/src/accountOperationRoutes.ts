@@ -15,7 +15,11 @@ import {
   runAccountRetryWake,
   runAccountWrite,
 } from "./accountChatWrites";
-import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  type LookupUserDisplayName,
+  type RefreshMentionAccountNames,
+} from "./accountDisplayName";
 import {
   cursorReaches,
   currentAccountFeedCursor,
@@ -27,7 +31,10 @@ import {
   runAccountOperation,
   withAccountReadDeadline,
 } from "./accountOperations";
+import type { DiscussionActivityHub } from "./discussionActivity";
 import { untilAborted } from "./namedLiveFrameHost";
+import { appendNamedChatMessage } from "./namedRecipientChat";
+import { COULD_NOT_SEND } from "./operationPublication";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollections";
@@ -47,10 +54,13 @@ import {
   SAVE_SKETCH_MAX_BODY_BYTES,
 } from "./phoneSketches";
 import { phoneMember, type PhoneMember } from "./phoneMember";
+import { authorizeShareGrantAction } from "./shareAuthorization";
+import { isWorkspaceSelector } from "./shareFilter";
 import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
-import type { SyncRelayStorage } from "./storage";
+import { SyncRelayConflictError, type SyncRelayStorage } from "./storage";
+import { workspaceChatAccess, workspaceGroupReachable } from "./workspaceReach";
 import { parseLogHold } from "./workspaceReplicationRoutes";
 
 export type AccountOperationRoute = {
@@ -115,6 +125,14 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * when it ran, which its copy may not have pulled, so it never moves a
  * read's starting point.
  */
+class MemberTargetMissing extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(reason);
+    this.reason = reason;
+  }
+}
+
 export function createAccountOperationRoute(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
@@ -125,10 +143,12 @@ export function createAccountOperationRoute(options: {
   feedWaits: AccountFeedWaits;
   /** The account's wake reads, which wake changes park in. */
   wakeWaits: Pick<ChatWakeWaits, "wait">;
+  activity?: Pick<DiscussionActivityHub, "wakeLog">;
   /** Reads the account's verified email again when it is old, so a folder or Group rule that names it reaches them. */
   refreshAccountEmail?(userId: string, signal: AbortSignal): Promise<void>;
   /** The account's name, which a write's author takes. */
   lookupUserDisplayName?: LookupUserDisplayName;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
   /** This server's public origin, which issues its accounts' actor keys. Writes need it. */
   serverUrl?: string;
   /** The workspace's published apps, their review and approval, and launch grants. */
@@ -197,8 +217,8 @@ export function createAccountOperationRoute(options: {
     const fileWrite = isAccountFileWriteOperation(route.operation);
     const docCollectionRead = isPhoneDocumentCollectionReadOperation(route.operation);
     const docCollectionWrite = isPhoneDocumentCollectionWriteOperation(route.operation);
-    // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
-    // and its live host; owner sketch, Document Collection, and file-write ops check owner reach first so Members always get 404.
+    const write = isPhoneWriteOperation(route.operation);
+    const memberWrite = route.operation === "post" || route.operation === "reply";
     if (
       !feed &&
       !wakeFeed &&
@@ -207,18 +227,19 @@ export function createAccountOperationRoute(options: {
       !page &&
       !sketch &&
       !fileWrite &&
+      !write &&
       !docCollectionRead &&
       !docCollectionWrite &&
       options.copies() === undefined
     )
       throw copiesUnavailable();
-    // The phone reaches a workspace its account owns while it shows on the phone. Signing in is the browser's only gate.
-    const joinedReads = feed || app || collection || isAccountOperation(route.operation);
+    const joinedAllowed =
+      feed || app || collection || memberWrite || isAccountOperation(route.operation);
     const owner = storage.workspaceOwner(route.workspaceId);
     const reaches = (userId: string) => {
       if (browser) return storage.workspaceIsOwnedBy(route.workspaceId, userId);
       const role = storage.phoneRole(userId, route.workspaceId);
-      return role === "owner" || (role !== null && joinedReads);
+      return role === "owner" || (role !== null && joinedAllowed);
     };
     const memberOf = (userId: string): PhoneMember | null => {
       if (userId === owner) return null;
@@ -226,7 +247,6 @@ export function createAccountOperationRoute(options: {
       if (found === null) throw notFound();
       return found;
     };
-    const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
     const context = route.operation === "chatContext";
@@ -392,6 +412,140 @@ export function createAccountOperationRoute(options: {
     } as const;
     if (write) {
       const parsed = parsePhoneWrite(route.operation, args);
+      if (member !== null) {
+        if (parsed.operation !== "post" && parsed.operation !== "reply") throw notFound();
+        if (
+          parsed.args.needsDecision !== undefined ||
+          parsed.args.options !== undefined ||
+          (parsed.operation === "reply" && parsed.args.resolves !== undefined)
+        )
+          throw badRequest("decisions are not supported");
+        const replyAnswer = async (result: unknown) => {
+          await check(false);
+          return jsonResponse({
+            ok: true,
+            result,
+            cursor: currentAccountFeedCursor(storage, route.workspaceId, memberOf(caller.userId)),
+          });
+        };
+        const channelWireId =
+          parsed.operation === "post"
+            ? parsed.args.groupId
+            : storage.findThreadCreateChannelWireId(route.workspaceId, parsed.args.threadId);
+        if (typeof channelWireId !== "string")
+          return await replyAnswer({
+            ok: false,
+            refusal: "missing",
+            reason: `chat thread not found: ${parsed.operation === "reply" ? parsed.args.threadId : ""}`,
+          });
+        const authorizeMemberGroup = (action: "read" | "append") => {
+          const role = storage.phoneRole(caller.userId, route.workspaceId);
+          if (
+            role === null ||
+            role === "owner" ||
+            storage.workspaceOwner(route.workspaceId) !== owner
+          )
+            throw notFound();
+          const fresh = phoneMember(storage, route.workspaceId, caller.userId);
+          if (
+            fresh === null ||
+            fresh.shareId !== member.shareId ||
+            fresh.grantId !== member.grantId
+          )
+            throw notFound();
+          if (
+            !workspaceGroupReachable(fresh.selector, channelWireId, {
+              channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
+            })
+          )
+            throw new MemberTargetMissing(
+              parsed.operation === "post"
+                ? `no such group: ${channelWireId}`
+                : `chat thread not found: ${parsed.args.threadId}`,
+            );
+          if (action === "read") {
+            return {
+              share: { shareId: fresh.shareId, workspaceId: route.workspaceId },
+              effectiveSelector: fresh.selector,
+            };
+          }
+          const granted = authorizeShareGrantAction({
+            storage,
+            grantId: fresh.grantId,
+            action: "append",
+            principal: { kind: "user", userId: caller.userId },
+          });
+          if (!granted.ok)
+            throw granted.reason === "denied" ? relayError("share_read_only") : notFound();
+          if (
+            granted.share.workspaceId !== route.workspaceId ||
+            granted.share.shareId !== member.shareId ||
+            !isWorkspaceSelector(granted.effectiveSelector)
+          )
+            throw notFound();
+          if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
+            throw relayError("share_read_only");
+          if (
+            parsed.operation === "post" &&
+            storage
+              .listChannelCreates(route.workspaceId)
+              .find((group) => group.channelWireId === channelWireId)?.type === "chat"
+          )
+            throw relayError("share_op_rejected");
+          return {
+            share: { shareId: granted.share.shareId, workspaceId: granted.share.workspaceId },
+            effectiveSelector: granted.effectiveSelector,
+          };
+        };
+        try {
+          const saved = await appendNamedChatMessage({
+            storage,
+            workspaceId: route.workspaceId,
+            shareId: member.shareId,
+            userId: caller.userId,
+            humanOnly: true,
+            allowPostParent: true,
+            redactFileLinks: true,
+            bindRequest: true,
+            channelWireId,
+            id: parsed.args.operationId,
+            body: parsed.args.body,
+            ...(parsed.operation === "post"
+              ? { lane: "posts" as const, title: parsed.args.title }
+              : { threadId: parsed.args.threadId, parentMessageId: parsed.args.parentMessageId }),
+            nowMs: () => options.nowMs(),
+            signal: visitor.signal,
+            lookupUserDisplayName: options.lookupUserDisplayName,
+            refreshMentionAccountNames: options.refreshMentionAccountNames,
+            activity: options.activity,
+            authorizeRetry: () => {
+              authorizeMemberGroup("read");
+            },
+            authorizeAppend: () => authorizeMemberGroup("append"),
+            requireParentMessage: (tid, parentId) => {
+              if (!storage.hasThreadMessage(route.workspaceId, tid, parentId))
+                throw new MemberTargetMissing(`chat message not found: ${parentId}`);
+            },
+            afterNameLookup: () => check(false),
+          });
+          return await replyAnswer({
+            ok: true,
+            state: "saved",
+            threadId: saved.threadId,
+            messageId: saved.messageId,
+          });
+        } catch (error) {
+          if (error instanceof MemberTargetMissing)
+            return await replyAnswer({ ok: false, refusal: "missing", reason: error.reason });
+          if (
+            error instanceof SyncRelayConflictError ||
+            (error instanceof RelayError &&
+              (error.code === "share_read_only" || error.code === "share_op_rejected"))
+          )
+            return await replyAnswer({ ok: false, refusal: "refused", reason: COULD_NOT_SEND });
+          throw error;
+        }
+      }
       // The author is the session's account, by the name it has now.
       const displayName = await accountDisplayName(options.lookupUserDisplayName, caller.userId);
       await authorize();

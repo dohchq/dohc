@@ -86,10 +86,17 @@ export type ChatGroupKind = "group" | "dm" | "agent";
 const isGroupKind = (value: unknown): value is ChatGroupKind =>
   value === "group" || value === "dm" || value === "agent";
 
+export type ChatGroupType = "posts" | "chat" | "both";
+const isGroupType = (value: unknown): value is ChatGroupType =>
+  value === "posts" || value === "chat" || value === "both";
+
 export interface ChatGroup {
   readonly id: string;
+  readonly channelWireId?: string;
   readonly name: string;
   readonly kind: ChatGroupKind;
+  readonly type?: ChatGroupType;
+  readonly access?: "read-write" | "read-only";
   /** The threads in it, so a change to one can find the chat it's in. */
   readonly threadIds: readonly string[];
   /** The threads in its posts lane, each a post's own, whose answers go at its top. Absent when it has none. */
@@ -134,9 +141,14 @@ export function readChats(
         const unreadCount = threads.reduce((sum, thread) => sum + thread.unreadCount, 0);
         const postThreadIds = threads.filter((thread) => thread.post).map((thread) => thread.id);
         const archived = group.kind === "agent" && group.archived === true;
+        const channelWireId = text(group.channelWireId, 256) ? group.channelWireId : undefined;
+        const type = isGroupType(group.type) ? group.type : undefined;
+        const access =
+          group.access === "read-write" || group.access === "read-only" ? group.access : undefined;
         return Number.isSafeInteger(unreadCount)
           ? {
               id: group.id,
+              ...(channelWireId ? { channelWireId } : {}),
               // The default agent's chat is always stored as "My agent"; the desktop says whose it was.
               name:
                 archived && group.channelWireId === AGENT_CHANNEL_WIRE_ID
@@ -144,6 +156,8 @@ export function readChats(
                   : group.name,
               ...(archived ? { archived: true as const } : {}),
               kind: group.kind,
+              ...(type ? { type } : {}),
+              ...(access ? { access } : {}),
               threadIds: threads.map((thread) => thread.id),
               ...(postThreadIds.length > 0 ? { postThreadIds } : {}),
               unreadCount,

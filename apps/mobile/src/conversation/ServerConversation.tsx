@@ -25,9 +25,10 @@ import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/types";
 import type { WakeTarget } from "../server/chatWakes";
-import { phoneWrites, writesIn } from "../server/phoneWrites";
+import { canWriteGroupChat, phoneWrites, writesIn } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";
 import type {
+  ChatGroup,
   ChatGroupKind,
   ChatMessage,
   ChatThread,
@@ -57,10 +58,13 @@ import {
   blockedBy,
   chatWrite,
   createWriteScope,
+  groupForStream,
+  joinedGroupLanes,
   lanesOf,
   replyWrite,
   routeReply,
   threadReplyTarget,
+  writableJoinedThread,
   type Lanes,
   type ReplyTarget,
 } from "./conversationWrites";
@@ -117,29 +121,84 @@ export function ServerConversation() {
     answer?: string;
   }>();
   const { data } = useAccount();
+  const { state: chatsState, retry: retryChats } = useView(views.chats);
+  const chats = chatsState.value;
+  const joined = data?.joined === true;
+  const isThread = thread === "1" || id.startsWith("thread-") || id.startsWith("browser-thread:");
+  const joinedThreadId = isThread && phoneWrites && joined ? id : null;
+  const threadKnown =
+    joinedThreadId !== null &&
+    chats?.some((each) => each.threadIds.includes(joinedThreadId)) === true;
+  useEnsureThreadListed(
+    joinedThreadId,
+    chats,
+    threadKnown,
+    chatsState.loading,
+    chatsState.problem,
+    retryChats,
+  );
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
-  // Keyed by the workspace store, which is one sign-in's, and the chat, so a draft, a chosen reply or a controller made
-  // for one never carries to another, even when the first comes back.
-  const writesKey = `${data?.instance ?? 0}:${id}`;
-  // Writes are off unless the build turns them on (src/server/phoneWrites.ts), and in a workspace the account joined.
+  const listedGroup = isThread ? null : groupForStream(chats, id);
+  const streamId = listedGroup?.id ?? id;
+  const writesKey = `${data?.instance ?? 0}:${isThread ? id : streamId}`;
   const writes = writesIn(data);
-  if (thread === "1" || id.startsWith("thread-"))
-    return writes ? (
+  if (isThread) {
+    const joinedWritable = joinedThreadId !== null && writableJoinedThread(chats, joinedThreadId);
+    return writes || joinedWritable ? (
       <WritableThread
         key={writesKey}
         threadId={id}
         messageId={message ?? null}
         replyId={routeReply(reply, workspace, data?.workspaceId ?? null)}
-        answerId={routeReply(answer, workspace, data?.workspaceId ?? null)}
+        answerId={joinedWritable ? null : routeReply(answer, workspace, data?.workspaceId ?? null)}
+        joined={joinedWritable}
       />
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
     );
-  return writes ? (
-    <WritableStream key={writesKey} groupId={id} name={name ?? ""} />
-  ) : (
-    <Stream groupId={id} name={name ?? ""} />
-  );
+  }
+  if (writes) return <OwnerWritableStream key={writesKey} groupId={streamId} name={name ?? ""} />;
+  if (canWriteGroupChat(data, listedGroup) && listedGroup?.channelWireId) {
+    return (
+      <WritableStream
+        key={writesKey}
+        groupId={streamId}
+        postGroupId={listedGroup.channelWireId}
+        name={name ?? listedGroup.name}
+        lanes={joinedGroupLanes(listedGroup)}
+        lanesProblem={null}
+        joined
+      />
+    );
+  }
+  return <Stream groupId={streamId} name={name ?? listedGroup?.name ?? ""} />;
+}
+
+function useEnsureThreadListed(
+  threadId: string | null,
+  chats: readonly ChatGroup[] | null,
+  known: boolean,
+  loading: boolean,
+  problem: unknown,
+  retryChats: () => void,
+): "asked" | "reading" | "read" | null {
+  const [listRead, setListRead] = useState<{
+    readonly threadId: string;
+    readonly phase: "asked" | "reading" | "read";
+  } | null>(null);
+  const phase = threadId !== null && listRead?.threadId === threadId ? listRead.phase : null;
+  useEffect(() => {
+    if (threadId === null || chats === null || known || phase === "read") return;
+    if (phase === null) {
+      setListRead({ threadId, phase: "asked" });
+      retryChats();
+    } else if (loading) {
+      if (phase !== "reading") setListRead({ threadId, phase: "reading" });
+    } else if (phase === "reading" && problem === null) {
+      setListRead({ threadId, phase: "read" });
+    }
+  }, [chats, known, phase, threadId, loading, problem, retryChats]);
+  return phase;
 }
 
 /** Opens a thread in the open workspace, at a message, to reply to it or answer its question when one is named. */
@@ -182,11 +241,11 @@ interface ScreenWrites {
    */
   local(shown: ReadonlySet<string>, questions: ReadonlySet<string>): readonly Message[];
   /** A message the server has, with this phone's reactions and answer over the server's. */
-  message(entry: ChatMessage, base: Message, shown: Shown): Message;
+  message?(entry: ChatMessage, base: Message, shown: Shown): Message;
   readonly actions: LocalActions;
-  readonly react: ReactActions;
+  readonly react?: ReactActions;
   /** The answers its cards offer, given the screen's messages by ID and which of them are posts. */
-  answers(byId: ReadonlyMap<string, ChatMessage>, posts: ReadonlySet<string>): AnswerActions;
+  answers?(byId: ReadonlyMap<string, ChatMessage>, posts: ReadonlySet<string>): AnswerActions;
   /** Reply on a message. In a stream, `post` says it's a post, whose thread is its own. */
   reply(message: Message, post: boolean): void;
   /**
@@ -319,11 +378,9 @@ const excerptOf = (message: Message) =>
     .map((segment) => ("text" in segment ? segment.text : `@${segment.mention}`))
     .join("");
 
-// A stream where phone writes are on. Its posts and messages go through the account's outbox. Reply on a message the
-// server has opens its thread; on a post or send still in the outbox, the composer replies to it here, and the reply
-// waits for the thread that write will name.
-function WritableStream({ groupId, name }: { groupId: string; name: string }) {
-  const router = useRouter();
+const EMPTY_QUESTIONS: ReadonlySet<string> = new Set();
+
+function OwnerWritableStream({ groupId, name }: { groupId: string; name: string }) {
   const lanesView = useMemo(() => views.lanes(groupId), [groupId]);
   const { state: lanesState, retry: retryLanes } = useView(lanesView);
   const context = lanesState.value;
@@ -332,6 +389,47 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     [context],
   );
   const problemText = useProblemText();
+  const lanesProblem = useMemo(
+    () =>
+      lanesState.problem
+        ? {
+            text: `${chatWords.lanesFailed} ${problemText(lanesState.problem)}`,
+            retry: retryLanes,
+          }
+        : null,
+    [lanesState.problem, problemText, retryLanes],
+  );
+  return (
+    <WritableStream
+      groupId={groupId}
+      postGroupId={groupId}
+      name={name}
+      lanes={lanes}
+      lanesProblem={lanesProblem}
+      joined={false}
+    />
+  );
+}
+
+// A stream where phone writes are on. Its posts and messages go through the account's outbox. Reply on a message the
+// server has opens its thread; on a post or send still in the outbox, the composer replies to it here, and the reply
+// waits for the thread that write will name.
+function WritableStream({
+  groupId,
+  postGroupId,
+  name,
+  lanes,
+  lanesProblem,
+  joined,
+}: {
+  groupId: string;
+  postGroupId: string;
+  name: string;
+  lanes: Lanes | null;
+  lanesProblem: { readonly text: string; readonly retry: () => void } | null;
+  joined: boolean;
+}) {
+  const router = useRouter();
   const {
     state,
     writes,
@@ -345,16 +443,16 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     problem: outboxProblemNow,
     chooser,
     writable,
-  } = useScreenWrites(groupId);
+  } = useScreenWrites(postGroupId);
   const [replyTo, setReplyTo] = useState<StreamReply | null>(null);
   const local = useCallback(
     (shown: ReadonlySet<string>, questions: ReadonlySet<string>) =>
       state && rowScope
-        ? streamRows(state, rowScope, groupId, shown, questions).map((row) =>
-            localMessage(row, you),
+        ? streamRows(state, rowScope, postGroupId, shown, joined ? EMPTY_QUESTIONS : questions).map(
+            (row) => localMessage(row, you),
           )
         : [],
-    [state, rowScope, groupId, you],
+    [state, rowScope, postGroupId, joined, you],
   );
   // A poll's choice answers at once, where the poll is. Answer on a question opens its thread to answer there, as
   // Reply does.
@@ -413,18 +511,6 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     },
     [router, workspaceId],
   );
-  // A failed read of the lanes shows in the composer's place, with its cause and Try again, and keeps the composer when
-  // it has lanes already. The outbox's own problem comes first.
-  const lanesProblem = useMemo(
-    () =>
-      lanesState.problem
-        ? {
-            text: `${chatWords.lanesFailed} ${problemText(lanesState.problem)}`,
-            retry: retryLanes,
-          }
-        : null,
-    [lanesState.problem, problemText, retryLanes],
-  );
   const problem = outboxProblemNow ?? lanesProblem;
   const submit = useCallback(
     async (kind: "send" | "post" | "reply", body: string, title: string) => {
@@ -440,14 +526,16 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
           setReplyTo((current) => (current === chosen ? null : current));
         return outcome;
       }
+      if (joined && (kind === "send" || (kind === "post" && !lanes?.post)))
+        return { kind: "blocked" as const };
       const write = chatWrite(
-        kind === "send" ? { kind, streamId: groupId } : { kind, groupId },
+        kind === "send" ? { kind, streamId: groupId } : { kind, groupId: postGroupId },
         body,
         title,
       );
       return write ? writes.submit(workspaceId, write) : { kind: "blocked" as const };
     },
-    [writes, workspaceId, groupId, replyTo],
+    [writes, workspaceId, groupId, postGroupId, joined, lanes, replyTo],
   );
   const cancelReply = useCallback(() => setReplyTo(null), []);
   const composer = useMemo(
@@ -479,8 +567,15 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem],
   );
   const streamWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, answers, reply, composer, writable }),
-    [local, message, actions, react, answers, reply, composer, writable],
+    () => ({
+      local,
+      ...(joined ? {} : { message, react, answers }),
+      actions,
+      reply,
+      composer,
+      writable,
+    }),
+    [local, joined, message, react, answers, actions, reply, composer, writable],
   );
   return <Stream groupId={groupId} name={name} writes={streamWrites} />;
 }
@@ -494,11 +589,13 @@ function WritableThread({
   messageId,
   replyId,
   answerId,
+  joined = false,
 }: {
   threadId: string;
   messageId: string | null;
   replyId: string | null;
   answerId: string | null;
+  joined?: boolean;
 }) {
   const {
     state,
@@ -525,31 +622,21 @@ function WritableThread({
   const { state: chatsState, retry: retryChats } = useView(views.chats);
   const chats = chatsState.value;
   const group = chats?.find((each) => each.threadIds.includes(threadId)) ?? null;
-  // A list that doesn't name the thread may be a cached one from before it, and a cached list can stay idle without
-  // reading again. So the screen asks for a read of its own, and the thread is no post only once that read succeeds.
-  const [listRead, setListRead] = useState<{
-    readonly threadId: string;
-    readonly phase: "asked" | "reading" | "read";
-  } | null>(null);
-  const phase = listRead?.threadId === threadId ? listRead.phase : null;
-  useEffect(() => {
-    if (chats === null || group !== null || phase === "read") return;
-    if (phase === null) {
-      setListRead({ threadId, phase: "asked" });
-      retryChats();
-    } else if (chatsState.loading) {
-      if (phase !== "reading") setListRead({ threadId, phase: "reading" });
-    } else if (phase === "reading" && chatsState.problem === null) {
-      setListRead({ threadId, phase: "read" });
-    }
-  }, [chats, group, phase, threadId, chatsState.loading, chatsState.problem, retryChats]);
+  const phase = useEnsureThreadListed(
+    joined ? null : threadId,
+    chats,
+    group !== null,
+    chatsState.loading,
+    chatsState.problem,
+    retryChats,
+  );
   const post = useMemo(() => {
     if (group) return group.postThreadIds?.includes(threadId) === true;
     return chats !== null && phase === "read" ? false : null;
   }, [chats, group, phase, threadId]);
   // The message a reply goes under, or the question it answers, never both.
-  const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
-  const [answering, setAnswering] = useState<string | null>(answerId);
+  const [chosen, setChosen] = useState<string | null>(joined || answerId === null ? replyId : null);
+  const [answering, setAnswering] = useState<string | null>(joined ? null : answerId);
   // Only a message the read shows is named and replied under: one it doesn't is never guessed at. A chosen message the
   // read doesn't show, as one that went before the thread opened from a Notice, keeps the reply context with Send off
   // until the person cancels Reply or chooses another, so its text never goes to the thread's top.
@@ -585,6 +672,7 @@ function WritableThread({
   // A failed read of the chat list shows in the composer while it keeps an answer off, chosen or offered by an open
   // question in the thread, with its cause and Try again. The outbox's own problem comes first.
   const answersWait =
+    !joined &&
     post === null &&
     (question !== null ||
       (thread?.messages.some((each) => each.decisionState === "open") ?? false));
@@ -686,8 +774,15 @@ function WritableThread({
     [blocked, problem, question, replyTarget, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, answers, reply, composer, writable }),
-    [local, message, actions, react, answers, reply, composer, writable],
+    () => ({
+      local,
+      ...(joined ? {} : { message, react, answers }),
+      actions,
+      reply,
+      composer,
+      writable,
+    }),
+    [local, joined, message, react, answers, actions, reply, composer, writable],
   );
   return <Thread threadId={threadId} messageId={messageId} writes={threadWrites} />;
 }
@@ -774,9 +869,14 @@ function Stream({
     () => (stream ? new Set(stream.items.map((item) => item.message.threadId)) : null),
     [stream],
   );
-  // A line's Try again is a write: offered only where writes are on and not blocked, and checked again as it runs.
-  const writable = writes !== undefined && !writes.actions.blocked;
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream, writes?.writable ?? null);
+  const writable = writes !== undefined && !writes.actions.blocked && !data?.joined;
+  const wakes = useChatWakes(
+    wakeTarget,
+    wakeThreads,
+    visible,
+    stream,
+    data?.joined ? null : (writes?.writable ?? null),
+  );
   return (
     <Conversation
       title={chatTitle(
@@ -790,13 +890,13 @@ function Stream({
       retryWakes={wakes.retry}
       wakeRetries={wakes.retries}
       {...(writable ? { onRetryWake: wakes.retryWake } : {})}
-      {...(writes && onReply && answers
+      {...(writes && onReply
         ? {
             local: local ?? EMPTY_MESSAGES,
             actions: writes.actions,
-            react: writes.react,
+            ...(writes.react ? { react: writes.react } : {}),
             onReply,
-            answers,
+            ...(answers ? { answers } : {}),
             composer: writes.composer,
           }
         : {})}
@@ -859,8 +959,14 @@ function Thread({
   const answers = useMemo(() => answersOf?.(byId, new Set()), [answersOf, byId]);
   const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "thread", threadId }), [threadId]);
   const wakeThreads = useMemo(() => (thread ? new Set([threadId]) : null), [thread, threadId]);
-  const writable = writes !== undefined && !writes.actions.blocked;
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread, writes?.writable ?? null);
+  const writable = writes !== undefined && !writes.actions.blocked && !data?.joined;
+  const wakes = useChatWakes(
+    wakeTarget,
+    wakeThreads,
+    visible,
+    thread,
+    data?.joined ? null : (writes?.writable ?? null),
+  );
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
@@ -873,13 +979,13 @@ function Thread({
       {...(writable ? { onRetryWake: wakes.retryWake } : {})}
       anchor={messageId}
       {...(messageId === null ? {} : { onShown: addOnScreen })}
-      {...(writes && onReply && answers
+      {...(writes && onReply
         ? {
             local: local ?? EMPTY_MESSAGES,
             actions: writes.actions,
-            react: writes.react,
+            ...(writes.react ? { react: writes.react } : {}),
             onReply,
-            answers,
+            ...(answers ? { answers } : {}),
             composer: writes.composer,
           }
         : {})}

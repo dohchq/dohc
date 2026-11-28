@@ -314,15 +314,27 @@ function targetOf(write: ChatWrite, thread: string | undefined): Target | null |
   }
 }
 
-/** A reply given the thread its saved outbox post or send named, or null while it named none. */
+/** A reply given the thread (and server parent message ID) its saved outbox post or send named, or null while it named none. */
 function withThread(
   write: ChatWrite,
   parent: OutboxRecord | undefined,
 ): { readonly write: ChatWrite; readonly target: Target } | null {
   const threadId = savedThread(parent);
   if (threadId === null || write.operation !== "reply") return null;
+  const savedMessageId = parent?.result?.kind === "saved" ? parent.result.messageId : null;
+  const parentMessageId =
+    savedMessageId !== null && write.args.parentMessageId === parent?.messageId
+      ? savedMessageId
+      : write.args.parentMessageId;
   return {
-    write: { operation: "reply", args: { ...write.args, threadId } },
+    write: {
+      operation: "reply",
+      args: {
+        ...write.args,
+        threadId,
+        ...(parentMessageId === undefined ? {} : { parentMessageId }),
+      },
+    },
     target: { kind: "thread", id: threadId },
   };
 }

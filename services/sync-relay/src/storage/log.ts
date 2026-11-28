@@ -952,6 +952,62 @@ export function fetchChatMessage(
   return row ? rowToLogRow(row) : null;
 }
 
+export function hasThreadMessage(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+  messageId: string,
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.message.append' AND relay_admission IS NULL
+           AND json_valid(payload_json)
+           AND json_extract(payload_json, '$.threadId') = ?
+           AND json_extract(payload_json, '$.messageId') = ?
+         LIMIT 1`,
+      )
+      .get(workspaceId, threadId, messageId) !== undefined
+  );
+}
+
+function readBrowserChatBinding(
+  storage: StorageContext,
+  input: { workspaceId: string; originId: string; messageId: string },
+): { requestHash: string; threadId: string } | null {
+  const row = storage.db
+    .prepare(
+      `SELECT request_hash, thread_id FROM sync_relay_browser_chat_bindings
+       WHERE workspace_id = ? AND origin_id = ? AND message_id = ?`,
+    )
+    .get(input.workspaceId, input.originId, input.messageId) as
+    | { request_hash: string; thread_id: string }
+    | undefined;
+  return row ? { requestHash: row.request_hash, threadId: row.thread_id } : null;
+}
+
+export function lookupBrowserChatBinding(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    originId: string;
+    messageId: string;
+    requestHash: string;
+    guard?: () => void;
+  },
+): { threadId: string } | null {
+  return storage.tx(() => {
+    const existing = fetchChatMessage(storage, input);
+    const binding = existing ? readBrowserChatBinding(storage, input) : null;
+    if (!existing || !binding) return null;
+    input.guard?.();
+    if (binding.requestHash !== input.requestHash)
+      throw new SyncRelayConflictError("retry changes browser chat request");
+    return { threadId: binding.threadId };
+  }, NO_LIVE_AUTHORITY);
+}
+
 export function appendBrowserChatBatch(
   storage: StorageContext,
   input: {
@@ -960,12 +1016,27 @@ export function appendBrowserChatBatch(
     messageId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    requestHash?: string;
+    retryGuard?: () => void;
     wakes?: BrowserPostWakes;
   },
 ): AppendLogBatchResult {
   return storage.tx(
     () => {
       const existing = fetchChatMessage(storage, input);
+      if (existing && input.requestHash !== undefined) {
+        const binding = readBrowserChatBinding(storage, input);
+        if (binding !== null) {
+          input.retryGuard?.();
+          if (binding.requestHash !== input.requestHash)
+            throw new SyncRelayConflictError("retry changes browser chat request");
+          return {
+            inserted: 0,
+            skipped: input.ops.length,
+            currentMaxOriginSeq: existing.originSeq,
+          };
+        }
+      }
       const storedPayload = existing
         ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
         : null;
@@ -1011,6 +1082,28 @@ export function appendBrowserChatBatch(
         };
       });
       const result = appendLogBatchInTransaction(storage, { ...input, ops });
+      if (!existing && input.requestHash !== undefined && result.inserted > 0) {
+        const saved = fetchChatMessage(storage, input);
+        const threadId = saved
+          ? (JSON.parse(saved.payloadJson) as { threadId?: unknown }).threadId
+          : null;
+        if (saved && typeof threadId === "string") {
+          storage.db
+            .prepare(
+              `INSERT INTO sync_relay_browser_chat_bindings
+               (workspace_id, origin_id, message_id, request_hash, thread_id, relay_seq)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              input.workspaceId,
+              input.originId,
+              input.messageId,
+              input.requestHash,
+              threadId,
+              saved.relaySeq,
+            );
+        }
+      }
       if (!existing && input.wakes && result.inserted > 0)
         insertBrowserWakesInTransaction(storage, {
           ...input.wakes,

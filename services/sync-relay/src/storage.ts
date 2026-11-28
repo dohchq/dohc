@@ -2570,6 +2570,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchChatMessage(this, input);
   }
 
+  hasThreadMessage(workspaceId: string, threadId: string, messageId: string): boolean {
+    return logStorage.hasThreadMessage(this, workspaceId, threadId, messageId);
+  }
+
+  lookupBrowserChatBinding(
+    input: Parameters<typeof logStorage.lookupBrowserChatBinding>[1],
+  ): { threadId: string } | null {
+    return logStorage.lookupBrowserChatBinding(this, input);
+  }
+
   appendBrowserChatBatch(
     input: Parameters<typeof logStorage.appendBrowserChatBatch>[1],
   ): AppendLogBatchResult {

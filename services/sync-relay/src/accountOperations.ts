@@ -211,7 +211,13 @@ export async function runAccountOperation(
         );
         const result =
           input.member !== null && CHAT_OPERATIONS.has(request.operation)
-            ? memberChatAnswer(input.member, read)
+            ? memberChatAnswer(
+                input.member,
+                read,
+                request.operation === "groupsFull"
+                  ? server.storage.listChannelCreates(input.workspaceId)
+                  : undefined,
+              )
             : request.operation === "groupsFull" && input.visitor.phone && input.member === null
               ? phoneGroups(
                   server.storage.declaredAgentNames({

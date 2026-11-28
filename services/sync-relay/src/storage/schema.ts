@@ -1416,6 +1416,22 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         ON sync_relay_log(workspace_id, relay_seq)
         WHERE op_kind = 'chat.channel.create';
 
+      CREATE TABLE IF NOT EXISTS sync_relay_browser_chat_bindings (
+        workspace_id TEXT NOT NULL,
+        origin_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        relay_seq INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, origin_id, message_id),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE,
+        FOREIGN KEY (relay_seq)
+          REFERENCES sync_relay_log(relay_seq)
+          ON DELETE CASCADE
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS sync_relay_blobs (
         workspace_id TEXT NOT NULL,
         sha256 TEXT NOT NULL,

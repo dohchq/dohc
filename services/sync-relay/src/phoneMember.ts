@@ -6,6 +6,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { workspaceMemberGrantId } from "./storage/workspaceMembers";
 import {
+  workspaceChatAccess,
   workspaceFileReach,
   workspaceGroupReachable,
   type WorkspaceShareSelector,
@@ -18,6 +19,7 @@ import {
  */
 export interface PhoneMember {
   grantId: string;
+  shareId: string;
   selector: WorkspaceShareSelector;
 }
 
@@ -37,7 +39,7 @@ export function phoneMember(
   return authorized.ok &&
     authorized.share.workspaceId === workspaceId &&
     isWorkspaceSelector(authorized.effectiveSelector)
-    ? { grantId, selector: authorized.effectiveSelector }
+    ? { grantId, shareId: authorized.share.shareId, selector: authorized.effectiveSelector }
     : null;
 }
 
@@ -73,16 +75,38 @@ const OWNER_READ_STATE: Readonly<Record<string, unknown>> = {
  * A chat answer as a Member reads it: every file link their reach doesn't cover reads "(a file not shared here)", as
  * in their browser, and no unread count or read place of the owner's shows.
  */
-export function memberChatAnswer<Answer>(member: PhoneMember, answer: Answer): Answer {
+export function memberChatAnswer<Answer>(
+  member: PhoneMember,
+  answer: Answer,
+  channels?: readonly { channelWireId: string; type: "posts" | "chat" | "both" }[],
+): Answer {
   const files = workspaceFileReach(member.selector);
+  const channelTypes = channels
+    ? new Map(channels.map((channel) => [channel.channelWireId, channel.type]))
+    : null;
   const served = (value: unknown, key?: string): unknown => {
     if (key !== undefined && Object.hasOwn(OWNER_READ_STATE, key)) return OWNER_READ_STATE[key];
     if (typeof value === "string") return withheldLinkText(value, files);
     if (Array.isArray(value)) return value.map((item) => served(item));
-    if (value !== null && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([name, item]) => [name, served(item, name)]),
-      );
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      const entries = Object.entries(record).map(([name, item]) => [name, served(item, name)]);
+      if (
+        channelTypes !== null &&
+        record.kind === "group" &&
+        typeof record.channelWireId === "string"
+      ) {
+        entries.push([
+          "access",
+          member.selector.reach.groupLevel(record.channelWireId) === null
+            ? "read-only"
+            : workspaceChatAccess(member.selector, record.channelWireId),
+        ]);
+        const type = channelTypes.get(record.channelWireId);
+        if (type !== undefined) entries.push(["type", type]);
+      }
+      return Object.fromEntries(entries);
+    }
     return value;
   };
   return served(answer) as Answer;
