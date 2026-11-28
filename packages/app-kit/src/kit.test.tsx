@@ -176,7 +176,7 @@ describe("dohc/ui", () => {
     expect(wrapper?.getAttribute("aria-invalid")).toBeNull();
   });
 
-  it("renders Badge dot/info, Callout info, ProgressBar info, Tabs badge, and Checkbox description", () => {
+  it("renders Badge dot/info, Callout info, ProgressBar info, and Checkbox description", () => {
     const { container } = render(
       <Card title="Settings">
         <Checkbox label="Include pending" description="Show unposted charges" defaultChecked />
@@ -190,7 +190,7 @@ describe("dohc/ui", () => {
         <Tabs
           value="a"
           onChange={() => {}}
-          items={[{ id: "a", label: "Inbox", badge: 4, content: <p>Items</p> }]}
+          items={[{ id: "a", label: "Inbox", content: <p>Items</p> }]}
         />
       </Card>,
     );
@@ -202,10 +202,9 @@ describe("dohc/ui", () => {
     expect(container.querySelector(".kit-badge-dot")).toBeTruthy();
     expect(container.querySelector(".kit-callout.kit-tone-info")).toBeTruthy();
     expect(container.querySelector(".kit-progress-fill-info")).toBeTruthy();
-    expect(screen.getByText("4").className).toContain("kit-tab-badge");
   });
 
-  it("clears DataTable search filter and renders loading skeletons", () => {
+  it("filters DataTable rows with native search input and renders loading skeletons", () => {
     const { rerender, container } = render(
       <DataTable
         searchable
@@ -237,7 +236,7 @@ describe("dohc/ui", () => {
     const search = screen.getByRole("searchbox", { name: "Filter rows" });
     fireEvent.change(search, { target: { value: "Coffee" } });
     expect(screen.queryByText("Tea")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    fireEvent.change(search, { target: { value: "" } });
     expect(screen.getByText("Tea")).toBeTruthy();
   });
 
@@ -407,6 +406,12 @@ describe("dohc/charts", () => {
           ]}
           ariaLabel="Sparse bars"
         />
+        <LineChart
+          variant="area"
+          labels={["N1", "N2", "N3"]}
+          series={[{ name: "Loss", values: [-5, -12, -9] }]}
+          ariaLabel="Negative area"
+        />
         <Sparkline values={[5, 5, 5]} ariaLabel="Flat spark" />
       </>,
     );
@@ -421,7 +426,17 @@ describe("dohc/charts", () => {
       "userSpaceOnUse",
       "userSpaceOnUse",
       "userSpaceOnUse",
+      "userSpaceOnUse",
     ]);
+    // Negative-only area gradient spans full plot height with non-zero stop opacity.
+    const negGrad = screen
+      .getByRole("group", { name: "Negative area" })
+      .getElementsByTagName("linearGradient")[0]!;
+    expect(Number(negGrad.getAttribute("y2"))).toBeGreaterThan(Number(negGrad.getAttribute("y1")));
+    const negStops = [...negGrad.getElementsByTagName("stop")].map((s) =>
+      Number(s.getAttribute("stop-opacity")),
+    );
+    expect(negStops.some((opacity) => opacity > 0)).toBe(true);
     // Sparse BarChart caps bar width rather than inflating into giant slabs.
     const barRects = [
       ...screen.getByRole("group", { name: "Sparse bars" }).querySelectorAll("rect"),

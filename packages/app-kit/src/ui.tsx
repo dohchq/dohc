@@ -192,7 +192,6 @@ export interface StatCardProps {
   readonly delta?: string;
   readonly tone?: Tone;
   readonly hint?: string;
-  readonly icon?: ReactNode;
   readonly footer?: ReactNode;
   readonly className?: string;
 }
@@ -203,20 +202,12 @@ export function StatCard({
   delta,
   tone = "neutral",
   hint,
-  icon,
   footer,
   className,
 }: StatCardProps) {
   return (
     <div className={cx("kit-card", "kit-stat", className)}>
-      <div className="kit-stat-head">
-        <span className="kit-stat-label">{label}</span>
-        {icon ? (
-          <span className="kit-stat-icon" aria-hidden="true">
-            {icon}
-          </span>
-        ) : null}
-      </div>
+      <span className="kit-stat-label">{label}</span>
       <div className="kit-stat-row">
         <span className="kit-stat-value">{value}</span>
         {delta ? <Badge tone={tone}>{delta}</Badge> : null}
@@ -230,7 +221,6 @@ export function StatCard({
 export interface TabItem {
   readonly id: string;
   readonly label: string;
-  readonly badge?: ReactNode;
   readonly content?: ReactNode;
 }
 
@@ -281,10 +271,7 @@ export function Tabs({ items, value, onChange, label = "Sections" }: TabsProps) 
               onClick={() => onChange(item.id)}
               onKeyDown={(event) => onKeyDown(event, index)}
             >
-              <span>{item.label}</span>
-              {item.badge !== undefined && item.badge !== null ? (
-                <span className="kit-tab-badge">{item.badge}</span>
-              ) : null}
+              {item.label}
             </button>
           );
         })}
@@ -904,16 +891,6 @@ export function DataTable<T>({
               aria-label={searchPlaceholder}
               className="kit-table-search"
             />
-            {query ? (
-              <button
-                type="button"
-                className="kit-table-clear"
-                onClick={() => setQuery("")}
-                aria-label="Clear filter"
-              >
-                <Glyph name="x" size={13} />
-              </button>
-            ) : null}
           </div>
         </div>
       ) : null}

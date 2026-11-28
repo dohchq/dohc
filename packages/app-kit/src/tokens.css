@@ -10,7 +10,6 @@
   --kit-accent: #2d342e;
   --kit-on-accent: #faf9f5;
   --kit-focus: color-mix(in srgb, var(--kit-accent) 65%, transparent);
-  --kit-focus-ring: color-mix(in srgb, var(--kit-accent) 16%, transparent);
   --kit-hover: color-mix(in srgb, var(--kit-ink) 7%, transparent);
   --kit-selected: color-mix(in srgb, var(--kit-ink) 14%, transparent);
   --kit-skeleton: color-mix(in srgb, var(--kit-ink) 11%, transparent);
@@ -49,7 +48,6 @@
     --kit-accent: #d7d0c0;
     --kit-on-accent: #131211;
     --kit-focus: color-mix(in srgb, var(--kit-accent) 58%, transparent);
-    --kit-focus-ring: color-mix(in srgb, var(--kit-accent) 22%, transparent);
     --kit-scrim: rgba(0, 0, 0, 0.65);
     --kit-info: #8ab8eb;
     --kit-success: #82c29b;
@@ -165,6 +163,11 @@
   padding-bottom: 4px;
   margin-bottom: 4px;
   border-bottom: 1px solid var(--kit-line);
+}
+
+.kit-chart-tooltip .kit-chart-legend-item {
+  display: flex;
+  line-height: 1.5;
 }
 
 .kit-donut-layout {

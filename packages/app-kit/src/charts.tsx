@@ -276,6 +276,7 @@ export function LineChart({
           <defs>
             {series.map((entry, seriesIndex) => {
               const stroke = colorAt(seriesIndex, entry.color);
+              const zeroPct = Math.max(0, Math.min(100, ((baselineY - pad.top) / plotH) * 100));
               return (
                 <linearGradient
                   key={`grad-${seriesIndex}`}
@@ -284,10 +285,15 @@ export function LineChart({
                   x1={0}
                   y1={pad.top}
                   x2={0}
-                  y2={baselineY}
+                  y2={pad.top + plotH}
                 >
-                  <stop offset="0%" stopColor={stroke} stopOpacity={areaTopOpacity} />
-                  <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+                  {zeroPct > 0 ? (
+                    <stop offset="0%" stopColor={stroke} stopOpacity={areaTopOpacity} />
+                  ) : null}
+                  <stop offset={`${zeroPct}%`} stopColor={stroke} stopOpacity={0} />
+                  {zeroPct < 100 ? (
+                    <stop offset="100%" stopColor={stroke} stopOpacity={areaTopOpacity} />
+                  ) : null}
                 </linearGradient>
               );
             })}
