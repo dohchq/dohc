@@ -4,6 +4,7 @@ import type { SignIn } from "../server/account";
 import { requestGenerations, ServerError, shownProblem } from "../server/client";
 import {
   collectionOperations,
+  type AttachmentUpload,
   type ChangeAnswer,
   type CollectionDescription,
   type CollectionField,
@@ -19,6 +20,7 @@ import {
   type RecordValue,
   type RelationLabels,
   type RelationOptionsPage,
+  type UploadAnswer,
   type WriteRefusal,
 } from "../server/phoneCollections";
 import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
@@ -39,6 +41,7 @@ export interface RecordChange {
   readonly change: FieldChange;
   readonly reversible: boolean;
   readonly relationLabels?: Readonly<Record<string, string>>;
+  readonly fileNames?: Readonly<Record<string, string>>;
   readonly state:
     | { readonly kind: "saving" }
     | ChangeAnswer
@@ -173,7 +176,15 @@ export interface WorkspaceCollections {
     edit: FieldEdit,
     value: RecordValue,
     relationLabels?: Readonly<Record<string, string>>,
+    fileNames?: Readonly<Record<string, string>>,
   ): void;
+  uploadAttachment(
+    input: Omit<AttachmentUpload, "datasetId" | "revision" | "revisionSha256"> & {
+      readonly revision?: number;
+      readonly revisionSha256?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<UploadAnswer>;
   /** Sends a failed change again, as it was. */
   retry(key: string): void;
   /** Drops a change that isn't saving. */
@@ -286,6 +297,7 @@ export function createWorkspaceCollections(
     { datasetId, tableId, recordId, fieldId, value }: FieldChange,
     version: number,
     relationLabels?: Readonly<Record<string, string>>,
+    fileNames?: Readonly<Record<string, string>>,
   ) => {
     const now = view;
     if (now?.datasetId !== datasetId) return;
@@ -299,12 +311,14 @@ export function createWorkspaceCollections(
     const { opened } = now;
     update(datasetId, {
       rows: now.tableId === tableId ? now.rows.map(patch) : now.rows,
+      files: now.tableId === tableId && fileNames ? { ...now.files, ...fileNames } : now.files,
       relations: now.tableId === tableId ? mergeRelations(now.relations, added) : now.relations,
       opened:
         opened?.tableId === tableId
           ? {
               ...opened,
               record: patch(opened.record),
+              files: fileNames ? { ...opened.files, ...fileNames } : opened.files,
               relations: mergeRelations(opened.relations, added),
             }
           : opened,
@@ -322,7 +336,8 @@ export function createWorkspaceCollections(
       const answer = await operations.change(sent.change);
       if (!lands()) return;
       setChange(key, { ...sent, state: answer });
-      if (answer.kind === "saved") saved(sent.change, answer.version, sent.relationLabels);
+      if (answer.kind === "saved")
+        saved(sent.change, answer.version, sent.relationLabels, sent.fileNames);
     } catch (error) {
       const problem = shownProblem(error);
       // A cancelled change belongs to a store cleared already, and a 401 clears it.
@@ -769,12 +784,26 @@ export function createWorkspaceCollections(
         },
       };
     },
-    change({ field, from }, value, relationLabels) {
+    change({ field, from }, value, relationLabels, fileNames) {
       void send(recordKey(from.datasetId, from.tableId, from.recordId), {
         change: { ...from, value, idempotencyKey: crypto.randomUUID() },
         reversible: field.reversible,
         ...(relationLabels ? { relationLabels } : {}),
+        ...(fileNames ? { fileNames } : {}),
       });
+    },
+    uploadAttachment(input, signal) {
+      const description = view?.description;
+      if (!isLive() || !view || !description) return Promise.reject(new ServerError("cancelled"));
+      return operations.uploadAttachment(
+        {
+          ...input,
+          datasetId: view.datasetId,
+          revision: input.revision ?? description.revision,
+          revisionSha256: input.revisionSha256 ?? description.revisionSha256,
+        },
+        signal,
+      );
     },
     retry(key) {
       const last = changes.get(key);

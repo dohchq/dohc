@@ -68,9 +68,49 @@ export interface FetchInit {
 export type Fetch = (
   url: string,
   init: FetchInit,
-) => Promise<{ readonly status: number; json(): Promise<unknown> }>;
+) => Promise<{
+  readonly status: number;
+  readonly headers?: { get(name: string): string | null };
+  json(): Promise<unknown>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+}>;
 
 export const REQUEST_TIMEOUT_MS = 15_000;
+
+async function fetchTimed(
+  fetch: Fetch,
+  url: string,
+  init: Omit<FetchInit, "credentials" | "redirect" | "signal">,
+  signal: AbortSignal,
+  timeoutMs: number,
+  keepAnswer = false,
+): Promise<{
+  readonly response: Awaited<ReturnType<Fetch>>;
+  readonly timedOut: () => boolean;
+  readonly done: () => void;
+}> {
+  if (signal.aborted) throw new ServerError("cancelled");
+  const own = new AbortController();
+  const abort = () => own.abort();
+  if (!keepAnswer) signal.addEventListener("abort", abort);
+  const timer = setTimeout(abort, timeoutMs);
+  const done = () => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  };
+  try {
+    const response = await fetch(url, {
+      ...init,
+      credentials: "omit",
+      redirect: "error",
+      signal: own.signal,
+    });
+    return { response, timedOut: () => own.signal.aborted && !signal.aborted, done };
+  } catch {
+    done();
+    throw new ServerError(signal.aborted ? "cancelled" : "offline");
+  }
+}
 
 /**
  * Sends one JSON request and reads its JSON answer, and rejects with `offline` when nothing answers within the
@@ -91,42 +131,34 @@ export async function exchange(
   },
 ): Promise<{ readonly status: number; readonly body: unknown }> {
   const { signal } = request;
-  if (signal.aborted) throw new ServerError("cancelled");
-  const own = new AbortController();
-  const abort = () => own.abort();
-  if (!request.keepAnswer) signal.addEventListener("abort", abort);
-  const timer = setTimeout(abort, request.timeoutMs ?? REQUEST_TIMEOUT_MS);
+  const { response, timedOut, done } = await fetchTimed(
+    fetch,
+    url,
+    {
+      method: request.method,
+      headers: {
+        accept: "application/json",
+        ...(request.body === undefined ? {} : { "content-type": "application/json" }),
+        ...request.headers,
+      },
+      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+    },
+    signal,
+    request.timeoutMs ?? REQUEST_TIMEOUT_MS,
+    request.keepAnswer,
+  );
   try {
-    let response: Awaited<ReturnType<Fetch>>;
-    try {
-      response = await fetch(url, {
-        method: request.method,
-        headers: {
-          accept: "application/json",
-          ...(request.body === undefined ? {} : { "content-type": "application/json" }),
-          ...request.headers,
-        },
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        credentials: "omit",
-        redirect: "error",
-        signal: own.signal,
-      });
-    } catch {
-      throw new ServerError(signal.aborted ? "cancelled" : "offline");
-    }
     let body: unknown;
     try {
       body = await response.json();
     } catch {
-      // An answer with no JSON, such as an empty one. Its status still says what happened.
       body = undefined;
-      if (own.signal.aborted && !signal.aborted) throw new ServerError("offline");
+      if (timedOut()) throw new ServerError("offline");
     }
     if (signal.aborted && !request.keepAnswer) throw new ServerError("cancelled");
     return { status: response.status, body };
   } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", abort);
+    done();
   }
 }
 
@@ -190,12 +222,36 @@ export interface ServerClient {
     body?: unknown,
     options?: SendOptions,
   ): Promise<T>;
+  /** Sends a request with the sign-in's Bearer token and returns raw response bytes, bounded by `maxBytes`. */
+  bytes(
+    method: Method,
+    path: string,
+    body?: unknown,
+    options?: SendOptions & { readonly maxBytes?: number },
+  ): Promise<Uint8Array>;
 }
 
 /** The error code a refusal's answer names, as the server's errors carry it: `{ ok: false, error, code }`. */
 function refusalCode(body: unknown): string | null {
   if (typeof body !== "object" || body === null || !("code" in body)) return null;
   return typeof body.code === "string" && body.code.length <= 64 ? body.code : null;
+}
+
+async function withScopedSignals<T>(
+  signals: readonly (AbortSignal | undefined)[],
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const ending = new AbortController();
+  const end = () => ending.abort();
+  for (const signal of signals) {
+    if (signal?.aborted) end();
+    signal?.addEventListener("abort", end);
+  }
+  try {
+    return await run(ending.signal);
+  } finally {
+    for (const signal of signals) signal?.removeEventListener("abort", end);
+  }
 }
 
 export function createServerClient(options: {
@@ -223,19 +279,12 @@ export function createServerClient(options: {
       socket.addEventListener("close", () => options.signal.removeEventListener("abort", abort));
       return socket;
     },
-    async send(method, path, read, body, request) {
-      // The request ends when the sign-in does, or when its own signal aborts.
-      const ending = new AbortController();
-      const end = () => ending.abort();
-      for (const signal of [options.signal, request?.signal]) {
-        if (signal?.aborted) end();
-        signal?.addEventListener("abort", end);
-      }
-      try {
+    send(method, path, read, body, request) {
+      return withScopedSignals([options.signal, request?.signal], async (signal) => {
         const answer = await exchange(options.fetch, `${options.origin}${path}`, {
           method,
           body,
-          signal: ending.signal,
+          signal,
           timeoutMs: request?.timeoutMs ?? options.timeoutMs,
           headers: { authorization: `Bearer ${options.token}` },
         });
@@ -247,10 +296,48 @@ export function createServerClient(options: {
         const value = read(answer.body);
         if (value === null) throw new ServerError("invalid", answer.status);
         return value;
-      } finally {
-        options.signal.removeEventListener("abort", end);
-        request?.signal?.removeEventListener("abort", end);
-      }
+      });
+    },
+    bytes(method, path, body, request) {
+      return withScopedSignals([options.signal, request?.signal], async (signal) => {
+        const { response, done } = await fetchTimed(
+          options.fetch,
+          `${options.origin}${path}`,
+          {
+            method,
+            headers: {
+              ...(body === undefined ? {} : { "content-type": "application/json" }),
+              authorization: `Bearer ${options.token}`,
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          },
+          signal,
+          request?.timeoutMs ?? options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+        );
+        try {
+          if (response.status < 200 || response.status > 299) {
+            const errBody = await response.json().catch(() => undefined);
+            if (signal.aborted) throw new ServerError("cancelled");
+            const problem = statusProblem(response.status);
+            if (problem === "signed-out") options.onSignedOut?.();
+            throw new ServerError(problem, response.status, refusalCode(errBody));
+          }
+          const limit = request?.maxBytes;
+          const len = Number(response.headers?.get("content-length") ?? "");
+          if (limit !== undefined && Number.isFinite(len) && len > limit)
+            throw new ServerError("refused", 413, "payload_too_large");
+          if (!response.arrayBuffer) throw new ServerError("invalid", response.status);
+          const raw = await response.arrayBuffer().catch(() => {
+            throw new ServerError(signal.aborted ? "cancelled" : "offline");
+          });
+          if (signal.aborted) throw new ServerError("cancelled");
+          if (limit !== undefined && raw.byteLength > limit)
+            throw new ServerError("refused", 413, "payload_too_large");
+          return new Uint8Array(raw);
+        } finally {
+          done();
+        }
+      });
     },
   };
 }

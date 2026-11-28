@@ -332,12 +332,25 @@ async function phone(keys = KEYS.slice(0, 2)) {
   // What the host does when it reads, which a test can add to, and how a test changes what it describes.
   let during: () => void = () => undefined;
   let describing = (description: DatasetDescription) => description;
-  const reading: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> = {
+  const reading: Pick<
+    RelayDatasetHost,
+    "list" | "describe" | "invoke" | "dataUpload" | "dataReadFile"
+  > = {
     list: host.list,
     describe: (auth, input) => describing(host.describe(auth, input)),
     invoke: async (auth, input) => {
       during();
       const answer = await host.invoke(auth, input);
+      during();
+      return answer;
+    },
+    dataUpload: (auth, input, signal) => {
+      during();
+      return host.dataUpload(auth, input, signal);
+    },
+    dataReadFile: async (auth, input, signal) => {
+      during();
+      const answer = await host.dataReadFile(auth, input, signal);
       during();
       return answer;
     },
@@ -353,9 +366,8 @@ async function phone(keys = KEYS.slice(0, 2)) {
     wakeWaits: createChatWakeWaits(storage, hub),
     phoneCollections: createPhoneCollections({ storage, host: reading }),
   });
-  /** One Collection operation as `user:session:kind`, answered with its status and body. */
-  async function op(operation: string, args: unknown, as = "owner:phone-1:phone") {
-    const response = await route(
+  async function opRaw(operation: string, args: unknown, as = "owner:phone-1:phone") {
+    return await route(
       new Request(`http://relay.test/sync/w/ops/${operation}`, {
         method: "POST",
         headers: { authorization: `Bearer session:${as}`, "content-type": "application/json" },
@@ -363,6 +375,10 @@ async function phone(keys = KEYS.slice(0, 2)) {
       }),
       { route: "account-operation", workspaceId: "w", operation },
     ).catch((error: unknown) => errorResponse(error));
+  }
+  /** One Collection operation as `user:session:kind`, answered with its status and body. */
+  async function op(operation: string, args: unknown, as = "owner:phone-1:phone") {
+    const response = await opRaw(operation, args, as);
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   }
   return {
@@ -371,6 +387,7 @@ async function phone(keys = KEYS.slice(0, 2)) {
       storage.setShowOnPhone({ userId: "owner", workspaceId: "w", showOnPhone }),
     host,
     op,
+    opRaw,
     records: (after?: unknown, as?: string) =>
       op(
         "collectionRecords",
@@ -442,12 +459,13 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
             field(PAID, "Paid", "checkbox", true),
             field(RECEIPT, "Receipt", "attachment"),
           ],
-          // Required and optional inputtable create fields (including write-only Email; excluding attachment Receipt).
+          // Required and optional inputtable create fields (including write-only Email and attachment Receipt).
           createFields: [
             { fieldId: KEY, name: "ID", type: "text", required: true },
             { fieldId: NAME, name: "Name", type: "text", required: true },
             { fieldId: PAID, name: "Paid", type: "checkbox", required: false },
             { fieldId: EMAIL, name: "Email", type: "text", required: false },
+            { fieldId: RECEIPT, name: "Receipt", type: "attachment", required: false },
           ],
           canCreate: true,
           canDelete: true,
@@ -943,11 +961,10 @@ it("refuses a new record or deletion that a table's operations don't allow, befo
   expect(await create(f, { tableId: NOTES })).toEqual(refused);
   expect(await remove(f, { tableId: NOTES })).toEqual(refused);
   expect(await create(f, { tableId: OTHER })).toEqual(notFound);
-  // Disallowed create fieldIds (generated key, another table's field, or attachment) are refused before invoke.
+  // Disallowed create fieldIds (generated key, another table's field, or button) are refused before invoke.
   expect(await create(f, { values: { [GUEST_KEY]: "forced" } })).toEqual(refused);
-  expect(
-    await create(f, { tableId: PEOPLE, values: { [RECEIPT]: "file-1234567890abcdef" } }),
-  ).toEqual(refused);
+  expect(await create(f, { tableId: PEOPLE, values: { [TEXT]: "wrong-table" } })).toEqual(refused);
+  expect(await create(f, { tableId: PEOPLE, values: { [BUTTON]: "nope" } })).toEqual(refused);
   // Nor does a key that isn't random, a version that isn't one, or malformed values.
   expect((await create(f, { idempotencyKey: "new-guest" })).status).toBe(400);
   expect((await create(f, { values: "bad" })).status).toBe(400);
@@ -1138,7 +1155,7 @@ it("commits no Member's change once their phone stops reaching the workspace as 
   expect(await edit(f, {}, ana)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
 });
 
-it("creates records with required and write-only fields via values, refuses disallowed fields, and disables create on required attachments", async () => {
+it("creates records with required and write-only fields via values, refuses disallowed fields, and disables create on required unreadable relations", async () => {
   const f = await phone([]);
   const added = await create(f, {
     tableId: PEOPLE,
@@ -1165,7 +1182,7 @@ it("creates records with required and write-only fields via values, refuses disa
   expect(
     await create(f, {
       tableId: PEOPLE,
-      values: { [KEY]: "p-3", [NAME]: "No Receipt", [RECEIPT]: "file_1234567890abcdef" },
+      values: { [KEY]: "p-3", [NAME]: "No Note", [TEXT]: "wrong-table" },
       idempotencyKey: id(203),
     }),
   ).toEqual(
@@ -1186,7 +1203,20 @@ it("creates records with required and write-only fields via values, refuses disa
         : {
             ...t,
             fields: t.fields.map((field) =>
-              field.fieldId !== RECEIPT ? field : { ...field, required: true },
+              field.fieldId !== EMAIL
+                ? field
+                : {
+                    ...field,
+                    type: "relation" as const,
+                    required: true,
+                    unique: false,
+                    relation: {
+                      datasetId: OTHER,
+                      tableId: PEOPLE,
+                      fieldId: KEY,
+                      many: false,
+                    },
+                  },
             ),
           },
     ),
@@ -2589,4 +2619,346 @@ CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,tag_ids TEXT
       ITEM_TAGS
     ]?.['"t-155"'],
   ).toBe(`t-155 ${bulk}`.slice(0, 500));
+});
+
+it("uploads, attaches, and downloads Collection attachments for Owner and Member, enforces 20 MiB cap, rejects forged operationId, and revokes on row/access change", async () => {
+  const ATT_DS = id(90);
+  const ATT_TBL = id(91);
+  const ATT_ID = id(92);
+  const ATT_TITLE = id(93);
+  const ATT_FILE = id(94);
+  const ATT_CREATE = id(95);
+  const ATT_READ = id(96);
+  const ATT_EDIT = id(97);
+  const attDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: ATT_DS,
+    name: "Expenses",
+    schemaPath: "expenses/schema.sql",
+    operationsPath: "expenses/operations.js",
+    tables: [
+      {
+        tableId: ATT_TBL,
+        name: "Items",
+        sqlName: "items",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ATT_ID,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: ATT_TITLE,
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: ATT_FILE,
+            name: "Receipt",
+            sqlColumn: "receipt",
+            type: "attachment",
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: ATT_CREATE,
+        name: "createItem",
+        label: "Create",
+        tableId: ATT_TBL,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ATT_ID, ATT_TITLE, ATT_FILE],
+      },
+      {
+        operationId: ATT_READ,
+        name: "readItems",
+        label: "Read",
+        tableId: ATT_TBL,
+        kind: "read",
+        access: "link",
+        readOnly: true,
+        fieldIds: [ATT_ID, ATT_TITLE, ATT_FILE],
+      },
+      {
+        operationId: ATT_EDIT,
+        name: "editItem",
+        label: "Edit",
+        tableId: ATT_TBL,
+        kind: "edit",
+        access: "link",
+        readOnly: false,
+        fieldIds: [ATT_TITLE, ATT_FILE],
+        reversible: true,
+      },
+    ],
+  };
+  const attSql =
+    'CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,receipt TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;';
+  const attSrc = generateDatasetOperations(attDef);
+  const attRev = describeDatasetRevision({
+    definition: attDef,
+    revision: 1,
+    schemaSql: attSql,
+    operationSource: attSrc,
+  });
+  const f = await phone([]);
+  await f.host.activate(owner, {
+    workspaceId: "w",
+    revision: attRev,
+    schemaSql: attSql,
+    operationSource: attSrc,
+    capacityBytes: 32 * 1024 * 1024,
+  });
+  pushFile(f.storage, "att-dataset", null, {
+    path: "expenses/dataset.json",
+    text: JSON.stringify({ datasetId: ATT_DS }),
+  });
+  await f.host.invoke(owner, {
+    workspaceId: "w",
+    datasetId: ATT_DS,
+    revision: 1,
+    revisionSha256: attRev.revisionSha256,
+    operationId: ATT_CREATE,
+    input: { values: { [ATT_ID]: "exp-1", [ATT_TITLE]: "Flight", [ATT_FILE]: null } },
+    idempotencyKey: "seed-exp-1",
+  });
+
+  // Collection description marks the attachment field editable.
+  const desc = await f.op("collection", { datasetId: ATT_DS });
+  expect(desc.status).toBe(200);
+  expect(
+    (
+      desc.body.result as {
+        tables: Array<{ fields: Array<{ fieldId: string; editable: boolean }> }>;
+      }
+    ).tables[0]!.fields.find((item) => item.fieldId === ATT_FILE)?.editable,
+  ).toBe(true);
+
+  // Owner uploads a PDF attachment (idempotent on retry key).
+  const pdfBytes = new TextEncoder().encode("%PDF-1.7\nreceipt\n");
+  const uploadArgs = {
+    datasetId: ATT_DS,
+    tableId: ATT_TBL,
+    fieldId: ATT_FILE,
+    revision: 1,
+    revisionSha256: attRev.revisionSha256,
+    idempotencyKey: id(210),
+    name: "flight.pdf",
+    contentType: "application/pdf",
+    bytesBase64: Buffer.from(pdfBytes).toString("base64"),
+  };
+  const up1 = await f.op("collectionAttachmentUpload", uploadArgs);
+  expect(up1.status).toBe(200);
+  const file1 = up1.body.result as { file: { fileId: string; name: string }; replayed: boolean };
+  expect(file1.replayed).toBe(false);
+  expect(file1.file.name).toBe("flight.pdf");
+
+  const upReplay = await f.op("collectionAttachmentUpload", uploadArgs);
+  expect(upReplay.status).toBe(200);
+  expect(upReplay.body.result).toMatchObject({
+    file: { fileId: file1.file.fileId, name: "flight.pdf" },
+    replayed: true,
+  });
+
+  // Same retry key with different bytes returns 409 conflict.
+  const upConflict = await f.op("collectionAttachmentUpload", {
+    ...uploadArgs,
+    bytesBase64: Buffer.from("%PDF-1.7\nother\n").toString("base64"),
+  });
+  expect(upConflict.status).toBe(409);
+
+  // > 20 MiB attachment rejected cleanly with 413 payload_too_large.
+  const over20 = await f.op("collectionAttachmentUpload", {
+    ...uploadArgs,
+    idempotencyKey: id(211),
+    contentType: "application/octet-stream",
+    name: "huge.bin",
+    bytesBase64: Buffer.alloc(20 * 1024 * 1024 + 1, 1).toString("base64"),
+  });
+  expect(over20.status).toBe(413);
+
+  // Attach to record via collectionEdit, then read back byte-for-byte with strict headers.
+  expect(
+    await f.op("collectionEdit", {
+      datasetId: ATT_DS,
+      tableId: ATT_TBL,
+      recordId: "exp-1",
+      fieldId: ATT_FILE,
+      value: file1.file.fileId,
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: attRev.revisionSha256,
+      idempotencyKey: id(212),
+    }),
+  ).toEqual(ok({ saved: { version: 2, priorValue: null } }));
+
+  const ownerRead = await f.opRaw("collectionAttachmentRead", {
+    datasetId: ATT_DS,
+    tableId: ATT_TBL,
+    recordId: "exp-1",
+    fieldId: ATT_FILE,
+    fileId: file1.file.fileId,
+  });
+  expect(ownerRead.status).toBe(200);
+  expect(ownerRead.headers.get("content-type")).toBe("application/octet-stream");
+  expect(ownerRead.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(ownerRead.headers.get("cache-control")).toBe("private, no-store");
+  expect(new Uint8Array(await ownerRead.arrayBuffer())).toEqual(pdfBytes);
+
+  // Forged operationId is rejected with 400 (server always derives readOperation()).
+  const forged = await f.op("collectionAttachmentRead", {
+    datasetId: ATT_DS,
+    tableId: ATT_TBL,
+    recordId: "exp-1",
+    fieldId: ATT_FILE,
+    fileId: file1.file.fileId,
+    operationId: ATT_EDIT,
+  });
+  expect(forged.status).toBe(400);
+
+  // Joined Member with Edit access + workspace defaults can upload, attach, and download SVG with strict headers.
+  const storage = f.storage as SyncRelayStorage;
+  storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Work",
+    email: "ana@dohc.test",
+    recipientUserId: "ana",
+    newMemberId: () => "member-ana",
+    newGrantId: () => "grant-ana",
+    newShareId: () => "share-w",
+    nowMs: 100,
+  });
+  storage.setWorkspaceMemberLevel({
+    workspaceId: "w",
+    actorUserId: "owner",
+    level: "edit",
+    workspaceName: undefined,
+    newShareId: () => "share-w-edit",
+    nowMs: 101,
+  });
+  storage.setShowOnPhone({ userId: "ana", workspaceId: "w", showOnPhone: true });
+  f.host.setWorkspaceDefaults(owner, {
+    workspaceId: "w",
+    datasetId: ATT_DS,
+    defaults: {
+      view: [ATT_READ],
+      comment: [ATT_READ],
+      edit: [ATT_READ, ATT_EDIT],
+      revision: 1,
+      revisionSha256: attRev.revisionSha256,
+    },
+  });
+  const ana = "ana:phone-ana:phone";
+  const svgBytes = new TextEncoder().encode(
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>',
+  );
+  const memberUp = await f.op(
+    "collectionAttachmentUpload",
+    {
+      datasetId: ATT_DS,
+      tableId: ATT_TBL,
+      fieldId: ATT_FILE,
+      revision: 1,
+      revisionSha256: attRev.revisionSha256,
+      idempotencyKey: id(213),
+      name: "diagram.svg",
+      contentType: "image/svg+xml",
+      bytesBase64: Buffer.from(svgBytes).toString("base64"),
+    },
+    ana,
+  );
+  expect(memberUp.status).toBe(200);
+  const svgFileId = (memberUp.body.result as { file: { fileId: string } }).file.fileId;
+  expect(
+    await f.op(
+      "collectionEdit",
+      {
+        datasetId: ATT_DS,
+        tableId: ATT_TBL,
+        recordId: "exp-1",
+        fieldId: ATT_FILE,
+        value: svgFileId,
+        expectedVersion: 2,
+        revision: 1,
+        revisionSha256: attRev.revisionSha256,
+        idempotencyKey: id(214),
+      },
+      ana,
+    ),
+  ).toEqual(ok({ saved: { version: 3, priorValue: file1.file.fileId } }));
+
+  const memberRead = await f.opRaw(
+    "collectionAttachmentRead",
+    {
+      datasetId: ATT_DS,
+      tableId: ATT_TBL,
+      recordId: "exp-1",
+      fieldId: ATT_FILE,
+      fileId: svgFileId,
+    },
+    ana,
+  );
+  expect(memberRead.status).toBe(200);
+  expect(memberRead.headers.get("content-type")).toBe("application/octet-stream");
+  expect(memberRead.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(memberRead.headers.get("cache-control")).toBe("private, no-store");
+  expect(new Uint8Array(await memberRead.arrayBuffer())).toEqual(svgBytes);
+
+  // Member can no longer read the previous unattached fileId (row value changed -> 404).
+  expect(
+    (
+      await f.opRaw(
+        "collectionAttachmentRead",
+        {
+          datasetId: ATT_DS,
+          tableId: ATT_TBL,
+          recordId: "exp-1",
+          fieldId: ATT_FILE,
+          fileId: file1.file.fileId,
+        },
+        ana,
+      )
+    ).status,
+  ).toBe(404);
+
+  // Clearing the attachment or revoking the Member's read default revokes access immediately -> 404.
+  f.host.setWorkspaceDefaults(owner, {
+    workspaceId: "w",
+    datasetId: ATT_DS,
+    defaults: {
+      view: [],
+      comment: [],
+      edit: [],
+      revision: 1,
+      revisionSha256: attRev.revisionSha256,
+    },
+  });
+  expect(
+    (
+      await f.opRaw(
+        "collectionAttachmentRead",
+        {
+          datasetId: ATT_DS,
+          tableId: ATT_TBL,
+          recordId: "exp-1",
+          fieldId: ATT_FILE,
+          fileId: svgFileId,
+        },
+        ana,
+      )
+    ).status,
+  ).toBe(404);
 });

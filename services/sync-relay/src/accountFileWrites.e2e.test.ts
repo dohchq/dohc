@@ -1579,6 +1579,33 @@ describe.skipIf(engine.missing)(
             requestId: "req-stale-undo",
           }),
         ).toMatchObject({ ok: false, refusal: "restore-unavailable" });
+
+        // Binary upload (<= 5 MiB PNG) syncs to real desktop engine and reads back byte-for-byte via GET fileBytes.
+        const pngBytes = new Uint8Array([
+          137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+        ]);
+        const uploaded = await stack.phoneOp<{ ok: true; path: string; objectId: string }>(
+          "uploadFile",
+          {
+            path: "assets/photo.png",
+            requestId: "req-e2e-png",
+            bytesBase64: Buffer.from(pngBytes).toString("base64"),
+          },
+        );
+        expect(uploaded).toMatchObject({ ok: true, path: "assets/photo.png" });
+        await relay.pull((apply) => desktopCapture.runRelaySync(apply));
+        expect(new Uint8Array(await readFile(join(desktopRoot, "assets/photo.png")))).toEqual(
+          pngBytes,
+        );
+        const downloaded = await fetch(
+          `${stack.origin}/sync/${WORKSPACE}/ops/fileBytes?path=${encodeURIComponent("assets/photo.png")}`,
+          { headers: { authorization: `Bearer session:${OWNER}:phone-1` } },
+        );
+        expect(downloaded.status).toBe(200);
+        expect(downloaded.headers.get("content-type")).toBe("application/octet-stream");
+        expect(downloaded.headers.get("x-content-type-options")).toBe("nosniff");
+        expect(downloaded.headers.get("cache-control")).toBe("private, no-store");
+        expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(pngBytes);
       },
       4 * REAL_DAEMON_DEADLINE_MS,
     );

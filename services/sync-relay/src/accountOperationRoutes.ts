@@ -1,10 +1,16 @@
+import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
+import { APP_BACKEND_UPLOAD_REQUEST_BYTES } from "@dohc/security-contract/app-backend";
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   isAccountFileWriteOperation,
   runAccountFileWrite,
+  UPLOAD_FILE_MAX_BODY_BYTES,
   type AccountFileWriteLiveHost,
 } from "./accountFileWrites";
+import { guardedByteResponse } from "./linkResponseStreams";
+import { MAX_BLOB_BYTES } from "./wireLimits";
 import type { LiveRooms } from "./liveRoom";
 import {
   isPhoneWriteOperation,
@@ -53,7 +59,7 @@ import {
   runPhoneSketchOperation,
   SAVE_SKETCH_MAX_BODY_BYTES,
 } from "./phoneSketches";
-import { phoneMember, type PhoneMember } from "./phoneMember";
+import { pathShown, phoneMember, type PhoneMember } from "./phoneMember";
 import { authorizeShareGrantAction } from "./shareAuthorization";
 import { isWorkspaceSelector } from "./shareFilter";
 import { accountIsFenced } from "./storage/accountDeletion";
@@ -73,6 +79,8 @@ const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;
 const SAVE_SKETCH_BODY_RECEIPT_MS = 30_000;
+const UPLOAD_BODY_RECEIPT_MS = 60_000;
+const PATH_CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 
 /**
  * The answer while this server has no copies to read from, as when it is still starting. It is the copies' own refusal
@@ -163,6 +171,8 @@ export function createAccountOperationRoute(options: {
   liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   /** share-web's origin and its exchange key check, with which it forwards the owner's browser to open a page. */
   browser?: { origin: string; hasExchangeKey(request: Request): boolean };
+  /** Admits bytes for an in-flight binary file stream, bounded per caller. */
+  admitBlobBytes?(callerKey: string, byteLength: number): (() => void) | null;
 }) {
   const { storage, limiter } = options;
   const session = async (request: Request, browser = false) => {
@@ -193,7 +203,9 @@ export function createAccountOperationRoute(options: {
   ): Promise<Response> => {
     const feed = route.operation === "changes" && request.method === "GET";
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
-    if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
+    const fileBytes = route.operation === "fileBytes" && request.method === "GET";
+    if (!feed && !wakeFeed && !fileBytes && request.method !== "POST")
+      throw relayError("method_not_allowed");
     const page = route.operation === "openPage";
     const browser = page && !request.headers.has("authorization");
     const checkSignIn = () =>
@@ -222,6 +234,7 @@ export function createAccountOperationRoute(options: {
     if (
       !feed &&
       !wakeFeed &&
+      !fileBytes &&
       !app &&
       !collection &&
       !page &&
@@ -234,7 +247,13 @@ export function createAccountOperationRoute(options: {
     )
       throw copiesUnavailable();
     const joinedAllowed =
-      feed || app || collection || page || memberWrite || isAccountOperation(route.operation);
+      feed ||
+      fileBytes ||
+      app ||
+      collection ||
+      page ||
+      memberWrite ||
+      isAccountOperation(route.operation);
     const owner = storage.workspaceOwner(route.workspaceId);
     const reaches = (userId: string) => {
       if (browser) return storage.workspaceIsOwnedBy(route.workspaceId, userId);
@@ -254,6 +273,7 @@ export function createAccountOperationRoute(options: {
       !(
         feed ||
         wakeFeed ||
+        fileBytes ||
         app ||
         collection ||
         docCollectionRead ||
@@ -334,12 +354,97 @@ export function createAccountOperationRoute(options: {
       });
       return jsonResponse({ ok: true, ...answer });
     }
+    if (fileBytes) {
+      const rawPath = new URL(request.url).searchParams.get("path");
+      if (
+        !rawPath?.length ||
+        Buffer.byteLength(rawPath, "utf8") > 1_024 ||
+        PATH_CONTROL_CHARS.test(rawPath)
+      )
+        throw badRequest("A file path is required.");
+      const validated = validateUserWritePath(rawPath);
+      if (!validated.ok || validated.normalized !== rawPath) throw notFound();
+      const lookup = () => {
+        if (!pathShown(memberOf(caller.userId), rawPath) || isFolderMarkerPath(rawPath))
+          throw notFound();
+        const current = storage.readCurrentFileState({
+          workspaceId: route.workspaceId,
+          versionId: "main",
+          selectorPaths: [rawPath],
+          limit: 1,
+        });
+        const found = current.files[0];
+        if (found?.path !== rawPath) throw notFound();
+        const byteLength = storage.currentFileBlobByteLength({
+          workspaceId: route.workspaceId,
+          versionId: "main",
+          selectorPaths: [rawPath],
+          sha256: found.blobSha256,
+          epochLogFloor: current.epochLogFloor,
+          visible: (candidate) => candidate === rawPath,
+        });
+        if (
+          byteLength === null ||
+          !Number.isSafeInteger(byteLength) ||
+          byteLength < 0 ||
+          byteLength > MAX_BLOB_BYTES
+        )
+          throw notFound();
+        return { found, byteLength };
+      };
+      const { found, byteLength } = lookup();
+      const releaseBytes =
+        options.admitBlobBytes?.(`account:${caller.sessionId}`, byteLength) ??
+        (options.admitBlobBytes ? null : () => undefined);
+      if (!releaseBytes)
+        throw new RelayError(
+          "server_busy",
+          "Too many downloads are in flight. Try again shortly.",
+          429,
+        );
+      let streamed = false;
+      try {
+        const bytes = storage.getBlob(route.workspaceId, found.blobSha256);
+        if (!bytes || bytes.byteLength !== byteLength) throw notFound();
+        const response = guardedByteResponse(
+          bytes,
+          {
+            "content-type": "application/octet-stream",
+            "x-content-type-options": "nosniff",
+            "cache-control": "private, no-store",
+            "content-length": String(byteLength),
+          },
+          {
+            register: () => () => undefined,
+            release: () => releaseBytes(),
+            terminatedMessage: "account file access changed during stream",
+            refresh: authorize,
+            guard: () => {
+              if (lookup().found.blobSha256 !== found.blobSha256) throw notFound();
+            },
+            signal: request.signal,
+          },
+        );
+        streamed = true;
+        return response;
+      } finally {
+        if (!streamed) releaseBytes();
+      }
+    }
     const maxBodyBytes =
-      route.operation === "saveSketch"
-        ? SAVE_SKETCH_MAX_BODY_BYTES
-        : ACCOUNT_OPERATION_MAX_BODY_BYTES;
+      route.operation === "collectionAttachmentUpload"
+        ? APP_BACKEND_UPLOAD_REQUEST_BYTES
+        : route.operation === "uploadFile"
+          ? UPLOAD_FILE_MAX_BODY_BYTES
+          : route.operation === "saveSketch"
+            ? SAVE_SKETCH_MAX_BODY_BYTES
+            : ACCOUNT_OPERATION_MAX_BODY_BYTES;
     const bodyReceiptMs =
-      route.operation === "saveSketch" ? SAVE_SKETCH_BODY_RECEIPT_MS : BODY_RECEIPT_MS;
+      route.operation === "collectionAttachmentUpload" || route.operation === "uploadFile"
+        ? UPLOAD_BODY_RECEIPT_MS
+        : route.operation === "saveSketch"
+          ? SAVE_SKETCH_BODY_RECEIPT_MS
+          : BODY_RECEIPT_MS;
     let args: unknown;
     try {
       args = await readBoundedJson(

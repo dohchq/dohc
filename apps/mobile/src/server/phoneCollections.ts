@@ -1,5 +1,5 @@
 import type { DatasetColumnFieldType } from "@dohc/security-contract/dataset";
-import { accountOperations, each, isFields, text } from "./api";
+import { accountOperations, each, isFields, okAnswer, segment, text } from "./api";
 import type { ServerClient } from "./client";
 
 // The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, a
@@ -95,6 +95,28 @@ export interface RecordDelete extends Omit<RecordCreate, "values"> {
   readonly recordId: RecordId;
   readonly expectedVersion: number;
 }
+
+export interface AttachmentUpload extends RulesStamp {
+  readonly datasetId: string;
+  readonly tableId: string;
+  readonly fieldId: string;
+  readonly idempotencyKey: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly bytesBase64: string;
+}
+
+export interface UploadedAttachment {
+  readonly fileId: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+}
+
+export type UploadAnswer =
+  | { readonly kind: "uploaded"; readonly file: UploadedAttachment; readonly replayed: boolean }
+  | WriteRefusal;
 
 export interface RecordSort {
   readonly fieldId: string;
@@ -305,6 +327,37 @@ export const readCreateAnswer = (result: unknown): CreateAnswer | null =>
 export const readDeleteAnswer = (result: unknown): DeleteAnswer | null =>
   readWrite(result, () => ({ kind: "saved" as const }));
 
+export function readUploadAnswer(result: unknown): UploadAnswer | null {
+  if (!isFields(result)) return null;
+  if (result.rulesChanged === true) return { kind: "rulesChanged" };
+  if (isFields(result.refused))
+    return text(result.refused.code, 64) && text(result.refused.message, 1024)
+      ? { kind: "refused", code: result.refused.code, message: result.refused.message }
+      : null;
+  const f = result.file;
+  if (
+    !isFields(f) ||
+    !text(f.fileId, 128) ||
+    !text(f.name, 255) ||
+    !text(f.contentType, 127) ||
+    !isCount(f.byteLength) ||
+    !text(f.sha256, 64) ||
+    typeof result.replayed !== "boolean"
+  )
+    return null;
+  return {
+    kind: "uploaded",
+    file: {
+      fileId: f.fileId,
+      name: f.name,
+      contentType: f.contentType,
+      byteLength: f.byteLength,
+      sha256: f.sha256,
+    },
+    replayed: result.replayed,
+  };
+}
+
 const readCursor = (cursor: unknown): RecordCursor | null | undefined =>
   cursor === null
     ? null
@@ -461,6 +514,21 @@ export function collectionOperations(
     create: (create: RecordCreate) => run("collectionCreate", create, readCreateAnswer),
 
     remove: (remove: RecordDelete) => run("collectionDelete", remove, readDeleteAnswer),
+
+    uploadAttachment: (upload: AttachmentUpload, requestSignal?: AbortSignal) =>
+      client.send(
+        "POST",
+        `/sync/${segment(workspaceId)}/ops/collectionAttachmentUpload`,
+        (body) => {
+          const answer = okAnswer(body);
+          return answer ? readUploadAnswer(answer.result) : null;
+        },
+        upload,
+        {
+          signal: requestSignal ? AbortSignal.any([signal, requestSignal]) : signal,
+          timeoutMs: 60_000,
+        },
+      ),
   };
 }
 

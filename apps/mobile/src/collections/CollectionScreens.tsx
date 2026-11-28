@@ -5,6 +5,7 @@ import { Stack, useFocusEffect, useLocalSearchParams, useNavigation, useRouter }
 import {
   ArrowUpDown,
   ChevronRight,
+  Paperclip,
   Plus,
   Search,
   Square,
@@ -621,9 +622,11 @@ export function RecordScreen() {
             <View style={styles.valueLine}>
               <View style={styles.valueText}>
                 <FieldValue
+                  datasetId={view.datasetId}
+                  tableId={table.tableId}
                   field={field}
                   record={shown}
-                  files={files}
+                  files={pending?.fileNames ? { ...files, ...pending.fileNames } : files}
                   relationLabels={
                     pending?.relationLabels
                       ? { ...relations[field.fieldId], ...pending.relationLabels }
@@ -717,12 +720,15 @@ function ChangeLine(props: ChangeLineProps) {
 }
 
 function FieldValue(props: {
+  datasetId: string;
+  tableId: string;
   field: CollectionField;
   record: CollectionRecord;
   files: Readonly<Record<string, string>>;
   relationLabels?: Readonly<Record<string, string>>;
 }) {
   const theme = useTheme();
+  const router = useRouter();
   const { origin } = useSignIn();
   const shown = shownValue(
     props.field,
@@ -742,6 +748,33 @@ function FieldValue(props: {
     );
   }
   if (shown.kind === "empty") return <Text style={[styles.value, { color: theme.subtle }]}>—</Text>;
+  if (shown.kind === "attachment")
+    return (
+      <Pressable
+        style={styles.attachmentLink}
+        onPress={() =>
+          router.push({
+            pathname: "/file",
+            params: {
+              datasetId: props.datasetId,
+              tableId: props.tableId,
+              recordId: String(props.record.id),
+              ...(typeof props.record.id === "number" ? { recordIdNum: "1" } : {}),
+              fieldId: props.field.fieldId,
+              fileId: shown.fileId,
+              name: shown.name,
+            },
+          })
+        }
+        accessibilityRole="button"
+        accessibilityLabel={`${collectionWords.openAttachment}, ${shown.name}`}
+      >
+        <Paperclip size={16} color={theme.accent} strokeWidth={2} />
+        <Text style={[styles.value, styles.link, { color: theme.accent }]} numberOfLines={2}>
+          {shown.name}
+        </Text>
+      </Pressable>
+    );
   if (shown.kind === "link") {
     const allowed = outsideLink(shown.url, origin);
     if (allowed)
@@ -807,6 +840,7 @@ const styles = StyleSheet.create({
   label: { fontSize: 13 },
   value: { fontSize: 17, lineHeight: 22 },
   linkTarget: { minHeight: TOUCH, justifyContent: "center" },
+  attachmentLink: { minHeight: TOUCH, flexDirection: "row", alignItems: "center", gap: 6 },
   link: { textDecorationLine: "underline" },
   editable: { minHeight: TOUCH, gap: 4 },
   valueLine: { flexDirection: "row", alignItems: "center", gap: 8 },

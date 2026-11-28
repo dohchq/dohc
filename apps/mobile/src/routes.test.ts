@@ -63,6 +63,7 @@ describe("routes opened from a link", () => {
       "app-review.tsx",
       "app-run.tsx",
       "document-collection.tsx",
+      "file.tsx",
       "sketch.tsx",
     ])
       expect(wrapped(route), route).toBe("signedInOnly");

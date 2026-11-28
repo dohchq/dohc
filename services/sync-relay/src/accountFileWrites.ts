@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -15,7 +17,7 @@ import {
   type WriteAuthor,
 } from "@dohc/workspace-engine-client";
 import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
-import { badRequest, RelayError } from "./errors";
+import { badRequest, RelayError, relayError } from "./errors";
 import { liveEditors } from "./liveEditors";
 import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 import { untilAborted } from "./namedLiveFrameHost";
@@ -30,14 +32,27 @@ import {
 
 export type AccountFileWriteOperation =
   | "createPage"
+  | "uploadFile"
   | "renameFile"
   | "deleteFile"
   | "restoreDeletedFile";
 export const isAccountFileWriteOperation = (name: string): name is AccountFileWriteOperation =>
   name === "createPage" ||
+  name === "uploadFile" ||
   name === "renameFile" ||
   name === "deleteFile" ||
   name === "restoreDeletedFile";
+
+export const MAX_UPLOAD_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_FILE_BASE64_CHARS = 4 * Math.ceil(MAX_UPLOAD_FILE_BYTES / 3);
+export const UPLOAD_FILE_MAX_BODY_BYTES = MAX_UPLOAD_FILE_BASE64_CHARS + 64 * 1024;
+const RESERVED_UPLOAD_BASENAMES = new Set([
+  "collection.yaml",
+  "dataset.json",
+  "schema.sql",
+  "operations.js",
+  "automations.yaml",
+]);
 
 export type AccountFileWriteRefusal =
   | "path-exists"
@@ -194,10 +209,7 @@ const parseId = (v: unknown, label: string) => {
 };
 export const parseObjectId = (v: unknown) => parseId(v, "expectedObjectId");
 
-export function validateAllowedFileWritePath(
-  value: unknown,
-  options: { readonly allowSketch: boolean; readonly checkDestination: boolean | "name" },
-): { readonly path: string; readonly kind: "page" | "sketch" } {
+function assertSafeUserPath(value: unknown, message: string): string {
   if (
     typeof value !== "string" ||
     !value.length ||
@@ -207,11 +219,18 @@ export function validateAllowedFileWritePath(
     isFolderMarkerPath(value) ||
     value.split("/").some((s) => s.startsWith("."))
   )
-    throw badRequest("This path cannot be changed here.");
+    throw badRequest(message);
   const checked = validateUserWritePath(value);
-  if (!checked.ok || checked.normalized !== value)
-    throw badRequest("This path cannot be changed here.");
-  const base = value.slice(value.lastIndexOf("/") + 1);
+  if (!checked.ok || checked.normalized !== value) throw badRequest(message);
+  return value;
+}
+
+export function validateAllowedFileWritePath(
+  value: unknown,
+  options: { readonly allowSketch: boolean; readonly checkDestination: boolean | "name" },
+): { readonly path: string; readonly kind: "page" | "sketch" } {
+  const path = assertSafeUserPath(value, "This path cannot be changed here.");
+  const base = path.slice(path.lastIndexOf("/") + 1);
   const kind =
     /\.md$/i.test(base) && base.length > 3
       ? "page"
@@ -221,10 +240,42 @@ export function validateAllowedFileWritePath(
   const badDestination =
     options.checkDestination === "name"
       ? workspaceNameError(base, "win32") !== null
-      : options.checkDestination && workspaceDestinationError(value, "win32") !== null;
+      : options.checkDestination && workspaceDestinationError(path, "win32") !== null;
   if (kind === null || (!options.allowSketch && kind !== "page") || badDestination)
     throw badRequest("This path cannot be changed here.");
-  return { path: value, kind };
+  return { path, kind };
+}
+
+export function validateBinaryUploadPath(value: unknown): string {
+  const path = assertSafeUserPath(value, "This path cannot be uploaded here.");
+  const base = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+  if (
+    classifyEngineFilePath(path).kind !== "tracked" ||
+    workspaceDestinationError(path, "win32") !== null ||
+    /\.(md|markdown|excalidraw)$/i.test(base) ||
+    RESERVED_UPLOAD_BASENAMES.has(base)
+  )
+    throw badRequest("This path cannot be uploaded here.");
+  return path;
+}
+
+function parseUploadBytes(value: unknown): Uint8Array {
+  if (typeof value !== "string" || !value.length) throw badRequest("File content is required.");
+  if (value.length > MAX_UPLOAD_FILE_BASE64_CHARS)
+    throw relayError("payload_too_large", "Binary uploads can be up to 5 MiB.");
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value))
+    throw badRequest("Invalid file content encoding.");
+  const pad = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const byteLength = (value.length / 4) * 3 - pad;
+  if (byteLength < 1) throw badRequest("File content cannot be empty.");
+  if (byteLength > MAX_UPLOAD_FILE_BYTES)
+    throw relayError("payload_too_large", "Binary uploads can be up to 5 MiB.");
+  const last = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".indexOf(
+    value[value.length - pad - 1]!,
+  );
+  if (last < 0 || (pad === 2 && (last & 15) !== 0) || (pad === 1 && (last & 3) !== 0))
+    throw badRequest("Invalid file content encoding.");
+  return Buffer.from(value, "base64");
 }
 
 export function parseAccountFileWrite(operation: AccountFileWriteOperation, args: unknown) {
@@ -235,6 +286,15 @@ export function parseAccountFileWrite(operation: AccountFileWriteOperation, args
       checkDestination: true,
     });
     return { operation, path, requestId: parseRequestId(body.requestId) } as const;
+  }
+  if (operation === "uploadFile") {
+    const body = parseFields(args, ["path", "requestId", "bytesBase64"]);
+    return {
+      operation,
+      path: validateBinaryUploadPath(body.path),
+      requestId: parseRequestId(body.requestId),
+      bytes: parseUploadBytes(body.bytesBase64),
+    } as const;
   }
   if (operation === "renameFile") {
     const body = parseFields(args, ["fromPath", "toPath", "expectedObjectId", "requestId"]);
@@ -486,6 +546,65 @@ export async function runAccountFileWrite(
           !deps.storage.mainLiveLineageExists({ workspaceId, objectId })
         )
           throw unconfirmed("the new page");
+        return await complete({ ok: true, path: parsed.path, objectId });
+      }
+
+      if (parsed.operation === "uploadFile") {
+        await files.ensureMainVersion({ workspaceId });
+        await assertOutsideCollection(files, workspaceId, parsed.path);
+        const correlationId = `phone-upload:${parsed.requestId}`;
+        const expectedSha256 = createHash("sha256").update(parsed.bytes).digest("hex");
+        let objectId: string;
+        try {
+          objectId = (
+            await files.writeBinaryFile({
+              workspaceId,
+              versionId: "main",
+              path: parsed.path,
+              bytes: parsed.bytes,
+              createOnly: true,
+              requestId: parsed.requestId,
+              metadata: { origin: "api", correlationId },
+              author,
+            })
+          ).object.id;
+        } catch (error) {
+          if (!(error instanceof DaemonRefusalError)) throw error;
+          const hit = (await files.resolveFiles({ workspaceId, targets: [{ path: parsed.path }] }))
+            .results[0];
+          if (hit?.status !== "found") {
+            if (error.message === "target-path-exists")
+              return refuse("path-exists", "A file with this name already exists.");
+            throw error;
+          }
+          const { moments } = await files.listMoments({
+            workspaceId,
+            versionId: "main",
+            objectId: hit.objectId,
+            limit: 10,
+            metadataOnly: true,
+          });
+          const replayed = moments.some(
+            (m) =>
+              m.path === parsed.path &&
+              m.operation === "write" &&
+              m.metadataCorrelationId === correlationId,
+          );
+          if (!replayed) return refuse("path-exists", "A file with this name already exists.");
+          const existing = await files.readBinaryFile({
+            workspaceId,
+            versionId: "main",
+            path: parsed.path,
+          });
+          if (!existing || createHash("sha256").update(existing).digest("hex") !== expectedSha256)
+            throw relayError(
+              "conflict",
+              "This requestId was already used for different file content.",
+            );
+          objectId = hit.objectId;
+        }
+        await replica.sync(signal);
+        if (objectAt(parsed.path) !== objectId) throw unconfirmed("the uploaded file");
         return await complete({ ok: true, path: parsed.path, objectId });
       }
 

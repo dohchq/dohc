@@ -25,6 +25,8 @@ import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import { createMemberAppRoutes, MEMBER_APP_UPLOAD_BYTES } from "./memberAppRoutes";
+import { UPLOAD_FILE_MAX_BODY_BYTES } from "./accountFileWrites";
+import { SAVE_SKETCH_MAX_BODY_BYTES } from "./phoneSketches";
 import { createPhoneApps } from "./phoneApps";
 import { createPhoneCollections } from "./phoneCollections";
 import { createNamedCollectionsRoute, NAMED_COLLECTIONS_PATH } from "./namedCollectionsRoute";
@@ -980,6 +982,7 @@ export function createSyncRelayHandler({
         ...(shareWebOrigin && relayExchangeKeyHash
           ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
           : {}),
+        admitBlobBytes: admitLinkBlobBytes,
       })
     : undefined;
   // The owner's computers claim wakes here; the phone reads wakes through its operations route.
@@ -2366,6 +2369,14 @@ export function maxRequestBodyBytes(url: URL): number {
       return MAX_HTTP_APPROVAL_BODY_BYTES;
     case "workspace-outbound-dispatch":
       return MAX_OUTBOUND_DISPATCH_BODY_BYTES;
+    case "account-operation":
+      return route.operation === "collectionAttachmentUpload"
+        ? APP_BACKEND_UPLOAD_REQUEST_BYTES
+        : route.operation === "uploadFile"
+          ? UPLOAD_FILE_MAX_BODY_BYTES
+          : route.operation === "saveSketch"
+            ? SAVE_SKETCH_MAX_BODY_BYTES
+            : DEFAULT_BODY_BYTES;
     case "workspace-webhooks":
     case "workspace-webhook":
     case "workspace-webhook-rotate":

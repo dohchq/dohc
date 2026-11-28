@@ -48,9 +48,22 @@ import { useWorkspaces } from "../chats/Workspaces";
 import { choose } from "../confirm";
 import { appState } from "../apps/reviewControls";
 import { defaultInboxCaptureTitle } from "@dohc/workspace-contracts/inbox";
+import { useShowToast } from "../notices/Toast";
+import {
+  encodeBase64,
+  MAX_WORKSPACE_UPLOAD_BYTES,
+  pickDocument,
+  sanitizeUploadFileName,
+} from "../server/binaryFiles";
 import { shownProblem } from "../server/client";
 import type { QueuedCapture } from "../server/captureQueue";
-import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
+import {
+  canWriteFiles,
+  fileWriteOperations,
+  fileWriteRefusalText,
+  isLifecycleManagedPath,
+  newFileRequestId,
+} from "../server/fileWrites";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { createSketch } from "../server/phoneSketches";
 import { writesIn } from "../server/phoneWrites";
@@ -80,30 +93,116 @@ export function ServerHome() {
   const router = useRouter();
   const { current } = useWorkspaces();
   const { data } = useAccount();
+  const signIn = useSignIn();
+  const showToast = useShowToast();
   const canEditFiles = canWriteFiles(data, current);
   const lifecycle = useFileLifecycle(current?.name ?? "");
   const [creatingCollection, setCreatingCollection] = useState(false);
   const [capturing, setCapturing] = useState<boolean | QueuedCapture>(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadFailure, setUploadFailure] = useState<{
+    problem: ReadProblem | null;
+    failures: number;
+  }>({
+    problem: null,
+    failures: 0,
+  });
+  const uploadAbort = useRef<AbortController | null>(null);
+  const uploadAttempt = useRef<{ path: string; requestId: string; bytesBase64: string } | null>(
+    null,
+  );
   useEffect(() => {
     setCreatingCollection(false);
     setCapturing(false);
+    uploadAbort.current?.abort();
+    uploadAttempt.current = null;
+    setUploadingFile(false);
+    setUploadFailure({ problem: null, failures: 0 });
   }, [data?.workspaceId]);
   const openCreate = () =>
     lifecycle.openCreate((path) =>
       router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
     );
+  const sendUpload = useCallback(async () => {
+    const attempt = uploadAttempt.current;
+    if (!data || !canEditFiles || uploadingFile || !attempt) return;
+    setUploadingFile(true);
+    setUploadFailure((prev) => ({ problem: null, failures: prev.failures }));
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    try {
+      const result = await fileWriteOperations(signIn.client, data.workspaceId).uploadFile(
+        attempt,
+        controller.signal,
+      );
+      if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
+      uploadAttempt.current = null;
+      if (result.ok) {
+        data.invalidate(views.files);
+        showToast({ tone: "success", title: workspaceWords.fileUploaded(result.path) });
+      } else {
+        showToast({
+          tone: "failure",
+          title: workspaceWords.fileUploadFailed,
+          body: fileWriteRefusalText(result.refusal, result.reason),
+        });
+      }
+    } catch (error) {
+      if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
+      const problem = shownProblem(error);
+      if (problem !== null) setUploadFailure((prev) => ({ problem, failures: prev.failures + 1 }));
+    } finally {
+      if (uploadAbort.current === controller) uploadAbort.current = null;
+      setUploadingFile(false);
+    }
+  }, [canEditFiles, data, showToast, signIn, uploadingFile]);
+  useFailureNotice(
+    `upload:${data?.workspaceId ?? "none"}:file`,
+    workspaceWords.fileUploadFailed,
+    uploadFailure,
+    () => void sendUpload(),
+  );
+  const startUploadFile = useCallback(async () => {
+    if (!canEditFiles || uploadingFile) return;
+    const picked = await pickDocument(MAX_WORKSPACE_UPLOAD_BYTES);
+    if (!picked.ok) {
+      const title =
+        picked.reason === "too-large"
+          ? workspaceWords.fileTooLarge
+          : picked.reason === "empty"
+            ? workspaceWords.fileEmpty
+            : picked.reason === "unreadable"
+              ? workspaceWords.fileUploadFailed
+              : null;
+      if (title) showToast({ tone: "failure", title });
+      return;
+    }
+    const safePath = sanitizeUploadFileName(picked.name);
+    if (!safePath) {
+      showToast({ tone: "failure", title: workspaceWords.filePathNotAllowed });
+      return;
+    }
+    uploadAttempt.current = {
+      path: safePath,
+      requestId: newFileRequestId(),
+      bytesBase64: encodeBase64(picked.bytes),
+    };
+    await sendUpload();
+  }, [canEditFiles, sendUpload, showToast, uploadingFile]);
   const openCreateMenu = () =>
     void choose({
       title: workspaceWords.pages,
       options: [
         { label: workspaceWords.quickCapture },
         { label: workspaceWords.newPage },
+        { label: workspaceWords.uploadFile },
         { label: collectionWords.newCollection },
       ],
     }).then((picked) => {
       if (picked === 0) setCapturing(true);
       else if (picked === 1) openCreate();
-      else if (picked === 2) setCreatingCollection(true);
+      else if (picked === 2) void startUploadFile();
+      else if (picked === 3) setCreatingCollection(true);
     });
   return (
     <ScrollView
@@ -145,6 +244,9 @@ export function ServerHome() {
               </Stack.Toolbar.MenuAction>
               <Stack.Toolbar.MenuAction icon="doc.badge.plus" onPress={openCreate}>
                 {workspaceWords.newPage}
+              </Stack.Toolbar.MenuAction>
+              <Stack.Toolbar.MenuAction icon="arrow.up.doc" onPress={() => void startUploadFile()}>
+                {workspaceWords.uploadFile}
               </Stack.Toolbar.MenuAction>
               <Stack.Toolbar.MenuAction
                 icon="tablecells"
@@ -291,6 +393,7 @@ function Files({
         router.push({ pathname: "/page", params: { path: row.path, t0: String(Date.now()) } });
       else if (row.kind === "sketch" && canOpenSketch)
         router.push({ pathname: "/sketch", params: { path: row.path } });
+      else if (row.kind === "other") router.push({ pathname: "/file", params: { path: row.path } });
     },
     [router, toggle, canOpenSketch],
   );
@@ -783,7 +886,7 @@ const Row = memo(function Row({
   busy?: boolean;
 }) {
   const theme = useTheme();
-  const listed = row.kind === "other" || (row.kind === "sketch" && !openable);
+  const listed = row.kind === "sketch" && !openable;
   const depth = row.kind === "folder" || row.kind === "page" ? row.depth : 0;
   const Icon =
     row.kind === "folder"

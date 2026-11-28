@@ -15,7 +15,8 @@ export type ShownValue =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "check"; readonly checked: boolean }
   /** A web address, which opens through the external-link rule (src/apps/appNavigation.ts). */
-  | { readonly kind: "link"; readonly url: string };
+  | { readonly kind: "link"; readonly url: string }
+  | { readonly kind: "attachment"; readonly fileId: string; readonly name: string };
 
 const EMPTY: ShownValue = { kind: "empty" };
 const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -82,11 +83,9 @@ export function shownValue(
         ? { kind: "link", url: value }
         : { kind: "text", text: plain(value) };
     case "attachment":
-      return {
-        kind: "text",
-        text:
-          typeof value === "string" ? (files[value] ?? collectionWords.attachedFile) : plain(value),
-      };
+      return typeof value === "string"
+        ? { kind: "attachment", fileId: value, name: files[value] ?? collectionWords.attachedFile }
+        : { kind: "text", text: plain(value) };
     case "relation": {
       const label = (item: RecordValue) => relationLabels?.[JSON.stringify(item)] ?? plain(item);
       return {
@@ -108,6 +107,8 @@ export function rowText(shown: ShownValue, fieldName: string): string | null {
       return shown.checked ? fieldName : null;
     case "link":
       return shown.url;
+    case "attachment":
+      return shown.name;
     default:
       return shown.text;
   }
@@ -142,11 +143,12 @@ export type EditorKind =
   | "select"
   | "multi-select"
   | "date"
-  | "relation";
+  | "relation"
+  | "attachment";
 
 export function editorKind(field: Pick<CollectionField, "type" | "relation">): EditorKind | null {
   if (field.type === "relation") return field.relation ? "relation" : null;
-  return field.type === "attachment" ? null : field.type;
+  return field.type;
 }
 
 /**
@@ -243,7 +245,7 @@ export function draftProblem(
   const empty = v === null || v === "" || (Array.isArray(v) && v.length === 0);
   if (empty) {
     if (!field.required) return null;
-    return ["relation", "select", "multi-select", "date"].includes(field.type)
+    return ["relation", "select", "multi-select", "date", "attachment"].includes(field.type)
       ? collectionWords.chooseField(field.name)
       : collectionWords.enterField(field.name);
   }
